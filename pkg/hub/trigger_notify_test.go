@@ -54,6 +54,18 @@ func (d *notifyTestDispatcher) DispatchAgentMessage(ctx context.Context, agent *
 	return d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
 }
 
+// setFireNotifyClockForTest overrides the clock used for notify-on-failure
+// cooldown windows and timestamps in deterministic tests. Passing nil restores
+// time.Now.
+func (s *Server) setFireNotifyClockForTest(fn func() time.Time) {
+	if s == nil {
+		return
+	}
+	s.triggers.mu.Lock()
+	s.triggers.notifyNow = fn
+	s.triggers.mu.Unlock()
+}
+
 func TestTriggerNotify_AuthoringValidationAndRevisionBump(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
@@ -151,7 +163,7 @@ func TestTriggerNotify_EndToEndCooldownUserAndAgentSinks(t *testing.T) {
 	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
 	var clockMu sync.Mutex
 	curTime := now
-	f.srv.SetFireNotifyClock(func() time.Time {
+	f.srv.setFireNotifyClockForTest(func() time.Time {
 		clockMu.Lock()
 		defer clockMu.Unlock()
 		return curTime
@@ -243,22 +255,32 @@ func TestTriggerNotify_EndToEndCooldownUserAndAgentSinks(t *testing.T) {
 	assert.NotEmpty(t, env.Event.Attributes["reason"])
 	assert.NotContains(t, env.Event.Attributes["reason"], payloadSentinel)
 
-	// Verify notify fire row is recorded in trigger_fires with action_type="notify" and action_index=-1.
+	// Verify notify fire rows are recorded in trigger_fires for both sinks
+	// (action_index=-1 for agent_message, action_index=-2 for user_notice)
+	// with deterministic fixed-window cooldown event_ids.
 	fires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
 		ProjectID: f.projectID,
 		TriggerID: trResp.ID,
 	}, store.ListOptions{Limit: 20})
 	require.NoError(t, err)
-	var notifyRows []store.TriggerFire
+	var agentNotifyRows, userNotifyRows []store.TriggerFire
 	for _, fr := range fires.Items {
 		if fr.ActionType == store.TriggerActionNotify {
-			notifyRows = append(notifyRows, fr)
+			switch fr.ActionIndex {
+			case store.TriggerFireActionIndexNotify:
+				agentNotifyRows = append(agentNotifyRows, fr)
+			case store.TriggerFireActionIndexNotifyUser:
+				userNotifyRows = append(userNotifyRows, fr)
+			}
 		}
 	}
-	require.Len(t, notifyRows, 1)
-	assert.Equal(t, store.TriggerFireActionIndexNotify, notifyRows[0].ActionIndex)
-	assert.Equal(t, store.TriggerFireStatusFired, notifyRows[0].Status)
-	assert.Equal(t, TriggerNotifyDerivedEventID(env.Event.Attributes["fire_id"]), notifyRows[0].EventID)
+	require.Len(t, agentNotifyRows, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, agentNotifyRows[0].Status)
+	win := fireNotifyCooldownWindow(now, DefaultFireNotifyCooldown)
+	assert.Equal(t, TriggerNotifyCooldownEventID(trResp.ID, FireNotifySinkAgent, "failed", env.Event.Attributes["reason"], win), agentNotifyRows[0].EventID)
+	require.Len(t, userNotifyRows, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, userNotifyRows[0].Status)
+	assert.Equal(t, TriggerNotifyCooldownEventID(trResp.ID, FireNotifySinkUser, "failed", env.Event.Attributes["reason"], win), userNotifyRows[0].EventID)
 
 	// Event 2 fails 10 minutes later (within 1h cooldown) -> suppressed for BOTH sinks.
 	clockMu.Lock()
@@ -364,7 +386,7 @@ func TestTriggerNotify_AgentCreatorDelegatingUserNoRecursionAndNoWake(t *testing
 	assert.Empty(t, disp.getCalls(), "suspended notify target must not be woken or delivered to")
 
 	// Direct recursive call with ActionType="notify" or Event.Type="trigger.fire_failed" must be a hard no-op.
-	f.srv.SetFireNotifyClock(func() time.Time { return time.Now().UTC().Add(2 * time.Hour) })
+	f.srv.setFireNotifyClockForTest(func() time.Time { return time.Now().UTC().Add(2 * time.Hour) })
 	f.srv.NotifyFireOutcome(ctx, hubfire.FireRequest{
 		ProjectID:  f.projectID,
 		ActionType: store.TriggerActionNotify,
@@ -401,7 +423,7 @@ func TestTriggerNotify_ExpiredProjectCapAndMultiAction(t *testing.T) {
 
 	now := time.Date(2026, 11, 27, 16, 0, 0, 0, time.UTC)
 	curTime := now
-	f.srv.SetFireNotifyClock(func() time.Time { return curTime })
+	f.srv.setFireNotifyClockForTest(func() time.Time { return curTime })
 
 	disp := &notifyTestDispatcher{
 		failIDs: map[string]error{

@@ -32,10 +32,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Notify-on-failure constants (Stage 2 §10, shared with ptone/scion#7895).
+// Notify-on-failure constants (Stage 2 §10, shared seam for ptone/scion#7895).
 const (
-	// DefaultFireNotifyCooldown is the default per-(definition, sink) cooldown
-	// preventing flapping targets from flooding notifications.
+	// DefaultFireNotifyCooldown is the default fixed-window bucket duration per
+	// (definition, sink, outcome, reason) preventing flapping targets from
+	// flooding notifications.
 	DefaultFireNotifyCooldown = time.Hour
 
 	// FireNotifyEventType is the synthetic event type carried on agent-message
@@ -48,21 +49,31 @@ const (
 	FireNotifySinkAgent = "agent_message"
 
 	// ExecutorKindTriggerNotify identifies the notify-on-failure agent-message
-	// sink in ExecutorContext (catalog entry point triggerNotify:message).
+	// sink in ExecutorContext (catalog entry point sendAgentFireNotification:message).
 	ExecutorKindTriggerNotify = "trigger_notify"
 
-	maxFireNotifyReasonBytes   = 120
-	maxFireNotifyCooldownEntry = 2000
-	fireNotifyTimeout          = 30 * time.Second
+	maxFireNotifyReasonBytes = 120
+	fireNotifyTimeout        = 30 * time.Second
 )
 
-// triggerNotifyEventNamespace is a fixed UUIDv5 namespace used to derive a
-// deterministic, idempotent event_id for (fire_id, "notify") trigger_fires rows.
+// triggerNotifyEventNamespace is a fixed UUIDv5 namespace used to derive
+// deterministic event_id values for notify trigger_fires rows.
 var triggerNotifyEventNamespace = uuid.MustParse("c3b2d9a4-7e1f-4c8b-9a5d-2e6f8a1b4c90")
 
 // FireNotifyPolicy configures hub-authored failure notifications for deferred
-// fires (Stage 2 §10). Exported so schedules (ptone/scion#7895) can reuse the
-// exact same seam and sinks.
+// fires (Stage 2 §10). Currently implemented for trigger definitions only;
+// ptone/scion#7895 adds schedule sinks on the same seam.
+//
+// Cooldown semantics (durable fixed window):
+//   - Each sink claims a durable trigger_fires row keyed on the existing unique
+//     (event_id, trigger_id, action_index) constraint with reserved per-sink
+//     action_index values (TriggerFireActionIndexNotify = -1 for agent_message,
+//     TriggerFireActionIndexNotifyUser = -2 for user_notice) and
+//     event_id = UUIDv5(trigger_id, sink, outcome, reason, floor(now/cooldown)).
+//   - This enforces at most one notice per sink, outcome, and reason per hour
+//     bucket across replicas and hub restarts without any schema change. Because
+//     it is a fixed window, two notices for the same key may land close together
+//     across a bucket boundary (e.g., 10:59 and 11:01).
 //
 // Security inventory (Stage 2 §18 S24):
 //   - No payload text: buildFireNotifyMessage formats only the validated
@@ -72,25 +83,20 @@ var triggerNotifyEventNamespace = uuid.MustParse("c3b2d9a4-7e1f-4c8b-9a5d-2e6f8a
 //   - Authority: authoring validates AgentID/AgentName via messageAction.Validate
 //     on create, update, and resume; every agent notification executes through
 //     fireAction under req.Authority (live authz, standing, frozen ceiling).
+//     User notices check live trigger.read on the project before delivery.
 //   - No recursion: NotifyFireOutcome rejects ActionType=="notify",
-//     Event.Type=="trigger.fire_failed", and ActionIndex==TriggerFireActionIndexNotify;
+//     Event.Type=="trigger.fire_failed", and negative notify ActionIndex values;
 //     the agent sink calls fireAction directly and never re-enters NotifyFireOutcome.
 //   - No wake: agent notifications set Wake=false, Offline="skip", and
 //     FireRequest.NoWake=true (suppressing auto-wake too).
-//   - Outside WithTx: all user-notice and agent-message I/O runs strictly after
-//     the fire outcome transaction has committed.
+//   - Outside WithTx: all claim, authz, user-notice, and agent-message I/O runs
+//     strictly after the fire outcome transaction has committed.
 type FireNotifyPolicy struct {
 	OnOutcomes []hubfire.FireStatus // subset of {failed, refused, expired, skipped}; default {failed, refused, expired}
 	UserNotice bool                 // notify the definition's creator (user, or agent creator's delegating user)
 	AgentID    string               // optional: message this in-project agent under the definition's RecordedAuthority
 	AgentName  string               // display name of AgentID (optional)
-	Cooldown   time.Duration        // per (definition, sink): 1 h default
-}
-
-type fireNotifyCooldownKey struct {
-	definitionKind string
-	definitionID   string
-	sink           string
+	Cooldown   time.Duration        // fixed-window bucket per (definition, sink, outcome, reason): 1 h default
 }
 
 // DefaultFireNotifyOutcomes returns a fresh slice of the default notify
@@ -103,22 +109,46 @@ func DefaultFireNotifyOutcomes() []hubfire.FireStatus {
 	}
 }
 
-// TriggerNotifyDerivedEventID returns the deterministic UUIDv5 event_id used to
-// record an idempotent (fire_id, "notify") trigger_fires row.
+// TriggerNotifyDerivedEventID returns the deterministic UUIDv5 event_id for a
+// single (fire_id, "notify") pair.
 func TriggerNotifyDerivedEventID(fireID string) string {
 	return uuid.NewSHA1(triggerNotifyEventNamespace, []byte(fireID+"\x00notify")).String()
 }
 
-// SetFireNotifyClock overrides the clock used for notify-on-failure cooldowns
-// and timestamps (intended for deterministic tests). Passing nil restores
-// time.Now.
-func (s *Server) SetFireNotifyClock(fn func() time.Time) {
-	if s == nil {
-		return
+// fireNotifyCooldownWindow returns the fixed-window bucket index
+// floor(now / cooldown) in UTC.
+func fireNotifyCooldownWindow(now time.Time, cooldown time.Duration) int64 {
+	if cooldown <= 0 {
+		cooldown = DefaultFireNotifyCooldown
 	}
-	s.triggers.mu.Lock()
-	s.triggers.notifyNow = fn
-	s.triggers.mu.Unlock()
+	utc := now.UTC()
+	if cooldown >= time.Second {
+		if sec := int64(cooldown / time.Second); sec > 0 {
+			u := utc.Unix()
+			if u >= 0 {
+				return u / sec
+			}
+			return (u - sec + 1) / sec
+		}
+	}
+	ns := int64(cooldown)
+	un := utc.UnixNano()
+	if un >= 0 {
+		return un / ns
+	}
+	return (un - ns + 1) / ns
+}
+
+// TriggerNotifyCooldownEventID returns the deterministic UUIDv5 event_id used
+// to atomically claim a durable fixed-window cooldown slot in trigger_fires
+// via the unique (event_id, trigger_id, action_index) index.
+//
+// Fixed-window semantics: at most one notice per (trigger, sink, outcome,
+// reason) per hour bucket (floor(now / cooldown)); two notices for the same
+// key may land close together across a bucket boundary.
+func TriggerNotifyCooldownEventID(triggerID, sink, outcome, reason string, window int64) string {
+	key := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d", triggerID, sink, outcome, reason, window)
+	return uuid.NewSHA1(triggerNotifyEventNamespace, []byte(key)).String()
 }
 
 func (s *Server) fireNotifyNow() time.Time {
@@ -134,10 +164,16 @@ func (s *Server) fireNotifyNow() time.Time {
 }
 
 // NotifyFireOutcome evaluates policy for a persisted terminal fire outcome and
-// dispatches enabled sinks (user notice and/or agent message) subject to
-// per-(definition, sink) cooldown. Must be called strictly OUTSIDE any WithTx.
+// dispatches enabled sinks (user notice and/or agent message) subject to a
+// durable fixed-window cooldown per (definition, sink, outcome, reason).
+// Currently implemented for trigger definitions only; ptone/scion#7895 adds
+// schedule sinks on the same seam. Must be called strictly OUTSIDE any WithTx.
 func (s *Server) NotifyFireOutcome(ctx context.Context, req hubfire.FireRequest, out hubfire.FireOutcome, policy FireNotifyPolicy) {
 	s.notifyFireOutcome(ctx, req, out, policy)
+}
+
+func isTriggerNotifyActionIndex(idx int) bool {
+	return idx == store.TriggerFireActionIndexNotify || idx == store.TriggerFireActionIndexNotifyUser
 }
 
 func (s *Server) notifyFireOutcome(ctx context.Context, req hubfire.FireRequest, out hubfire.FireOutcome, policy FireNotifyPolicy) {
@@ -152,7 +188,7 @@ func (s *Server) notifyFireOutcome(ctx context.Context, req hubfire.FireRequest,
 		if req.Event.Type == FireNotifyEventType {
 			return
 		}
-		if req.Event.Trigger != nil && req.Event.Trigger.ActionIndex == store.TriggerFireActionIndexNotify {
+		if req.Event.Trigger != nil && isTriggerNotifyActionIndex(req.Event.Trigger.ActionIndex) {
 			return
 		}
 	}
@@ -177,21 +213,26 @@ func (s *Server) notifyFireOutcome(ctx context.Context, req hubfire.FireRequest,
 	if defKind == "" {
 		defKind = hubfire.DefinitionKindTrigger
 	}
+	if defKind != hubfire.DefinitionKindTrigger {
+		slog.DebugContext(ctx, "fire notify: unsupported definition kind; skipping notification (trigger definitions only; ptone/scion#7895 adds schedule sinks)",
+			"definition_kind", defKind, "definition_id", defID)
+		return
+	}
 
 	cooldown := policy.Cooldown
 	if cooldown <= 0 {
 		cooldown = DefaultFireNotifyCooldown
 	}
 
-	defName := s.resolveFireDefinitionName(ctx, defKind, defID, req)
+	now := s.fireNotifyNow()
+	window := fireNotifyCooldownWindow(now, cooldown)
 	reason := sanitizeFireNotifyReason(out.Status, out.Error)
-	msg := buildFireNotifyMessage(defKind, defID, defName, req.ProjectID, req.Authority.FireID, out.Status, reason)
 
 	if policy.UserNotice {
-		s.sendUserFireNotification(ctx, req, defKind, defID, msg, cooldown)
+		s.sendUserFireNotification(ctx, req, out, defKind, defID, reason, now, window)
 	}
 	if strings.TrimSpace(policy.AgentID) != "" {
-		s.sendAgentFireNotification(ctx, req, out, policy, defKind, defID, defName, reason, msg, cooldown)
+		s.sendAgentFireNotification(ctx, req, out, policy, defKind, defID, reason, now, window)
 	}
 }
 
@@ -218,47 +259,6 @@ func shouldNotifyFireOutcome(out hubfire.FireOutcome, policy FireNotifyPolicy) b
 	return false
 }
 
-func (s *Server) tryClaimFireNotifyCooldown(defKind, defID, sink string, cooldown time.Duration) (time.Time, bool) {
-	now := s.fireNotifyNow()
-	key := fireNotifyCooldownKey{
-		definitionKind: defKind,
-		definitionID:   defID,
-		sink:           sink,
-	}
-	rt := &s.triggers
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.fireNotifyCooldown == nil {
-		rt.fireNotifyCooldown = make(map[fireNotifyCooldownKey]time.Time)
-	}
-	if last, ok := rt.fireNotifyCooldown[key]; ok && now.Sub(last) < cooldown {
-		return now, false
-	}
-	if len(rt.fireNotifyCooldown) >= maxFireNotifyCooldownEntry {
-		for k, ts := range rt.fireNotifyCooldown {
-			if now.Sub(ts) >= cooldown {
-				delete(rt.fireNotifyCooldown, k)
-			}
-		}
-	}
-	rt.fireNotifyCooldown[key] = now
-	return now, true
-}
-
-func (s *Server) releaseFireNotifyCooldown(defKind, defID, sink string, claimedAt time.Time) {
-	key := fireNotifyCooldownKey{
-		definitionKind: defKind,
-		definitionID:   defID,
-		sink:           sink,
-	}
-	rt := &s.triggers
-	rt.mu.Lock()
-	if cur, ok := rt.fireNotifyCooldown[key]; ok && cur.Equal(claimedAt) {
-		delete(rt.fireNotifyCooldown, key)
-	}
-	rt.mu.Unlock()
-}
-
 func (s *Server) resolveFireDefinitionName(ctx context.Context, defKind, defID string, req hubfire.FireRequest) string {
 	if req.Event != nil {
 		if req.Event.Trigger != nil && req.Event.Trigger.Name != "" {
@@ -282,7 +282,8 @@ func (s *Server) resolveFireDefinitionName(ctx context.Context, defKind, defID s
 }
 
 // sanitizeFireNotifyReason produces a bounded, control-char-free generic reason
-// string for failure notifications. It never inspects event payloads.
+// string for failure notifications, truncating cleanly on a UTF-8 rune
+// boundary. It never inspects event payloads.
 func sanitizeFireNotifyReason(status hubfire.FireStatus, raw string) string {
 	cleaned := strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
@@ -295,7 +296,7 @@ func sanitizeFireNotifyReason(status hubfire.FireStatus, raw string) string {
 		return "fire " + status.String()
 	}
 	if len(cleaned) > maxFireNotifyReasonBytes {
-		cleaned = strings.TrimSpace(cleaned[:maxFireNotifyReasonBytes])
+		cleaned = strings.TrimSpace(truncateUTF8Bytes(cleaned, maxFireNotifyReasonBytes))
 	}
 	return cleaned
 }
@@ -321,45 +322,101 @@ func buildFireNotifyMessage(defKind, defID, defName, projectID, fireID string, s
 func (s *Server) sendUserFireNotification(
 	ctx context.Context,
 	req hubfire.FireRequest,
-	defKind, defID, msg string,
-	cooldown time.Duration,
+	out hubfire.FireOutcome,
+	defKind, defID, reason string,
+	now time.Time,
+	window int64,
 ) {
-	if defKind != hubfire.DefinitionKindTrigger {
+	origFireID := req.Authority.FireID
+	if origFireID == "" {
+		origFireID = api.NewUUID()
+	}
+
+	// Claim durable fixed-window cooldown slot FIRST, before any recipient
+	// lookup, authz check, or notification write (R1/R2/O1).
+	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), fireNotifyTimeout)
+	defer cancelWrite()
+
+	cooldownEventID := TriggerNotifyCooldownEventID(defID, FireNotifySinkUser, out.Status.String(), reason, window)
+	notifyFire := store.TriggerFire{
+		ID:                   api.NewUUID(),
+		ProjectID:            req.ProjectID,
+		TriggerID:            defID,
+		EventID:              cooldownEventID,
+		Subject:              "notify-user:" + origFireID,
+		ActionType:           store.TriggerActionNotify,
+		ActionIndex:          store.TriggerFireActionIndexNotifyUser,
+		Status:               store.TriggerFireStatusFiring,
+		ExecutorKind:         ExecutorKindTriggerNotify,
+		ExecutorID:           trigger.ExecutorIDPrefixTriggerFire + origFireID,
+		LeaseUntil:           now.Add(trigger.FireLeaseHorizon),
+		StartedAt:            now,
+		CreatedAt:            now,
+		InitiatorAttribution: req.Authority.Attribution,
+	}
+	claimed, _, err := s.store.ClaimTriggerFire(writeCtx, &notifyFire)
+	if err != nil {
+		slog.WarnContext(ctx, "trigger notify: failed to claim user-notice cooldown row",
+			"trigger_id", defID, "fire_id", origFireID, "error", err)
 		return
 	}
+	if !claimed {
+		return
+	}
+
 	principalID := req.Authority.Attribution.InitiatorPrincipalID
 	if principalID == "" {
 		principalID = fireHistoryCreatorFromContext(ctx)
 	}
 	if principalID == "" {
-		if tr, err := s.store.GetTrigger(ctx, defID); err == nil && tr != nil {
+		if tr, err := s.store.GetTrigger(writeCtx, defID); err == nil && tr != nil {
 			principalID = tr.CreatedBy
 		}
 	}
-	recipient := s.fireNotificationRecipient(ctx, principalID, "trigger")
-	if recipient == "" {
+	recipient := s.fireNotificationRecipientUser(writeCtx, principalID, "trigger")
+	if recipient == nil {
 		slog.WarnContext(ctx, "trigger notify: no owning user to notify; skipping user notice",
-			"trigger_id", defID, "fire_id", req.Authority.FireID, "principal_id", principalID)
+			"trigger_id", defID, "fire_id", origFireID, "principal_id", principalID)
+		_, _ = s.store.FinishTriggerFire(writeCtx, notifyFire.ID, store.TriggerFireStatusSkipped, "", "", "no owning user to notify", s.fireNotifyNow())
 		return
 	}
-	claimedAt, ok := s.tryClaimFireNotifyCooldown(defKind, defID, FireNotifySinkUser, cooldown)
-	if !ok {
-		return
+	// O4: verify recipient still holds trigger.read on the project (outside any tx).
+	if s.authzService != nil && req.ProjectID != "" {
+		userIdent := NewAuthenticatedUser(recipient.ID, recipient.Email, recipient.DisplayName, recipient.Role, "notify")
+		decision := s.authzService.Decide(writeCtx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   triggerResource(req.ProjectID),
+			Action:     ActionRead,
+			Permission: "trigger.read",
+		})
+		if !decision.Allowed {
+			slog.InfoContext(ctx, "trigger notify: recipient no longer has trigger.read on project; skipping user notice",
+				"trigger_id", defID, "fire_id", origFireID, "recipient", recipient.ID, "project_id", req.ProjectID)
+			_, _ = s.store.FinishTriggerFire(writeCtx, notifyFire.ID, store.TriggerFireStatusSkipped, "", "", "recipient lacks project trigger.read", s.fireNotifyNow())
+			return
+		}
 	}
-	err := s.writeUserNotification(ctx, userNotice{
+
+	defName := s.resolveFireDefinitionName(writeCtx, defKind, defID, req)
+	msg := buildFireNotifyMessage(defKind, defID, defName, req.ProjectID, req.Authority.FireID, out.Status, reason)
+
+	err = s.writeUserNotification(writeCtx, userNotice{
 		Kind:             store.NotificationKindTriggerFireFailed,
 		ResourceType:     store.NotificationResourceTrigger,
 		ResourceID:       defID,
 		Status:           store.NotificationStatusTriggerFireFailed,
 		ProjectID:        req.ProjectID,
-		SubscriberUserID: recipient,
+		SubscriberUserID: recipient.ID,
 		Message:          msg,
 	})
 	if err != nil {
-		s.releaseFireNotifyCooldown(defKind, defID, FireNotifySinkUser, claimedAt)
 		slog.WarnContext(ctx, "trigger notify: failed to write user notification",
-			"trigger_id", defID, "fire_id", req.Authority.FireID, "recipient", recipient, "error", err)
+			"trigger_id", defID, "fire_id", origFireID, "recipient", recipient.ID, "error", err)
+		_, _ = s.store.FinishTriggerFire(writeCtx, notifyFire.ID, store.TriggerFireStatusFailed, "", "", "user notification write failed", s.fireNotifyNow())
+		return
 	}
+	_, _ = s.store.FinishTriggerFire(writeCtx, notifyFire.ID, store.TriggerFireStatusFired, "", "", "", s.fireNotifyNow())
 }
 
 func (s *Server) sendAgentFireNotification(
@@ -367,24 +424,18 @@ func (s *Server) sendAgentFireNotification(
 	req hubfire.FireRequest,
 	out hubfire.FireOutcome,
 	policy FireNotifyPolicy,
-	defKind, defID, defName, reason, msg string,
-	cooldown time.Duration,
+	defKind, defID, reason string,
+	now time.Time,
+	window int64,
 ) {
-	if defKind != hubfire.DefinitionKindTrigger {
-		return
-	}
 	origFireID := req.Authority.FireID
 	if origFireID == "" {
 		origFireID = api.NewUUID()
 	}
 
-	claimedAt, ok := s.tryClaimFireNotifyCooldown(defKind, defID, FireNotifySinkAgent, cooldown)
-	if !ok {
-		return
-	}
-
-	now := s.fireNotifyNow()
-	derivedEventID := TriggerNotifyDerivedEventID(origFireID)
+	// Claim durable fixed-window cooldown slot FIRST via the unique
+	// (event_id, trigger_id, action_index=-1) index (R1/R2/O1).
+	cooldownEventID := TriggerNotifyCooldownEventID(defID, FireNotifySinkAgent, out.Status.String(), reason, window)
 	notifyFireID := api.NewUUID()
 
 	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), fireNotifyTimeout)
@@ -394,7 +445,7 @@ func (s *Server) sendAgentFireNotification(
 		ID:                   notifyFireID,
 		ProjectID:            req.ProjectID,
 		TriggerID:            defID,
-		EventID:              derivedEventID,
+		EventID:              cooldownEventID,
 		Subject:              "notify:" + origFireID,
 		ActionType:           store.TriggerActionNotify,
 		ActionIndex:          store.TriggerFireActionIndexNotify,
@@ -409,16 +460,18 @@ func (s *Server) sendAgentFireNotification(
 	}
 	claimed, _, err := s.store.ClaimTriggerFire(writeCtx, &notifyFire)
 	if err != nil {
-		s.releaseFireNotifyCooldown(defKind, defID, FireNotifySinkAgent, claimedAt)
 		slog.WarnContext(ctx, "trigger notify: failed to claim notify fire row",
 			"trigger_id", defID, "fire_id", origFireID, "error", err)
 		return
 	}
 	if !claimed {
-		// Idempotent per (fire_id, "notify"): another pass or replica already
-		// claimed this notification fire row.
+		// Another pass or replica already claimed this (trigger, sink,
+		// outcome, reason, window) bucket.
 		return
 	}
+
+	defName := s.resolveFireDefinitionName(writeCtx, defKind, defID, req)
+	msg := buildFireNotifyMessage(defKind, defID, defName, req.ProjectID, req.Authority.FireID, out.Status, reason)
 
 	rawPayload, err := json.Marshal(MessageEventPayload{
 		AgentID:   policy.AgentID,
@@ -441,7 +494,7 @@ func (s *Server) sendAgentFireNotification(
 		Payload:    string(rawPayload),
 		NoWake:     true,
 		Event: &hubfire.FireEvent{
-			ID:         derivedEventID,
+			ID:         TriggerNotifyDerivedEventID(origFireID),
 			ProjectID:  req.ProjectID,
 			SourceKind: store.TriggerActionNotify,
 			SourceID:   defID,
@@ -510,17 +563,25 @@ func normalizeNotifyFireStatus(st hubfire.FireStatus, errMsg string) string {
 }
 
 // fireNotificationRecipient resolves a definition's creator/initiator ID to
-// the user its notifications go to: the user itself, or for an agent creator
+// the user ID its notifications go to: the user itself, or for an agent creator
 // the agent's delegating user (its ancestry root, else its owner) when that is
 // a user row. Returns "" when there is none. Used only to address
 // notifications, never for authority (Stage 2 §10).
 func (s *Server) fireNotificationRecipient(ctx context.Context, createdBy, kindLabel string) string {
-	if createdBy == "" || s == nil || s.store == nil {
+	u := s.fireNotificationRecipientUser(ctx, createdBy, kindLabel)
+	if u == nil {
 		return ""
 	}
-	if _, err := s.store.GetUser(ctx, createdBy); err == nil {
-		return createdBy
-	} else if !errors.Is(err, store.ErrNotFound) {
+	return u.ID
+}
+
+func (s *Server) fireNotificationRecipientUser(ctx context.Context, createdBy, kindLabel string) *store.User {
+	if createdBy == "" || s == nil || s.store == nil {
+		return nil
+	}
+	if u, err := s.store.GetUser(ctx, createdBy); err == nil && u != nil {
+		return u
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		if kindLabel == "schedule" {
 			slog.WarnContext(ctx, "Scheduler: looking up the schedule creator as a user failed; skipping notification",
 				"subsystem", "scheduler", "createdBy", createdBy, "error", err)
@@ -531,11 +592,11 @@ func (s *Server) fireNotificationRecipient(ctx context.Context, createdBy, kindL
 			slog.WarnContext(ctx, "looking up the "+kindLabel+" creator as a user failed; skipping notification",
 				"createdBy", createdBy, "error", err)
 		}
-		return ""
+		return nil
 	}
 	agent, err := s.store.GetAgent(ctx, createdBy)
 	if err != nil {
-		return ""
+		return nil
 	}
 	candidates := []string{}
 	if len(agent.Ancestry) > 0 {
@@ -546,11 +607,11 @@ func (s *Server) fireNotificationRecipient(ctx context.Context, createdBy, kindL
 		if id == "" || id == agent.ID {
 			continue
 		}
-		if _, err := s.store.GetUser(ctx, id); err == nil {
-			return id
+		if u, err := s.store.GetUser(ctx, id); err == nil && u != nil {
+			return u
 		}
 	}
-	return ""
+	return nil
 }
 
 // effectiveTriggerNotifyPolicy converts a trigger's stored Notify policy into
@@ -586,7 +647,7 @@ func (s *Server) notifyTriggerFire(ctx context.Context, tr *store.Trigger, fire 
 	if s == nil || s.store == nil || fire == nil {
 		return
 	}
-	if fire.ActionType == store.TriggerActionNotify || fire.ActionIndex == store.TriggerFireActionIndexNotify {
+	if fire.ActionType == store.TriggerActionNotify || isTriggerNotifyActionIndex(fire.ActionIndex) {
 		return
 	}
 	if tr == nil && fire.TriggerID != "" {

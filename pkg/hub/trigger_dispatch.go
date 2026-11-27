@@ -54,9 +54,8 @@ type triggerRuntime struct {
 	cancel               context.CancelFunc
 	done                 chan struct{}
 	started              bool
-	projectCapNotify     map[string]time.Time                // per-trigger 1h cooldown for project live-agent cap warning log (§7.4)
-	fireNotifyCooldown   map[fireNotifyCooldownKey]time.Time // per-(definition, sink) cooldown for notify-on-failure (§10)
-	notifyNow            func() time.Time                    // optional clock override for notify-on-failure tests
+	projectCapNotify     map[string]time.Time // per-trigger 1h cooldown for project live-agent cap warning log (§7.4)
+	notifyNow            func() time.Time     // optional clock override for notify-on-failure tests
 }
 
 // SetTriggerTemplateRefusalAuditSink overrides the audit sink used for

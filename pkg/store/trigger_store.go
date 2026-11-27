@@ -84,10 +84,14 @@ const (
 	TriggerActionNotify = "notify"
 
 	// TriggerFireActionIndexNotify is the reserved action_index stored on
-	// action_type = "notify" trigger_fires rows. Real actions always use
-	// non-negative indices (0..MaxTriggerActions-1), so -1 can never collide
-	// with real actions on the unique (event_id, trigger_id, action_index) key.
-	TriggerFireActionIndexNotify = -1
+	// action_type = "notify" trigger_fires rows for the agent-message sink.
+	// TriggerFireActionIndexNotifyUser is the reserved action_index stored on
+	// action_type = "notify" trigger_fires rows for the user-notice sink.
+	// Real actions always use non-negative indices (0..MaxTriggerActions-1), so
+	// negative indices can never collide with real actions on the unique
+	// (event_id, trigger_id, action_index) key.
+	TriggerFireActionIndexNotify     = -1
+	TriggerFireActionIndexNotifyUser = -2
 
 	TriggerSubjectModeNew   = "new"
 	TriggerSubjectModeSkip  = "skip"

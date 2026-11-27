@@ -3939,7 +3939,7 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 	if limit > 0 {
 		q = q.Limit(limit)
 	}
-	expired, err := q.Select(triggerfire.FieldID, triggerfire.FieldTriggerID, triggerfire.FieldStatus).All(ctx)
+	expired, err := q.Select(triggerfire.FieldID, triggerfire.FieldTriggerID, triggerfire.FieldStatus, triggerfire.FieldActionType).All(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -3975,7 +3975,9 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 				SetState(store.TriggerSubjectClaimStateReleased).
 				SetReleasedAt(now.Truncate(time.Microsecond)).
 				Save(ctx)
-			_ = s.RecordTriggerFire(ctx, f.TriggerID.String(), now, store.TriggerFireStatusFailed, errMsg)
+			if f.ActionType != store.TriggerActionNotify {
+				_ = s.RecordTriggerFire(ctx, f.TriggerID.String(), now, store.TriggerFireStatusFailed, errMsg)
+			}
 		}
 	}
 	return reaped, nil
