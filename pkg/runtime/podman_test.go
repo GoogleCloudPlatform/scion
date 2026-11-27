@@ -1158,9 +1158,13 @@ func TestPodmanRuntime_Run_RootlessLoopback(t *testing.T) {
 			RootlessNetwork: podmanRootlessNetSlirp4netns,
 		}
 		cfg := baseCfg()
-		cfg.ExtraHosts = []string{"host.containers.internal:host-gateway"}
+		callerHosts := []string{"host.containers.internal:host-gateway"}
+		cfg.ExtraHosts = callerHosts
 		if _, err := rt.Run(context.Background(), cfg); err != nil {
 			t.Fatalf("Run() error = %v", err)
+		}
+		if callerHosts[0] != "host.containers.internal:host-gateway" {
+			t.Errorf("caller ExtraHosts slice was mutated in place: got %q", callerHosts[0])
 		}
 		argv, _ := os.ReadFile(argvFile)
 		out := string(argv)
@@ -1169,6 +1173,25 @@ func TestPodmanRuntime_Run_RootlessLoopback(t *testing.T) {
 		}
 		if strings.Count(out, "host.containers.internal:") != 1 || !strings.Contains(out, "--add-host host.containers.internal:10.0.2.2") {
 			t.Errorf("expected single host.containers.internal:10.0.2.2 entry, got: %s", out)
+		}
+	})
+
+	t.Run("unknown rootless network backend leaves NetworkMode unset", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: "",
+		}
+		cfg := baseCfg()
+		cfg.BrokerMode = true
+		cfg.TrustedHubEndpoint = "http://host.containers.internal:19810"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if strings.Contains(string(argv), "--network") {
+			t.Errorf("expected no --network flag when rootless network backend is unknown, got: %s", string(argv))
 		}
 	})
 

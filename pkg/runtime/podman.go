@@ -473,29 +473,32 @@ func needsPodmanRootlessLoopback(config RunConfig) bool {
 	return false
 }
 
-// ensurePodmanHostAliasExtraHost pins host.containers.internal to loopbackAddr
-// in extraHosts. It replaces any host-gateway placeholder (which resolves to
-// the host's non-loopback NIC under rootless pasta/slirp4netns) while
-// preserving any explicit operator-provided IP mapping.
+// ensurePodmanHostAliasExtraHost returns a copy of extraHosts with
+// host.containers.internal pinned to loopbackAddr. It replaces any
+// host-gateway placeholder (which resolves to the host's non-loopback NIC
+// under rootless pasta/slirp4netns) while preserving any explicit
+// operator-provided IP mapping without mutating the caller's slice.
 func ensurePodmanHostAliasExtraHost(extraHosts []string, loopbackAddr string) []string {
 	replaced := false
 	hasExplicitIP := false
-	for i, h := range extraHosts {
+	res := make([]string, len(extraHosts), len(extraHosts)+1)
+	copy(res, extraHosts)
+	for i, h := range res {
 		name, target, ok := strings.Cut(h, ":")
 		if !ok || !strings.EqualFold(strings.TrimSpace(name), podmanNativeHostAlias) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(target), "host-gateway") {
-			extraHosts[i] = podmanNativeHostAlias + ":" + loopbackAddr
+			res[i] = podmanNativeHostAlias + ":" + loopbackAddr
 			replaced = true
 		} else {
 			hasExplicitIP = true
 		}
 	}
 	if !replaced && !hasExplicitIP {
-		extraHosts = append(extraHosts, podmanNativeHostAlias+":"+loopbackAddr)
+		res = append(res, podmanNativeHostAlias+":"+loopbackAddr)
 	}
-	return extraHosts
+	return res
 }
 
 // applyPodmanRootlessLoopback enables host-loopback translation on rootless
@@ -518,6 +521,9 @@ func applyPodmanRootlessLoopback(config *RunConfig, rootless bool, rootlessNetwo
 	case podmanRootlessNetSlirp4netns:
 		config.NetworkMode = "slirp4netns:allow_host_loopback=true"
 		config.ExtraHosts = ensurePodmanHostAliasExtraHost(config.ExtraHosts, podmanSlirpLoopbackAddr)
+	default:
+		runtimeLog().Warn("Rootless loopback routing requested for host.containers.internal, but no supported rootless network backend (pasta or slirp4netns) was detected",
+			"rootless_network", rootlessNetwork)
 	}
 }
 
