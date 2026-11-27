@@ -428,6 +428,7 @@ func TestForceDeleteUser_ForbiddenWritesNothing(t *testing.T) {
 // While the experiment is off, force is ignored: the plain refusal.
 func TestForceDeleteUser_ExperimentOffIgnoresForce(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
+	setUserDeleteForce(t, srv, false)
 	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
 	a := createOwnedAgent(t, s, "dave-agent", project.ID, dave.ID)
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID+"?force=true", nil)

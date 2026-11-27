@@ -386,6 +386,7 @@ func TestArtifactsSettingsDisabledAnswers404(t *testing.T) {
 // would get ServeMux's plain-text 404, which fails the JSON check.
 func TestArtifactsGuardViaRegisterRoutes(t *testing.T) {
 	srv := &Server{config: DefaultServerConfig()}
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	mux := http.NewServeMux()
 	artifacts.NewService(newArtifactHost(srv)).RegisterRoutes(mux, srv.artifactsGuard)
 	serveArtifactRequests(t, mux, NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"))

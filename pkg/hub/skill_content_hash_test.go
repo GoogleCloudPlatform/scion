@@ -481,6 +481,7 @@ func TestSkillsResolve_GitHubContentHashV2(t *testing.T) {
 		return resp.Resolved[0], raw.Resolved[0]
 	}
 
+	setSkillContentHashV2Experiment(t, srv, false)
 	got, raw := resolveRaw()
 	assert.Equal(t, goldenGHModesTreeV1, got.ContentHash)
 	_, present := raw["contentHashV2"]

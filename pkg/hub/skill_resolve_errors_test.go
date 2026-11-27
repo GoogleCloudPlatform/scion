@@ -34,6 +34,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -324,6 +325,11 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			}
 			mock := newFederationMockRegistry(t, handler)
 			srv, s := newFederationTestServer(t, mock)
+			if tc.name == "content hash mismatch" {
+				// Keep exercising the v1 pin mismatch log phrase when the
+				// mock registry omits per-file hashes.
+				setServerExperimentDefault(t, srv, experiments.SkillContentHashV2, false)
+			}
 			uri := tc.setup(t, s, mock.URL)
 			logs := captureJSONSlog(t)
 

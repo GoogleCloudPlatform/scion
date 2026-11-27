@@ -194,6 +194,15 @@ func TestDispatch_Experiments_OnWire(t *testing.T) {
 		t.Errorf("broker side does not see the experiment in %s", blob)
 	}
 
+	// A fresh hub with no overrides dispatches exactly the default-on
+	// dispatch experiments (ptone/scion#9486).
+	fresh := dispatchExperimentsServer(t, "")
+	d = fresh.CreateAuthenticatedDispatcher()
+	wantFresh := []string{experiments.K8sNFSHome, experiments.AgentPlugins, experiments.Artifacts}
+	if got := d.dispatchExperiments(); !slices.Equal(got, wantFresh) {
+		t.Errorf("fresh hub defaults: want %v, got %v", wantFresh, got)
+	}
+
 	off := dispatchExperimentsServer(t, `{"overrides":{"hub.k8s_nfs_home":false,"hub.agent_plugins":false,"hub.artifacts":false}}`)
 	d = off.CreateAuthenticatedDispatcher()
 	if got := d.dispatchExperiments(); got != nil {
