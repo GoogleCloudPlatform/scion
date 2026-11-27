@@ -34,7 +34,18 @@ var (
 	runReportOpenSessionAtShutdown    = reportOpenSessionAtShutdown
 	runWireSessionUsage               = wireSessionUsage
 	runStartHeldReportSender          = startHeldReportSender
+	runFlushSQLiteUsageBeforeBackstop = flushSQLiteUsageBeforeBackstop
 )
+
+// flushSQLiteUsageBeforeBackstop flushes the Antigravity SQLite tailer (if
+// active) before the shutdown backstop finalizes and tombstones the open
+// session, so late tailer tokens reach the local session report.
+func flushSQLiteUsageBeforeBackstop(p *telemetry.Pipeline) {
+	if p == nil {
+		return
+	}
+	p.FlushSQLiteUsage(context.Background())
+}
 
 // reportOpenSessionAtShutdown is the init daemon's backstop for session
 // metrics. Hook processes report a session when the harness's session-end

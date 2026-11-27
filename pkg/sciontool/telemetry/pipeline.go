@@ -630,6 +630,29 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	return nil
 }
 
+// FlushSQLiteUsage runs a bounded synchronous final poll and shutdown of the
+// Antigravity SQLite tailer (if active) ahead of Pipeline.Stop, so any final
+// DB rows flushed as the harness exited reach the SessionUsageSink before the
+// init shutdown backstop reports the open session. Safe to call when p is nil
+// or no SQLite tailer is active; idempotent with Pipeline.Stop (which swaps
+// agyTailer to nil and preserves agyActiveAtStop / driftLatched).
+func (p *Pipeline) FlushSQLiteUsage(ctx context.Context) {
+	if p == nil {
+		return
+	}
+	if tailer := p.agyTailer.Swap(nil); tailer != nil {
+		p.agyActiveAtStop.Store(true)
+		pollCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		defer cancel()
+		if err := tailer.Stop(pollCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
+		}
+		if tailer.SchemaDriftDetected() {
+			p.driftLatched.Store(true)
+		}
+	}
+}
+
 // Stop stops the telemetry pipeline.
 func (p *Pipeline) Stop(ctx context.Context) error {
 	if p == nil {
@@ -670,15 +693,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// loopback into the still-open receiver before flushMetricsOnStop runs.
 	// Capture active status and drift latch before clearing agyTailer so the
 	// final health event and heartbeat remain accurate.
-	if tailer := p.agyTailer.Swap(nil); tailer != nil {
-		p.agyActiveAtStop.Store(true)
-		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
-		}
-		if tailer.SchemaDriftDetected() {
-			p.driftLatched.Store(true)
-		}
-	}
+	p.FlushSQLiteUsage(ctx)
 
 	var errs []error
 	intakeDone := p.closeIntake()

@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
 // backstopPinResult is what pinBackstopCallSites observed.
@@ -140,6 +141,12 @@ func pinBackstopCallSites(t *testing.T, child string, setup func(t *testing.T, o
 	}
 	t.Cleanup(func() { runStartHeldReportSender = origStartHeld })
 
+	origFlushSQLite := runFlushSQLiteUsageBeforeBackstop
+	runFlushSQLiteUsageBeforeBackstop = func(*telemetry.Pipeline) {
+		r.order = append(r.order, "sqlite usage flush")
+	}
+	t.Cleanup(func() { runFlushSQLiteUsageBeforeBackstop = origFlushSQLite })
+
 	if setup != nil {
 		setup(t, &r.order)
 	}
@@ -169,8 +176,8 @@ func pinBackstopCallSites(t *testing.T, child string, setup func(t *testing.T, o
 		}
 		return -1
 	}
-	if c, s, p, b := pos("clear"), pos("held sender start"), pos("held sender stop"), pos("backstop"); c < 0 || s < c || p < s || b < p {
-		t.Errorf("order = %q, want clear, then held sender start, then held sender stop before backstop", r.order)
+	if c, s, p, f, b := pos("clear"), pos("held sender start"), pos("held sender stop"), pos("sqlite usage flush"), pos("backstop"); c < 0 || s < c || p < s || f < p || b < f {
+		t.Errorf("order = %q, want clear, held sender start, held sender stop, sqlite usage flush, then backstop", r.order)
 	}
 	return r
 }
@@ -229,7 +236,7 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 				t.Cleanup(func() { runReportHookLimitsExceeded = origReport })
 			},
 			want:      exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true},
-			wantOrder: []string{"clear", "held sender start", "limits report", "held sender stop", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"},
+			wantOrder: []string{"clear", "held sender start", "limits report", "held sender stop", "sqlite usage flush", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,7 +248,7 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 			// can use up the runtime's stop window.
 			wantOrder := tc.wantOrder
 			if wantOrder == nil {
-				wantOrder = []string{"clear", "held sender start", "held sender stop", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
+				wantOrder = []string{"clear", "held sender start", "held sender stop", "sqlite usage flush", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
 			}
 			if !reflect.DeepEqual(r.order, wantOrder) {
 				t.Errorf("call order = %q, want %q", r.order, wantOrder)

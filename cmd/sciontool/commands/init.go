@@ -1920,6 +1920,7 @@ waitLoop:
 	// (2s lock wait plus shutdownSessionReportTimeout) and deliberately
 	// runs ahead of the stopping and final status reports.
 	stopHeldReportSender()
+	runFlushSQLiteUsageBeforeBackstop(telemetryPipeline)
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit
