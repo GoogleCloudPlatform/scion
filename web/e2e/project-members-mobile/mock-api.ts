@@ -25,6 +25,8 @@ export const LONG_OTHER_NAME = 'jonathan.fitzgerald-smith@example-corp.com';
 export interface ProjectMembersMockOptions {
   showVisitorsTab?: boolean;
   longNames?: boolean;
+  includeCustomRoles?: boolean;
+  includeGroupSource?: boolean;
 }
 
 export async function setupProjectMembersHub(
@@ -33,6 +35,8 @@ export async function setupProjectMembersHub(
 ): Promise<void> {
   const showVisitorsTab = opts.showVisitorsTab ?? true;
   const longNames = opts.longNames ?? false;
+  const includeCustomRoles = opts.includeCustomRoles ?? longNames;
+  const includeGroupSource = opts.includeGroupSource ?? false;
 
   await page.addInitScript(
     ({ visitorsFlag }) => {
@@ -161,7 +165,7 @@ export async function setupProjectMembersHub(
         createdAt: '2026-11-20T00:00:00Z',
         source: 'direct',
       },
-      ...(longNames
+      ...(includeCustomRoles
         ? [
             {
               id: 'b-1-custom',
@@ -189,9 +193,10 @@ export async function setupProjectMembersHub(
         scopeType: 'project',
         scopeId: PROJECT_ID,
         createdAt: '2026-11-20T00:00:00Z',
-        source: 'direct',
+        source: includeGroupSource ? 'group' : 'direct',
+        ...(includeGroupSource ? { sourceGroupName: 'platform-engineering-team' } : {}),
       },
-      ...(longNames
+      ...(includeCustomRoles
         ? [
             {
               id: 'b-2-custom',

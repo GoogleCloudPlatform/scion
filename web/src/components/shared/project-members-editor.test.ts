@@ -2310,7 +2310,7 @@ describe('narrow-container responsive layout style contract (ptone/scion#9571, p
     expect(rules.get('.section-header')).toContain('display: flex');
     expect(rules.get('.section-header')).not.toContain('flex-direction: column');
     expect(rules.get('.actions-cell')).toContain('white-space: nowrap');
-    expect(rules.get('tbody td:first-child')).toContain('width: 100%');
+    expect(rules.get('tbody td:first-child')).toContain('width: 35%');
     expect(rules.get('tbody td:first-child')).toContain('max-width: 0');
     expect(rules.get('.member-identity')).toContain('min-width: 0');
 

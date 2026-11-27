@@ -336,4 +336,88 @@ test.describe('Project Settings > Members responsive layout', () => {
       expect(actionsCellRect.left).toBeGreaterThanOrEqual(rolesCellRect.right - 1);
     });
   });
+
+  test.describe('desktop 1100px viewport with multi-role and group-derived Source', () => {
+    test.use({ viewport: { width: 1100, height: 800 } });
+
+    test('keeps multi-role badges on one line when Source column is hidden', async ({ page }) => {
+      await setupProjectMembersHub(page, {
+        showVisitorsTab: true,
+        includeCustomRoles: true,
+        includeGroupSource: false,
+      });
+      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+      const editor = page.locator('scion-project-members-editor');
+      await expect(editor).toBeVisible({ timeout: 10_000 });
+      await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+      for (const userId of [SELF_USER_ID, OTHER_USER_ID]) {
+        const row = editor.locator(`tr[data-principal="user:${userId}"]`);
+        const badges = row.locator('.role-badge');
+        await expect(badges).toHaveCount(2);
+        const firstBadge = await rectOf(badges.nth(0));
+        const secondBadge = await rectOf(badges.nth(1));
+        expect(Math.abs(secondBadge.top - firstBadge.top)).toBeLessThanOrEqual(2);
+      }
+    });
+
+    test('keeps Via group text within 1-2 lines when Source column is shown', async ({ page }) => {
+      await setupProjectMembersHub(page, {
+        showVisitorsTab: true,
+        includeCustomRoles: true,
+        includeGroupSource: true,
+      });
+      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+      const editor = page.locator('scion-project-members-editor');
+      await expect(editor).toBeVisible({ timeout: 10_000 });
+      await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
+      const provenance = otherRow.locator('.provenance-badge.group-derived');
+      await expect(provenance).toBeVisible();
+      const provenanceRect = await rectOf(provenance);
+      expect(provenanceRect.height).toBeLessThanOrEqual(32);
+    });
+  });
+
+  test.describe('desktop 1440px viewport with multi-role and group-derived Source', () => {
+    test.use({ viewport: { width: 1440, height: 800 } });
+
+    test('keeps multi-role badges and Via group text on one line without truncating short names', async ({
+      page,
+    }) => {
+      await setupProjectMembersHub(page, {
+        showVisitorsTab: true,
+        includeCustomRoles: true,
+        includeGroupSource: true,
+      });
+      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+      const editor = page.locator('scion-project-members-editor');
+      await expect(editor).toBeVisible({ timeout: 10_000 });
+      await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+      for (const userId of [SELF_USER_ID, OTHER_USER_ID]) {
+        const row = editor.locator(`tr[data-principal="user:${userId}"]`);
+        const badges = row.locator('.role-badge');
+        await expect(badges).toHaveCount(2);
+        const firstBadge = await rectOf(badges.nth(0));
+        const secondBadge = await rectOf(badges.nth(1));
+        expect(Math.abs(secondBadge.top - firstBadge.top)).toBeLessThanOrEqual(2);
+
+        const nameTruncated = await row
+          .locator('.member-name')
+          .evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+        expect(nameTruncated).toBe(false);
+      }
+
+      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
+      const provenance = otherRow.locator('.provenance-badge.group-derived');
+      await expect(provenance).toBeVisible();
+      const provenanceRect = await rectOf(provenance);
+      expect(provenanceRect.height).toBeLessThanOrEqual(20);
+    });
+  });
 });

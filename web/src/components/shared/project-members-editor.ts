@@ -752,9 +752,10 @@ export class ScionProjectMembersEditor extends LitElement {
       }
 
       /* Allow the identity column to shrink in table mode so .member-name
-         ellipsizes instead of expanding the table and clipping row actions. */
+         ellipsizes instead of expanding the table and clipping row actions,
+         without starving the Roles and Source columns on desktop. */
       tbody td:first-child {
-        width: 100%;
+        width: 35%;
         max-width: 0;
       }
 
