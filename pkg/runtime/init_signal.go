@@ -63,27 +63,39 @@ func signalInitReloadWithCLI(ctx context.Context, command, id string) error {
 
 // SignalInitReload implements InitSignaler with `docker kill --signal`.
 func (r *DockerRuntime) SignalInitReload(ctx context.Context, id string) error {
-	return signalInitReloadWithCLI(ctx, r.Command, resolveListedID(ctx, r.List, id))
+	resolved, err := resolveListedID(ctx, r.List, id)
+	if err != nil {
+		return err
+	}
+	return signalInitReloadWithCLI(ctx, r.Command, resolved)
 }
 
 // SignalInitReload implements InitSignaler with `podman kill --signal`.
 func (r *PodmanRuntime) SignalInitReload(ctx context.Context, id string) error {
-	return signalInitReloadWithCLI(ctx, r.Command, resolveListedID(ctx, r.List, id))
+	resolved, err := resolveListedID(ctx, r.List, id)
+	if err != nil {
+		return err
+	}
+	return signalInitReloadWithCLI(ctx, r.Command, resolved)
 }
 
 // SignalInitReload implements InitSignaler with `container kill --signal`.
 func (r *AppleContainerRuntime) SignalInitReload(ctx context.Context, id string) error {
-	return signalInitReloadWithCLI(ctx, r.Command, resolveListedID(ctx, r.List, id))
+	resolved, err := resolveListedID(ctx, r.List, id)
+	if err != nil {
+		return err
+	}
+	return signalInitReloadWithCLI(ctx, r.Command, resolved)
 }
 
 // resolveListedID maps a slug or name to the listed container ID, falling
 // back to id when the list fails or has no match (the same resolution Exec
 // uses).
-func resolveListedID(ctx context.Context, list func(context.Context, map[string]string) ([]api.AgentInfo, error), id string) string {
+func resolveListedID(ctx context.Context, list func(context.Context, map[string]string) ([]api.AgentInfo, error), id string) (string, error) {
 	if agents, err := list(ctx, nil); err == nil {
 		return resolveContainerID(agents, id)
 	}
-	return id
+	return id, nil
 }
 
 var (

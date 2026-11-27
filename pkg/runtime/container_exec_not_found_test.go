@@ -210,3 +210,34 @@ func TestClassifyExecErr_CancelledContextKeepsExitError(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyExecErr_SharedPrefix(t *testing.T) {
+	// When "myproject--agent-10" was removed while "myproject--agent-1" is
+	// still running, reverse-prefix must not falsely treat the removed
+	// container as still present.
+	runErr := exec.Command("sh", "-c", "exit 1").Run()
+	notFoundOut := `Error: notFound: "get failed: container myproject--agent-10 not found"` + "\n"
+	onlyShortListed := func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{ContainerID: "myproject--agent-1", Name: "agent-1"},
+		}, nil
+	}
+	err := appleExecNotFound.classifyExecErr(context.Background(), runErr, notFoundOut, "myproject--agent-10", onlyShortListed)
+	if !errors.Is(err, ErrContainerNotFound) {
+		t.Errorf("removed longer ID with shorter sibling listed: got %v, want ErrContainerNotFound", err)
+	}
+
+	// When an ambiguous prefix matches multiple running containers,
+	// classifyExecErr must keep the original error (not claim not-found).
+	ambigNotFoundOut := `Error: notFound: "get failed: container myproject--agent- not found"` + "\n"
+	bothListed := func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{ContainerID: "myproject--agent-1", Name: "agent-1"},
+			{ContainerID: "myproject--agent-10", Name: "agent-10"},
+		}, nil
+	}
+	err = appleExecNotFound.classifyExecErr(context.Background(), runErr, ambigNotFoundOut, "myproject--agent-", bothListed)
+	if errors.Is(err, ErrContainerNotFound) || err != runErr {
+		t.Errorf("ambiguous prefix with multiple siblings listed: got %v, want original ExitError %v", err, runErr)
+	}
+}

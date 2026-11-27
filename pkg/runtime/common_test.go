@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -96,7 +97,10 @@ func TestResolveContainerID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveContainerID(agents, tt.id)
+			got, err := resolveContainerID(agents, tt.id)
+			if err != nil {
+				t.Fatalf("resolveContainerID(%q) unexpected error: %v", tt.id, err)
+			}
 			if got != tt.want {
 				t.Errorf("resolveContainerID(%q) = %q, want %q", tt.id, got, tt.want)
 			}
@@ -115,10 +119,134 @@ func TestResolveContainerID_SlugMatchesAgentName(t *testing.T) {
 		},
 	}
 
-	got := resolveContainerID(agents, "foo")
+	got, err := resolveContainerID(agents, "foo")
+	if err != nil {
+		t.Fatalf("resolveContainerID(\"foo\") unexpected error: %v", err)
+	}
 	if got != "a1b2c3d4e5f60000" {
 		t.Errorf("resolveContainerID(\"foo\") = %q, want %q", got, "a1b2c3d4e5f60000")
 	}
+}
+
+func TestFindContainerAgent_SharedPrefix(t *testing.T) {
+	// Two containers sharing a >=12-char prefix (common with Apple Container
+	// IDs such as "<project>--<agent>", and possible with hex container IDs).
+	longerFirst := []api.AgentInfo{
+		{ContainerID: "myproject--agent-10", Name: "agent-10"},
+		{ContainerID: "myproject--agent-1", Name: "agent-1"},
+		{ContainerID: "unique1234567890", Name: "unique"},
+	}
+	shorterFirst := []api.AgentInfo{
+		{ContainerID: "myproject--agent-1", Name: "agent-1"},
+		{ContainerID: "myproject--agent-10", Name: "agent-10"},
+		{ContainerID: "unique1234567890", Name: "unique"},
+	}
+
+	t.Run("exact shorter ID wins when longer appears first", func(t *testing.T) {
+		got, err := findContainerAgent(longerFirst, "myproject--agent-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.ContainerID != "myproject--agent-1" {
+			t.Errorf("got %+v, want myproject--agent-1", got)
+		}
+	})
+
+	t.Run("exact longer ID wins when shorter appears first", func(t *testing.T) {
+		got, err := findContainerAgent(shorterFirst, "myproject--agent-10")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.ContainerID != "myproject--agent-10" {
+			t.Errorf("got %+v, want myproject--agent-10", got)
+		}
+	})
+
+	t.Run("unique forward prefix resolves", func(t *testing.T) {
+		got, err := findContainerAgent(longerFirst, "unique123456")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.ContainerID != "unique1234567890" {
+			t.Errorf("got %+v, want unique1234567890", got)
+		}
+	})
+
+	t.Run("ambiguous prefix returns ErrAmbiguousContainerID", func(t *testing.T) {
+		got, err := findContainerAgent(longerFirst, "myproject--agent-")
+		if !errors.Is(err, ErrAmbiguousContainerID) {
+			t.Fatalf("err = %v, want ErrAmbiguousContainerID", err)
+		}
+		if got != nil {
+			t.Errorf("got %+v, want nil", got)
+		}
+		resolved, resErr := resolveContainerID(longerFirst, "myproject--agent-")
+		if !errors.Is(resErr, ErrAmbiguousContainerID) || resolved != "" {
+			t.Errorf("resolveContainerID = (%q, %v), want (\"\", ErrAmbiguousContainerID)", resolved, resErr)
+		}
+	})
+
+	t.Run("reverse prefix is not accepted", func(t *testing.T) {
+		got, err := findContainerAgent(longerFirst, "myproject--agent-100")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("reverse prefix matched %+v, want nil", got)
+		}
+		// resolveContainerID falls back to raw id when unmatched.
+		resolved, resErr := resolveContainerID(longerFirst, "myproject--agent-100")
+		if resErr != nil || resolved != "myproject--agent-100" {
+			t.Errorf("resolveContainerID = (%q, %v), want (\"myproject--agent-100\", nil)", resolved, resErr)
+		}
+	})
+
+	t.Run("prefix shorter than 12 chars is not accepted", func(t *testing.T) {
+		got, err := findContainerAgent(longerFirst, "unique12345")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("short prefix matched %+v, want nil", got)
+		}
+	})
+
+	t.Run("exact ID beats exact name match", func(t *testing.T) {
+		// Container A's Name equals Container B's full ContainerID and appears
+		// first; querying that ID must select Container B by exact ID.
+		agents := []api.AgentInfo{
+			{ContainerID: "aaaa111122223333", Name: "bbbb444455556666"},
+			{ContainerID: "bbbb444455556666", Name: "other-agent"},
+		}
+		got, err := findContainerAgent(agents, "bbbb444455556666")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.ContainerID != "bbbb444455556666" {
+			t.Errorf("got %+v, want bbbb444455556666", got)
+		}
+	})
+
+	t.Run("exact name beats prefix ID match", func(t *testing.T) {
+		agents := []api.AgentInfo{
+			{ContainerID: "my-long-agent-name-extra", Name: "other"},
+			{ContainerID: "ffff000011112222", Name: "my-long-agent-name"},
+		}
+		got, err := findContainerAgent(agents, "my-long-agent-name")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.ContainerID != "ffff000011112222" {
+			t.Errorf("got %+v, want ffff000011112222", got)
+		}
+	})
+
+	t.Run("empty id returns nil without error", func(t *testing.T) {
+		got, err := findContainerAgent(longerFirst, "")
+		if err != nil || got != nil {
+			t.Errorf("got (%+v, %v), want (nil, nil)", got, err)
+		}
+	})
 }
 
 // homeDirForTest pins $HOME to a deterministic, test-isolated directory and

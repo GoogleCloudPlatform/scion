@@ -99,7 +99,11 @@ func (n containerExecNotFound) classifyExecErr(ctx context.Context, err error, o
 		return err
 	}
 	agents, listErr := list(ctx, nil)
-	if listErr != nil || findContainerAgent(agents, id) != nil {
+	if listErr != nil {
+		return err
+	}
+	agent, findErr := findContainerAgent(agents, id)
+	if findErr != nil || agent != nil {
 		return err
 	}
 	return fmt.Errorf("agent '%s' %w, it may have exited and been removed", id, ErrContainerNotFound)

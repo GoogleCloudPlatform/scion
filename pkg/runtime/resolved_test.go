@@ -202,3 +202,95 @@ func TestContainerExec_ResolvedContainerIDKeepsNotFoundClassification(t *testing
 		})
 	}
 }
+
+func TestContainerExec_SharedPrefixRoutingAndAmbiguity(t *testing.T) {
+	const (
+		idLong   = "myproject--agent-10"
+		idShort  = "myproject--agent-1"
+		ambigPfx = "myproject--agent-"
+	)
+	cases := []struct {
+		name    string
+		new     func(cli string) Runtime
+		listing string // idLong listed before idShort
+	}{
+		{
+			name: "docker",
+			new:  func(cli string) Runtime { return &DockerRuntime{Command: cli} },
+			listing: `{"ID":"` + idLong + `","Names":"` + idLong + `","Status":"Up 1 minute","Image":"img","Labels":"scion.name=agent-10"}` + "\n" +
+				`{"ID":"` + idShort + `","Names":"` + idShort + `","Status":"Up 1 minute","Image":"img","Labels":"scion.name=agent-1"}` + "\n",
+		},
+		{
+			name: "podman",
+			new:  func(cli string) Runtime { return &PodmanRuntime{Command: cli} },
+			listing: `[{"Id":"` + idLong + `","Names":["` + idLong + `"],"Status":"running","Image":"img","Labels":{"scion.name":"agent-10"}},` +
+				`{"Id":"` + idShort + `","Names":["` + idShort + `"],"Status":"running","Image":"img","Labels":{"scion.name":"agent-1"}}]`,
+		},
+		{
+			name: "apple",
+			new:  func(cli string) Runtime { return &AppleContainerRuntime{Command: cli} },
+			listing: `[{"status":"running","configuration":{"id":"` + idLong + `","labels":{"scion.name":"agent-10"},"image":{"reference":"img"}}},` +
+				`{"status":"running","configuration":{"id":"` + idShort + `","labels":{"scion.name":"agent-1"},"image":{"reference":"img"}}}]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"/Exec/exact_shorter_wins", func(t *testing.T) {
+			cli, logPath := writeRecordingCLI(t, tc.listing)
+			rt := tc.new(cli)
+			if _, err := rt.Exec(context.Background(), idShort, []string{"true"}); err != nil {
+				t.Fatalf("Exec error = %v", err)
+			}
+			_, targets := readCallLog(t, logPath)
+			if len(targets) != 1 || targets[0] != idShort {
+				t.Errorf("exec targets = %v, want [%s]", targets, idShort)
+			}
+		})
+
+		t.Run(tc.name+"/Exec/ambiguous_prefix_errors", func(t *testing.T) {
+			cli, logPath := writeRecordingCLI(t, tc.listing)
+			rt := tc.new(cli)
+			_, err := rt.Exec(context.Background(), ambigPfx, []string{"true"})
+			if !errors.Is(err, ErrAmbiguousContainerID) {
+				t.Fatalf("Exec error = %v, want ErrAmbiguousContainerID", err)
+			}
+			_, targets := readCallLog(t, logPath)
+			if len(targets) != 0 {
+				t.Errorf("exec must not run on ambiguous prefix; targets = %v", targets)
+			}
+		})
+
+		t.Run(tc.name+"/ExecWithStdin/ambiguous_prefix_errors", func(t *testing.T) {
+			cli, logPath := writeRecordingCLI(t, tc.listing)
+			rt := tc.new(cli)
+			_, err := rt.ExecWithStdin(context.Background(), ambigPfx, []string{"cat"}, strings.NewReader("hi"))
+			if !errors.Is(err, ErrAmbiguousContainerID) {
+				t.Fatalf("ExecWithStdin error = %v, want ErrAmbiguousContainerID", err)
+			}
+			_, targets := readCallLog(t, logPath)
+			if len(targets) != 0 {
+				t.Errorf("exec must not run on ambiguous prefix; targets = %v", targets)
+			}
+		})
+
+		if tc.name == "docker" || tc.name == "podman" {
+			t.Run(tc.name+"/Attach/ambiguous_prefix_errors", func(t *testing.T) {
+				cli, _ := writeRecordingCLI(t, tc.listing)
+				rt := tc.new(cli)
+				err := rt.Attach(context.Background(), ambigPfx)
+				if !errors.Is(err, ErrAmbiguousContainerID) {
+					t.Fatalf("Attach error = %v, want ErrAmbiguousContainerID", err)
+				}
+			})
+
+			t.Run(tc.name+"/Sync/ambiguous_prefix_errors", func(t *testing.T) {
+				cli, _ := writeRecordingCLI(t, tc.listing)
+				rt := tc.new(cli)
+				err := rt.Sync(context.Background(), ambigPfx, SyncTo)
+				if !errors.Is(err, ErrAmbiguousContainerID) {
+					t.Fatalf("Sync error = %v, want ErrAmbiguousContainerID", err)
+				}
+			})
+		}
+	}
+}

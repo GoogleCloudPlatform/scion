@@ -1788,28 +1788,68 @@ func mkdirUnderHome(home *agenthome.Home, rel string) {
 	_ = home.MkdirAll(rel, 0755)
 }
 
-// resolveContainerID maps an agent identifier (slug, name, or partial
+// ErrAmbiguousContainerID is returned when a container ID prefix matches more
+// than one container in a runtime's listing.
+var ErrAmbiguousContainerID = errors.New("ambiguous container ID prefix")
+
+// resolveContainerID maps an agent identifier (slug, name, or unique partial
 // container ID) to the authoritative container ID used by the runtime.
 // When no match is found the original id is returned so callers can fall
 // back to the raw value (which may itself be a valid container name).
-func resolveContainerID(agents []api.AgentInfo, id string) string {
-	if agent := findContainerAgent(agents, id); agent != nil {
-		return agent.ContainerID
+// Returns an error wrapping ErrAmbiguousContainerID if id is an ambiguous
+// container ID prefix matching multiple containers.
+func resolveContainerID(agents []api.AgentInfo, id string) (string, error) {
+	agent, err := findContainerAgent(agents, id)
+	if err != nil {
+		return "", err
 	}
-	return id
+	if agent != nil {
+		return agent.ContainerID, nil
+	}
+	return id, nil
 }
 
-func findContainerAgent(agents []api.AgentInfo, id string) *api.AgentInfo {
+// findContainerAgent looks up an agent in agents by id:
+//  1. Exact ContainerID match (wins even if another container shares a prefix).
+//  2. Exact Name match (with or without a leading '/').
+//  3. Unique forward prefix match on ContainerID (len(id) >= 12); returns
+//     ErrAmbiguousContainerID if multiple containers share the prefix.
+//
+// Reverse prefix matching (stored ContainerID being a prefix of id) is not
+// performed: Docker and Podman list with --no-trunc (full 64-char IDs) and
+// Apple Container lists full configuration IDs.
+func findContainerAgent(agents []api.AgentInfo, id string) (*api.AgentInfo, error) {
+	if id == "" {
+		return nil, nil
+	}
 	for i := range agents {
-		agent := &agents[i]
-		if agent.ContainerID == id ||
-			(len(id) >= 12 && strings.HasPrefix(agent.ContainerID, id)) ||
-			(len(agent.ContainerID) >= 12 && strings.HasPrefix(id, agent.ContainerID)) ||
-			agent.Name == id || agent.Name == "/"+id || strings.TrimPrefix(agent.Name, "/") == id {
-			return agent
+		if agents[i].ContainerID == id {
+			return &agents[i], nil
 		}
 	}
-	return nil
+	for i := range agents {
+		name := agents[i].Name
+		if name == id || name == "/"+id || strings.TrimPrefix(name, "/") == id {
+			return &agents[i], nil
+		}
+	}
+	if len(id) >= 12 {
+		var match *api.AgentInfo
+		matches := 0
+		for i := range agents {
+			if strings.HasPrefix(agents[i].ContainerID, id) {
+				match = &agents[i]
+				matches++
+			}
+		}
+		if matches == 1 {
+			return match, nil
+		}
+		if matches > 1 {
+			return nil, fmt.Errorf("%w %q: matches %d containers", ErrAmbiguousContainerID, id, matches)
+		}
+	}
+	return nil, nil
 }
 
 func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection) error {
