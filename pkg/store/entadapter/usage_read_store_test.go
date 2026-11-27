@@ -1464,6 +1464,42 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		return out
 	}
 
+	// Project extended coverage buckets onto the 5 pre-P2.3 flags so we verify
+	// exact equivalence of agent selection and running/meter/stale/usage counts
+	// between the globalDriven CTE and the old agents-driven query.
+	projectLegacyFlags := func(buckets []store.UsageCoverageBucket) []store.UsageCoverageBucket {
+		type key struct {
+			isRunning        bool
+			hasMeterHealth   bool
+			latestFinalState string
+			isReceiptStale   bool
+			hasUsageData     bool
+		}
+		counts := make(map[key]int, len(buckets))
+		for _, b := range buckets {
+			k := key{
+				isRunning:        b.IsRunning,
+				hasMeterHealth:   b.HasMeterHealth,
+				latestFinalState: b.LatestFinalState,
+				isReceiptStale:   b.IsReceiptStale,
+				hasUsageData:     b.HasUsageData,
+			}
+			counts[k] += b.AgentCount
+		}
+		out := make([]store.UsageCoverageBucket, 0, len(counts))
+		for k, cnt := range counts {
+			out = append(out, store.UsageCoverageBucket{
+				IsRunning:        k.isRunning,
+				HasMeterHealth:   k.hasMeterHealth,
+				LatestFinalState: k.latestFinalState,
+				IsReceiptStale:   k.isReceiptStale,
+				HasUsageData:     k.hasUsageData,
+				AgentCount:       cnt,
+			})
+		}
+		return out
+	}
+
 	// (a) Window including now: [now-24h, now]
 	gotNow, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
 		Since:      now.Add(-24 * time.Hour),
@@ -1473,7 +1509,7 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 	})
 	require.NoError(t, err)
 	wantNow := runOldGlobalCoverage(now.Add(-24*time.Hour), now, 3*time.Minute)
-	assert.ElementsMatch(t, wantNow.Buckets, gotNow.Buckets, "global coverage (includes now) must match old query")
+	assert.ElementsMatch(t, wantNow.Buckets, projectLegacyFlags(gotNow.Buckets), "global coverage (includes now) must match old query")
 	assert.Equal(t, wantNow.LastReceiptAt, gotNow.LastReceiptAt)
 
 	// (b) Historical window: [histStart, histEnd]
@@ -1485,7 +1521,7 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 	})
 	require.NoError(t, err)
 	wantHist := runOldGlobalCoverage(histStart, histEnd, 3*time.Minute)
-	assert.ElementsMatch(t, wantHist.Buckets, gotHist.Buckets, "global coverage (historical) must match old query")
+	assert.ElementsMatch(t, wantHist.Buckets, projectLegacyFlags(gotHist.Buckets), "global coverage (historical) must match old query")
 	assert.Equal(t, wantHist.LastReceiptAt, gotHist.LastReceiptAt)
 
 	// --- Postgres EXPLAIN (ANALYZE, BUFFERS) verification under force_generic_plan ---
