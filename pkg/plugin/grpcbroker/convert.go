@@ -65,6 +65,7 @@ func StructuredMessageToProto(msg *messages.StructuredMessage) *brokerv1.Structu
 			ExternalRef: msg.Conversation.ExternalRef,
 			ParentRef:   msg.Conversation.ParentRef,
 			DisplayName: msg.Conversation.DisplayName,
+			Kind:        msg.Conversation.Kind,
 		}
 	}
 	return pb
@@ -111,6 +112,7 @@ func ProtoToStructuredMessage(pb *brokerv1.StructuredMessage) *messages.Structur
 			ExternalRef: pb.Conversation.ExternalRef,
 			ParentRef:   pb.Conversation.ParentRef,
 			DisplayName: pb.Conversation.DisplayName,
+			Kind:        pb.Conversation.Kind,
 		}
 	}
 	return msg

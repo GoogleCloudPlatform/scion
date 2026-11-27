@@ -17,37 +17,37 @@ package plugin
 import "github.com/GoogleCloudPlatform/scion/pkg/messages"
 
 // ConversationTarget holds the resolved conversation addressing extracted
-// from an outbound StructuredMessage for broker plugin routing (Phase 11).
+// from an outbound StructuredMessage for broker plugin routing (Phase 11 / P5).
 //
-// Contract for broker plugins (P4 dual-population):
-//   - On outbound Publish(), the hub translates stored thread keys
-//     ("thread:<project>:<ref>") on external surfaces into surface-native
-//     Conversation.ExternalRef values (<ref>), and omits Conversation (nil)
-//     for native conversations, direct (dm:*) conversations, and any ref that
-//     cannot be safely translated. ConversationID is always preserved.
+// Contract for broker plugins (P5):
+//   - On outbound Publish(), the hub always attaches Conversation whenever
+//     ConversationID resolves: external thread rows carry the surface-native
+//     ExternalRef (with "thread:<project>:" stripped), ParentRef, DisplayName,
+//     and Kind; native, direct, and untranslatable rows carry
+//     {Surface: "native", Kind, DisplayName} with empty ExternalRef/ParentRef
+//     so hub-internal keys never cross the wire. When ConversationID is empty
+//     or lookup fails, the hub clears Conversation to nil.
 //   - Call ResolveConversationTarget(msg) (and, for plugins that filter by
 //     channel such as Slack/Discord/Teams, MatchesSurface(msg, "<surface>")).
-//   - While legacy msg.Channel is populated (P4), spoke selection follows
-//     msg.Channel (the hub's per-message routing decision, including reply
-//     affinity). Absent or native Conversations (DMs, native threads,
-//     agent-to-agent observer copies) never filter out a message and never
-//     supply an external target ref.
-//   - When msg.Conversation is present with a non-native surface, Surface,
-//     ExternalRef, ParentRef and DisplayName come from it; when absent or
-//     native, Surface falls back to msg.Channel and ExternalRef falls back to
-//     msg.ThreadID.
+//   - Spoke selection follows msg.Channel (the hub-computed delivery channel,
+//     including reply affinity). Absent or native Conversations (DMs, native
+//     threads, agent-to-agent observer copies) never filter out a message and
+//     never supply an external target ref.
+//   - When msg.Conversation is present, ThreadID is NEVER read: Kind and
+//     DisplayName come from msg.Conversation, non-native Surface/ExternalRef/
+//     ParentRef come from msg.Conversation, and an empty Surface falls back to
+//     msg.Channel. Only when msg.Conversation is nil (an older pre-P5a hub)
+//     does ResolveConversationTarget fall back to msg.Channel and msg.ThreadID.
+//   - Direct messages (target.Kind == "direct") route by Recipient/RecipientID
+//     without using ExternalRef or ThreadID.
 //   - On inbound HTTP delivery (/api/v1/broker/inbound and
 //     /api/v1/broker/inbound/routed), embed InboundConversation (surface,
-//     external_ref, optional parent_ref and display_name) at the top level of
-//     the request JSON ONLY when HubSupportsInboundConversation(config) is true
-//     (hub passes hub_inbound_conversation="1" in Configure). Against older
-//     hubs where the flag is absent, plugins omit those fields so inbound falls
-//     through to legacy Phase 5 resolution without creating raw-keyed rows.
-//   - When (surface, external_ref) is sent to a P4+ hub, the hub maps it onto
-//     the canonical thread:<project>:<ref> key (with a read-only fallback to
-//     pre-P4 Phase 5 keys when no row exists under the new key) so inbound and
-//     outbound threads share one conversation. 1:1 surface DMs without a thread
-//     omit external_ref so Phase 5 resolves the shared direct dm: conversation.
+//     external_ref, optional parent_ref, display_name, and legacy_ref) at the
+//     top level of the request JSON ONLY when HubSupportsInboundConversation
+//     returns true (hub passes hub_inbound_conversation="1" in Configure).
+//     Plugins always set surface (even for 1:1 chats with empty external_ref)
+//     and set legacy_ref to the exact pre-P4 thread_id value for read-only
+//     continuity lookup.
 //   - Exception: scion-chat-app delivers inbound messages through the
 //     user-authenticated agent-message API (/api/v1/agents/{id}/message)
 //     rather than /api/v1/broker/inbound and is therefore a documented
@@ -58,6 +58,7 @@ type ConversationTarget struct {
 	ExternalRef    string
 	ParentRef      string
 	DisplayName    string
+	Kind           string
 }
 
 // ConfigKeyHubInboundConversation is the Configure map key injected by hubs
@@ -87,21 +88,28 @@ func HubSupportsInboundConversation(config map[string]string) bool {
 //   - ParentRef requires ExternalRef to be non-empty.
 //   - Surface must be a valid conversation surface (e.g. "slack", "discord",
 //     "telegram", "teams", "gchat").
+//   - LegacyRef carries the exact pre-P4 message.thread_id value used by the
+//     hub's read-only Phase-5 continuity fallback until F1 retires legacy keys.
 type InboundConversation struct {
 	Surface     string `json:"surface,omitempty"`
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
+	LegacyRef   string `json:"legacy_ref,omitempty"`
 }
 
-// ResolveConversationTarget extracts conversation addressing from msg,
-// preferring msg.Conversation (proto field 23) when it carries a non-native
-// surface and falling back field-by-field to legacy msg.Channel and
-// msg.ThreadID when msg.Conversation is absent or has Surface=="native".
+// ResolveConversationTarget extracts conversation addressing from msg.
 //
+// When msg.Conversation is present (proto field 23), msg.ThreadID is never
+// read: Kind and DisplayName are copied from msg.Conversation, non-native
+// Surface/ExternalRef/ParentRef are copied from msg.Conversation, and an empty
+// Surface falls back to msg.Channel (the hub-computed delivery channel).
 // Native conversations (DMs, native webchat threads, agent-to-agent observer
 // copies) never supply an external target ref, so hub-internal keys like
 // "dm:..." or "thread:..." are not treated as surface addresses.
+//
+// Only when msg.Conversation is nil (an older pre-P5a hub) does
+// ResolveConversationTarget fall back to msg.Channel and msg.ThreadID.
 func ResolveConversationTarget(msg *messages.StructuredMessage) ConversationTarget {
 	if msg == nil {
 		return ConversationTarget{}
@@ -109,17 +117,20 @@ func ResolveConversationTarget(msg *messages.StructuredMessage) ConversationTarg
 	target := ConversationTarget{
 		ConversationID: msg.ConversationID,
 	}
-	if msg.Conversation != nil && msg.Conversation.Surface != "native" {
+	if msg.Conversation == nil {
+		target.Surface = msg.Channel
+		target.ExternalRef = msg.ThreadID
+		return target
+	}
+	target.Kind = msg.Conversation.Kind
+	target.DisplayName = msg.Conversation.DisplayName
+	if msg.Conversation.Surface != "native" {
 		target.Surface = msg.Conversation.Surface
 		target.ExternalRef = msg.Conversation.ExternalRef
 		target.ParentRef = msg.Conversation.ParentRef
-		target.DisplayName = msg.Conversation.DisplayName
 	}
 	if target.Surface == "" {
 		target.Surface = msg.Channel
-	}
-	if target.ExternalRef == "" {
-		target.ExternalRef = msg.ThreadID
 	}
 	return target
 }

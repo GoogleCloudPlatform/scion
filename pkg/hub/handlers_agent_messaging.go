@@ -2275,6 +2275,7 @@ type MessageRequest struct {
 	Surface     string `json:"surface,omitempty"`
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
+	LegacyRef   string `json:"legacy_ref,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -2351,7 +2352,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// External chat references name conversations owned by chat
 	// integrations, which authenticate as brokers. Any other caller is
 	// refused before anything is looked up or written.
-	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
+	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "" || req.LegacyRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
 		logReferenceRefused(ctx, logging.RequestPath(r), "external chat reference from a caller that is not a chat integration", GetIdentityFromContext(ctx))
 		ValidationError(w, "surface and external_ref are set by chat integrations", nil)
 		return
@@ -2723,7 +2724,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		convResult, convErr := s.resolveBrokerInboundConversation(
 			ctx, s.messageLog, agent.ProjectID,
 			req.Surface, req.ExternalRef, req.ParentRef, "", agent.ID,
-			structuredMsg.Channel, structuredMsg.ThreadID,
+			structuredMsg.Channel, req.LegacyRef, structuredMsg.ThreadID,
 		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {

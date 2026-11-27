@@ -2018,6 +2018,129 @@ func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
 		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
 			"container-scoped Slack channel row must not be reused for a new thread")
 	})
+
+	t.Run("legacy_ref_reuses_pre_p4_row_without_message_thread_id", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "legacy-ref-only")
+		ctx := context.Background()
+
+		legacyKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000222")
+		require.NoError(t, err)
+		seeded, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), legacyKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000222",
+			ParentRef:   "C0123ABC",
+			LegacyRef:   "1700000000.000222",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "follow-up via legacy_ref only",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, seeded.ConversationID, msgs.Items[0].ConversationID,
+			"legacy_ref must reuse pre-P4 conversation row even when message.thread_id is empty")
+
+		allConvs, err := s.ListConversations(ctx, store.ConversationFilter{Surface: "slack"}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Len(t, allConvs.Items, 1, "must not create a duplicate conversation row")
+	})
+
+	t.Run("legacy_ref_takes_precedence_over_message_thread_id", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "legacy-ref-precedence")
+		ctx := context.Background()
+
+		refKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000333")
+		require.NoError(t, err)
+		refConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), refKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		tidKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000444")
+		require.NoError(t, err)
+		_, err = messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), tidKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000333",
+			ParentRef:   "C0123ABC",
+			LegacyRef:   "1700000000.000333",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "1700000000.000444",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "legacy_ref wins over message.thread_id",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, refConv.ConversationID, msgs.Items[0].ConversationID,
+			"legacy_ref must take precedence over message.thread_id")
+	})
+
+	t.Run("legacy_ref_container_scoped_not_reused", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "legacy-ref-container")
+		ctx := context.Background()
+
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000888",
+			ParentRef:   "C0123ABC",
+			LegacyRef:   "C0123ABC",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "container-scoped legacy_ref must not reuse channel row",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
+			"container-scoped legacy_ref must not reuse channel-wide row")
+	})
 }
 
 type inboundTestCaptureBus struct {

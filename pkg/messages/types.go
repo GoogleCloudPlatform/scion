@@ -276,6 +276,7 @@ type Conversation struct {
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
+	Kind        string `json:"kind,omitempty"`
 }
 
 // LogTypeOther is what LogType returns for a type outside the closed enum.

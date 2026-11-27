@@ -243,12 +243,16 @@ func (x *StructuredMessage) GetConversation() *Conversation {
 // Conversation carries the resolved conversation metadata for a message on
 // the hub-to-plugin wire (Phase 11). Plugins choose their spoke from surface
 // and target external_ref instead of reading legacy channel/thread_id fields.
+// For native/direct/untranslatable conversations the hub emits surface="native"
+// with empty external_ref/parent_ref so hub-internal keys never cross the wire.
 type Conversation struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Surface       string                 `protobuf:"bytes,1,opt,name=surface,proto3" json:"surface,omitempty"`
-	ExternalRef   string                 `protobuf:"bytes,2,opt,name=external_ref,json=externalRef,proto3" json:"external_ref,omitempty"`
-	ParentRef     string                 `protobuf:"bytes,3,opt,name=parent_ref,json=parentRef,proto3" json:"parent_ref,omitempty"`
-	DisplayName   string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Surface     string                 `protobuf:"bytes,1,opt,name=surface,proto3" json:"surface,omitempty"`
+	ExternalRef string                 `protobuf:"bytes,2,opt,name=external_ref,json=externalRef,proto3" json:"external_ref,omitempty"`
+	ParentRef   string                 `protobuf:"bytes,3,opt,name=parent_ref,json=parentRef,proto3" json:"parent_ref,omitempty"`
+	DisplayName string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	// Conversation kind from conversations.kind: "direct", "group", or "thread".
+	Kind          string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -307,6 +311,13 @@ func (x *Conversation) GetParentRef() string {
 func (x *Conversation) GetDisplayName() string {
 	if x != nil {
 		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *Conversation) GetKind() string {
+	if x != nil {
+		return x.Kind
 	}
 	return ""
 }
@@ -880,13 +891,14 @@ const file_broker_v1_broker_proto_rawDesc = "" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\v\x10\fJ\x04\b\x14\x10\x15R\x03rawR\n" +
-	"visibility\"\x8d\x01\n" +
+	"visibility\"\xa1\x01\n" +
 	"\fConversation\x12\x18\n" +
 	"\asurface\x18\x01 \x01(\tR\asurface\x12!\n" +
 	"\fexternal_ref\x18\x02 \x01(\tR\vexternalRef\x12\x1d\n" +
 	"\n" +
 	"parent_ref\x18\x03 \x01(\tR\tparentRef\x12!\n" +
-	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\"\x94\x01\n" +
+	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\x12\x12\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\"\x94\x01\n" +
 	"\x10ConfigureRequest\x12E\n" +
 	"\x06config\x18\x01 \x03(\v2-.scion.broker.v1.ConfigureRequest.ConfigEntryR\x06config\x1a9\n" +
 	"\vConfigEntry\x12\x10\n" +
