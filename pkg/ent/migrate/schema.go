@@ -332,6 +332,14 @@ var (
 					Where: "harness_config IS NULL AND applied_config IS NOT NULL",
 				},
 			},
+			{
+				Name:    "agent_running_active",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[0], AgentsColumns[58]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "deleted_at IS NULL AND phase = 'running'",
+				},
+			},
 		},
 	}
 	// AgentCredentialsColumns holds the columns for the "agent_credentials" table.
@@ -2838,6 +2846,8 @@ var (
 		{Name: "last_contiguous_seq", Type: field.TypeInt64, Default: 0},
 		{Name: "max_seq_seen", Type: field.TypeInt64, Default: 0},
 		{Name: "missing_ranges", Type: field.TypeJSON, Nullable: true},
+		{Name: "rejected_count", Type: field.TypeInt64, Default: 0},
+		{Name: "rejected_ranges", Type: field.TypeJSON, Nullable: true},
 		{Name: "last_source_activity_at", Type: field.TypeTime, Nullable: true},
 		{Name: "supported_signals", Type: field.TypeJSON, Nullable: true},
 		{Name: "anomalous_count", Type: field.TypeInt64, Default: 0},
@@ -2864,12 +2874,17 @@ var (
 			{
 				Name:    "meterhealth_final_state_updated_at",
 				Unique:  false,
-				Columns: []*schema.Column{MeterHealthColumns[12], MeterHealthColumns[13]},
+				Columns: []*schema.Column{MeterHealthColumns[14], MeterHealthColumns[15]},
 			},
 			{
 				Name:    "meterhealth_updated_at",
 				Unique:  false,
-				Columns: []*schema.Column{MeterHealthColumns[13]},
+				Columns: []*schema.Column{MeterHealthColumns[15]},
+			},
+			{
+				Name:    "meterhealth_last_receipt_at_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{MeterHealthColumns[4], MeterHealthColumns[1]},
 			},
 		},
 	}
@@ -3482,9 +3497,9 @@ var (
 				Columns: []*schema.Column{RunAttributionColumns[9], RunAttributionColumns[25]},
 			},
 			{
-				Name:    "runattribution_created_at",
+				Name:    "runattribution_created_at_agent_id",
 				Unique:  false,
-				Columns: []*schema.Column{RunAttributionColumns[25]},
+				Columns: []*schema.Column{RunAttributionColumns[25], RunAttributionColumns[6]},
 			},
 		},
 	}
