@@ -106,6 +106,20 @@ func TestScopesForRole_EmptyStringDefaultsToNone(t *testing.T) {
 	assert.Nil(t, scopes)
 }
 
+// TestAgentAuthoringFloorScope_MatchesBaselineFloor pins the coupling between
+// agentAuthoringFloorScope and the stock agent roles (Stage 2 §4.3,
+// ptone/scion#8065): readonly and none MUST NOT hold it, baseline and full
+// MUST hold it, and it MUST NOT be ceiling-optional (so every minted
+// baseline/full token carries it).
+func TestAgentAuthoringFloorScope_MatchesBaselineFloor(t *testing.T) {
+	assert.NotContains(t, ScopesForRole(AgentRoleNone), agentAuthoringFloorScope)
+	assert.NotContains(t, ScopesForRole(AgentRoleReadOnly), agentAuthoringFloorScope)
+	assert.Contains(t, ScopesForRole(AgentRoleBaseline), agentAuthoringFloorScope)
+	assert.Contains(t, ScopesForRole(AgentRoleFull), agentAuthoringFloorScope)
+	assert.False(t, ceilingOptionalRoleScopes[agentAuthoringFloorScope],
+		"agentAuthoringFloorScope must remain a non-optional baseline scope")
+}
+
 func TestValidAgentRole(t *testing.T) {
 	// All four stock roles are valid
 	assert.True(t, ValidAgentRole(AgentRoleNone))

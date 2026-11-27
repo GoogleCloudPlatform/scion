@@ -26,13 +26,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func createRoleAgentForFloorTest(t *testing.T, f *triggersTestFixture, slug string, role AgentRole) (*store.Agent, AgentIdentity) {
+func createRoleAgentForFloorTest(t *testing.T, f *triggersTestFixture, slug string, role AgentRole) (*store.Agent, AgentIdentity, string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -50,8 +51,9 @@ func createRoleAgentForFloorTest(t *testing.T, f *triggersTestFixture, slug stri
 		},
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, ag))
+	edgeID := api.NewUUID()
 	require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
-		ID:            api.NewUUID(),
+		ID:            edgeID,
 		DelegatorType: store.DelegationPrincipalUser,
 		DelegatorID:   f.owner.ID,
 		DelegateType:  store.DelegationPrincipalAgent,
@@ -68,14 +70,36 @@ func createRoleAgentForFloorTest(t *testing.T, f *triggersTestFixture, slug stri
 		ProjectID: f.projectID,
 		Scopes:    ScopesForRole(role),
 	}}
-	return ag, jwtID
+	return ag, jwtID, edgeID
 }
 
-func assertForbiddenMissingNotifyScope(t *testing.T, code int, body string) {
+func assertForbiddenAuthoringFloor(t *testing.T, code int, body string) {
 	t.Helper()
 	assert.Equal(t, http.StatusForbidden, code, "expected 403, body=%s", body)
 	assert.Contains(t, body, `"code":"forbidden"`)
-	assert.Contains(t, body, "Missing required scope: project:agent:notify")
+	assert.Contains(t, body, agentAuthoringFloorForbiddenMessage)
+}
+
+func seedROEndpointForFloorTest(t *testing.T, f *triggersTestFixture, ag *store.Agent, name string) *store.WebhookEndpoint {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ep := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           f.projectID,
+		Name:                name,
+		OwnerPrincipalKind:  store.DelegationPrincipalAgent,
+		OwnerPrincipalID:    ag.ID,
+		OwnerCredentialKind: store.InitiatorCredentialKindAgent,
+		AuthMode:            store.WebhookAuthModeHMAC,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+		CreatedBy:           ag.ID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(context.Background(), ep))
+	return ep
 }
 
 // TestTriggerAgentFloor_PrincipalRouteMatrix verifies Stage 2 §4.3
@@ -88,9 +112,9 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
 
-	roAgent, roAuth := createRoleAgentForFloorTest(t, f, "ro-agent", AgentRoleReadOnly)
-	baseAgent, baseAuth := createRoleAgentForFloorTest(t, f, "base-agent", AgentRoleBaseline)
-	fullAgent, fullAuth := createRoleAgentForFloorTest(t, f, "full-agent", AgentRoleFull)
+	roAgent, roAuth, _ := createRoleAgentForFloorTest(t, f, "ro-agent", AgentRoleReadOnly)
+	baseAgent, baseAuth, _ := createRoleAgentForFloorTest(t, f, "base-agent", AgentRoleBaseline)
+	fullAgent, fullAuth, _ := createRoleAgentForFloorTest(t, f, "full-agent", AgentRoleFull)
 
 	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
 	fullUAT := scheduleTestUAT(t, f.ownerAuth, projBoundary,
@@ -215,6 +239,8 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 		SourceKind:   store.TriggerSourceKindWebhook,
 		SourceID:     roEp.ID,
 		Type:         "webhook.received",
+		Subject:      "floor-test-subject",
+		DedupKey:     "floor-test-dedup",
 		Status:       store.TriggerEventStatusProcessed,
 		Payload:      `{"ok":true}`,
 		PayloadBytes: len(`{"ok":true}`),
@@ -229,7 +255,7 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 		rec := f.doWebhookEndpoint(t, roAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
 			Name: "ro-unbound-ep",
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 2. POST /webhook-endpoints (--to-self with composite trigger)
 		rec = f.doWebhookEndpoint(t, roAuth, "", http.MethodPost, map[string]any{
@@ -238,21 +264,21 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 			"boundLifetime": "agent",
 			"trigger":       map[string]any{"message": "hi"},
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 3. PATCH /webhook-endpoints/{id} (description update on own endpoint)
 		desc := "mutated"
 		rec = f.doWebhookEndpoint(t, roAuth, roEp.ID, http.MethodPatch, UpdateWebhookEndpointRequest{
 			Description: &desc,
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 4. PATCH /webhook-endpoints/{id} (re-enable disabled own endpoint)
 		activeStatus := store.WebhookEndpointStatusActive
 		rec = f.doWebhookEndpoint(t, roAuth, roDisabledEp.ID, http.MethodPatch, UpdateWebhookEndpointRequest{
 			Status: &activeStatus,
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 5. PATCH /webhook-endpoints/{id} (mixed disable + description)
 		disabledStatus := store.WebhookEndpointStatusDisabled
@@ -260,15 +286,15 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 			Status:      &disabledStatus,
 			Description: &desc,
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 6. PATCH /webhook-endpoints/{id} (empty body)
 		rec = f.doWebhookEndpoint(t, roAuth, roEp.ID, http.MethodPatch, map[string]any{})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 7. POST /webhook-endpoints/{id}/rotate-secret
 		rec = f.doWebhookEndpoint(t, roAuth, roEp.ID+"/rotate-secret", http.MethodPost, nil)
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 8. POST /triggers (message-to-self)
 		rec = f.doTrigger(t, roAuth, "", http.MethodPost, CreateTriggerRequest{
@@ -276,17 +302,17 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: roEp.ID},
 			Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: roAgent.ID, Message: "hi"},
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 9. PATCH /triggers/{id}
 		rec = f.doTrigger(t, roAuth, roTrigger.ID, http.MethodPatch, UpdateTriggerRequest{
 			Description: &desc,
 		})
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 
 		// 10. POST /triggers/{id}/resume
 		rec = f.doTrigger(t, roAuth, roPausedTrigger.ID+"/resume", http.MethodPost, nil)
-		assertForbiddenMissingNotifyScope(t, rec.Code, rec.Body.String())
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
 	})
 
 	t.Run("readonly_agent_allowed_on_reads_and_authority_reducing_routes", func(t *testing.T) {
@@ -436,14 +462,16 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 
 // TestTriggerAgentFloor_FireTimeDowngradeRefused verifies that an agent-authored
 // message-to-self trigger whose author is subsequently downgraded below baseline
-// (readonly or none) is refused at fire time with errScheduledMessageRefused,
-// while baseline/full agent triggers, user triggers, and agent schedules remain
-// authorized.
+// (by role or by a tightened bounded delegation ceiling) is refused at fire
+// time with errScheduledMessageRefused, that unset/unknown definition kinds
+// fail closed, and that explicit schedule definitions and baseline/full agents
+// remain authorized.
 func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	f := setupTriggersTestFixture(t)
+	f.srv.authzService.mintDevAuthOverride = false
 	ctx := context.Background()
 
-	ag, agAuth := createRoleAgentForFloorTest(t, f, "downgrade-agent", AgentRoleBaseline)
+	ag, agAuth, edgeID := createRoleAgentForFloorTest(t, f, "downgrade-agent", AgentRoleBaseline)
 
 	// Author a self endpoint + message-to-self trigger while baseline.
 	epRec := f.doWebhookEndpoint(t, agAuth, "", http.MethodPost, map[string]any{
@@ -476,10 +504,10 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 		}
 		ma := &messageAction{srv: f.srv}
 		_, refusal, aErr := ma.Authorize(ctx, hubfire.FireRequest{
-			ProjectID:     f.projectID,
-			ActionType:    store.TriggerActionMessage,
-			ActionPayload: acts[0].Payload,
-			Authority:     rec,
+			ProjectID:  f.projectID,
+			ActionType: store.TriggerActionMessage,
+			Payload:    acts[0].Payload,
+			Authority:  rec,
 		}, auth, identity)
 		return refusal, aErr
 	}
@@ -498,7 +526,15 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	require.NotNil(t, refusal, "readonly-downgraded agent trigger must be refused at fire time")
 	assert.Equal(t, errScheduledMessageRefused.Error(), refusal.Reason)
 
-	// 3. Downgrade agent role to none -> trigger fire is refused.
+	// 3. Unset and unknown DefinitionKind fail closed for a below-baseline author.
+	for _, kind := range []string{"", "future_kind"} {
+		refusal, err = runAuthorize(kind)
+		require.NoError(t, err)
+		require.NotNil(t, refusal, "definition kind %q must fail closed for below-baseline author", kind)
+		assert.Equal(t, errScheduledMessageRefused.Error(), refusal.Reason)
+	}
+
+	// 4. Downgrade agent role to none -> trigger fire is refused.
 	ag.AppliedConfig.AgentRole = string(AgentRoleNone)
 	require.NoError(t, f.store.UpdateAgent(ctx, ag))
 
@@ -507,17 +543,196 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	require.NotNil(t, refusal, "none-downgraded agent trigger must be refused at fire time")
 	assert.Equal(t, errScheduledMessageRefused.Error(), refusal.Reason)
 
-	// 4. Schedules are unaffected by the trigger-specific baseline floor.
+	// 5. Explicit schedules (recurring and one-shot) are unaffected by the floor.
 	ag.AppliedConfig.AgentRole = string(AgentRoleReadOnly)
 	require.NoError(t, f.store.UpdateAgent(ctx, ag))
-	refusal, err = runAuthorize(hubfire.DefinitionKindSchedule)
-	require.NoError(t, err)
-	assert.Nil(t, refusal, "schedule fire must remain unaffected")
+	for _, schedKind := range []string{hubfire.DefinitionKindSchedule, hubfire.DefinitionKindScheduledEvent} {
+		refusal, err = runAuthorize(schedKind)
+		require.NoError(t, err)
+		assert.Nil(t, refusal, "schedule kind %q must remain unaffected", schedKind)
+	}
 
-	// 5. Restore to full -> trigger fire is authorized again.
+	// 6. Restore to full -> trigger fire is authorized again.
 	ag.AppliedConfig.AgentRole = string(AgentRoleFull)
 	require.NoError(t, f.store.UpdateAgent(ctx, ag))
 	refusal, err = runAuthorize(hubfire.DefinitionKindTrigger)
 	require.NoError(t, err)
 	assert.Nil(t, refusal, "full agent trigger should be authorized at fire time")
+
+	// 7. Ceiling downgrade: keep role at baseline, tighten active delegation
+	// edge to a bounded ceiling that omits agent.notify -> refused at fire time.
+	ag.AppliedConfig.AgentRole = string(AgentRoleBaseline)
+	require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	now := time.Now().UTC()
+	_, err = f.store.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, ag.ID, edgeID, store.Deactivation{
+		Cause: store.EdgeDeactivationCauseManualRevoke,
+		At:    now,
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		ID:            api.NewUUID(),
+		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorID:   f.owner.ID,
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    ag.ID,
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       f.projectID,
+		Role:          string(AgentRoleBaseline),
+		EffectCeiling: store.EffectCeiling{
+			Kind:              store.EffectCeilingBounded,
+			Version:           permissions.CeilingVersionV1,
+			PermissionIDs:     []string{"project.read"},
+			BoundaryKind:      string(permissions.BoundaryKindProject),
+			BoundaryProjectID: f.projectID,
+		},
+		Active:    true,
+		CreatedAt: now,
+	}))
+	refusal, err = runAuthorize(hubfire.DefinitionKindTrigger)
+	require.NoError(t, err)
+	require.NotNil(t, refusal, "ceiling-downgraded baseline agent trigger must be refused at fire time")
+	assert.Equal(t, errScheduledMessageRefused.Error(), refusal.Reason)
+}
+
+// TestTriggerAgentFloor_ReadonlyDisableMixedBodies verifies that every
+// widening field mixed with status=disabled is refused for a readonly owner
+// agent without mutating the row, whitespace-padded disable and explicit nulls
+// are allowed as disable-only, and non-canonical case fails closed.
+func TestTriggerAgentFloor_ReadonlyDisableMixedBodies(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ro, roAuth, _ := createRoleAgentForFloorTest(t, f, "probe-ro", AgentRoleReadOnly)
+	ep := seedROEndpointForFloorTest(t, f, ro, "probe-ro-ep")
+
+	mixed := map[string]map[string]any{
+		"boundAgentId":        {"status": "disabled", "boundAgentId": ro.ID},
+		"boundAgentId_empty":  {"status": "disabled", "boundAgentId": ""},
+		"boundLifetime":       {"status": "disabled", "boundLifetime": "agent"},
+		"auth":                {"status": "disabled", "auth": "hub_token"},
+		"allowProjectAgents":  {"status": "disabled", "allowProjectAgents": true},
+		"allowProjectAgentsF": {"status": "disabled", "allowProjectAgents": false},
+		"signatureMode":       {"status": "disabled", "signatureMode": "scion-v1"},
+		"routingHints":        {"status": "disabled", "routingHints": map[string]any{"typePath": "/type"}},
+		"routingHints_empty":  {"status": "disabled", "routingHints": map[string]any{}},
+		"maxBodyBytes":        {"status": "disabled", "maxBodyBytes": 1024},
+		"rateLimit":           {"status": "disabled", "rateLimit": map[string]any{"perMinute": 5}},
+		"replayWindowSeconds": {"status": "disabled", "replayWindowSeconds": 60},
+		"description":         {"status": "disabled", "description": ""},
+		"status_active":       {"status": "active"},
+		"status_uppercase":    {"status": "DISABLED"},
+		"status_empty":        {"status": ""},
+		"empty":               {},
+	}
+	for name, body := range mixed {
+		t.Run(name, func(t *testing.T) {
+			rec := f.doWebhookEndpoint(t, roAuth, ep.ID, http.MethodPatch, body)
+			assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
+		})
+	}
+
+	got, err := f.store.GetWebhookEndpoint(context.Background(), ep.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.WebhookEndpointStatusActive, got.Status, "no refused PATCH may have mutated the row")
+
+	t.Run("whitespace_disable_allowed", func(t *testing.T) {
+		rec := f.doWebhookEndpoint(t, roAuth, ep.ID, http.MethodPatch, map[string]any{"status": "  disabled "})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+	t.Run("explicit_nulls_disable_allowed", func(t *testing.T) {
+		rec := f.doWebhookEndpoint(t, roAuth, ep.ID, http.MethodPatch, map[string]any{"status": "disabled", "description": nil, "boundAgentId": nil})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+	t.Run("readonly_cannot_reenable_after_disable", func(t *testing.T) {
+		rec := f.doWebhookEndpoint(t, roAuth, ep.ID, http.MethodPatch, map[string]any{"status": "active"})
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
+		got, err := f.store.GetWebhookEndpoint(context.Background(), ep.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.WebhookEndpointStatusDisabled, got.Status)
+	})
+	t.Run("readonly_nonexistent_widen_is_403_not_404", func(t *testing.T) {
+		// Body-based refusal precedes row load: same answer for existing and
+		// missing IDs, so no existence oracle.
+		rec := f.doWebhookEndpoint(t, roAuth, api.NewUUID(), http.MethodPatch, map[string]any{"description": "x"})
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
+	})
+	t.Run("readonly_rotate_nonexistent_is_403", func(t *testing.T) {
+		rec := f.doWebhookEndpoint(t, roAuth, api.NewUUID()+"/rotate-secret", http.MethodPost, nil)
+		assertForbiddenAuthoringFloor(t, rec.Code, rec.Body.String())
+	})
+}
+
+// TestTriggerAgentFloor_DowngradedAgentTrigger_UserResumeReattributes verifies
+// that a readonly agent's pre-downgrade trigger is refused at fire time, and
+// when the project owner resumes it, resume re-attributes to the owner so it
+// fires under the owner's authority (user path unchanged).
+func TestTriggerAgentFloor_DowngradedAgentTrigger_UserResumeReattributes(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	f.srv.authzService.mintDevAuthOverride = false
+	ctx := context.Background()
+	ag, agAuth, _ := createRoleAgentForFloorTest(t, f, "probe-dg", AgentRoleBaseline)
+
+	epRec := f.doWebhookEndpoint(t, agAuth, "", http.MethodPost, map[string]any{
+		"name": "probe-dg-ep", "boundAgentId": "self", "boundLifetime": "agent",
+		"trigger": map[string]any{"message": "ping"},
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var created WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &created))
+
+	authorize := func() *FireRefusal {
+		tr, err := f.store.GetTrigger(ctx, created.TriggerID)
+		require.NoError(t, err)
+		acts, err := triggerActions(*tr)
+		require.NoError(t, err)
+		rec := hubfire.RecordedAuthority{
+			DefinitionKind: hubfire.DefinitionKindTrigger, DefinitionID: tr.ID, FireID: api.NewUUID(),
+			Attribution: tr.InitiatorAttribution, Ceiling: tr.AuthorityCeiling,
+		}
+		auth, identity, rErr := f.srv.resolveRecordedAuthority(ctx, rec, f.projectID, scheduledMessagePermission)
+		require.NoError(t, rErr)
+		_, refusal, aErr := (&messageAction{srv: f.srv}).Authorize(ctx, hubfire.FireRequest{
+			ProjectID: f.projectID, ActionType: store.TriggerActionMessage, Payload: acts[0].Payload, Authority: rec,
+		}, auth, identity)
+		require.NoError(t, aErr)
+		return refusal
+	}
+
+	require.Equal(t, http.StatusOK, f.doTrigger(t, agAuth, created.TriggerID+"/pause", http.MethodPost, nil).Code)
+	ag.AppliedConfig.AgentRole = string(AgentRoleReadOnly)
+	require.NoError(t, f.store.UpdateAgent(ctx, ag))
+
+	require.NotNil(t, authorize(), "downgraded author must be refused")
+
+	rec := f.doTrigger(t, f.ownerAuth, created.TriggerID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	tr, err := f.store.GetTrigger(ctx, created.TriggerID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationPrincipalUser, tr.InitiatorAttribution.InitiatorPrincipalKind)
+	assert.Nil(t, authorize(), "owner-resumed trigger fires under owner authority")
+}
+
+// TestTriggerAgentFloor_StaleBaselineTokenAfterDowngrade_Observation documents
+// that the request-path floor reads the bearer token's scopes (so a token
+// minted while baseline keeps authoring until refresh/expiry), while the
+// fire-time floor reads live state and refuses resulting fires.
+func TestTriggerAgentFloor_StaleBaselineTokenAfterDowngrade_Observation(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+	ag, agAuth, _ := createRoleAgentForFloorTest(t, f, "probe-stale", AgentRoleBaseline)
+	ag.AppliedConfig.AgentRole = string(AgentRoleReadOnly)
+	require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	rec := f.doWebhookEndpoint(t, agAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "probe-stale-ep"})
+	assert.Equal(t, http.StatusCreated, rec.Code, "documents token-scoped request floor")
+}
+
+// TestTriggerAgentFloor_MemberViewerUnchanged verifies that user callers
+// (member, viewer) retain their existing policy behaviour and viewer refusals
+// never cite the agent authoring floor.
+func TestTriggerAgentFloor_MemberViewerUnchanged(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	mRec := f.doWebhookEndpoint(t, f.memberAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "probe-member-ep"})
+	assert.Equal(t, http.StatusCreated, mRec.Code, mRec.Body.String())
+	vRec := f.doWebhookEndpoint(t, f.viewerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "probe-viewer-ep"})
+	assert.Equal(t, http.StatusForbidden, vRec.Code)
+	assert.NotContains(t, vRec.Body.String(), agentAuthoringFloorForbiddenMessage, "user refusals must not cite the agent floor")
+	assert.NotContains(t, vRec.Body.String(), "project:agent:notify", "user refusals must not cite the agent floor")
 }

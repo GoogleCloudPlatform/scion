@@ -563,10 +563,18 @@ func (s *Server) authorizeMessageFire(
 			return fmt.Errorf("%w: revision ceiling does not allow %s", errScheduledAuthorityDenied, scheduledMessagePermission)
 		}
 	case store.DelegationPrincipalAgent:
-		if auth.Recorded.DefinitionKind == hubfire.DefinitionKindTrigger {
-			agentIdent, ok := identity.(AgentIdentity)
-			if !ok || !agentIdent.HasScope(ScopeAgentNotify) {
-				return fmt.Errorf("%w: trigger author agent lacks required scope %s", errScheduledAuthorityDenied, ScopeAgentNotify)
+		// Fail closed: apply the baseline authoring floor to every
+		// agent-principal deferred fire except explicit schedule definitions
+		// (DefinitionKindSchedule / DefinitionKindScheduledEvent), so an unset
+		// or future definition kind cannot bypass the floor
+		// (Stage 2 §4.3, ptone/scion#8065).
+		if auth.Recorded.DefinitionKind != hubfire.DefinitionKindSchedule &&
+			auth.Recorded.DefinitionKind != hubfire.DefinitionKindScheduledEvent {
+			if _, ok := identity.(AgentIdentity); !ok {
+				return fmt.Errorf("%w: agent principal missing agent identity", errScheduledAuthorityDenied)
+			}
+			if err := requireAgentAuthoringFloor(identity); err != nil {
+				return err
 			}
 		}
 	default:

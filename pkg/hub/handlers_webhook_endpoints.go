@@ -167,8 +167,9 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 		}
 
 		// Baseline agent floor (Stage 2 §4.3, ptone/scion#8065):
-		// Agent callers below baseline (e.g. readonly, which lacks ScopeAgentNotify)
-		// are refused on routes that create or widen trigger/endpoint authority:
+		// Agent callers below baseline (e.g. readonly, which lacks
+		// agentAuthoringFloorScope) are refused on routes that create or widen
+		// trigger/endpoint authority:
 		//   - POST   /webhook-endpoints              (create, incl. --to-self & unbound)
 		//   - POST   /webhook-endpoints/{id}/rotate-secret (mint/rotate secret)
 		//   - PATCH  /webhook-endpoints/{id}         (checked in updateWebhookEndpoint:
@@ -176,7 +177,7 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 		//                                             disable-only PATCH reduces authority
 		//                                             and stays at project:read)
 		// Reads (GET list/get) and DELETE (reduces authority) stay at project:read.
-		if (authoring || subAction == "rotate-secret") && !checkAgentNotifyScope(w, r) {
+		if (authoring || subAction == "rotate-secret") && !checkAgentAuthoringFloor(w, r) {
 			return
 		}
 		if authoring && !authorizeDeferredAuthoringCredential(w, r) {
@@ -869,14 +870,15 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		req        UpdateWebhookEndpointRequest
 		reqDecoded bool
 	)
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && !agentIdent.HasScope(ScopeAgentNotify) {
+	if requireAgentAuthoringFloor(GetAgentIdentityFromContext(ctx)) != nil {
 		if !readTriggerRequestJSON(w, r, &req) {
 			return
 		}
 		reqDecoded = true
 		if !isWebhookEndpointDisableOnlyPatch(&req) {
-			checkAgentNotifyScope(w, r)
-			return
+			if !checkAgentAuthoringFloor(w, r) {
+				return
+			}
 		}
 	}
 

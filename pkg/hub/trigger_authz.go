@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -49,7 +50,44 @@ const (
 	mutationTypeWebhookEndpointDelete       = "webhook_endpoint_delete"
 	mutationTypeTriggerPause                = "trigger_pause"
 	mutationTypeTriggerDelete               = "trigger_delete"
+
+	// agentAuthoringFloorScope is the baseline agent scope required for trigger
+	// and webhook-endpoint authoring routes and live agent-authored trigger
+	// fires (Stage 2 §4.3, ptone/scion#8065). Pinned by
+	// TestAgentAuthoringFloorScope_MatchesBaselineFloor in agentrole_test.go so
+	// adding this scope to AgentRoleReadOnly fails a test rather than silently
+	// reopening authoring.
+	agentAuthoringFloorScope = ScopeAgentNotify
+
+	agentAuthoringFloorForbiddenMessage = "Agent role must be baseline or higher to author triggers or webhook endpoints"
 )
+
+// requireAgentAuthoringFloor enforces the baseline agent floor (Stage 2 §4.3,
+// ptone/scion#8065) for an agent identity. Non-agent identities are unaffected
+// (returns nil). Agent identities lacking agentAuthoringFloorScope return an
+// error so HTTP handlers write 403 and fire-time authorization refuses the fire.
+func requireAgentAuthoringFloor(identity Identity) error {
+	agentIdent, ok := identity.(AgentIdentity)
+	if !ok || agentIdent == nil {
+		return nil
+	}
+	if !agentIdent.HasScope(agentAuthoringFloorScope) {
+		return fmt.Errorf("%w: agent lacks baseline authoring floor (%s)", errScheduledAuthorityDenied, agentAuthoringFloorScope)
+	}
+	return nil
+}
+
+// checkAgentAuthoringFloor enforces requireAgentAuthoringFloor on HTTP routes
+// that create or widen trigger/webhook-endpoint authority. User and UAT callers
+// are unaffected (returns true). Below-baseline agents receive the hub's
+// standard 403 forbidden response with an authoring-specific message.
+func checkAgentAuthoringFloor(w http.ResponseWriter, r *http.Request) bool {
+	if err := requireAgentAuthoringFloor(GetAgentIdentityFromContext(r.Context())); err != nil {
+		writeForbidden(w, agentAuthoringFloorForbiddenMessage)
+		return false
+	}
+	return true
+}
 
 func newWebhookEndpointAudit(ctx context.Context, mutationType, endpointID string) *store.MutationAuditRecord {
 	record := &store.MutationAuditRecord{
