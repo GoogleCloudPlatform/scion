@@ -271,7 +271,11 @@ func TestCreateDecisionPrompt_UpdateReplacesPendingAndDecided(t *testing.T) {
 	assert.Equal(t, "D1", p.Key, "a repost keeps the key as first given")
 	assert.Equal(t, 2, p.Version)
 	require.NotNil(t, p.Replaced)
-	assert.Equal(t, store.ReplacedDecision{RowID: v1.Decisions[0].RowID, Version: 1, Status: store.DecisionStatusPending}, *p.Replaced)
+	assert.Equal(t, v1.Decisions[0].RowID, p.Replaced.RowID)
+	assert.NotEmpty(t, p.Replaced.MessageID)
+	assert.Equal(t, 1, p.Replaced.Version)
+	assert.Equal(t, store.DecisionStatusPending, p.Replaced.Status)
+	assert.Nil(t, p.Replaced.Answer)
 
 	d := v2.Decisions[1]
 	assert.Equal(t, 2, d.Version)

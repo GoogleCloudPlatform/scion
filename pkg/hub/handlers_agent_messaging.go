@@ -1635,7 +1635,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	storeOutboundRow := func(storeCtx context.Context) error {
 		if decisionSend != nil {
 			// The message and its decisions in one transaction.
-			if err := s.storeDecisionPrompt(storeCtx, decisionSend, agent, storeMsg, structuredMsg); err != nil {
+			if err := s.storeDecisionPrompt(storeCtx, decisionSend, agent, storeMsg, structuredMsg, outboundArtifactRefs); err != nil {
 				return err
 			}
 		} else if secretRequestSend != nil {
@@ -1957,6 +1957,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if decisionSend != nil {
 		respBody["decisions"] = decisionSendResults(agent.ID, decisionSend.result)
+		if decisionSend.update {
+			if notice := s.decisionUpdateDroppedArtifactsNotice(ctx, decisionSend.result, outboundArtifactRefs); notice != "" {
+				respBody["decision_artifact_notice"] = notice
+			}
+		}
 	}
 	if secretRequestSend != nil {
 		respBody["secret_requests"] = secretRequestSendResults(secretRequestSend.result)

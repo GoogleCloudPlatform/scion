@@ -109,7 +109,7 @@ func TestValidateDecisionFlags(t *testing.T) {
 		{name: "agent recipient", setup: func() { msgDecisions = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
 		{name: "group recipient", setup: func() { msgDecisions = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
 		{name: "attachments", setup: func() { msgDecisions = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach", wantUsage: true},
-		{name: "artifact", setup: func() { msgDecisions = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact", wantUsage: true},
+		{name: "artifact allowed", setup: func() { msgDecisions = "[]"; msgArtifacts = []string{"scion://artifact/a"} }},
 		{name: "wake", setup: func() { msgDecisions = "[]"; msgWake = true }, wantErr: "--wake", wantUsage: true},
 		{name: "not an agent", setup: func() { msgDecisions = "[]" }, noAgent: true, wantErr: "only by an agent", wantUsage: false},
 		{name: "agent name in human mode", setup: func() { msgDecisions = "[]" }, human: true, wantErr: "only by an agent", wantUsage: false},
@@ -326,6 +326,48 @@ func TestMessageCommand_UpdateHelpDocumentsFullSet(t *testing.T) {
 	assert.Contains(t, messageCmd.Long, "still-pending keys")
 	assert.Contains(t, messageCmd.Long, "To retire a decision without a replacement")
 	assert.Contains(t, messageCmd.Long, "withdraw")
+}
+
+// TestSendOutboundDecisions_WithArtifacts verifies that --decisions + --artifact
+// sends both decisions and metadata.artifacts, appends the canonical artifact
+// URI to the intro body, and prints any hub artifact_warning (ptone/scion#9424).
+func TestSendOutboundDecisions_WithArtifacts(t *testing.T) {
+	asked := decisionsState(t, "asker")
+	origArtifacts := msgArtifacts
+	origRefs := msgArtifactRefs
+	t.Cleanup(func() {
+		msgArtifacts = origArtifacts
+		msgArtifactRefs = origRefs
+	})
+
+	const artID = "5f1c2d3e-0000-4000-8000-0000000000aa"
+	refs, err := parseArtifactFlags([]string{"scion://artifact/" + artID + "@2"})
+	require.NoError(t, err)
+	msgArtifactRefs = refs
+	msgDecisionsPayload = json.RawMessage(twoTestDecisions)
+
+	respBody := decisionsSentBody()
+	respBody["artifact_warning"] = "1 artifact reference(s) may not be readable by alice@example.com"
+	respBody["decision_artifact_notice"] = "1 artifact reference(s) from the replaced decision prompt were not included in this --update (scion://artifact/5f1c2d3e-0000-4000-8000-0000000000bb); pass --artifact to re-attach if unintentional"
+	var got map[string]interface{}
+	hubCtx := newDecisionsHub(t, http.StatusOK, respBody, &got)
+
+	body := appendArtifactRefsToBody("Review mockup before deciding", msgArtifactRefs)
+	var sendErr error
+	out := captureStdout(t, func() {
+		sendErr = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", body, false)
+	})
+	require.NoError(t, sendErr)
+
+	assert.Contains(t, got["msg"], "Review mockup before deciding")
+	assert.Contains(t, got["msg"], "scion://artifact/"+artID+"@2")
+	assert.Contains(t, got, "decisions")
+	md, ok := got["metadata"].(map[string]interface{})
+	require.True(t, ok, "expected metadata map on outbound request")
+	assert.Contains(t, md["artifacts"], artID)
+	assert.Contains(t, out, "D234 v1 (new)")
+	assert.Contains(t, out, "Note: 1 artifact reference(s) from the replaced decision prompt were not included in this --update")
+	assert.Len(t, *asked, 1)
 }
 
 // TestMessageCommand_DecisionsFlagsAndRemovedChoicesAliases verifies that

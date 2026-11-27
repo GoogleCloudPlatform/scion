@@ -833,6 +833,15 @@ func EscapeMarkdownPlain(s string) string {
 // with no intro). The hub stores it on the message's first decision row and
 // recovers the intro with DecisionIntro.
 func RenderDecisionFallback(intro string, decisions []Decision, answerURL string) (msg string, introLen int) {
+	return RenderDecisionFallbackWithRefs(intro, decisions, answerURL, nil)
+}
+
+// RenderDecisionFallbackWithRefs is RenderDecisionFallback with optional
+// canonical artifact reference URIs (scion://artifact/<id>[@<seq>]). Any ref
+// not already present in intro is listed after the decisions so chat plugins
+// and non-web surfaces still see every admitted reference without baking
+// artifact titles or metadata into stored message text.
+func RenderDecisionFallbackWithRefs(intro string, decisions []Decision, answerURL string, artifactRefs []string) (msg string, introLen int) {
 	var b strings.Builder
 	intro = strings.TrimRight(intro, " \t\r\n")
 	if intro != "" {
@@ -875,6 +884,22 @@ func RenderDecisionFallback(intro string, decisions []Decision, answerURL string
 				b.WriteString(NeutralizeMentions(d.Other.Description))
 			}
 			b.WriteString(" — *your own answer, in words*\n")
+		}
+	}
+	var missingRefs []string
+	for _, ref := range artifactRefs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || strings.Contains(intro, ref) {
+			continue
+		}
+		missingRefs = append(missingRefs, ref)
+	}
+	if len(missingRefs) > 0 {
+		b.WriteString("\n**References:**\n")
+		for _, ref := range missingRefs {
+			b.WriteString("- ")
+			b.WriteString(ref)
+			b.WriteString("\n")
 		}
 	}
 	b.WriteString("\n")

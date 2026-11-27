@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -202,11 +203,19 @@ func (s *Server) decisionAnswerURL(m *store.Message) string {
 // transaction (CreateDecisionPrompt renders msg and sets the type), then
 // copies the stored body and type onto the structured message that is
 // published. A refusal comes back as a decisionStoreError.
-func (s *Server) storeDecisionPrompt(ctx context.Context, dp *decisionPromptSend, agent *store.Agent, storeMsg *store.Message, structuredMsg *messages.StructuredMessage) error {
+func (s *Server) storeDecisionPrompt(ctx context.Context, dp *decisionPromptSend, agent *store.Agent, storeMsg *store.Message, structuredMsg *messages.StructuredMessage, artifactRefs []artifacts.MessageRef) error {
+	var refURIs []string
+	if len(artifactRefs) > 0 {
+		refURIs = make([]string, len(artifactRefs))
+		for i, r := range artifactRefs {
+			refURIs[i] = r.String()
+		}
+	}
 	res, err := s.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message:        storeMsg,
 		Intro:          dp.intro,
 		AnswerURL:      s.decisionAnswerURL(storeMsg),
+		ArtifactRefs:   refURIs,
 		AskerAgentID:   agent.ID,
 		AskerAgentName: agentDisplayName(agent),
 		Decisions:      dp.decisions,
@@ -254,6 +263,58 @@ func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.Decisi
 		}
 		s.publishDecisionUpdatedAt(ctx, old.ProjectID, old.MessageID, chatKey, s.decisionViewFor(ctx, old))
 	}
+}
+
+// decisionUpdateDroppedArtifactsNotice returns an agent-facing notice when a
+// --update decision prompt replaces one or more prompts that carried artifact
+// references which are not present in kept (compared by artifact ID, so
+// bumping @seq is not treated as a drop). Best effort: returns "" on error or
+// when no references were dropped.
+func (s *Server) decisionUpdateDroppedArtifactsNotice(ctx context.Context, res *store.DecisionPromptResult, kept []artifacts.MessageRef) string {
+	if res == nil || !s.artifactRefsActive() {
+		return ""
+	}
+	st := s.ArtifactStore()
+	if st == nil {
+		return ""
+	}
+	var oldMsgIDs []string
+	seenMsg := make(map[string]bool)
+	for _, d := range res.Decisions {
+		if d.Replaced == nil || d.Replaced.MessageID == "" || seenMsg[d.Replaced.MessageID] {
+			continue
+		}
+		seenMsg[d.Replaced.MessageID] = true
+		oldMsgIDs = append(oldMsgIDs, d.Replaced.MessageID)
+	}
+	if len(oldMsgIDs) == 0 {
+		return ""
+	}
+	recorded, err := st.ListMessageRefs(ctx, oldMsgIDs)
+	if err != nil {
+		s.messageLog.Warn("decisions: failed to check replaced prompt artifact refs", "error", err)
+		return ""
+	}
+	keptIDs := make(map[string]bool, len(kept))
+	for _, r := range kept {
+		keptIDs[r.ArtifactID] = true
+	}
+	var droppedURIs []string
+	seenArt := make(map[string]bool)
+	for _, msgID := range oldMsgIDs {
+		for _, r := range recorded[msgID] {
+			if keptIDs[r.ArtifactID] || seenArt[r.ArtifactID] {
+				continue
+			}
+			seenArt[r.ArtifactID] = true
+			droppedURIs = append(droppedURIs, r.String())
+		}
+	}
+	if len(droppedURIs) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d artifact reference(s) from the replaced decision prompt were not included in this --update (%s); pass --artifact to re-attach if unintentional",
+		len(droppedURIs), strings.Join(droppedURIs, ", "))
 }
 
 // DecisionSendResult is one decision in a decision prompt send response.

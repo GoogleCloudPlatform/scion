@@ -654,6 +654,10 @@ type DecisionPromptInput struct {
 	// AnswerURL, when set, is the link the fallback offers for answering
 	// in Scion.
 	AnswerURL string
+	// ArtifactRefs are canonical scion://artifact/<id>[@<seq>] URIs admitted
+	// for this prompt. Any ref not already present in Intro is included in
+	// the rendered markdown fallback for non-web surfaces.
+	ArtifactRefs []string
 
 	AskerAgentID   string
 	AskerAgentName string
@@ -667,9 +671,10 @@ type DecisionPromptInput struct {
 
 // ReplacedDecision is the version a prompt replaced, as it was before.
 type ReplacedDecision struct {
-	RowID   string
-	Version int
-	Status  string // the status before it was replaced: pending or decided
+	RowID     string
+	MessageID string
+	Version   int
+	Status    string // the status before it was replaced: pending or decided
 	// Answer is its effective answer when it was decided, else nil. The
 	// answer row is kept.
 	Answer *DecisionAnswer
