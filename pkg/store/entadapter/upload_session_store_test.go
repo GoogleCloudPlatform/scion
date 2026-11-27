@@ -497,12 +497,14 @@ func TestUploadSessionStore_ListExpiredAndDelete(t *testing.T) {
 
 	// 3. uploading: idle-expired, ACTIVE lease -> EXCLUDED
 	sLeased := newTestUploadSession("upl_exp_leased", "u-e", 100, now)
-	sLeased.IdleExpiresAt = now.Add(-time.Minute)
 	if err := st.CreateUploadSession(ctx, sLeased, store.UploadQuota{}); err != nil {
 		t.Fatalf("create sLeased: %v", err)
 	}
 	if _, err := st.ClaimUploadLease(ctx, sLeased.ID, store.UploadStateUploading, 0, "tok-l", time.Hour); err != nil {
 		t.Fatalf("claim sLeased: %v", err)
+	}
+	if err := client.UploadSession.UpdateOneID(sLeased.ID).SetIdleExpiresAt(now.Add(-time.Minute)).Exec(ctx); err != nil {
+		t.Fatalf("expire sLeased idle_expires_at: %v", err)
 	}
 
 	// 4. uploading: fresh, free lease -> EXCLUDED
@@ -594,5 +596,106 @@ func TestUploadSessionStore_ListExpiredAndDelete(t *testing.T) {
 	}
 	if err := st.DeleteUploadSession(ctx, sOldTerm.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("repeat DeleteUploadSession = %v, want ErrNotFound", err)
+	}
+}
+
+func TestUploadSessionStore_ReleasedFinalizingNotImmediatelySwept(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	st := entadapter.NewCompositeStore(client)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	s := newTestUploadSession("upl_rel_fin", "u-r1", 512, now)
+	if err := st.CreateUploadSession(ctx, s, store.UploadQuota{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := st.ClaimUploadLease(ctx, s.ID, store.UploadStateUploading, 0, "tok-r1", time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := st.TransitionUploadSession(ctx, s.ID, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateFinalizing, "tok-r1", nil); err != nil {
+		t.Fatalf("uploading->finalizing: %v", err)
+	}
+	// Simulate transient finalize failure releasing the lease (lease_until=NULL).
+	if err := st.ReleaseUploadLease(ctx, s.ID, "tok-r1"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// At now + 2m, the released finalizing row must NOT be sweepable (R1).
+	early, err := st.ListExpiredUploadSessions(ctx, now.Add(2*time.Minute), 50)
+	if err != nil {
+		t.Fatalf("ListExpiredUploadSessions(now+2m): %v", err)
+	}
+	for _, got := range early {
+		if got.ID == s.ID {
+			t.Fatalf("released finalizing session %q swept prematurely at now+2m", s.ID)
+		}
+	}
+
+	// Past the 1h bound (now + 65m), it IS sweepable so a genuinely stuck row drains.
+	late, err := st.ListExpiredUploadSessions(ctx, now.Add(65*time.Minute), 50)
+	if err != nil {
+		t.Fatalf("ListExpiredUploadSessions(now+65m): %v", err)
+	}
+	found := false
+	for _, got := range late {
+		if got.ID == s.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected stuck released finalizing session %q to be sweepable at now+65m", s.ID)
+	}
+}
+
+func TestUploadSessionStore_ExpiryEnforcedAtClaimAndClampedAtCommit(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	st := entadapter.NewCompositeStore(client)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 1. Idle-expired session is refused by ClaimUploadLease with ErrStateChanged (O2).
+	sIdle := newTestUploadSession("upl_o2_idle", "u-o2", 512, now)
+	sIdle.IdleExpiresAt = now.Add(-time.Second)
+	if err := st.CreateUploadSession(ctx, sIdle, store.UploadQuota{}); err != nil {
+		t.Fatalf("create sIdle: %v", err)
+	}
+	if _, err := st.ClaimUploadLease(ctx, sIdle.ID, store.UploadStateUploading, 0, "tok-i", time.Minute); !errors.Is(err, store.ErrStateChanged) {
+		t.Fatalf("ClaimUploadLease(idle-expired) = %v, want ErrStateChanged", err)
+	}
+
+	// 2. Hard-expired session is refused by ClaimUploadLease with ErrStateChanged (O2).
+	sHard := newTestUploadSession("upl_o2_hard", "u-o2", 512, now)
+	sHard.HardExpiresAt = now.Add(-time.Second)
+	if err := st.CreateUploadSession(ctx, sHard, store.UploadQuota{}); err != nil {
+		t.Fatalf("create sHard: %v", err)
+	}
+	if _, err := st.ClaimUploadLease(ctx, sHard.ID, store.UploadStateUploading, 0, "tok-h", time.Minute); !errors.Is(err, store.ErrStateChanged) {
+		t.Fatalf("ClaimUploadLease(hard-expired) = %v, want ErrStateChanged", err)
+	}
+
+	// 3. CommitUploadChunk clamps idle_expires_at so it never exceeds hard_expires_at (O2).
+	sClamp := newTestUploadSession("upl_o2_clamp", "u-o2", 512, now)
+	sClamp.IdleExpiresAt = now.Add(10 * time.Minute)
+	sClamp.HardExpiresAt = now.Add(30 * time.Minute)
+	if err := st.CreateUploadSession(ctx, sClamp, store.UploadQuota{}); err != nil {
+		t.Fatalf("create sClamp: %v", err)
+	}
+	if _, err := st.ClaimUploadLease(ctx, sClamp.ID, store.UploadStateUploading, 0, "tok-c", time.Minute); err != nil {
+		t.Fatalf("claim sClamp: %v", err)
+	}
+	if err := st.CommitUploadChunk(ctx, sClamp.ID, "tok-c", store.UploadChunkCommit{
+		Received:      256,
+		HashState:     []byte("hs"),
+		IdleExpiresAt: now.Add(2 * time.Hour), // past hard_expires_at
+	}); err != nil {
+		t.Fatalf("commit sClamp: %v", err)
+	}
+	got, err := st.GetUploadSession(ctx, sClamp.ID)
+	if err != nil {
+		t.Fatalf("get sClamp: %v", err)
+	}
+	if !got.IdleExpiresAt.Equal(sClamp.HardExpiresAt) {
+		t.Errorf("IdleExpiresAt = %v, want clamped to HardExpiresAt %v", got.IdleExpiresAt, sClamp.HardExpiresAt)
 	}
 }

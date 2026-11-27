@@ -299,21 +299,29 @@ func (s *UploadSessionStore) ClaimUploadLease(
 	leaseUntil := now.Add(ttl)
 	d := s.client.Driver().Dialect()
 
+	preds := []*entsql.Predicate{
+		entsql.EQ(uploadsession.FieldID, id),
+		entsql.EQ(uploadsession.FieldState, string(wantState)),
+		entsql.EQ(uploadsession.FieldReceived, atOffset),
+		entsql.Or(
+			entsql.IsNull(uploadsession.FieldLeaseUntil),
+			entsql.LT(uploadsession.FieldLeaseUntil, timeArg(d, now)),
+		),
+	}
+	if wantState == store.UploadStateUploading {
+		preds = append(preds,
+			entsql.GT(uploadsession.FieldIdleExpiresAt, timeArg(d, now)),
+			entsql.GT(uploadsession.FieldHardExpiresAt, timeArg(d, now)),
+		)
+	}
+
 	ub := entsql.Dialect(d).
 		Update(uploadsession.Table).
 		Set(uploadsession.FieldLeaseToken, token).
 		Set(uploadsession.FieldLeaseUntil, timeArg(d, leaseUntil)).
 		Set(uploadsession.FieldUpdatedAt, timeArg(d, now)).
 		Set(uploadsession.FieldTakeovers, entsql.Expr("takeovers + CASE WHEN lease_until IS NOT NULL THEN 1 ELSE 0 END")).
-		Where(entsql.And(
-			entsql.EQ(uploadsession.FieldID, id),
-			entsql.EQ(uploadsession.FieldState, string(wantState)),
-			entsql.EQ(uploadsession.FieldReceived, atOffset),
-			entsql.Or(
-				entsql.IsNull(uploadsession.FieldLeaseUntil),
-				entsql.LT(uploadsession.FieldLeaseUntil, timeArg(d, now)),
-			),
-		))
+		Where(entsql.And(preds...))
 
 	query, args := ub.Query()
 	var res stdsql.Result
@@ -330,6 +338,9 @@ func (s *UploadSessionStore) ClaimUploadLease(
 			return nil, gerr
 		}
 		if cur.State != wantState {
+			return nil, store.ErrStateChanged
+		}
+		if wantState == store.UploadStateUploading && (!cur.IdleExpiresAt.After(now) || !cur.HardExpiresAt.After(now)) {
 			return nil, store.ErrStateChanged
 		}
 		if cur.Received != atOffset {
@@ -356,11 +367,18 @@ func (s *UploadSessionStore) CommitUploadChunk(ctx context.Context, id, token st
 	idleExp := truncUTC(upd.IdleExpiresAt)
 	d := s.client.Driver().Dialect()
 
+	idleArg := timeArg(d, idleExp)
 	ub := entsql.Dialect(d).
 		Update(uploadsession.Table).
 		Set(uploadsession.FieldReceived, upd.Received).
 		Set(uploadsession.FieldHashState, upd.HashState).
-		Set(uploadsession.FieldIdleExpiresAt, timeArg(d, idleExp)).
+		Set(uploadsession.FieldIdleExpiresAt, entsql.ExprFunc(func(b *entsql.Builder) {
+			b.WriteString("CASE WHEN ").Ident(uploadsession.FieldHardExpiresAt).
+				WriteString(" < ").Arg(idleArg).
+				WriteString(" THEN ").Ident(uploadsession.FieldHardExpiresAt).
+				WriteString(" ELSE ").Arg(idleArg).
+				WriteString(" END")
+		})).
 		SetNull(uploadsession.FieldLeaseToken).
 		SetNull(uploadsession.FieldLeaseUntil).
 		Set(uploadsession.FieldUpdatedAt, timeArg(d, now))
@@ -544,12 +562,18 @@ func (s *UploadSessionStore) ListExpiredUploadSessions(ctx context.Context, now 
 					uploadsession.LeaseUntilLT(nowUTC),
 				),
 			),
-			// 2. finalizing sessions stuck past lease_until + 1h
+			// 2. finalizing sessions stuck past 1h: either a held/expired lease
+			// whose lease_until < now-1h, or a released finalizing row
+			// (lease_until IS NULL, e.g. after a transient finalize error) whose
+			// updated_at < now-1h (§3.7).
 			uploadsession.And(
 				uploadsession.StateEQ(uploadsession.StateFinalizing),
 				uploadsession.Or(
-					uploadsession.LeaseUntilIsNil(),
 					uploadsession.LeaseUntilLT(finalizingCutoff),
+					uploadsession.And(
+						uploadsession.LeaseUntilIsNil(),
+						uploadsession.UpdatedAtLT(finalizingCutoff),
+					),
 				),
 			),
 			// 3. terminal sessions past 15m retention window
