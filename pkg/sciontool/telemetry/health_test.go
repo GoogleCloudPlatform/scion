@@ -1851,3 +1851,66 @@ func TestDisabledAnalyticsLossFlagTransition(t *testing.T) {
 		t.Fatalf("earlier run's delivered usage must stay its own independent row")
 	}
 }
+
+// When an Antigravity SQLite tailer latches schema drift, telemetry.health
+// degrades usage_capabilities to ["calls"] (matching supportedUsageSignals on
+// heartbeats) both while the tailer is running and in the final snapshot after
+// Stop() clears agyTailer and retains the latched drift flag.
+func TestHealthSnapshotCapabilitiesDegradeOnDrift(t *testing.T) {
+	setAnalyticsEnv(t, "antigravity")
+	setTestVersion(t)
+
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.now = time.Now
+	p.health.runID = "drift-health-run"
+	p.health.analyticsHandles = analyticsHandles{disabledReason: telemetrycontract.AnalyticsDisabledNoGCPExporter}
+	p.health.selection = UsageSourceSelection{
+		Settled: true,
+		Source:  telemetrycontract.UsageSourceSQLiteNative,
+		Origin:  telemetrycontract.UsageSourceOriginOverlay,
+	}
+
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		ConversationsDir: t.TempDir(),
+		StatePath:        filepath.Join(t.TempDir(), "state.json"),
+	})
+	p.agyTailer.Store(tailer)
+
+	snapshotCaps := func(trigger string) []string {
+		t.Helper()
+		in := p.healthSnapshotInputs(trigger)
+		ev, err := buildHealthEvent(in)
+		if err != nil {
+			t.Fatalf("buildHealthEvent: %v", err)
+		}
+		ev.HubID = "hub-1"
+		if _, err := telemetrycontract.Marshal(ev); err != nil {
+			t.Fatalf("telemetrycontract.Marshal: %v", err)
+		}
+		return ev.UsageCapabilities
+	}
+
+	// Before drift: full sqlite_native/antigravity capabilities.
+	before := snapshotCaps(telemetrycontract.HealthTriggerStart)
+	wantFull := "calls,input,output,cache_read,cache_write,reasoning"
+	if got := strings.Join(before, ","); got != wantFull {
+		t.Fatalf("capabilities before drift = %q, want %q", got, wantFull)
+	}
+
+	// While tailer is running with schema drift latched.
+	tailer.driftLatched.Store(true)
+	during := snapshotCaps(telemetrycontract.HealthTriggerPeriodic)
+	if got := strings.Join(during, ","); got != telemetrycontract.UsageCapabilityCalls {
+		t.Fatalf("capabilities during drift = %v, want [%s]", during, telemetrycontract.UsageCapabilityCalls)
+	}
+
+	// Final snapshot after Stop(): tailer is cleared, agyActiveAtStop and
+	// p.driftLatched preserve the state.
+	p.agyTailer.Store(nil)
+	p.agyActiveAtStop.Store(true)
+	p.driftLatched.Store(true)
+	final := snapshotCaps(telemetrycontract.HealthTriggerFinal)
+	if got := strings.Join(final, ","); got != telemetrycontract.UsageCapabilityCalls {
+		t.Fatalf("capabilities on final snapshot after drift = %v, want [%s]", final, telemetrycontract.UsageCapabilityCalls)
+	}
+}

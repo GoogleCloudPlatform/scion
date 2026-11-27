@@ -818,6 +818,11 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 		sourceActive = p.agyTailer.Load() != nil || p.agyActiveAtStop.Load()
 	}
 	in.Usage = deriveUsageCollection(sel, in.Harness, sourceActive, len(rulesForHarness(in.Harness)) > 0)
+	if in.Usage.State == telemetrycontract.UsageCollectionEnabled &&
+		in.Usage.Source == telemetrycontract.UsageSourceSQLiteNative &&
+		p.schemaDriftDetected() {
+		in.Usage.Capabilities = []string{telemetrycontract.UsageCapabilityCalls}
+	}
 	in.SourceOrigin = sel.Origin
 	if !sel.Settled && nativeActive {
 		in.SourceOrigin = telemetrycontract.UsageSourceOriginRuntimeEnv
