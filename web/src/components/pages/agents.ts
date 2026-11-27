@@ -44,6 +44,7 @@ import {
 
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
+import { getMessageModeDisplay } from '../../shared/message-mode.js';
 import {
   isNeverSuspendActive,
   neverSuspendBadge,
@@ -388,9 +389,45 @@ export class ScionPageAgents extends LitElement {
         flex-shrink: 0;
       }
 
-      .policy-auto {
-        color: var(--scion-text-muted, #64748b);
-        font-size: 0.813rem;
+      .traits-pills {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .trait-pill {
+        display: inline-flex;
+        align-items: center;
+        flex-shrink: 0;
+        padding: 0.0625rem 0.4375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 500;
+        line-height: 1.25;
+        white-space: nowrap;
+        background: var(--scion-badge-neutral-bg);
+        color: var(--scion-badge-neutral-text);
+      }
+
+      .trait-pill--primary {
+        background: var(--scion-badge-primary-bg);
+        color: var(--scion-badge-primary-text);
+      }
+
+      .trait-pill--success {
+        background: var(--scion-badge-success-bg);
+        color: var(--scion-badge-success-text);
+      }
+
+      .trait-pill--warning {
+        background: var(--scion-badge-warning-bg);
+        color: var(--scion-badge-warning-text);
+      }
+
+      .trait-pill--danger {
+        background: var(--scion-badge-danger-bg);
+        color: var(--scion-badge-danger-text);
       }
 
       .agent-meta {
@@ -2366,12 +2403,7 @@ export class ScionPageAgents extends LitElement {
               >
                 Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
               </th>
-              ${neverSuspendOn
-                ? html`<th class="hide-mobile" data-testid="suspend-policy-col-header">
-                    Suspend Policy
-                  </th>`
-                : nothing}
-              <th class="hide-mobile">Messaging</th>
+              <th class="hide-mobile" data-testid="traits-col-header">Traits</th>
               <th
                 class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('updated')}
@@ -2391,6 +2423,51 @@ export class ScionPageAgents extends LitElement {
           </tbody>
         </table>
       </div>
+    `;
+  }
+
+  /**
+   * Traits holds only per-agent settings that change lifecycle or messaging
+   * behaviour (plus the reachability exception).
+   */
+  private renderTraitsCell(agent: Agent, neverSuspendOn: boolean): TemplateResult | typeof nothing {
+    const mode = agent.messageMode;
+    const hasNonDefaultMode = Boolean(mode && mode !== 'project');
+    const hasNeverSuspend = neverSuspendOn && isNeverSuspendActive(agent);
+    const msg = agent._messageability;
+    const hasReachabilityException = Boolean(msg && !(msg.canMessage && msg.canReachViewer));
+
+    if (!hasNonDefaultMode && !hasNeverSuspend && !hasReachabilityException) {
+      return nothing;
+    }
+
+    const modeDisplay = hasNonDefaultMode ? getMessageModeDisplay(mode) : null;
+    const modeTooltip = modeDisplay
+      ? `Message mode: ${modeDisplay.label} — ${modeDisplay.description}`
+      : '';
+
+    return html`
+      <span class="traits-pills">
+        ${modeDisplay
+          ? html`<span
+              class="trait-pill trait-pill--${modeDisplay.color}"
+              data-testid="trait-message-mode"
+              title=${modeTooltip}
+              aria-label=${modeTooltip}
+              >${modeDisplay.label}</span
+            >`
+          : nothing}
+        ${hasNeverSuspend ? neverSuspendBadge(agent, { compact: true }) : nothing}
+        ${hasReachabilityException
+          ? html`
+              <scion-messageability-indicator
+                .messageability=${msg}
+                agentName=${agent.name}
+                size="small"
+              ></scion-messageability-indicator>
+            `
+          : nothing}
+      </span>
     `;
   }
 
@@ -2417,26 +2494,8 @@ export class ScionPageAgents extends LitElement {
           ></scion-deletion-badge>
           ${this.renderDeletionBanner(agent, true)}
         </td>
-        ${neverSuspendOn
-          ? html`<td class="hide-mobile" data-testid="suspend-policy-cell">
-              ${isNeverSuspendActive(agent)
-                ? neverSuspendBadge(agent, { compact: true })
-                : html`<span class="policy-auto">Auto</span>`}
-            </td>`
-          : nothing}
-        <td class="hide-mobile">
-          <scion-message-mode-badge
-            mode=${agent.messageMode || 'project'}
-            size="small"
-          ></scion-message-mode-badge>
-          ${agent._messageability
-            ? html`
-                <scion-messageability-indicator
-                  .messageability=${agent._messageability}
-                  size="small"
-                ></scion-messageability-indicator>
-              `
-            : nothing}
+        <td class="hide-mobile" data-testid="traits-cell">
+          ${this.renderTraitsCell(agent, neverSuspendOn)}
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||

@@ -639,12 +639,17 @@ create or `PATCH` requests that set `suspendPolicy` with `400 experiment_disable
 - **Web UI:** while `lifecycle.never_suspend` is enabled, the **Create Agent**
   form offers a **Never suspend** checkbox, agent lists and detail pages show a
   **Never suspend** badge, the hub-wide **Agents** page adds a **Policy** filter
-  (`suspendPolicy:never` / `suspendPolicy:auto`) and **Suspend Policy** column,
-  and clicking **Suspend** on a flagged agent opens a confirmation dialog that
-  sends `force: true`.
+  (`suspendPolicy:never` / `suspendPolicy:auto`) and surfaces non-default
+  lifecycle and messaging settings in the **Traits** column, and clicking
+  **Suspend** on a flagged agent opens a confirmation dialog that sends
+  `force: true`.
 
 ### Current Limits (v1)
 
+- **Per-project quota (`max_never_suspend_agents_per_project`):** an optional
+  fairness limit (unlimited by default) that counts flagged non-deleted agents
+  in the project; creating or `PATCH`ing over the cap returns `429`, and
+  restoring a soft-deleted flagged agent over the cap returns `409`.
 - **Agent principals can set the flag only at creation.** Calling
   `scion create --never-suspend` or `scion start --never-suspend` from an agent
   works under the existing `agent.create` rules, but `PATCH /api/v1/agents/{id}`

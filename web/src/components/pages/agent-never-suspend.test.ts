@@ -522,28 +522,93 @@ describe('Never-suspend hub-wide agents view (scion-page-agents)', () => {
     return el;
   }
 
-  it('hides Policy filter and Suspend Policy column when experiment is off', async () => {
+  it('hides Policy filter and Never suspend pill in Traits when experiment is off, while keeping Traits column', async () => {
     const el = await mountAgents();
     expect(el.shadowRoot?.querySelector('[data-testid="suspend-policy-filter"]')).toBeNull();
-    expect(el.shadowRoot?.querySelector('[data-testid="suspend-policy-col-header"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-testid="traits-col-header"]')).not.toBeNull();
     expect(el.shadowRoot?.querySelector('[data-testid="never-suspend-badge"]')).toBeNull();
+    const cells = Array.from(el.shadowRoot!.querySelectorAll('[data-testid="traits-cell"]'));
+    expect(cells.length).toBe(2);
+    expect(cells[0].textContent?.trim()).toBe('');
+    expect(cells[1].textContent?.trim()).toBe('');
   });
 
-  it('shows Policy filter and Suspend Policy column with badge when experiment is on', async () => {
+  it('shows Policy filter and Never suspend pill in Traits when experiment is on, leaving default agent empty', async () => {
     setFeatureFlag(NEVER_SUSPEND_FLAG, true);
     const el = await mountAgents();
 
     expect(el.shadowRoot?.querySelector('[data-testid="suspend-policy-filter"]')).not.toBeNull();
-    expect(
-      el.shadowRoot?.querySelector('[data-testid="suspend-policy-col-header"]')
-    ).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-testid="traits-col-header"]')).not.toBeNull();
 
-    const cells = Array.from(
-      el.shadowRoot!.querySelectorAll('[data-testid="suspend-policy-cell"]')
-    );
+    const cells = Array.from(el.shadowRoot!.querySelectorAll('[data-testid="traits-cell"]'));
     expect(cells.length).toBe(2);
-    expect(cells[0].querySelector('[data-testid="never-suspend-badge"]')).not.toBeNull();
-    expect(cells[1].textContent?.trim()).toBe('Auto');
+    const badge = cells[0].querySelector('[data-testid="never-suspend-badge"]');
+    expect(badge).not.toBeNull();
+    expect(badge?.getAttribute('aria-label')).toContain('Never suspend');
+    expect(cells[1].textContent?.trim()).toBe('');
+    expect(cells[1].children.length).toBe(0);
+  });
+
+  it('renders only non-default traits (mode pill, never-suspend pill, reachability exception arrow) with aria-labels', async () => {
+    setFeatureFlag(NEVER_SUSPEND_FLAG, true);
+    agentsList = [
+      makeAgent({
+        id: 'a-default',
+        name: 'default-worker',
+        messageMode: 'project',
+        suspendPolicy: 'auto',
+        _messageability: { canMessage: true, canReachViewer: true },
+      }),
+      makeAgent({
+        id: 'a-sealed',
+        name: 'sealed-worker',
+        messageMode: 'none',
+        suspendPolicy: 'auto',
+        _messageability: {
+          canMessage: false,
+          canReachViewer: false,
+          reason: 'mode_none',
+        },
+      }),
+      makeAgent({
+        id: 'a-oneway',
+        name: 'oneway-lead',
+        messageMode: 'owner',
+        suspendPolicy: 'never',
+        _messageability: {
+          canMessage: true,
+          canReachViewer: false,
+          replyReason: 'mode_owner',
+        },
+      }),
+    ];
+
+    const el = await mountAgents();
+    const cells = Array.from(el.shadowRoot!.querySelectorAll('[data-testid="traits-cell"]'));
+    expect(cells.length).toBe(3);
+
+    // Default agent (project mode, auto policy, two-way reachability) -> empty cell
+    expect(cells[0].textContent?.trim()).toBe('');
+    expect(cells[0].querySelector('[data-testid="trait-message-mode"]')).toBeNull();
+    expect(cells[0].querySelector('[data-testid="never-suspend-badge"]')).toBeNull();
+    expect(cells[0].querySelector('scion-messageability-indicator')).toBeNull();
+
+    // Sealed agent (none mode, unreachable) -> Sealed pill + reachability indicator, no never-suspend
+    const sealedPill = cells[1].querySelector('[data-testid="trait-message-mode"]');
+    expect(sealedPill?.textContent?.trim()).toBe('Sealed');
+    expect(sealedPill?.getAttribute('aria-label')).toContain('Sealed');
+    expect(sealedPill?.getAttribute('title')).toContain('Cannot send or receive messages');
+    expect(cells[1].querySelector('[data-testid="never-suspend-badge"]')).toBeNull();
+    expect(cells[1].querySelector('scion-messageability-indicator')).not.toBeNull();
+
+    // One-way never-suspend agent (owner mode, never suspend, one-way) -> all three
+    const ownerPill = cells[2].querySelector('[data-testid="trait-message-mode"]');
+    expect(ownerPill?.textContent?.trim()).toBe('Owner');
+    expect(ownerPill?.getAttribute('aria-label')).toContain('Owner');
+    const nsPill = cells[2].querySelector('[data-testid="never-suspend-badge"]');
+    expect(nsPill).not.toBeNull();
+    expect(nsPill?.getAttribute('aria-label')).toContain('Never suspend');
+    expect(cells[2].querySelector('scion-messageability-indicator')).not.toBeNull();
   });
 });
 
