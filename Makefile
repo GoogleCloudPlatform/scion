@@ -688,8 +688,9 @@ INTEGRATIONS_HA_POSTGRES_TESTS := TestUpdateIntegration_HA_Accepted \
 # (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS), the forced user delete
 # tests (USER_DELETION_POSTGRES_TESTS), the integrations HA tests
 # (INTEGRATIONS_HA_POSTGRES_TESTS), the chat retention cascade and
-# replica race and deleted-conversation tests, and the two-replica project
-# quota admission test.
+# replica race and deleted-conversation tests, the two-replica project
+# quota admission test, and the 2-node Postgres conduit HA harness tests
+# (TestConduitHA_DeliverCrossNode, TestConduitHA_FaultHooks).
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -714,7 +715,9 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestCustomDefaultUserRole_ConcurrentFirstSignIn_Postgres \
 	TestTriggers_ConcurrentCaps_Postgres \
 	TestWebhookIngress_ConcurrentPendingCap_Postgres \
-	TestNeverSuspend_QuotaConcurrencyAndIsolation_Postgres
+	TestNeverSuspend_QuotaConcurrencyAndIsolation_Postgres \
+	TestConduitHA_DeliverCrossNode \
+	TestConduitHA_FaultHooks
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
