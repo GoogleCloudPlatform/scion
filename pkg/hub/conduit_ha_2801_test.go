@@ -469,6 +469,7 @@ func TestConduitHA_2801_C2_BrokerPathCrossNode(t *testing.T) {
 //     write (owner relay stale-route not_local) -> re-resolved to live session,
 //     handled exactly once, 200 OK.
 func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
+	requirePG(t)
 	t.Run("a_non_idempotent_in_flight_lost", func(t *testing.T) {
 		env := newConduitHAEnv(t)
 		env.HubA.EnableBrokerRouting(t)
@@ -749,6 +750,7 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 // Subtest 2 confirms an in-flight non-idempotent RPC that outlives a short
 // drain_deadline fails with 502 outcome_unknown when the drain deadline fires.
 func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
+	requirePG(t)
 	t.Run("in_flight_completes_and_new_reresolves_to_replacement_on_same_relay", func(t *testing.T) {
 		env := newConduitHAEnv(t)
 		env.HubA.EnableBrokerRouting(t)
@@ -938,6 +940,7 @@ func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
 //	    incarnation flap is logged (broker_incarnation_flap); plus the
 //	    shared-broker sub-case carried over from Phase 1
 func TestConduitHA_2801_C17_BrokerIncarnation(t *testing.T) {
+	requirePG(t)
 	t.Run("restart_onto_different_relay_makes_old_sessions_non_current", func(t *testing.T) {
 		env := newConduitHAEnvWith(t, conduitHAOptions{
 			AuthzRecheckInterval: 100 * time.Millisecond,
@@ -986,6 +989,16 @@ func TestConduitHA_2801_C17_BrokerIncarnation(t *testing.T) {
 		superseded, err := env.HubB.Server.conduit.Load().registry.BrokerSessionSuperseded(ctx, env.BrokerID, oldSess.SessionID, time.Now())
 		require.NoError(t, err)
 		assert.True(t, superseded, "proc-1 session on Hub B must be marked superseded once proc-2 registers on Hub A")
+
+		// Even when proc-2's session is explicitly excluded, proc-1 is
+		// non-current and must not be resolved as a fallback.
+		_, err = env.HubB.Router().Resolve(ctx, router.Request{
+			Op:   router.OpStatefulRPC,
+			Kind: registry.PrincipalBroker,
+			ID:   env.BrokerID,
+			Want: registry.Want{Capability: conduit.RPCAgentLogs},
+		}, map[string]bool{newSess.SessionID: true})
+		assert.ErrorIs(t, err, router.ErrNoSession, "old proc-1 session must not be routable even when proc-2 is excluded")
 
 		// Nothing routes to proc-1 from either Hub A or Hub B.
 		for _, node := range []*conduitHANode{env.HubA, env.HubB} {
