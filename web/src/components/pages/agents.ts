@@ -1780,13 +1780,6 @@ export class ScionPageAgents extends LitElement {
     const onPhaseClick = (phase: AgentPhase | ''): void => {
       this.setChipInQuery('phase', phase);
     };
-    const neverSuspendOn = neverSuspendEnabled();
-    const activePolicy = neverSuspendOn
-      ? getActiveSingleKeyValue(this.filterQueryText, 'suspendPolicy', AGENTS_FILTER_SCHEMA)
-      : '';
-    const onPolicyClick = (policy: '' | 'never' | 'auto'): void => {
-      this.setChipInQuery('suspendPolicy', policy);
-    };
 
     return html`
       <div class="filter-bar">
@@ -1826,33 +1819,6 @@ export class ScionPageAgents extends LitElement {
             Error
           </button>
         </div>
-        ${neverSuspendOn
-          ? html`
-              <span class="label">Policy:</span>
-              <div class="scope-toggle" data-testid="suspend-policy-filter">
-                <button
-                  class=${activePolicy === '' ? 'active' : ''}
-                  @click=${() => onPolicyClick('')}
-                >
-                  All
-                </button>
-                <button
-                  class=${activePolicy === 'never' ? 'active' : ''}
-                  data-testid="filter-suspend-policy-never"
-                  @click=${() => onPolicyClick('never')}
-                >
-                  Never suspend
-                </button>
-                <button
-                  class=${activePolicy === 'auto' ? 'active' : ''}
-                  data-testid="filter-suspend-policy-auto"
-                  @click=${() => onPolicyClick('auto')}
-                >
-                  Auto
-                </button>
-              </div>
-            `
-          : nothing}
         <scion-filter-box
           view="agents"
           .value=${this.filterQueryText}

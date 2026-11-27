@@ -563,7 +563,7 @@ export function telemetryEnforcementEnabled(): boolean {
 /**
  * Never-suspend agents (lifecycle.never_suspend, ptone/scion#9178):
  * gates the Never suspend create checkbox, badge, edit toggle, force-suspend
- * confirmation dialog, and hub-wide agent list filter/column. Presentation
+ * confirmation dialog, and hub-wide agent list Traits pill. Presentation
  * only: the hub enforces the experiment on create, PATCH, suspend, and
  * auto-suspend sweeps. Default OFF.
  */

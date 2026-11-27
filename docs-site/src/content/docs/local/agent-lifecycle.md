@@ -638,10 +638,10 @@ create or `PATCH` requests that set `suspendPolicy` with `400 experiment_disable
 
 - **Web UI:** while `lifecycle.never_suspend` is enabled, the **Create Agent**
   form offers a **Never suspend** checkbox, agent lists and detail pages show a
-  **Never suspend** badge, the hub-wide **Agents** page adds a **Policy** filter
-  (`suspendPolicy:never` / `suspendPolicy:auto`) and surfaces non-default
-  lifecycle and messaging settings in the **Traits** column, and clicking
-  **Suspend** on a flagged agent opens a confirmation dialog that sends
+  **Never suspend** badge, the hub-wide **Agents** page supports filtering by
+  `suspendPolicy:never` / `suspendPolicy:auto` in the filter box and surfaces
+  non-default lifecycle and messaging settings in the **Traits** column, and
+  clicking **Suspend** on a flagged agent opens a confirmation dialog that sends
   `force: true`.
 
 ### Current Limits (v1)
