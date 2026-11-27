@@ -33,9 +33,10 @@ import (
 )
 
 // BrokerDispatchStore is the Ent-backed store for the broker_dispatch durable
-// intent table plus the message dispatch-state CAS helpers. Exactly-once
-// execution across nodes is enforced by conditional (compare-and-swap) updates
-// on the state column — no SELECT ... FOR UPDATE, correct on SQLite + Postgres.
+// intent table plus the message dispatch-state transitions. Broker-dispatch
+// rows use conditional (compare-and-swap) updates; message bind and fail
+// transitions take SELECT ... FOR UPDATE row locks on Postgres (single-writer
+// transactions on SQLite).
 type BrokerDispatchStore struct {
 	client    *ent.Client
 	inTx      bool

@@ -18,6 +18,8 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -40,10 +42,11 @@ import (
 // entadapter Postgres job:
 //
 //	SCION_TEST_POSTGRES_URL='postgres://user:pass@host:5432/postgres?sslmode=disable' \
-//	  go test -tags integration -count=50 -run 'TestMessageDeliveryRace_' ./pkg/store/entadapter/
+//	  go test -tags integration -timeout 30m -count=50 -run 'TestMessageDeliveryRace_' ./pkg/store/entadapter/
 
-// deliveryRaceBlockedFor is how long connection 2 must stay blocked to prove
-// it is waiting on connection 1's Postgres row lock.
+// deliveryRaceBlockedFor is the fallback dwell after pg_stat_activity reports
+// wait_event_type = 'Lock' to confirm the waiting connection does not return
+// early before connection 1 commits.
 const deliveryRaceBlockedFor = 100 * time.Millisecond
 
 const (
@@ -52,12 +55,25 @@ const (
 )
 
 type deliveryRaceFixture struct {
-	c1    *ent.Client
-	c2    *ent.Client
-	ms1   *MessageStore
-	ds1   *BrokerDispatchStore
-	ds2   *BrokerDispatchStore
-	agent string
+	c1        *ent.Client
+	c2        *ent.Client
+	obsDB     *sql.DB
+	c1AppName string
+	c2AppName string
+	ms1       *MessageStore
+	ds1       *BrokerDispatchStore
+	ds2       *BrokerDispatchStore
+	agent     string
+}
+
+func withApplicationName(t *testing.T, rawURL, appName string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("application_name", appName)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func newDeliveryRaceFixture(t *testing.T) *deliveryRaceFixture {
@@ -65,22 +81,67 @@ func newDeliveryRaceFixture(t *testing.T) *deliveryRaceFixture {
 	requirePostgres(t)
 	schemaURL := enttest.NewSchemaURL(t)
 
-	c1, err := entc.OpenPostgres(schemaURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1, Diag: txdiag.QuietConfig()})
+	tag := uuid.NewString()[:8]
+	c1AppName := "scion_race_c1_" + tag
+	c2AppName := "scion_race_c2_" + tag
+
+	c1, err := entc.OpenPostgres(withApplicationName(t, schemaURL, c1AppName), entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1, Diag: txdiag.QuietConfig()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c1.Close() })
 
-	c2, err := entc.OpenPostgres(schemaURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1, Diag: txdiag.QuietConfig()})
+	c2, err := entc.OpenPostgres(withApplicationName(t, schemaURL, c2AppName), entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1, Diag: txdiag.QuietConfig()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c2.Close() })
 
+	obsDB, err := sql.Open("pgx", schemaURL)
+	require.NoError(t, err)
+	obsDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = obsDB.Close() })
+
 	return &deliveryRaceFixture{
-		c1:    c1,
-		c2:    c2,
-		ms1:   NewMessageStore(c1),
-		ds1:   NewBrokerDispatchStore(c1),
-		ds2:   NewBrokerDispatchStore(c2),
-		agent: uuid.NewString(),
+		c1:        c1,
+		c2:        c2,
+		obsDB:     obsDB,
+		c1AppName: c1AppName,
+		c2AppName: c2AppName,
+		ms1:       NewMessageStore(c1),
+		ds1:       NewBrokerDispatchStore(c1),
+		ds2:       NewBrokerDispatchStore(c2),
+		agent:     uuid.NewString(),
 	}
+}
+
+// waitForLock polls pg_stat_activity until the named backend reports
+// wait_event_type = 'Lock' (proving it reached its statement and blocked on
+// Postgres's row lock), then dwells for deliveryRaceBlockedFor to confirm it
+// does not return early before the lock holder commits.
+func waitForLock[T any](t *testing.T, f *deliveryRaceFixture, appName string, done <-chan T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case r := <-done:
+			t.Fatalf("backend %s finished without blocking on row lock: %+v", appName, r)
+		default:
+		}
+		var locked int
+		err := f.obsDB.QueryRowContext(
+			context.Background(),
+			`SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock'`,
+			appName,
+		).Scan(&locked)
+		require.NoError(t, err)
+		if locked > 0 {
+			select {
+			case r := <-done:
+				t.Fatalf("backend %s finished early after lock was observed: %+v", appName, r)
+			case <-time.After(deliveryRaceBlockedFor):
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for backend %s to report wait_event_type='Lock' in pg_stat_activity", appName)
 }
 
 func (f *deliveryRaceFixture) msg(t *testing.T, state string) string {
@@ -238,11 +299,7 @@ func TestMessageDeliveryRace_BindVsBindDifferentID(t *testing.T) {
 				res, err := f.ds2.BindMessageDelivery(ctx, f.agent, tc.secondID, ids, now)
 				c2Done <- bindRes{res, err}
 			}()
-			select {
-			case r := <-c2Done:
-				t.Fatalf("conn2 bind(%s) did not wait for conn1's FOR UPDATE lock: %+v", tc.secondID, r)
-			case <-time.After(deliveryRaceBlockedFor):
-			}
+			waitForLock(t, f, f.c2AppName, c2Done)
 
 			close(release)
 			r1 := <-c1Done
@@ -291,11 +348,7 @@ func TestMessageDeliveryRace_BindVsBindSameID(t *testing.T) {
 			res, err := f.ds2.BindMessageDelivery(ctx, f.agent, "d1", ids, now)
 			c2Done <- bindRes{res, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 same-id bind did not wait for conn1's FOR UPDATE lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		close(release)
 		r1 := <-c1Done
@@ -333,11 +386,7 @@ func TestMessageDeliveryRace_BindVsBindSameID(t *testing.T) {
 			res, err := f.ds1.BindMessageDelivery(ctx, f.agent, "d1", ids, now)
 			c1Done <- bindRes{res, err}
 		}()
-		select {
-		case r := <-c1Done:
-			t.Fatalf("conn1 same-id bind did not wait for conn2's FOR UPDATE lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c1AppName, c1Done)
 
 		close(release)
 		r2 := <-c2Done
@@ -382,11 +431,7 @@ func TestMessageDeliveryRace_BindVsBindSameID(t *testing.T) {
 			res, err := f.ds2.BindMessageDelivery(ctx, f.agent, "d1", ids, now)
 			c2Done <- bindRes{res, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 replay did not wait for conn1's FOR UPDATE lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		close(release)
 		r1 := <-c1Done
@@ -436,11 +481,7 @@ func TestMessageDeliveryRace_BindVsFail(t *testing.T) {
 			won, err := f.ds2.FailUndeliveredMessage(ctx, a, "broker failure")
 			c2Done <- failRes{won, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 fail did not wait for conn1's bind FOR UPDATE lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		close(release)
 		r1 := <-c1Done
@@ -478,11 +519,7 @@ func TestMessageDeliveryRace_BindVsFail(t *testing.T) {
 		go func() {
 			c2Done <- f.ds2.MarkMessageFailed(ctx, a, "ExecuteAgentDM finalization")
 		}()
-		select {
-		case err := <-c2Done:
-			t.Fatalf("conn2 MarkMessageFailed did not wait for conn1's bind FOR UPDATE lock: %v", err)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		close(release)
 		r1 := <-c1Done
@@ -519,11 +556,7 @@ func TestMessageDeliveryRace_BindVsFail(t *testing.T) {
 			res, err := f.ds2.BindMessageDelivery(ctx, f.agent, "d1", ids, now)
 			c2Done <- bindRes{res, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 bind did not wait for conn1's fail row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -569,11 +602,7 @@ func TestMessageDeliveryRace_FinishVsSweep(t *testing.T) {
 			swept, err := f.ds2.SweepStaleDeliveries(ctx, cutoff, store.DeliveryOutcomeUnknownPartial)
 			c2Done <- sweepRes{swept, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 sweep did not wait for conn1's finish row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -612,11 +641,7 @@ func TestMessageDeliveryRace_FinishVsSweep(t *testing.T) {
 			n, err := f.ds2.FinishMessageDelivery(ctx, "d1", ids, store.MessageDispatchDelivered, outcomeDelivered)
 			c2Done <- finishRes{n, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 finish did not wait for conn1's sweep row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -661,11 +686,7 @@ func TestMessageDeliveryRace_FinishVsFail(t *testing.T) {
 			won, err := f.ds2.FailUndeliveredMessage(ctx, a, "partial delivery failed")
 			c2Done <- failRes{won, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 fail did not wait for conn1's finish(partial) row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -704,11 +725,7 @@ func TestMessageDeliveryRace_FinishVsFail(t *testing.T) {
 			n, err := f.ds2.FinishMessageDelivery(ctx, "d1", ids, store.MessageDispatchPartial, outcomePartialSubmit)
 			c2Done <- finishRes{n, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 finish did not wait for conn1's fail row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -747,11 +764,7 @@ func TestMessageDeliveryRace_FinishVsFail(t *testing.T) {
 			won, err := f.ds2.FailUndeliveredMessage(ctx, a, "late broker failure")
 			c2Done <- failRes{won, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 fail did not wait for conn1's finish(delivered) row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -793,11 +806,7 @@ func TestMessageDeliveryRace_UnbindVsBind(t *testing.T) {
 			res, err := f.ds2.BindMessageDelivery(ctx, f.agent, "d2", ids, now)
 			c2Done <- bindRes{res, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 bind did not wait for conn1's unbind row lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -836,11 +845,7 @@ func TestMessageDeliveryRace_UnbindVsBind(t *testing.T) {
 		go func() {
 			c2Done <- f.ds2.UnbindMessageDelivery(ctx, "d1", ids)
 		}()
-		select {
-		case err := <-c2Done:
-			t.Fatalf("conn2 unbind did not wait for conn1's bind FOR UPDATE lock: %v", err)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		close(release)
 		r1 := <-c1Done
@@ -884,11 +889,7 @@ func TestMessageDeliveryRace_MarkDispatchedVsBind(t *testing.T) {
 			res, err := f.ds2.BindMessageDelivery(ctx, f.agent, "d1", ids, now)
 			c2Done <- bindRes{res, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 bind did not wait for conn1's MarkMessageDispatched lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		require.NoError(t, tx.Commit())
 		r2 := <-c2Done
@@ -928,11 +929,7 @@ func TestMessageDeliveryRace_MarkDispatchedVsBind(t *testing.T) {
 			d, err := f.ds2.MarkMessageDispatched(ctx, a)
 			c2Done <- dispRes{d, err}
 		}()
-		select {
-		case r := <-c2Done:
-			t.Fatalf("conn2 MarkMessageDispatched did not wait for conn1's bind FOR UPDATE lock: %+v", r)
-		case <-time.After(deliveryRaceBlockedFor):
-		}
+		waitForLock(t, f, f.c2AppName, c2Done)
 
 		close(release)
 		r1 := <-c1Done
