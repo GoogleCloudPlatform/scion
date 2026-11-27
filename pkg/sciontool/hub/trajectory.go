@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/shipper"
 )
@@ -159,7 +160,14 @@ func (c *Client) UploadTrajectorySegment(
 		method = http.MethodPut
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, inst.URL, bytes.NewReader(compressed))
+	reqCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, trajectoryUploadHTTPTimeout)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, method, inst.URL, bytes.NewReader(compressed))
 	if err != nil {
 		return 0, fmt.Errorf("create trajectory upload request: %w", err)
 	}
@@ -174,7 +182,13 @@ func (c *Client) UploadTrajectorySegment(
 		currentToken := c.token
 		c.tokenMu.RUnlock()
 		c.setAgentAuth(req.Header, currentToken)
-		resp, err = c.do(req)
+		// Shallow-copy the Hub-scoped client so large (up to 16 MiB) proxied
+		// PUTs are bounded by trajectoryUploadHTTPTimeout (2 min) rather than
+		// DefaultTimeout (30 s), while preserving transport OIDC and redirect
+		// scoping.
+		scoped := *apiclient.HubScopedHTTPClient(c.client, c.hubURL)
+		scoped.Timeout = trajectoryUploadHTTPTimeout
+		resp, err = scoped.Do(req)
 	} else {
 		// External signed URL (e.g. GCS): use a clean client with no Hub
 		// agent token, run header, or transport OIDC credentials, and refuse
@@ -340,8 +354,16 @@ func (u *TrajectoryUploader) Ship(ctx context.Context, seg shipper.Segment) (shi
 		}, err
 	}
 
+	// Per wire contract §2, every PUT failure other than 412 (already handled
+	// as success inside UploadTrajectorySegment) is retryable so the pending
+	// segment is replayed via a fresh prepare -> PUT -> commit. Never route
+	// storage/PUT errors through the prepare/commit outcome table (e.g. a GCS
+	// 400/404/409/413 must not park an artifact, bump generation, or back off).
 	if _, err := client.UploadTrajectorySegment(ctx, *prepResp.Upload, seg.Compressed); err != nil {
-		return mapTrajectoryShipError(err)
+		return shipper.ShipResult{
+			Outcome: shipper.OutcomeRetryable,
+			Message: err.Error(),
+		}, err
 	}
 
 	commitResp, err := client.CommitTrajectorySegment(ctx, prepResp.SegmentID)

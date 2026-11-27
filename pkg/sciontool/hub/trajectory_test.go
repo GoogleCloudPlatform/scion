@@ -20,6 +20,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -242,5 +244,114 @@ func TestTrajectoryUploader_OutcomeMappingTable(t *testing.T) {
 				t.Fatalf("status=%d code=%s: got outcome %q, want %q", tc.status, tc.code, res.Outcome, tc.wantOutcome)
 			}
 		})
+	}
+}
+
+func TestTrajectoryUploader_PutErrorsAlwaysRetryable(t *testing.T) {
+	statuses := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"400", http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment},
+		{"404", http.StatusNotFound, "not_found"},
+		{"409", http.StatusConflict, telemetrycontract.TrajectoryErrSegmentConflict},
+		{"413", http.StatusRequestEntityTooLarge, telemetrycontract.TrajectoryErrSegmentTooLarge},
+		{"500", http.StatusInternalServerError, "internal"},
+		{"503", http.StatusServiceUnavailable, "unavailable"},
+	}
+
+	for _, mode := range []string{"external_signed", "hub_proxied"} {
+		for _, tc := range statuses {
+			t.Run(mode+"_"+tc.name, func(t *testing.T) {
+				var extSrv *httptest.Server
+				if mode == "external_signed" {
+					extSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(tc.status)
+						_, _ = w.Write([]byte("storage error"))
+					}))
+					defer extSrv.Close()
+				}
+
+				var hubSrv *httptest.Server
+				hubSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case telemetrycontract.TrajectorySegmentsPrepareAgentPath("agent-1"):
+						uploadURL := hubSrv.URL + telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-put") + "?exp=9999999999&sig=abc"
+						if extSrv != nil {
+							uploadURL = extSrv.URL + "/bucket/obj.seg.gz?X-Goog-Signature=abc"
+						}
+						_ = json.NewEncoder(w).Encode(telemetrycontract.TrajectorySegmentPrepareResponse{
+							SegmentID: "seg-put",
+							State:     telemetrycontract.TrajectorySegmentStateUploadRequired,
+							Upload: &telemetrycontract.TrajectorySegmentUploadInstruction{
+								Method: http.MethodPut,
+								URL:    uploadURL,
+								Headers: map[string]string{
+									"Content-Type": "application/gzip",
+								},
+							},
+						})
+					case telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-put"):
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(tc.status)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error": map[string]string{"code": tc.code, "message": "put failed"},
+						})
+					default:
+						t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer hubSrv.Close()
+
+				home := t.TempDir()
+				rel := ".claude/projects/-workspace/sess-puterr.jsonl"
+				artPath := filepath.Join(home, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(artPath), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(artPath, nil, 0o644); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+
+				up := NewTrajectoryUploader(NewClientWithConfig(hubSrv.URL, "tok", "agent-1"))
+				s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up})
+				if err != nil {
+					t.Fatalf("shipper.New: %v", err)
+				}
+				if _, err := s.Baseline(context.Background()); err != nil {
+					t.Fatalf("Baseline: %v", err)
+				}
+				if err := os.WriteFile(artPath, []byte("{\"seq\":1}\n"), 0o644); err != nil {
+					t.Fatalf("append: %v", err)
+				}
+
+				roundRes, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+				if err != nil {
+					t.Fatalf("RunRound: %v", err)
+				}
+				if roundRes.SegmentsShipped != 0 {
+					t.Fatalf("expected 0 segments shipped, got %d", roundRes.SegmentsShipped)
+				}
+				if roundRes.GenerationBumps != 0 {
+					t.Fatalf("PUT %s must not bump generation, got %d", tc.name, roundRes.GenerationBumps)
+				}
+				if roundRes.CaptureUnavailable || roundRes.PolicyRefused {
+					t.Fatalf("PUT %s must not trigger backoff/policy refusal: %+v", tc.name, roundRes)
+				}
+				st, ok, err := shipper.LoadState(home)
+				if err != nil || !ok {
+					t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+				}
+				entry := st.Artifacts[rel]
+				if entry.Rejected {
+					t.Fatalf("PUT %s must not park artifact as Rejected", tc.name)
+				}
+				if entry.Pending == nil {
+					t.Fatalf("PUT %s must preserve pending segment for retry", tc.name)
+				}
+			})
+		}
 	}
 }
