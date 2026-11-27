@@ -410,6 +410,7 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		Since:         win.Since,
 		Until:         win.Until,
 		StaleAfter:    staleHeartbeatMultiplier * defaultHeartbeatInterval,
+		StartupGrace:  defaultUsageStartupGrace,
 		DBNow:         dbNow,
 	})
 	if err != nil {
@@ -417,7 +418,8 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	resp := buildScopedUsageResponse(scope, win, groupBy, dbNow, rollupRes, cov)
+	capResolver := s.loadActiveUsageCapabilities(ctx, filterProjectID)
+	resp := buildScopedUsageResponse(scope, win, groupBy, dbNow, rollupRes, cov, capResolver)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -642,6 +644,7 @@ func buildScopedUsageResponse(
 	dbNow time.Time,
 	rollupRes *store.UsageRollupQueryResult,
 	cov *store.UsageScopeCoverage,
+	capResolver *usageCapabilityResolver,
 ) UsageSummaryResponse {
 	if rollupRes == nil {
 		rollupRes = &store.UsageRollupQueryResult{}
@@ -712,7 +715,8 @@ func buildScopedUsageResponse(
 		}
 	}
 
-	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(cov, t.Events, dbNow)
+	windowIncludesNow := !win.Until.Before(dbNow)
+	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(cov, t.Events, dbNow, windowIncludesNow, capResolver)
 
 	return UsageSummaryResponse{
 		Scope:             scope,
@@ -733,11 +737,116 @@ func buildScopedUsageResponse(
 	}
 }
 
+// usageCapabilityResolver resolves current harness-config revision usage.yaml
+// capabilities in memory for scoped usage coverage buckets without per-agent
+// DB round trips. Note: capability reflects the current active harness-config
+// revision, not a per-run snapshot.
+type usageCapabilityResolver struct {
+	project map[harnessRefKey]*usageLiveCapability
+	global  map[string]*usageLiveCapability
+}
+
+func (r *usageCapabilityResolver) resolve(projectID, harnessConfig, harness string) *usageLiveCapability {
+	if r == nil {
+		return nil
+	}
+	hc := strings.TrimSpace(harnessConfig)
+	h := strings.TrimSpace(harness)
+	if hc != "" {
+		if projectID != "" {
+			if cap, ok := r.project[harnessRefKey{projectID: projectID, ref: hc}]; ok {
+				return cap
+			}
+		}
+		if cap, ok := r.global[hc]; ok {
+			return cap
+		}
+	}
+	if h != "" && h != hc {
+		if cap, ok := r.global[h]; ok {
+			return cap
+		}
+	}
+	return nil
+}
+
+// loadActiveUsageCapabilities loads active HarnessConfig records once per
+// scoped usage request (bounded by active harness-config count, not fleet
+// size). For a project-scoped query it loads only that project's active
+// configs plus global configs; for user/global queries it loads all active
+// configs.
+func (s *Server) loadActiveUsageCapabilities(ctx context.Context, projectID string) *usageCapabilityResolver {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	res := &usageCapabilityResolver{
+		project: make(map[harnessRefKey]*usageLiveCapability),
+		global:  make(map[string]*usageLiveCapability),
+	}
+	addAll := func(filter store.HarnessConfigFilter) {
+		list, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: 500, SkipTotalCount: true})
+		if err != nil || list == nil {
+			return
+		}
+		for i := range list.Items {
+			hc := &list.Items[i]
+			s.populateHarnessConfigCapabilities(ctx, hc)
+			cap := usageCapabilityFromHarnessConfig(hc)
+			if cap == nil {
+				continue
+			}
+			slug := strings.TrimSpace(hc.Slug)
+			if slug == "" {
+				slug = strings.TrimSpace(hc.Name)
+			}
+			if slug == "" {
+				continue
+			}
+			switch hc.Scope {
+			case store.HarnessConfigScopeProject:
+				if hc.ScopeID != "" {
+					res.project[harnessRefKey{projectID: hc.ScopeID, ref: slug}] = cap
+				}
+			case store.HarnessConfigScopeGlobal, "":
+				res.global[slug] = cap
+			}
+		}
+	}
+
+	if projectID != "" {
+		addAll(store.HarnessConfigFilter{
+			Scope:   store.HarnessConfigScopeProject,
+			ScopeID: projectID,
+			Status:  store.HarnessConfigStatusActive,
+		})
+		addAll(store.HarnessConfigFilter{
+			Scope:  store.HarnessConfigScopeGlobal,
+			Status: store.HarnessConfigStatusActive,
+		})
+	} else {
+		addAll(store.HarnessConfigFilter{
+			Status: store.HarnessConfigStatusActive,
+		})
+	}
+	return res
+}
+
 // deriveScopeCoverageSummary maps each SQL-grouped coverage bucket through the
 // single deriveMeasurementStatus function in Go (O1c) and computes aggregate
-// status using precedence stale > measured > unmeasured.
-func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64, dbNow time.Time) (status string, unmeasuredAgents, staleAgents int) {
-	var measuredAgents int
+// status using precedence stale > partial > measured > calls_only > unmeasured,
+// along with unmeasured_agents and stale_agents counts.
+func deriveScopeCoverageSummary(
+	cov *store.UsageScopeCoverage,
+	totalEvents int64,
+	dbNow time.Time,
+	windowIncludesNow bool,
+	capResolver *usageCapabilityResolver,
+) (status string, unmeasuredAgents, staleAgents int) {
+	var (
+		partialAgents   int
+		measuredAgents  int
+		callsOnlyAgents int
+	)
 	staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
 	if cov != nil {
 		for _, b := range cov.Buckets {
@@ -757,21 +866,34 @@ func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64
 					receiptAt = dbNow.Add(-(staleAfter + time.Second))
 				}
 				mhRows = []*store.MeterHealth{{
-					FinalState:    b.LatestFinalState,
-					LastReceiptAt: receiptAt,
+					FinalState:          b.LatestFinalState,
+					LastReceiptAt:       receiptAt,
+					SchemaDriftDetected: b.HasSchemaDrift,
 				}}
 			}
+			var runStartedAt time.Time
+			if b.IsPastGrace {
+				runStartedAt = dbNow.Add(-(defaultUsageStartupGrace + time.Second))
+			}
+			usageCap := capResolver.resolve(b.CapabilityProjectID, b.HarnessConfig, b.Harness)
 			s := deriveMeasurementStatus(measurementStatusInput{
 				MeterHealth:       mhRows,
 				HasRunUsageEvents: b.HasUsageData,
+				RunStartedAt:      runStartedAt,
 				DBNow:             dbNow,
 				AgentPhase:        phase,
+				WindowIncludesNow: &windowIncludesNow,
+				UsageLive:         usageCap,
 			})
 			switch s {
 			case MeasurementStatusStale:
 				staleAgents += b.AgentCount
+			case MeasurementStatusPartial:
+				partialAgents += b.AgentCount
 			case MeasurementStatusMeasured:
 				measuredAgents += b.AgentCount
+			case MeasurementStatusCallsOnly:
+				callsOnlyAgents += b.AgentCount
 			default:
 				unmeasuredAgents += b.AgentCount
 			}
@@ -781,8 +903,12 @@ func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64
 	switch {
 	case staleAgents > 0:
 		status = MeasurementStatusStale
+	case partialAgents > 0 || (measuredAgents > 0 && callsOnlyAgents > 0):
+		status = MeasurementStatusPartial
 	case measuredAgents > 0 || totalEvents > 0:
 		status = MeasurementStatusMeasured
+	case callsOnlyAgents > 0:
+		status = MeasurementStatusCallsOnly
 	default:
 		status = MeasurementStatusUnmeasured
 	}

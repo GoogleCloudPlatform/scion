@@ -548,19 +548,29 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 	out := &store.UsageScopeCoverage{}
 	for rows.Next() {
 		var (
-			isRunning        int
-			hasMeterHealth   int
-			latestFinalState string
-			isReceiptStale   int
-			hasUsageData     int
-			agentCount       int64
-			rawLastReceipt   any
+			harnessConfig       string
+			harness             string
+			capabilityProjectID string
+			isRunning           int
+			hasMeterHealth      int
+			latestFinalState    string
+			isReceiptStale      int
+			isPastGrace         int
+			hasSchemaDrift      int
+			hasUsageData        int
+			agentCount          int64
+			rawLastReceipt      any
 		)
 		if err := rows.Scan(
+			&harnessConfig,
+			&harness,
+			&capabilityProjectID,
 			&isRunning,
 			&hasMeterHealth,
 			&latestFinalState,
 			&isReceiptStale,
+			&isPastGrace,
+			&hasSchemaDrift,
 			&hasUsageData,
 			&agentCount,
 			&rawLastReceipt,
@@ -568,12 +578,17 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 			return nil, mapError(err)
 		}
 		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
-			IsRunning:        isRunning != 0,
-			HasMeterHealth:   hasMeterHealth != 0,
-			LatestFinalState: latestFinalState,
-			IsReceiptStale:   isReceiptStale != 0,
-			HasUsageData:     hasUsageData != 0,
-			AgentCount:       int(agentCount),
+			HarnessConfig:       harnessConfig,
+			Harness:             harness,
+			CapabilityProjectID: capabilityProjectID,
+			IsRunning:           isRunning != 0,
+			HasMeterHealth:      hasMeterHealth != 0,
+			LatestFinalState:    latestFinalState,
+			IsReceiptStale:      isReceiptStale != 0,
+			IsPastGrace:         isPastGrace != 0,
+			HasSchemaDrift:      hasSchemaDrift != 0,
+			HasUsageData:        hasUsageData != 0,
+			AgentCount:          int(agentCount),
 		})
 		if rawLastReceipt != nil {
 			ts, err := parseSQLTimestamp(rawLastReceipt)
@@ -609,6 +624,11 @@ func buildUsageScopeCoverageSQL(dialectName string, filter store.UsageCoverageFi
 	untilDay := utcDayStart(until)
 	staleCutoff := dbNow.UTC().Add(-filter.StaleAfter).Truncate(time.Microsecond)
 	windowIncludesNow := !until.Before(staleCutoff)
+	startupGrace := filter.StartupGrace
+	if startupGrace <= 0 {
+		startupGrace = 60 * time.Second
+	}
+	graceCutoff := dbNow.UTC().Add(-startupGrace).Truncate(time.Microsecond)
 	runningPhase := string(state.PhaseRunning)
 
 	var scopeWhere []string
@@ -638,8 +658,10 @@ func buildUsageScopeCoverageSQL(dialectName string, filter store.UsageCoverageFi
 scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
+		CAST(a.project_id AS TEXT) AS project_id_text,
 		COALESCE(a.run_id, '') AS run_id,
-		COALESCE(a.phase, '') AS phase
+		COALESCE(a.phase, '') AS phase,
+		COALESCE(a.harness_config, '') AS agent_harness_config
 	FROM user_agents ua
 	JOIN agents a ON a.id = CAST(ua.agent_id AS UUID)
 	WHERE %s
@@ -653,8 +675,10 @@ scoped_agents AS (
 scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
+		CAST(a.project_id AS TEXT) AS project_id_text,
 		COALESCE(a.run_id, '') AS run_id,
-		COALESCE(a.phase, '') AS phase
+		COALESCE(a.phase, '') AS phase,
+		COALESCE(a.harness_config, '') AS agent_harness_config
 	FROM user_agents ua
 	JOIN agents a ON a.id = ua.agent_id
 	WHERE %s
@@ -690,8 +714,10 @@ scoped_agents AS (
 scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
+		CAST(a.project_id AS TEXT) AS project_id_text,
 		COALESCE(a.run_id, '') AS run_id,
-		COALESCE(a.phase, '') AS phase
+		COALESCE(a.phase, '') AS phase,
+		COALESCE(a.harness_config, '') AS agent_harness_config
 	FROM candidate_agents ca
 	JOIN agents a ON a.id = CASE
 		WHEN ca.agent_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
@@ -716,8 +742,10 @@ scoped_agents AS (
 scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
+		CAST(a.project_id AS TEXT) AS project_id_text,
 		COALESCE(a.run_id, '') AS run_id,
-		COALESCE(a.phase, '') AS phase
+		COALESCE(a.phase, '') AS phase,
+		COALESCE(a.harness_config, '') AS agent_harness_config
 	FROM candidate_agents ca
 	JOIN agents a ON a.id = ca.agent_id
 	WHERE %%s
@@ -728,8 +756,10 @@ scoped_agents AS (
 		scopedAgentsCTE = `scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
+		CAST(a.project_id AS TEXT) AS project_id_text,
 		COALESCE(a.run_id, '') AS run_id,
-		COALESCE(a.phase, '') AS phase
+		COALESCE(a.phase, '') AS phase,
+		COALESCE(a.harness_config, '') AS agent_harness_config
 	FROM agents a
 	WHERE %s
 )`
@@ -805,15 +835,18 @@ scoped_agents AS (
 	}
 
 	// Parameters for agent_flags projection:
-	// Running-phase and stale classification apply only when the window includes
-	// now (until >= dbNow - staleAfter), so historical windows are not marked
-	// stale by a currently running agent's open meter.
+	// Running-phase, stale, and past-grace classification apply only when the
+	// window includes now (until >= dbNow - staleAfter), so historical windows
+	// are not marked stale by a currently running agent's open meter or startup
+	// grace.
 	isRunningExpr := "0"
 	isStaleExpr := "0"
+	isPastGraceExpr := "0"
 	if windowIncludesNow {
 		isRunningExpr = "CASE WHEN am.phase = ? THEN 1 ELSE 0 END"
 		isStaleExpr = "CASE WHEN am.latest_receipt_at IS NOT NULL AND am.latest_receipt_at < ? THEN 1 ELSE 0 END"
-		args = append(args, runningPhase, staleCutoff)
+		isPastGraceExpr = "CASE WHEN am.run_created_at IS NOT NULL AND am.run_created_at < ? THEN 1 ELSE 0 END"
+		args = append(args, runningPhase, staleCutoff, graceCutoff)
 	}
 	rdFlagCond := "rd.agent_id = am.agent_id_text AND rd.bucket_start >= ? AND rd.bucket_start <= ?"
 	args = append(args, sinceDay, untilDay)
@@ -827,8 +860,12 @@ WITH %s,
 agent_mh AS (
 	SELECT
 		sa.agent_id_text,
+		sa.project_id_text,
 		sa.run_id,
 		sa.phase,
+		COALESCE(NULLIF(ra_cur.harness_config, ''), sa.agent_harness_config) AS harness_config,
+		COALESCE(ra_cur.harness, '') AS harness,
+		ra_cur.created_at AS run_created_at,
 		MAX(mh.last_receipt_at) AS latest_receipt_at,
 		COALESCE(MAX(CASE
 			WHEN mh.last_receipt_at = (
@@ -837,18 +874,39 @@ agent_mh AS (
 				WHERE mh2.agent_id = sa.agent_id_text AND mh2.run_id = sa.run_id
 			) THEN mh.final_state
 			ELSE ''
-		END), '') AS latest_final_state
+		END), '') AS latest_final_state,
+		COALESCE(MAX(CASE
+			WHEN mh.last_receipt_at = (
+				SELECT MAX(mh2.last_receipt_at)
+				FROM meter_health mh2
+				WHERE mh2.agent_id = sa.agent_id_text AND mh2.run_id = sa.run_id
+			) AND mh.schema_drift_detected THEN 1
+			ELSE 0
+		END), 0) AS has_schema_drift
 	FROM scoped_agents sa
+	LEFT JOIN run_attribution ra_cur
+		ON ra_cur.run_id = sa.run_id AND sa.run_id <> ''
 	LEFT JOIN meter_health mh
 		ON mh.agent_id = sa.agent_id_text AND mh.run_id = sa.run_id AND sa.run_id <> ''
-	GROUP BY sa.agent_id_text, sa.run_id, sa.phase
+	GROUP BY sa.agent_id_text, sa.project_id_text, sa.run_id, sa.phase, ra_cur.harness_config, sa.agent_harness_config, ra_cur.harness, ra_cur.created_at
 ),
 agent_flags AS (
 	SELECT
+		am.harness_config AS harness_config,
+		am.harness AS harness,
+		CASE
+			WHEN EXISTS (
+				SELECT 1 FROM harness_configs hc
+				WHERE hc.scope = 'project' AND hc.scope_id = am.project_id_text AND hc.status = 'active'
+			) THEN am.project_id_text
+			ELSE ''
+		END AS capability_project_id,
 		%s AS is_running,
 		CASE WHEN am.latest_receipt_at IS NOT NULL THEN 1 ELSE 0 END AS has_meter_health,
 		am.latest_final_state AS latest_final_state,
 		%s AS is_receipt_stale,
+		%s AS is_past_grace,
+		am.has_schema_drift AS has_schema_drift,
 		CASE
 			WHEN am.run_id <> '' AND EXISTS (
 				SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id
@@ -862,18 +920,24 @@ agent_flags AS (
 	FROM agent_mh am
 )
 SELECT
+	harness_config,
+	harness,
+	capability_project_id,
 	is_running,
 	has_meter_health,
 	latest_final_state,
 	is_receipt_stale,
+	is_past_grace,
+	has_schema_drift,
 	has_usage_data,
 	CAST(COUNT(*) AS BIGINT) AS agent_count,
 	MAX(latest_receipt_at) AS max_last_receipt_at
 FROM agent_flags
-GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has_usage_data`,
+GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_health, latest_final_state, is_receipt_stale, is_past_grace, has_schema_drift, has_usage_data`,
 		fmt.Sprintf(scopedAgentsCTE, strings.Join(scopeWhere, " AND ")),
 		isRunningExpr,
 		isStaleExpr,
+		isPastGraceExpr,
 		rdFlagCond,
 	)
 

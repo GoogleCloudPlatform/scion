@@ -1528,3 +1528,154 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		assert.Contains(t, covPlan, "agent_running_active", "global GetUsageScopeCoverage must use agent_running_active")
 	}
 }
+
+func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	projGlobal := createTestProject(t, cs, "cov-global")
+	projOverride := createTestProject(t, cs, "cov-override")
+	user1 := createTestUser(t, cs, "cov-u1@example.com")
+
+	seedAgent := func(projID, slug, runID string, phase state.Phase) *store.Agent {
+		ag := &store.Agent{
+			ID:        uuid.NewString(),
+			Slug:      slug,
+			Name:      slug,
+			ProjectID: projID,
+			OwnerID:   user1,
+			Phase:     string(phase),
+		}
+		require.NoError(t, cs.CreateAgent(ctx, ag))
+		_, err := cs.SetAgentRunID(ctx, ag.ID, runID, nil)
+		require.NoError(t, err)
+		ag.RunID = runID
+		return ag
+	}
+
+	// Seed an active project-scoped harness config ONLY on projOverride.
+	require.NoError(t, cs.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hermes",
+		Slug:    "hermes",
+		Harness: "hermes",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: projOverride,
+		Status:  store.HarnessConfigStatusActive,
+	}))
+
+	// 1. Agent on projGlobal: running past 60s grace, no meter_health, no events.
+	agPastGrace := seedAgent(projGlobal, "ag-past-grace", "run-past-grace", state.PhaseRunning)
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agPastGrace.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agPastGrace.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-2 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	// 2. Agent on projGlobal: running within 60s grace, no meter_health, no events.
+	agInGrace := seedAgent(projGlobal, "ag-in-grace", "run-in-grace", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agInGrace.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agInGrace.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-30 * time.Second),
+	})
+	require.NoError(t, err)
+
+	// 3. Agent on projGlobal: heartbeat-only fresh meter with schema_drift_detected=true.
+	agDrift := seedAgent(projGlobal, "ag-drift", "run-drift", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agDrift.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agDrift.ID,
+		Harness:       "antigravity",
+		HarnessConfig: "antigravity",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDrift.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agDrift.ID,
+			RunID:               agDrift.RunID,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       now.Add(-15 * time.Second),
+			ProducerSeq:         1,
+			SchemaDriftDetected: true,
+			FinalState:          store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// 4. Agent on projOverride: heartbeat-only fresh meter, project-scoped override present.
+	agOverride := seedAgent(projOverride, "ag-override", "run-override", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agOverride.RunID,
+		ProjectID:     projOverride,
+		AgentID:       agOverride.ID,
+		Harness:       "hermes",
+		HarnessConfig: "hermes",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agOverride.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agOverride.ID,
+			RunID:         agOverride.RunID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: now.Add(-10 * time.Second),
+			ProducerSeq:   1,
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	cov, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		Since:        now.Add(-1 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+
+	var foundPastGrace, foundInGrace, foundDrift, foundOverride bool
+	for _, b := range cov.Buckets {
+		switch {
+		case b.HarnessConfig == "claude" && b.IsPastGrace && !b.HasMeterHealth:
+			assert.Equal(t, "", b.CapabilityProjectID, "projGlobal has no project-scoped harness_config and must collapse to empty string")
+			assert.Equal(t, 1, b.AgentCount)
+			foundPastGrace = true
+		case b.HarnessConfig == "claude" && !b.IsPastGrace && !b.HasMeterHealth:
+			assert.Equal(t, "", b.CapabilityProjectID)
+			assert.Equal(t, 1, b.AgentCount)
+			foundInGrace = true
+		case b.HarnessConfig == "antigravity" && b.HasSchemaDrift:
+			assert.Equal(t, "", b.CapabilityProjectID)
+			assert.True(t, b.HasMeterHealth)
+			assert.False(t, b.HasUsageData)
+			assert.False(t, b.IsReceiptStale)
+			assert.Equal(t, 1, b.AgentCount)
+			foundDrift = true
+		case b.HarnessConfig == "hermes" && b.CapabilityProjectID == projOverride:
+			assert.True(t, b.HasMeterHealth)
+			assert.False(t, b.HasUsageData)
+			assert.Equal(t, 1, b.AgentCount)
+			foundOverride = true
+		}
+	}
+	assert.True(t, foundPastGrace, "expected bucket for claude past 60s grace")
+	assert.True(t, foundInGrace, "expected bucket for claude within 60s grace")
+	assert.True(t, foundDrift, "expected bucket for antigravity with schema drift")
+	assert.True(t, foundOverride, "expected bucket for hermes with projOverride capability_project_id")
+}
