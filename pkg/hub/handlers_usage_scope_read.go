@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -410,6 +411,7 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		Since:         win.Since,
 		Until:         win.Until,
 		StaleAfter:    staleHeartbeatMultiplier * defaultHeartbeatInterval,
+		StartupGrace:  defaultUsageStartupGrace,
 		DBNow:         dbNow,
 	})
 	if err != nil {
@@ -417,7 +419,8 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	resp := buildScopedUsageResponse(scope, win, groupBy, dbNow, rollupRes, cov)
+	capMemo := newUsageCapabilityMemo(ctx, s)
+	resp := buildScopedUsageResponse(scope, win, groupBy, dbNow, rollupRes, cov, capMemo.resolve)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -642,6 +645,7 @@ func buildScopedUsageResponse(
 	dbNow time.Time,
 	rollupRes *store.UsageRollupQueryResult,
 	cov *store.UsageScopeCoverage,
+	resolveCap usageCapabilityLookup,
 ) UsageSummaryResponse {
 	if rollupRes == nil {
 		rollupRes = &store.UsageRollupQueryResult{}
@@ -712,7 +716,16 @@ func buildScopedUsageResponse(
 		}
 	}
 
-	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(cov, t.Events, dbNow)
+	windowIncludesNow := usageWindowIncludesNow(win.Until, dbNow)
+	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(
+		cov,
+		t.Events,
+		rollupRes.HasLegacyRollups,
+		rollupRes.HasNonLegacyRollups,
+		dbNow,
+		windowIncludesNow,
+		resolveCap,
+	)
 
 	return UsageSummaryResponse{
 		Scope:             scope,
@@ -735,9 +748,27 @@ func buildScopedUsageResponse(
 
 // deriveScopeCoverageSummary maps each SQL-grouped coverage bucket through the
 // single deriveMeasurementStatus function in Go (O1c) and computes aggregate
-// status using precedence stale > measured > unmeasured.
-func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64, dbNow time.Time) (status string, unmeasuredAgents, staleAgents int) {
-	var measuredAgents int
+// status using precedence stale > partial > measured > calls_only >
+// legacy_client > unmeasured (with mixed measured/calls_only/legacy_client
+// scopes reading partial so legacy_client never reads as measured), along with
+// unmeasured_agents and stale_agents counts. The totalEvents fallback applies
+// ONLY when zero agent buckets were classified (e.g., historical rollups from
+// deleted agents no longer in scope).
+func deriveScopeCoverageSummary(
+	cov *store.UsageScopeCoverage,
+	totalEvents int64,
+	hasLegacyRollups bool,
+	hasNonLegacyRollups bool,
+	dbNow time.Time,
+	windowIncludesNow bool,
+	resolveCap usageCapabilityLookup,
+) (status string, unmeasuredAgents, staleAgents int) {
+	var (
+		partialAgents      int
+		measuredAgents     int
+		callsOnlyAgents    int
+		legacyClientAgents int
+	)
 	staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
 	if cov != nil {
 		for _, b := range cov.Buckets {
@@ -757,32 +788,71 @@ func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64
 					receiptAt = dbNow.Add(-(staleAfter + time.Second))
 				}
 				mhRows = []*store.MeterHealth{{
-					FinalState:    b.LatestFinalState,
-					LastReceiptAt: receiptAt,
+					FinalState:          b.LatestFinalState,
+					LastReceiptAt:       receiptAt,
+					SchemaDriftDetected: b.HasSchemaDrift,
 				}}
 			}
+			var runStartedAt time.Time
+			if b.IsPastGrace {
+				runStartedAt = dbNow.Add(-(defaultUsageStartupGrace + time.Second))
+			}
+			var usageCap *api.HarnessUsageCapabilities
+			if resolveCap != nil {
+				usageCap = resolveCap(b.CapabilityProjectID, b.HarnessConfig)
+			}
 			s := deriveMeasurementStatus(measurementStatusInput{
-				MeterHealth:       mhRows,
-				HasRunUsageEvents: b.HasUsageData,
-				DBNow:             dbNow,
-				AgentPhase:        phase,
+				MeterHealth:        mhRows,
+				HasRunUsageEvents:  b.HasUsageData,
+				HasLegacyUsageOnly: b.HasLegacyOnly,
+				RunStartedAt:       runStartedAt,
+				DBNow:              dbNow,
+				AgentPhase:         phase,
+				WindowIncludesNow:  &windowIncludesNow,
+				Usage:              usageCap,
 			})
 			switch s {
 			case MeasurementStatusStale:
 				staleAgents += b.AgentCount
+			case MeasurementStatusPartial:
+				partialAgents += b.AgentCount
 			case MeasurementStatusMeasured:
 				measuredAgents += b.AgentCount
+			case MeasurementStatusCallsOnly:
+				callsOnlyAgents += b.AgentCount
+			case MeasurementStatusLegacyClient:
+				legacyClientAgents += b.AgentCount
 			default:
 				unmeasuredAgents += b.AgentCount
 			}
 		}
 	}
 
+	totalClassified := staleAgents + partialAgents + measuredAgents + callsOnlyAgents + legacyClientAgents + unmeasuredAgents
 	switch {
 	case staleAgents > 0:
 		status = MeasurementStatusStale
-	case measuredAgents > 0 || totalEvents > 0:
+	case partialAgents > 0:
+		status = MeasurementStatusPartial
+	case measuredAgents > 0 && (callsOnlyAgents > 0 || legacyClientAgents > 0):
+		status = MeasurementStatusPartial
+	case measuredAgents > 0:
 		status = MeasurementStatusMeasured
+	case callsOnlyAgents > 0 && legacyClientAgents > 0:
+		status = MeasurementStatusPartial
+	case callsOnlyAgents > 0:
+		status = MeasurementStatusCallsOnly
+	case legacyClientAgents > 0:
+		status = MeasurementStatusLegacyClient
+	case totalClassified == 0 && totalEvents > 0:
+		switch {
+		case hasLegacyRollups && hasNonLegacyRollups:
+			status = MeasurementStatusPartial
+		case hasLegacyRollups:
+			status = MeasurementStatusLegacyClient
+		default:
+			status = MeasurementStatusMeasured
+		}
 	default:
 		status = MeasurementStatusUnmeasured
 	}

@@ -1464,6 +1464,42 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		return out
 	}
 
+	// Project extended coverage buckets onto the 5 pre-P2.3 flags so we verify
+	// exact equivalence of agent selection and running/meter/stale/usage counts
+	// between the globalDriven CTE and the old agents-driven query.
+	projectLegacyFlags := func(buckets []store.UsageCoverageBucket) []store.UsageCoverageBucket {
+		type key struct {
+			isRunning        bool
+			hasMeterHealth   bool
+			latestFinalState string
+			isReceiptStale   bool
+			hasUsageData     bool
+		}
+		counts := make(map[key]int, len(buckets))
+		for _, b := range buckets {
+			k := key{
+				isRunning:        b.IsRunning,
+				hasMeterHealth:   b.HasMeterHealth,
+				latestFinalState: b.LatestFinalState,
+				isReceiptStale:   b.IsReceiptStale,
+				hasUsageData:     b.HasUsageData,
+			}
+			counts[k] += b.AgentCount
+		}
+		out := make([]store.UsageCoverageBucket, 0, len(counts))
+		for k, cnt := range counts {
+			out = append(out, store.UsageCoverageBucket{
+				IsRunning:        k.isRunning,
+				HasMeterHealth:   k.hasMeterHealth,
+				LatestFinalState: k.latestFinalState,
+				IsReceiptStale:   k.isReceiptStale,
+				HasUsageData:     k.hasUsageData,
+				AgentCount:       cnt,
+			})
+		}
+		return out
+	}
+
 	// (a) Window including now: [now-24h, now]
 	gotNow, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
 		Since:      now.Add(-24 * time.Hour),
@@ -1473,7 +1509,7 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 	})
 	require.NoError(t, err)
 	wantNow := runOldGlobalCoverage(now.Add(-24*time.Hour), now, 3*time.Minute)
-	assert.ElementsMatch(t, wantNow.Buckets, gotNow.Buckets, "global coverage (includes now) must match old query")
+	assert.ElementsMatch(t, wantNow.Buckets, projectLegacyFlags(gotNow.Buckets), "global coverage (includes now) must match old query")
 	assert.Equal(t, wantNow.LastReceiptAt, gotNow.LastReceiptAt)
 
 	// (b) Historical window: [histStart, histEnd]
@@ -1485,7 +1521,7 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 	})
 	require.NoError(t, err)
 	wantHist := runOldGlobalCoverage(histStart, histEnd, 3*time.Minute)
-	assert.ElementsMatch(t, wantHist.Buckets, gotHist.Buckets, "global coverage (historical) must match old query")
+	assert.ElementsMatch(t, wantHist.Buckets, projectLegacyFlags(gotHist.Buckets), "global coverage (historical) must match old query")
 	assert.Equal(t, wantHist.LastReceiptAt, gotHist.LastReceiptAt)
 
 	// --- Postgres EXPLAIN (ANALYZE, BUFFERS) verification under force_generic_plan ---
@@ -1527,4 +1563,404 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		assert.NotContains(t, covPlan, "Seq Scan on agents", "global GetUsageScopeCoverage must not Seq Scan agents")
 		assert.Contains(t, covPlan, "agent_running_active", "global GetUsageScopeCoverage must use agent_running_active")
 	}
+}
+
+func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	projGlobal := createTestProject(t, cs, "cov-global")
+	projOverride := createTestProject(t, cs, "cov-override")
+	user1 := createTestUser(t, cs, "cov-u1@example.com")
+
+	seedAgent := func(projID, slug, runID string, phase state.Phase) *store.Agent {
+		ag := &store.Agent{
+			ID:        uuid.NewString(),
+			Slug:      slug,
+			Name:      slug,
+			ProjectID: projID,
+			OwnerID:   user1,
+			Phase:     string(phase),
+		}
+		require.NoError(t, cs.CreateAgent(ctx, ag))
+		_, err := cs.SetAgentRunID(ctx, ag.ID, runID, nil)
+		require.NoError(t, err)
+		ag.RunID = runID
+		return ag
+	}
+
+	// Seed an archived project-scoped harness config for slug "hermes" on projOverride
+	// (no status filter, matching dispatch; only matching slug splits capability_project_id).
+	require.NoError(t, cs.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hermes",
+		Slug:    "hermes",
+		Harness: "hermes",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: projOverride,
+		Status:  store.HarnessConfigStatusArchived,
+	}))
+
+	// 1. Agent on projGlobal: running past 60s grace, no meter_health, no events.
+	agPastGrace := seedAgent(projGlobal, "ag-past-grace", "run-past-grace", state.PhaseRunning)
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agPastGrace.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agPastGrace.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-2 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	// 2. Agent on projGlobal: running within 60s grace, no meter_health, no events.
+	agInGrace := seedAgent(projGlobal, "ag-in-grace", "run-in-grace", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agInGrace.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agInGrace.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-30 * time.Second),
+	})
+	require.NoError(t, err)
+
+	// 3. Agent on projGlobal: heartbeat-only fresh meter with schema_drift_detected=true.
+	agDrift := seedAgent(projGlobal, "ag-drift", "run-drift", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agDrift.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agDrift.ID,
+		Harness:       "antigravity",
+		HarnessConfig: "antigravity",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDrift.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agDrift.ID,
+			RunID:               agDrift.RunID,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       now.Add(-15 * time.Second),
+			ProducerSeq:         1,
+			SchemaDriftDetected: true,
+			FinalState:          store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// 4. Agent on projOverride: heartbeat-only fresh meter, project-scoped override present.
+	agOverride := seedAgent(projOverride, "ag-override", "run-override", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agOverride.RunID,
+		ProjectID:     projOverride,
+		AgentID:       agOverride.ID,
+		Harness:       "hermes",
+		HarnessConfig: "hermes",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agOverride.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agOverride.ID,
+			RunID:         agOverride.RunID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: now.Add(-10 * time.Second),
+			ProducerSeq:   1,
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	cov, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		Since:        now.Add(-1 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+
+	var foundPastGrace, foundInGrace, foundDrift, foundOverride bool
+	for _, b := range cov.Buckets {
+		switch {
+		case b.HarnessConfig == "claude" && b.IsPastGrace && !b.HasMeterHealth:
+			assert.Equal(t, "", b.CapabilityProjectID, "projGlobal has no project-scoped harness_config and must collapse to empty string")
+			assert.Equal(t, 1, b.AgentCount)
+			foundPastGrace = true
+		case b.HarnessConfig == "claude" && !b.IsPastGrace && !b.HasMeterHealth:
+			assert.Equal(t, "", b.CapabilityProjectID)
+			assert.Equal(t, 1, b.AgentCount)
+			foundInGrace = true
+		case b.HarnessConfig == "antigravity" && b.HasSchemaDrift:
+			assert.Equal(t, "", b.CapabilityProjectID)
+			assert.True(t, b.HasMeterHealth)
+			assert.False(t, b.HasUsageData)
+			assert.False(t, b.IsReceiptStale)
+			assert.Equal(t, 1, b.AgentCount)
+			foundDrift = true
+		case b.HarnessConfig == "hermes" && b.CapabilityProjectID == projOverride:
+			assert.True(t, b.HasMeterHealth)
+			assert.False(t, b.HasUsageData)
+			assert.Equal(t, 1, b.AgentCount)
+			foundOverride = true
+		}
+	}
+	assert.True(t, foundPastGrace, "expected bucket for claude past 60s grace")
+	assert.True(t, foundInGrace, "expected bucket for claude within 60s grace")
+	assert.True(t, foundDrift, "expected bucket for antigravity with schema drift")
+	assert.True(t, foundOverride, "expected bucket for hermes with projOverride capability_project_id")
+
+	// 5. Restarted agent with prior-run rollups inside the window and a new
+	// current run with NO events/meter must report HasUsageData=false (R1) so
+	// past-grace staleness is not suppressed by prior-run rollups.
+	agRestarted := seedAgent(projGlobal, "ag-restarted", "run-restarted-1", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-restarted-1",
+		ProjectID:     projGlobal,
+		AgentID:       agRestarted.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-2 * time.Hour),
+	})
+	require.NoError(t, err)
+	evPrior := makeStoreUsageEvent("hub-cov", "ev-prior-1", "run-restarted-1", projGlobal, agRestarted.ID, &user1, 1, now.Add(-2*time.Hour), 100, 50, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRestarted.ID,
+		Events:  []*store.UsageEvent{evPrior},
+	})
+	require.NoError(t, err)
+	// Restart onto run-restarted-2 (5m ago, past 60s grace, no events, no meter).
+	_, err = cs.SetAgentRunID(ctx, agRestarted.ID, "run-restarted-2", nil)
+	require.NoError(t, err)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-restarted-2",
+		ProjectID:     projGlobal,
+		AgentID:       agRestarted.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	covRestarted, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agRestarted.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covRestarted.Buckets, 1)
+	assert.True(t, covRestarted.Buckets[0].IsRunning)
+	assert.True(t, covRestarted.Buckets[0].IsPastGrace)
+	assert.False(t, covRestarted.Buckets[0].HasMeterHealth)
+	assert.False(t, covRestarted.Buckets[0].HasUsageData, "prior-run rollups must not set HasUsageData when current run has no events")
+	assert.False(t, covRestarted.Buckets[0].HasLegacyOnly)
+
+	// 6. Legacy-only current run sets HasUsageData=true and HasLegacyOnly=true;
+	// adding a Track 1 event clears HasLegacyOnly while keeping HasUsageData=true.
+	agLegacy := seedAgent(projGlobal, "ag-legacy-only", "run-legacy-1", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-legacy-1",
+		ProjectID:     projGlobal,
+		AgentID:       agLegacy.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evLegacy := makeStoreUsageEvent("hub-cov", "ev-legacy-1", "run-legacy-1", projGlobal, agLegacy.ID, &user1, 1, now.Add(-5*time.Minute), 100, 50, 0, 0)
+	evLegacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agLegacy.ID,
+		Events:  []*store.UsageEvent{evLegacy},
+	})
+	require.NoError(t, err)
+
+	covLegacy, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agLegacy.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covLegacy.Buckets, 1)
+	assert.True(t, covLegacy.Buckets[0].HasUsageData)
+	assert.True(t, covLegacy.Buckets[0].HasLegacyOnly, "legacy-only current run must set HasLegacyOnly=true")
+
+	evTrack1 := makeStoreUsageEvent("hub-cov", "ev-track1-1", "run-legacy-1", projGlobal, agLegacy.ID, &user1, 2, now.Add(-4*time.Minute), 20, 10, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agLegacy.ID,
+		Events:  []*store.UsageEvent{evTrack1},
+	})
+	require.NoError(t, err)
+
+	covMixed, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agLegacy.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covMixed.Buckets, 1)
+	assert.True(t, covMixed.Buckets[0].HasUsageData)
+	assert.False(t, covMixed.Buckets[0].HasLegacyOnly, "mixed Track 1 + legacy run must set HasLegacyOnly=false")
+
+	// 7. O1: run_id-empty agent uses the usage_rollups_daily arm for HasLegacyOnly.
+	agEmptyRun := seedAgent(projGlobal, "ag-empty-run-legacy", "", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "legacy-agent:" + agEmptyRun.ID,
+		ProjectID:     projGlobal,
+		AgentID:       agEmptyRun.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-15 * time.Minute),
+	})
+	require.NoError(t, err)
+	evEmptyRunLegacy := makeStoreUsageEvent("hub-cov", "ev-empty-run-leg-1", "legacy-agent:"+agEmptyRun.ID, projGlobal, agEmptyRun.ID, &user1, 1, now.Add(-10*time.Minute), 40, 20, 0, 0)
+	evEmptyRunLegacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agEmptyRun.ID,
+		Events:  []*store.UsageEvent{evEmptyRunLegacy},
+	})
+	require.NoError(t, err)
+
+	covEmptyRunLegacy, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agEmptyRun.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covEmptyRunLegacy.Buckets, 1)
+	assert.True(t, covEmptyRunLegacy.Buckets[0].HasUsageData)
+	assert.True(t, covEmptyRunLegacy.Buckets[0].HasLegacyOnly, "run_id-empty agent with only legacy rollups must set HasLegacyOnly=true")
+
+	evEmptyRunTrack1 := makeStoreUsageEvent("hub-cov", "ev-empty-run-t1-1", "legacy-agent:"+agEmptyRun.ID, projGlobal, agEmptyRun.ID, &user1, 2, now.Add(-9*time.Minute), 10, 5, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agEmptyRun.ID,
+		Events:  []*store.UsageEvent{evEmptyRunTrack1},
+	})
+	require.NoError(t, err)
+
+	covEmptyRunMixed, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agEmptyRun.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covEmptyRunMixed.Buckets, 1)
+	assert.True(t, covEmptyRunMixed.Buckets[0].HasUsageData)
+	assert.False(t, covEmptyRunMixed.Buckets[0].HasLegacyOnly, "run_id-empty agent with non-legacy rollup added must set HasLegacyOnly=false")
+
+	// 8. R1: deleted-agent scope has zero coverage buckets while QueryUsageRollups
+	// exposes HasLegacyRollups / HasNonLegacyRollups accurately across legacy-only,
+	// mixed, and Track-1-only scopes.
+	projDeletedLegacy := createTestProject(t, cs, "cov-deleted-legacy")
+	agDelLeg := seedAgent(projDeletedLegacy, "ag-del-leg", "run-del-leg-1", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-del-leg-1",
+		ProjectID:     projDeletedLegacy,
+		AgentID:       agDelLeg.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evDelLeg := makeStoreUsageEvent("hub-cov", "ev-del-leg-1", "run-del-leg-1", projDeletedLegacy, agDelLeg.ID, &user1, 1, now.Add(-5*time.Minute), 100, 50, 0, 0)
+	evDelLeg.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDelLeg.ID,
+		Events:  []*store.UsageEvent{evDelLeg},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cs.DeleteAgent(ctx, agDelLeg.ID))
+
+	covDelLeg, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projDeletedLegacy,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, covDelLeg.Buckets, "deleted agent must yield zero coverage buckets")
+
+	rollupDelLeg, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		ProjectID:   projDeletedLegacy,
+		Since:       now.Add(-24 * time.Hour),
+		Until:       now,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rollupDelLeg.Totals.Events)
+	assert.True(t, rollupDelLeg.HasLegacyRollups)
+	assert.False(t, rollupDelLeg.HasNonLegacyRollups)
+
+	// Adding a Track 1 event in the same deleted-agent project makes it mixed.
+	evDelTrack1 := makeStoreUsageEvent("hub-cov", "ev-del-t1-1", "run-del-leg-1", projDeletedLegacy, agDelLeg.ID, &user1, 2, now.Add(-4*time.Minute), 10, 5, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDelLeg.ID,
+		Events:  []*store.UsageEvent{evDelTrack1},
+	})
+	require.NoError(t, err)
+	rollupDelMixed, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		ProjectID:   projDeletedLegacy,
+		Since:       now.Add(-24 * time.Hour),
+		Until:       now,
+	})
+	require.NoError(t, err)
+	assert.True(t, rollupDelMixed.HasLegacyRollups)
+	assert.True(t, rollupDelMixed.HasNonLegacyRollups)
+
+	// Track-1-only project sets HasLegacyRollups=false, HasNonLegacyRollups=true.
+	projTrack1Only := createTestProject(t, cs, "cov-track1-only")
+	agT1 := seedAgent(projTrack1Only, "ag-t1-only", "run-t1-only-1", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-t1-only-1",
+		ProjectID:     projTrack1Only,
+		AgentID:       agT1.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evT1Only := makeStoreUsageEvent("hub-cov", "ev-t1-only-1", "run-t1-only-1", projTrack1Only, agT1.ID, &user1, 1, now.Add(-5*time.Minute), 10, 5, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agT1.ID,
+		Events:  []*store.UsageEvent{evT1Only},
+	})
+	require.NoError(t, err)
+	rollupT1Only, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		ProjectID:   projTrack1Only,
+		Since:       now.Add(-24 * time.Hour),
+		Until:       now,
+	})
+	require.NoError(t, err)
+	assert.False(t, rollupT1Only.HasLegacyRollups)
+	assert.True(t, rollupT1Only.HasNonLegacyRollups)
 }

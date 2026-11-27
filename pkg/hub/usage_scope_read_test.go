@@ -606,6 +606,7 @@ func TestScopedUsageRead_SaturatedTotalsAndStoppedNotStale(t *testing.T) {
 				{IsRunning: false, HasMeterHealth: true, LatestFinalState: store.MeterHealthFinalStateOpen, IsReceiptStale: true, HasUsageData: true, AgentCount: 2},
 			},
 		},
+		nil,
 	)
 	require.NotNil(t, resp.Tokens.SummableTokens)
 	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.SummableTokens)

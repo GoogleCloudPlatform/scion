@@ -189,6 +189,9 @@ type Client interface {
 	// CommandRequests returns the human-approved command request operations interface.
 	CommandRequests() CommandRequestService
 
+	// Usage returns the Track 1 token usage read operations interface.
+	Usage() UsageService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 
@@ -236,6 +239,7 @@ type client struct {
 	decisions             *decisionService
 	myDecisions           *myDecisionService
 	commandRequests       *commandRequestService
+	usage                 *usageService
 
 	// pluginName, when set (WithPluginName), is sent as
 	// X-Scion-Plugin-Name on the broker attachment requests.
@@ -306,6 +310,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.decisions = &decisionService{c: c}
 	c.myDecisions = &myDecisionService{c: c}
 	c.commandRequests = &commandRequestService{c: c}
+	c.usage = &usageService{c: c}
 
 	return c, nil
 }
@@ -512,6 +517,10 @@ func (c *client) MyDecisions() MyDecisionService {
 // CommandRequests returns the command request operations interface.
 func (c *client) CommandRequests() CommandRequestService {
 	return c.commandRequests
+}
+
+func (c *client) Usage() UsageService {
+	return c.usage
 }
 
 // get performs an HTTP GET request.

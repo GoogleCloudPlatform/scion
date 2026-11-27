@@ -228,6 +228,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `template` (`list`, `show`, `clone`, `delete`, `import`, `import-url`, `update`, `sync`, `push`, `pull`, `status`) | Y | Y (singular alias parity with `templates`) |
 | `tunnel` | Y | - |
 | `tunnel status` | Y | - |
+| `usage` | Y | Y (defaults to the agent's own project; `--user` and `--all` are human-mode only; Hub enforces project/agent scope) |
 | `version` | Y | Y |
 | `vscode` | Y | - |
 | `help` | Y | Y |

@@ -497,9 +497,11 @@ type UsageRollupQuery struct {
 // UsageRollupQueryResult holds overall totals and optional bounded grouped rows
 // returned by QueryUsageRollups.
 type UsageRollupQueryResult struct {
-	Totals    UsageRollupTotals
-	Groups    []*UsageRollupGroup
-	Truncated bool
+	Totals              UsageRollupTotals
+	Groups              []*UsageRollupGroup
+	Truncated           bool
+	HasLegacyRollups    bool
+	HasNonLegacyRollups bool
 }
 
 // UsageCoverageFilter scopes a single-query aggregate meter-health and
@@ -511,19 +513,27 @@ type UsageCoverageFilter struct {
 	Since         time.Time
 	Until         time.Time
 	StaleAfter    time.Duration
+	StartupGrace  time.Duration
 	DBNow         time.Time
 }
 
 // UsageCoverageBucket aggregates agent counts sharing the same
-// measurement-status derivation inputs so the Hub derives status through a
-// single Go function (deriveMeasurementStatus) without per-agent queries.
+// measurement-status derivation inputs (including current harness-config
+// identity) so the Hub derives status through a single Go function
+// (deriveMeasurementStatus) without per-agent queries.
 type UsageCoverageBucket struct {
-	IsRunning        bool
-	HasMeterHealth   bool
-	LatestFinalState string
-	IsReceiptStale   bool
-	HasUsageData     bool
-	AgentCount       int
+	HarnessConfig       string
+	Harness             string
+	CapabilityProjectID string
+	IsRunning           bool
+	HasMeterHealth      bool
+	LatestFinalState    string
+	IsReceiptStale      bool
+	IsPastGrace         bool
+	HasSchemaDrift      bool
+	HasUsageData        bool
+	HasLegacyOnly       bool
+	AgentCount          int
 }
 
 // UsageScopeCoverage summarizes measurement coverage inputs across agents in scope.

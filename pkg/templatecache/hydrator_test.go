@@ -165,6 +165,7 @@ func (m *mockHubClient) ProjectMessagePolicies(string) hubclient.MessagePolicySe
 }
 func (m *mockHubClient) MyDecisions() hubclient.MyDecisionService         { return nil }
 func (m *mockHubClient) CommandRequests() hubclient.CommandRequestService { return nil }
+func (m *mockHubClient) Usage() hubclient.UsageService                    { return nil }
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }

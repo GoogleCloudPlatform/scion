@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -43,6 +46,7 @@ const (
 	defaultUsageRunSummaryCap = 20
 	defaultHeartbeatInterval  = time.Duration(telemetrycontract.DefaultUsageHeartbeatIntervalSec) * time.Second
 	staleHeartbeatMultiplier  = 3
+	defaultUsageStartupGrace  = 60 * time.Second
 )
 
 // AgentUsageBucketUnknownEvents reports per-bucket counts of events in the
@@ -177,7 +181,7 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	targetRunID, _ := resolveCurrentRunForUsage(agent, runs)
+	targetRunID, currentRA := resolveCurrentRunForUsage(agent, runs)
 	var currentRunSources store.RunUsageSourceSummary
 	if targetRunID != "" {
 		currentRunSources, err = s.store.GetRunUsageSourceSummary(ctx, agent.ID, targetRunID)
@@ -187,7 +191,20 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, runs, targetRunID, meterRows, currentRunSources)
+	var hcName string
+	if currentRA != nil {
+		hcName = strings.TrimSpace(currentRA.HarnessConfig)
+	}
+	if hcName == "" {
+		hcName = strings.TrimSpace(agent.HarnessConfig)
+	}
+	usageCap := newUsageCapabilityMemo(ctx, s).resolve(agent.ProjectID, hcName)
+	var runStartedAt time.Time
+	if currentRA != nil {
+		runStartedAt = currentRA.CreatedAt
+	}
+
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, runs, targetRunID, meterRows, currentRunSources, runStartedAt, usageCap)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -399,6 +416,8 @@ func buildAgentUsageResponse(
 	targetRunID string,
 	meterRows []*store.MeterHealth,
 	currentRunSources store.RunUsageSourceSummary,
+	runStartedAt time.Time,
+	usageCap *api.HarnessUsageCapabilities,
 ) AgentUsageResponse {
 	type modelKey struct {
 		model       string
@@ -579,12 +598,16 @@ func buildAgentUsageResponse(
 		}
 	}
 
+	windowIncludesNow := usageWindowIncludesNow(until, dbNow)
 	status := deriveMeasurementStatus(measurementStatusInput{
 		MeterHealth:        currentRunMeterRows,
 		HasRunUsageEvents:  hasRunData,
 		HasLegacyUsageOnly: hasLegacyOnly,
+		RunStartedAt:       runStartedAt,
 		DBNow:              dbNow,
 		AgentPhase:         agent.Phase,
+		WindowIncludesNow:  &windowIncludesNow,
+		Usage:              usageCap,
 	})
 
 	return AgentUsageResponse{
@@ -708,31 +731,212 @@ func resolveNullableTokens(
 	return out
 }
 
+type usageCapabilityKind int
+
+const (
+	usageCapUnknown usageCapabilityKind = iota
+	usageCapUnmeasured
+	usageCapCallsOnly
+	usageCapPartial
+	usageCapFull
+)
+
+// summableTokenTypes lists the four canonical summable token buckets (§3.1).
+// A live-metered harness achieves full ("measured") coverage when every
+// summable token type appears in either TokenTypes or NotApplicableTokenTypes.
+// CountsFailedCalls=false does not downgrade measurement_status to partial.
+var summableTokenTypes = []string{
+	telemetrycontract.TokenTypeInput,
+	telemetrycontract.TokenTypeOutput,
+	telemetrycontract.TokenTypeCacheRead,
+	telemetrycontract.TokenTypeCacheWrite,
+}
+
+func classifyUsageLiveCapability(u *api.HarnessUsageCapabilities) usageCapabilityKind {
+	if u == nil || strings.TrimSpace(string(u.Live.Source)) == "" {
+		return usageCapUnknown
+	}
+	if u.Live.Source == api.UsageLiveSourceNone {
+		return usageCapUnmeasured
+	}
+	if len(u.Live.TokenTypes) == 0 {
+		return usageCapCallsOnly
+	}
+	covered := make(map[string]bool, len(u.Live.TokenTypes)+len(u.Live.NotApplicableTokenTypes))
+	for _, tt := range u.Live.TokenTypes {
+		covered[strings.TrimSpace(tt)] = true
+	}
+	for _, tt := range u.Live.NotApplicableTokenTypes {
+		covered[strings.TrimSpace(tt)] = true
+	}
+	for _, req := range summableTokenTypes {
+		if !covered[req] {
+			return usageCapPartial
+		}
+	}
+	return usageCapFull
+}
+
+// usageWindowIncludesNow is the single shared definition (matching
+// GetUsageScopeCoverage in pkg/store/entadapter/usage_read_store.go) of
+// whether a queried [since, until] window includes "now" for running-phase
+// and staleness derivation (D7a).
+func usageWindowIncludesNow(until, dbNow time.Time) bool {
+	staleCutoff := dbNow.UTC().Add(-(staleHeartbeatMultiplier * defaultHeartbeatInterval)).Truncate(time.Microsecond)
+	return !until.UTC().Truncate(time.Microsecond).Before(staleCutoff)
+}
+
+type usageConfigLookupResult struct {
+	hc  *store.HarnessConfig
+	err error
+}
+
+// usageCapabilityLookup resolves the current harness-config revision's
+// usage.yaml capability for one (projectID, harnessConfig) tuple.
+type usageCapabilityLookup func(projectID, harnessConfig string) *api.HarnessUsageCapabilities
+
+// usageCapabilityMemo is the single shared harness-config usage capability
+// resolver used by both per-agent reads and scoped aggregate reads.
+//
+// Resolution matches dispatch (resolveHarnessConfigBySlug) exactly:
+//   - walks s.harnessConfigLookupScopes(projectID) (global-first on hosted
+//     hubs, project-first on workstation hubs) with no status filter;
+//   - stops at the FIRST config found — if that dispatch-winning config has
+//     no usage.yaml (or an invalid one), capability is unknown (nil) and
+//     never falls through to a shadowed same-slug config in another scope;
+//   - on hosted hubs, a non-NotFound error on global lookup stops immediately
+//     without consulting project scope (returning unknown/nil);
+//   - never falls back to a global config named after the harness type;
+//     capability comes strictly from what dispatch's slug lookup finds.
+//
+// Memoizes per-scope lookups (hits, not-found, and errors) for one request.
+// Note: capability reflects the current harness-config revision, not a
+// per-run snapshot.
+type usageCapabilityMemo struct {
+	ctx     context.Context
+	s       *Server
+	project map[harnessRefKey]usageConfigLookupResult
+	global  map[string]usageConfigLookupResult
+}
+
+func newUsageCapabilityMemo(ctx context.Context, s *Server) *usageCapabilityMemo {
+	return &usageCapabilityMemo{
+		ctx:     ctx,
+		s:       s,
+		project: make(map[harnessRefKey]usageConfigLookupResult),
+		global:  make(map[string]usageConfigLookupResult),
+	}
+}
+
+func (m *usageCapabilityMemo) lookupScope(slug, scope, scopeID string) (*store.HarnessConfig, error) {
+	if slug == "" || m == nil || m.s == nil || m.s.store == nil {
+		return nil, store.ErrNotFound
+	}
+	if scope == store.HarnessConfigScopeProject {
+		k := harnessRefKey{projectID: scopeID, ref: slug}
+		if res, ok := m.project[k]; ok {
+			return res.hc, res.err
+		}
+		hc, err := m.s.store.GetHarnessConfigBySlug(m.ctx, slug, scope, scopeID)
+		m.project[k] = usageConfigLookupResult{hc: hc, err: err}
+		return hc, err
+	}
+	if res, ok := m.global[slug]; ok {
+		return res.hc, res.err
+	}
+	hc, err := m.s.store.GetHarnessConfigBySlug(m.ctx, slug, store.HarnessConfigScopeGlobal, "")
+	m.global[slug] = usageConfigLookupResult{hc: hc, err: err}
+	return hc, err
+}
+
+func (m *usageCapabilityMemo) resolveConfigBySlug(projectID, name string) (*store.HarnessConfig, error) {
+	if name == "" || m == nil || m.s == nil {
+		return nil, nil
+	}
+	var lookupErr error
+	for _, sc := range m.s.harnessConfigLookupScopes(projectID) {
+		hc, err := m.lookupScope(name, sc.scope, sc.scopeID)
+		if err == nil && hc != nil {
+			return hc, nil
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			if m.s.agentLifecycleLog != nil {
+				m.s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
+					"slug", name, "scope_id", sc.scopeID, "error", err)
+			}
+			if !m.s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
+				return nil, err
+			}
+			lookupErr = err
+		}
+	}
+	return nil, lookupErr
+}
+
+func (m *usageCapabilityMemo) resolve(projectID, harnessConfig string) *api.HarnessUsageCapabilities {
+	if m == nil || m.s == nil {
+		return nil
+	}
+	hcName := strings.TrimSpace(harnessConfig)
+	if hcName == "" {
+		return nil
+	}
+	hc, err := m.resolveConfigBySlug(projectID, hcName)
+	if err != nil || hc == nil {
+		return nil
+	}
+	m.s.populateHarnessConfigCapabilities(m.ctx, hc)
+	return usageCapabilityFromHarnessConfig(hc)
+}
+
+// usageCapabilityFromHarnessConfig extracts the parsed usage.yaml capability
+// from a stored HarnessConfig, or nil if absent/unknown.
+func usageCapabilityFromHarnessConfig(hc *store.HarnessConfig) *api.HarnessUsageCapabilities {
+	if hc == nil || hc.Config == nil {
+		return nil
+	}
+	return hc.Config.Usage
+}
+
 // measurementStatusInput holds the run-scoped inputs to deriveMeasurementStatus.
-// Kept in a single struct + single function so P2 can extend it with usage.yaml
-// harness capability metadata without changing call sites.
+// Kept in a single struct + single function so both per-agent and scoped
+// aggregate reads share one authoritative derivation.
 type measurementStatusInput struct {
 	MeterHealth        []*store.MeterHealth
 	HasRunUsageEvents  bool
 	HasLegacyUsageOnly bool
+	RunStartedAt       time.Time
 	DBNow              time.Time
-	// AgentPhase, when non-empty, restricts open-meter staleness to running
-	// agents (PhaseRunning) so stopped or crashed agents do not remain stale
-	// indefinitely (O1b).
+	// AgentPhase, when non-empty, restricts open-meter and past-grace staleness
+	// to running agents (PhaseRunning) so stopped or crashed agents do not
+	// remain stale indefinitely (O1b).
 	AgentPhase string
+	// WindowIncludesNow gates running-phase/stale derivation (D7a): historical
+	// windows strictly before DBNow do not flag agents as stale. Nil defaults
+	// to true.
+	WindowIncludesNow *bool
+	// Usage is the current harness-config revision's usage.yaml capability.
+	// Nil means unknown capability (preserves P1 behavior).
+	Usage *api.HarnessUsageCapabilities
 }
 
-// deriveMeasurementStatus computes measurement_status for an agent's current run:
-//   - "stale" when an open meter_health row for the run has had no receipt for
-//     more than 3 heartbeat intervals (180s), evaluated at read time from DBNow
-//     (§4.2 item 7), and (when AgentPhase is provided) the agent is in a
-//     running phase;
-//   - "legacy_client" when the current run has usage events solely from
-//     legacy_session_metrics (and no Track 1 meter_health);
-//   - "measured" when the current run has received Track 1 usage events and its
-//     meter is fresh (or cleanly closed with final_state="final");
-//   - "unmeasured" when no Track 1 usage data has been received for the current
-//     run.
+// deriveMeasurementStatus computes the Track 1 measurement_status for an
+// agent's current run (Tokenomics design §3.3, §4.2 item 7, §4.5):
+//   - "legacy_client" when the current run's usage events come solely from
+//     legacy_session_metrics (even if a meter_health row exists, unless the
+//     open meter is stale — stale still wins, D13a);
+//   - source: none -> "unmeasured" unconditionally;
+//   - running & window includes now: open meter past 3 heartbeats (180s), OR
+//     known live-metered harness with no receipt/events past 60s startup grace
+//     -> "stale";
+//   - no usage events & no fresh meter -> "unmeasured";
+//   - heartbeat-only fresh meter with known capability -> capability status
+//     ("measured" / "partial" / "calls_only"); unknown capability -> "unmeasured";
+//   - schema_drift_detected on latest meter -> "calls_only";
+//   - final_state="incomplete" on latest meter -> "partial" (or "calls_only"
+//     when capability is calls_only);
+//   - otherwise maps capability: calls_only -> "calls_only", partial ->
+//     "partial", full or unknown -> "measured".
 func deriveMeasurementStatus(in measurementStatusInput) string {
 	var latest *store.MeterHealth
 	for _, mh := range in.MeterHealth {
@@ -744,23 +948,65 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 		}
 	}
 
-	if latest != nil {
-		staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
-		isRunning := in.AgentPhase == "" || in.AgentPhase == string(state.PhaseRunning)
-		if isRunning &&
-			latest.FinalState == store.MeterHealthFinalStateOpen &&
-			in.DBNow.Sub(latest.LastReceiptAt) > staleAfter {
+	windowIncludesNow := true
+	if in.WindowIncludesNow != nil {
+		windowIncludesNow = *in.WindowIncludesNow
+	}
+	isRunning := windowIncludesNow && (in.AgentPhase == "" || in.AgentPhase == string(state.PhaseRunning))
+
+	staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
+	isOpenMeterStale := latest != nil &&
+		isRunning &&
+		latest.FinalState == store.MeterHealthFinalStateOpen &&
+		in.DBNow.Sub(latest.LastReceiptAt) > staleAfter
+
+	// D13a: legacy-only runs read legacy_client even when a meter_health row
+	// exists (and regardless of current usage.yaml), unless the meter is stale.
+	if in.HasRunUsageEvents && in.HasLegacyUsageOnly {
+		if isOpenMeterStale {
 			return MeasurementStatusStale
 		}
-		// TODO(P2): map latest.FinalState == store.MeterHealthFinalStateIncomplete
-		// to MeasurementStatusPartial once P2 adds partial-coverage handling.
+		return MeasurementStatusLegacyClient
 	}
 
-	if in.HasRunUsageEvents {
-		if in.HasLegacyUsageOnly && latest == nil {
-			return MeasurementStatusLegacyClient
-		}
-		return MeasurementStatusMeasured
+	capKind := classifyUsageLiveCapability(in.Usage)
+	if capKind == usageCapUnmeasured {
+		return MeasurementStatusUnmeasured
 	}
-	return MeasurementStatusUnmeasured
+
+	if isOpenMeterStale {
+		return MeasurementStatusStale
+	}
+	if latest == nil &&
+		isRunning &&
+		capKind != usageCapUnknown &&
+		!in.HasRunUsageEvents &&
+		!in.RunStartedAt.IsZero() &&
+		in.DBNow.Sub(in.RunStartedAt) > defaultUsageStartupGrace {
+		// P1 deferral (a): running agent whose harness declares live metering
+		// with no receipt or usage events past the 60s startup grace reads stale.
+		return MeasurementStatusStale
+	}
+
+	// No usage events: only a fresh meter on a known live-metered harness
+	// (P1 deferral b: heartbeat-only fresh meter) reads as measured/partial/calls_only.
+	if !in.HasRunUsageEvents {
+		if latest == nil || capKind == usageCapUnknown {
+			return MeasurementStatusUnmeasured
+		}
+	}
+
+	if latest != nil && latest.SchemaDriftDetected && (capKind == usageCapFull || capKind == usageCapPartial) {
+		return MeasurementStatusCallsOnly
+	}
+	if capKind == usageCapCallsOnly {
+		return MeasurementStatusCallsOnly
+	}
+	if latest != nil && latest.FinalState == store.MeterHealthFinalStateIncomplete {
+		return MeasurementStatusPartial
+	}
+	if capKind == usageCapPartial {
+		return MeasurementStatusPartial
+	}
+	return MeasurementStatusMeasured
 }

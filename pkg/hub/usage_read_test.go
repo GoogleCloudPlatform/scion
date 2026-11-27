@@ -789,7 +789,7 @@ func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *t
 		{Model: "claude-sonnet-4-6", Harness: "claude", UsageSource: store.UsageSourceHooks, Calls: 2, Input: 10, Output: 5, Events: 2},
 		{Model: "claude-sonnet-4-6", Harness: "", UsageSource: store.UsageSourceNative, Calls: 2, Input: 10, Output: 5, Events: 2},
 	}
-	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{})
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{}, time.Time{}, nil)
 	require.Len(t, resp.ByModel, 4)
 	assert.Equal(t, "", resp.ByModel[0].Harness)
 	assert.Equal(t, store.UsageSourceNative, resp.ByModel[0].UsageSource)
@@ -817,7 +817,7 @@ func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *t
 			PresenceTrackedEvents: 0,
 		},
 	}
-	legacyResp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, legacyRollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{})
+	legacyResp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, legacyRollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{}, time.Time{}, nil)
 	require.NotNil(t, legacyResp.Tokens.Input)
 	assert.Equal(t, int64(100), *legacyResp.Tokens.Input)
 	require.NotNil(t, legacyResp.Tokens.Output)
@@ -857,7 +857,7 @@ func TestAgentUsageRead_SaturatesOnOverflow(t *testing.T) {
 		},
 	}
 
-	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{HasTrack1Events: true})
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{HasTrack1Events: true}, time.Time{}, nil)
 	require.NotNil(t, resp.Tokens.Input)
 	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.Input)
 	require.NotNil(t, resp.Tokens.Output)

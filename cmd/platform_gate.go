@@ -99,6 +99,9 @@ var windowsAllowed = map[string]bool{
 	"artifact.dismiss-review":  true,
 	"artifact.review-requests": true,
 
+	// Token usage summary (ptone/scion#9239, D10): pure Hub API calls, no local writes.
+	"usage": true,
+
 	// Event triggers and webhook endpoints (ptone/scion#8028): pure Hub API
 	// calls, no local writes.
 	"trigger":                       true,

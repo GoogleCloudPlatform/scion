@@ -80,6 +80,7 @@ var agentAllowed = map[string]bool{
 	"stop":                        true,
 	"suspend":                     true,
 	"unexpose":                    true, // acts only as the calling agent (ptone/scion#4728)
+	"usage":                       true, // own project or own agent usage; Hub enforces scope (ptone/scion#9239)
 	"version":                     true,
 	"whoami":                      true,
 	"global-flags":                true,
