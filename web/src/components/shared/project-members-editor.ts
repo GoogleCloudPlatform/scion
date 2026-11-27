@@ -654,6 +654,14 @@ export class ScionProjectMembersEditor extends LitElement {
         display: block;
       }
 
+      /* Query container for the narrow stacked layout: wraps the header and
+         table (not the sibling <sl-dialog> modals, which need viewport-fixed
+         positioning) so the editor adapts to its own width rather than the
+         viewport (e.g. just above 768px when the 280px sidebar is visible). */
+      .members-layout {
+        container-type: inline-size;
+      }
+
       .section {
         background: var(--scion-surface, #ffffff);
         border: 1px solid var(--scion-border, #e2e8f0);
@@ -1017,7 +1025,7 @@ export class ScionProjectMembersEditor extends LitElement {
         margin-top: 0.375rem;
       }
 
-      @media (max-width: 768px) {
+      @container (max-width: 600px) {
         .section {
           padding: 1rem;
         }
@@ -1870,47 +1878,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
   private renderStandalone() {
     return html`
-      ${this.renderFeedback()}
-      <div class="section-header">
-        <div class="section-header-info">
-          <h2>
-            ${this.sectionTitle}
-            <span class="member-count">(${this.groups.length})</span>
-          </h2>
-          ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
-        </div>
-        <div class="section-header-actions">
-          ${this.capabilities?.canTransfer
-            ? html`
-                <sl-button
-                  variant="warning"
-                  size="small"
-                  outline
-                  @click=${() => this.openTransferDialog()}
-                >
-                  <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
-                  Transfer Ownership
-                </sl-button>
-              `
-            : nothing}
-          ${!this.effectiveReadOnly
-            ? html`
-                <sl-button variant="primary" size="small" @click=${() => this.openAddDialog()}>
-                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                  Add Member
-                </sl-button>
-              `
-            : nothing}
-        </div>
-      </div>
-      ${this.renderBody()} ${this.renderMemberDialog()} ${this.renderTransferDialog()}
-      ${this.renderLeaveDialog()}
-    `;
-  }
-
-  private renderCompact() {
-    return html`
-      <div class="section compact">
+      <div class="members-layout">
         ${this.renderFeedback()}
         <div class="section-header">
           <div class="section-header-info">
@@ -1936,7 +1904,7 @@ export class ScionProjectMembersEditor extends LitElement {
               : nothing}
             ${!this.effectiveReadOnly
               ? html`
-                  <sl-button size="small" variant="default" @click=${() => this.openAddDialog()}>
+                  <sl-button variant="primary" size="small" @click=${() => this.openAddDialog()}>
                     <sl-icon slot="prefix" name="person-plus"></sl-icon>
                     Add Member
                   </sl-button>
@@ -1944,9 +1912,53 @@ export class ScionProjectMembersEditor extends LitElement {
               : nothing}
           </div>
         </div>
-        ${this.renderBody()} ${this.renderMemberDialog()} ${this.renderTransferDialog()}
-        ${this.renderLeaveDialog()}
+        ${this.renderBody()}
       </div>
+      ${this.renderMemberDialog()} ${this.renderTransferDialog()} ${this.renderLeaveDialog()}
+    `;
+  }
+
+  private renderCompact() {
+    return html`
+      <div class="members-layout">
+        <div class="section compact">
+          ${this.renderFeedback()}
+          <div class="section-header">
+            <div class="section-header-info">
+              <h2>
+                ${this.sectionTitle}
+                <span class="member-count">(${this.groups.length})</span>
+              </h2>
+              ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
+            </div>
+            <div class="section-header-actions">
+              ${this.capabilities?.canTransfer
+                ? html`
+                    <sl-button
+                      variant="warning"
+                      size="small"
+                      outline
+                      @click=${() => this.openTransferDialog()}
+                    >
+                      <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                      Transfer Ownership
+                    </sl-button>
+                  `
+                : nothing}
+              ${!this.effectiveReadOnly
+                ? html`
+                    <sl-button size="small" variant="default" @click=${() => this.openAddDialog()}>
+                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                      Add Member
+                    </sl-button>
+                  `
+                : nothing}
+            </div>
+          </div>
+          ${this.renderBody()}
+        </div>
+      </div>
+      ${this.renderMemberDialog()} ${this.renderTransferDialog()} ${this.renderLeaveDialog()}
     `;
   }
 

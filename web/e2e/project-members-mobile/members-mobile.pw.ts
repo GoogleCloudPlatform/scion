@@ -117,6 +117,79 @@ test.describe('Project Settings > Members responsive layout', () => {
     });
   });
 
+  test.describe('tablet 780px viewport (sidebar visible, narrow editor)', () => {
+    test.use({ viewport: { width: 780, height: 800 } });
+
+    test('uses narrow stacked layout and keeps header and all row actions unclipped', async ({
+      page,
+    }) => {
+      await setupProjectMembersHub(page, { showVisitorsTab: true });
+      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+      const editor = page.locator('scion-project-members-editor');
+      await expect(editor).toBeVisible({ timeout: 10_000 });
+      await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+      const editorRect = await rectOf(editor);
+      // Above 768px the 280px sidebar is visible, leaving the editor narrow.
+      expect(editorRect.left).toBeGreaterThanOrEqual(240);
+      expect(editorRect.width).toBeLessThan(520);
+
+      const headerInfo = editor.locator('.section-header-info');
+      const headerActions = editor.locator('.section-header-actions');
+      const transferBtn = headerActions.locator('sl-button', { hasText: 'Transfer Ownership' });
+      const addBtn = headerActions.locator('sl-button', { hasText: 'Add Member' });
+
+      const infoRect = await rectOf(headerInfo);
+      const actionsRect = await rectOf(headerActions);
+      const transferRect = await rectOf(transferBtn);
+      const addRect = await rectOf(addBtn);
+
+      // Header stacks and buttons stay within the editor bounds.
+      expect(actionsRect.top).toBeGreaterThanOrEqual(infoRect.bottom - 1);
+      expect(transferRect.left).toBeGreaterThanOrEqual(editorRect.left - 1);
+      expect(transferRect.right).toBeLessThanOrEqual(editorRect.right + 1);
+      expect(addRect.left).toBeGreaterThanOrEqual(editorRect.left - 1);
+      expect(addRect.right).toBeLessThanOrEqual(editorRect.right + 1);
+      expect(addRect.right).toBeLessThanOrEqual(780);
+
+      // Member table container and both rows keep every action visible and unclipped.
+      const tableContainer = editor.locator('.table-container');
+      const tableRect = await rectOf(tableContainer);
+      expect(tableRect.right).toBeLessThanOrEqual(780);
+
+      const selfRow = editor.locator(`tr[data-principal="user:${SELF_USER_ID}"]`);
+      const selfEdit = selfRow.locator('sl-icon-button[label="Edit roles"]');
+      const selfLeave = selfRow.locator('sl-button[data-self-leave]');
+      await expect(selfEdit).toBeVisible();
+      await expect(selfLeave).toBeVisible();
+      const selfEditRect = await rectOf(selfEdit);
+      const selfLeaveRect = await rectOf(selfLeave);
+      expect(selfEditRect.right).toBeLessThanOrEqual(tableRect.right + 1);
+      expect(selfLeaveRect.left).toBeGreaterThanOrEqual(tableRect.left - 1);
+      expect(selfLeaveRect.right).toBeLessThanOrEqual(tableRect.right + 1);
+      expect(selfLeaveRect.right).toBeLessThanOrEqual(780);
+
+      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
+      const otherEdit = otherRow.locator('sl-icon-button[label="Edit roles"]');
+      const otherRemove = otherRow.locator('sl-icon-button[label="Remove member"]');
+      await expect(otherEdit).toBeVisible();
+      await expect(otherRemove).toBeVisible();
+      const otherEditRect = await rectOf(otherEdit);
+      const otherRemoveRect = await rectOf(otherRemove);
+      expect(otherEditRect.right).toBeLessThanOrEqual(tableRect.right + 1);
+      expect(otherRemoveRect.left).toBeGreaterThanOrEqual(tableRect.left - 1);
+      expect(otherRemoveRect.right).toBeLessThanOrEqual(tableRect.right + 1);
+      expect(otherRemoveRect.right).toBeLessThanOrEqual(780);
+
+      // No horizontal overflow inside the table container.
+      const tableOverflow = await tableContainer.evaluate(
+        (el) => el.scrollWidth > el.clientWidth + 1
+      );
+      expect(tableOverflow).toBe(false);
+    });
+  });
+
   test.describe('desktop 1100px viewport', () => {
     test.use({ viewport: { width: 1100, height: 800 } });
 

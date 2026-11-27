@@ -2296,27 +2296,30 @@ describe('invited principals', () => {
   });
 });
 
-describe('mobile responsive layout style contract (ptone/scion#9571)', () => {
-  const MOBILE = '@media (max-width: 768px)';
+describe('narrow-container responsive layout style contract (ptone/scion#9571, ptone/scion#9575)', () => {
+  const NARROW = '@container (max-width: 600px)';
 
-  it('stacks the section header and wraps header actions on mobile without altering desktop', () => {
+  it('stacks the section header and wraps header actions via container query without altering desktop', () => {
     const rules = elementStyleRules('scion-project-members-editor');
+
+    // Container query host wraps the layout so narrow sidebar viewports match.
+    expect(rules.get('.members-layout')).toContain('container-type: inline-size');
 
     // Desktop stays a horizontal row with non-wrapping actions.
     expect(rules.get('.section-header')).toContain('display: flex');
     expect(rules.get('.section-header')).not.toContain('flex-direction: column');
     expect(rules.get('.actions-cell')).toContain('white-space: nowrap');
 
-    // Mobile stacks the header and wraps actions.
-    expect(rules.get(`${MOBILE} .section-header`)).toContain('flex-direction: column');
-    expect(rules.get(`${MOBILE} .section-header-actions`)).toContain('flex-wrap: wrap');
+    // Narrow container stacks the header and wraps actions.
+    expect(rules.get(`${NARROW} .section-header`)).toContain('flex-direction: column');
+    expect(rules.get(`${NARROW} .section-header-actions`)).toContain('flex-wrap: wrap');
 
-    // Mobile wraps table rows so member identity gets full width and actions stay visible.
-    expect(rules.get(`${MOBILE} thead`)).toContain('display: none');
-    expect(rules.get(`${MOBILE} tbody tr`)).toContain('display: flex');
-    expect(rules.get(`${MOBILE} tbody tr`)).toContain('flex-wrap: wrap');
-    expect(rules.get(`${MOBILE} tbody td:first-child`)).toContain('flex: 1 1 100%');
-    expect(rules.get(`${MOBILE} .actions-cell`)).toContain('flex-wrap: wrap');
-    expect(rules.get(`${MOBILE} .actions-cell`)).toContain('white-space: normal');
+    // Narrow container wraps table rows so member identity gets full width and actions stay visible.
+    expect(rules.get(`${NARROW} thead`)).toContain('display: none');
+    expect(rules.get(`${NARROW} tbody tr`)).toContain('display: flex');
+    expect(rules.get(`${NARROW} tbody tr`)).toContain('flex-wrap: wrap');
+    expect(rules.get(`${NARROW} tbody td:first-child`)).toContain('flex: 1 1 100%');
+    expect(rules.get(`${NARROW} .actions-cell`)).toContain('flex-wrap: wrap');
+    expect(rules.get(`${NARROW} .actions-cell`)).toContain('white-space: normal');
   });
 });
