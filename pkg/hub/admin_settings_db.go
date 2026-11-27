@@ -2699,6 +2699,14 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 					keys = append(keys, config.HubTracingEnabledKey)
 				}
 			}
+			if u := hub.Uploads; u != nil {
+				if u.MaxAttachmentSize != 0 {
+					keys = append(keys, config.HubUploadsMaxAttachmentSizeKey)
+				}
+				if u.MaxWorkspaceFileSize != 0 {
+					keys = append(keys, config.HubUploadsMaxWorkspaceFileSizeKey)
+				}
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
