@@ -375,6 +375,14 @@ type VersionInfo struct {
 	// SourceMessageID is the message id the source attachment was sent in,
 	// populated only when the viewer may read that message.
 	SourceMessageID string `json:"sourceMessageId,omitempty"`
+	// SourceConversationKey is the web chat conversation key (topic/thread id
+	// or "dm:...") of the source message, populated only under the same viewer
+	// gate as SourceMessageID.
+	SourceConversationKey string `json:"sourceConversationKey,omitempty"`
+	// SourceProjectID is the owning project id of a project-thread source
+	// message (empty for DMs), populated only under the same viewer gate as
+	// SourceMessageID.
+	SourceProjectID string `json:"sourceProjectId,omitempty"`
 }
 
 // FileInfo describes one file of a version.

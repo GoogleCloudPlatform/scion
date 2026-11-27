@@ -124,6 +124,7 @@ import type {
 } from '../../client/artifacts.js';
 import type { WakeOffer } from '../../client/wake-offer.js';
 import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
+import { chatConversationPath } from '../../client/chat-routes.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import type { ScionCodeEditor } from '../shared/code-editor.js';
 import type { CriticView } from '../shared/artifact-markdown-frame.js';
@@ -3267,19 +3268,22 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
-   * The shown version's facts in the header (ptone/scion#6852): its number,
-   * whether it is the current version, its kind and author, and its date.
-   */
-  /**
    * Provenance line for a version published from a chat attachment by
    * reference (ptone/scion#4598, #4599). The link to the conversation is
-   * shown only when `sourceMessageId` is present (already viewer-scoped by
-   * the backend).
+   * shown only when `sourceMessageId` and a routable `sourceConversationKey`
+   * are present (already viewer-scoped by the backend).
    */
   private renderAttachmentProvenance(v: ArtifactVersion): TemplateResult | typeof nothing {
     if (!v.sourceAttachmentId) return nothing;
-    if (v.sourceMessageId) {
-      const href = `/chat#msg-${encodeURIComponent(v.sourceMessageId)}`;
+    const convPath =
+      v.sourceMessageId && v.sourceConversationKey
+        ? chatConversationPath({
+            conversationKey: v.sourceConversationKey,
+            ...(v.sourceProjectId ? { projectId: v.sourceProjectId } : {}),
+          })
+        : null;
+    if (convPath && v.sourceMessageId) {
+      const href = `${convPath}#msg-${encodeURIComponent(v.sourceMessageId)}`;
       return html`<span class="attachment-provenance">
         <sl-icon name="paperclip"></sl-icon>
         Published from an attachment in
@@ -3292,6 +3296,10 @@ export class ScionPageArtifactDetail extends LitElement {
     </span>`;
   }
 
+  /**
+   * The shown version's facts in the header (ptone/scion#6852): its number,
+   * whether it is the current version, its kind and author, and its date.
+   */
   private renderVersionInfo(v: ArtifactVersion): TemplateResult {
     const latest = this.latestSeq;
     const state = v.seq === latest ? 'current' : `older, current is v${latest}`;

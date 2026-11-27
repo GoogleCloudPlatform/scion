@@ -549,13 +549,27 @@ func writeAttachmentNotShareable(w http.ResponseWriter) {
 }
 
 // versionInfoForViewer builds VersionInfo for v and populates SourceMessageID
-// only when the caller of ctx may read the source message (ptone/scion#4599).
+// (and its chat conversation route when available) only when the caller of ctx
+// may read the source message (ptone/scion#4599).
 func (s *Service) versionInfoForViewer(ctx context.Context, b backend, v *Version, files []File) *VersionInfo {
 	vi := versionInfo(v, files)
 	if v.SourceMessageID != "" && s.canReadSourceMessage(ctx, b, v) {
-		vi.SourceMessageID = v.SourceMessageID
+		s.populateSourceMessageRoute(ctx, vi, v.SourceMessageID)
 	}
 	return vi
+}
+
+// populateSourceMessageRoute sets SourceMessageID and, when the host implements
+// MessageRouteHost, the source conversation route fields. Callers must have
+// already verified that the viewer of ctx may read messageID.
+func (s *Service) populateSourceMessageRoute(ctx context.Context, vi *VersionInfo, messageID string) {
+	vi.SourceMessageID = messageID
+	if rh, ok := s.host.(MessageRouteHost); ok {
+		if route, ok := rh.MessageRoute(ctx, messageID); ok && route.ConversationKey != "" {
+			vi.SourceConversationKey = route.ConversationKey
+			vi.SourceProjectID = route.ProjectID
+		}
+	}
 }
 
 // canReadSourceMessage reports whether the caller of ctx may read the message

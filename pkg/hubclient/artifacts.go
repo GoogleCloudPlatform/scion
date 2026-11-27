@@ -453,20 +453,22 @@ type Artifact struct {
 
 // ArtifactVersion describes one version of an artifact.
 type ArtifactVersion struct {
-	Seq                int            `json:"seq"`
-	Ref                string         `json:"ref"`
-	Kind               string         `json:"kind"`
-	EntryPath          string         `json:"entryPath"`
-	Note               string         `json:"note,omitempty"`
-	TotalBytes         int64          `json:"totalBytes"`
-	FileCount          int            `json:"fileCount"`
-	CreatedByKind      string         `json:"createdByKind,omitempty"`
-	CreatedByRef       string         `json:"createdByRef,omitempty"`
-	CreatedAt          time.Time      `json:"createdAt"`
-	State              string         `json:"state"`
-	Files              []ArtifactFile `json:"files"`
-	SourceAttachmentID string         `json:"sourceAttachmentId,omitempty"`
-	SourceMessageID    string         `json:"sourceMessageId,omitempty"`
+	Seq                   int            `json:"seq"`
+	Ref                   string         `json:"ref"`
+	Kind                  string         `json:"kind"`
+	EntryPath             string         `json:"entryPath"`
+	Note                  string         `json:"note,omitempty"`
+	TotalBytes            int64          `json:"totalBytes"`
+	FileCount             int            `json:"fileCount"`
+	CreatedByKind         string         `json:"createdByKind,omitempty"`
+	CreatedByRef          string         `json:"createdByRef,omitempty"`
+	CreatedAt             time.Time      `json:"createdAt"`
+	State                 string         `json:"state"`
+	Files                 []ArtifactFile `json:"files"`
+	SourceAttachmentID    string         `json:"sourceAttachmentId,omitempty"`
+	SourceMessageID       string         `json:"sourceMessageId,omitempty"`
+	SourceConversationKey string         `json:"sourceConversationKey,omitempty"`
+	SourceProjectID       string         `json:"sourceProjectId,omitempty"`
 }
 
 // ArtifactDiscardedVersion is a discarded version as the versions list

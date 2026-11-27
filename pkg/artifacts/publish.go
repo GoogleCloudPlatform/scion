@@ -580,7 +580,9 @@ func (s *Service) handlePublishFromAttachment(w http.ResponseWriter, r *http.Req
 			s.notifyInboxChanged(ctx, updated.OwnerRef)
 		}
 		vi := versionInfo(v, files)
-		vi.SourceMessageID = v.SourceMessageID
+		if v.SourceMessageID != "" {
+			s.populateSourceMessageRoute(ctx, vi, v.SourceMessageID)
+		}
 		writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(updated), Version: vi, Warnings: allWarnings})
 	}
 
@@ -686,7 +688,9 @@ func (s *Service) handlePublishFromAttachment(w http.ResponseWriter, r *http.Req
 	s.logAllowed(r, logEntry{action: logActionPublished, artifact: a, seq: 1, authority: logAuthorityOwner})
 	s.logSponsorReviewGrants(r, a, grants)
 	vi := versionInfo(v, files)
-	vi.SourceMessageID = v.SourceMessageID
+	if v.SourceMessageID != "" {
+		s.populateSourceMessageRoute(ctx, vi, v.SourceMessageID)
+	}
 	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: vi, Warnings: warnings})
 }
 

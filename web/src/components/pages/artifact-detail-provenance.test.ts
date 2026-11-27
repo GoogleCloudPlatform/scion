@@ -34,6 +34,8 @@ const ATT_ID = '33333333-3333-3333-3333-333333333333';
 function makeResponse(provenance: {
   sourceAttachmentId?: string;
   sourceMessageId?: string;
+  sourceConversationKey?: string;
+  sourceProjectId?: string;
 }): ArtifactResponse {
   return {
     artifact: {
@@ -64,6 +66,10 @@ function makeResponse(provenance: {
         ? { sourceAttachmentId: provenance.sourceAttachmentId }
         : {}),
       ...(provenance.sourceMessageId ? { sourceMessageId: provenance.sourceMessageId } : {}),
+      ...(provenance.sourceConversationKey
+        ? { sourceConversationKey: provenance.sourceConversationKey }
+        : {}),
+      ...(provenance.sourceProjectId ? { sourceProjectId: provenance.sourceProjectId } : {}),
     },
   };
 }
@@ -137,8 +143,32 @@ describe('scion-page-artifact-detail attachment provenance (#4598, #4599)', () =
     expect(prov?.querySelector('a')).toBeNull();
   });
 
-  it('shows the provenance line with a conversation link when sourceMessageId is present', async () => {
-    stubArtifactApi(makeResponse({ sourceAttachmentId: ATT_ID, sourceMessageId: 'msg-42' }));
+  it('shows the provenance line without a link when sourceMessageId has no routable conversation', async () => {
+    stubArtifactApi(
+      makeResponse({
+        sourceAttachmentId: ATT_ID,
+        sourceMessageId: 'msg-42',
+        sourceConversationKey: 'group-no-project',
+      })
+    );
+    const el = await mountDetail();
+    const prov = el.shadowRoot?.querySelector('.attachment-provenance');
+    expect(prov).not.toBeNull();
+    expect(prov?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Published from an attachment in a conversation'
+    );
+    expect(prov?.querySelector('a')).toBeNull();
+  });
+
+  it('links to the project thread conversation and message when source route is a project thread', async () => {
+    stubArtifactApi(
+      makeResponse({
+        sourceAttachmentId: ATT_ID,
+        sourceMessageId: 'msg-42',
+        sourceConversationKey: 'topic-7',
+        sourceProjectId: PROJECT_ID,
+      })
+    );
     const el = await mountDetail();
     const prov = el.shadowRoot?.querySelector('.attachment-provenance');
     expect(prov).not.toBeNull();
@@ -147,6 +177,22 @@ describe('scion-page-artifact-detail attachment provenance (#4598, #4599)', () =
     );
     const link = prov?.querySelector<HTMLAnchorElement>('a.provenance-link');
     expect(link).not.toBeNull();
-    expect(link?.getAttribute('href')).toBe('/chat#msg-msg-42');
+    expect(link?.getAttribute('href')).toBe(`/chat/space/${PROJECT_ID}/thread/topic-7#msg-msg-42`);
+  });
+
+  it('links to the DM conversation and message when source route is a DM', async () => {
+    stubArtifactApi(
+      makeResponse({
+        sourceAttachmentId: ATT_ID,
+        sourceMessageId: 'msg-99',
+        sourceConversationKey: 'dm:user:u1:user:u2',
+      })
+    );
+    const el = await mountDetail();
+    const prov = el.shadowRoot?.querySelector('.attachment-provenance');
+    expect(prov).not.toBeNull();
+    const link = prov?.querySelector<HTMLAnchorElement>('a.provenance-link');
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('href')).toBe('/chat/dm/dm%3Auser%3Au1%3Auser%3Au2#msg-msg-99');
   });
 });

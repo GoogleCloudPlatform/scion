@@ -62,6 +62,16 @@ export interface ArtifactVersion {
    * viewer may read that message.
    */
   sourceMessageId?: string;
+  /**
+   * Chat conversation key (topic/thread id or `dm:...`) of the source message,
+   * populated only under the same viewer gate as `sourceMessageId`.
+   */
+  sourceConversationKey?: string;
+  /**
+   * Owning project id of a project-thread source message (absent for DMs),
+   * populated only under the same viewer gate as `sourceMessageId`.
+   */
+  sourceProjectId?: string;
 }
 
 export interface Artifact {
