@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -850,27 +849,10 @@ func (m *usageCapabilityMemo) lookupScope(slug, scope, scopeID string) (*store.H
 }
 
 func (m *usageCapabilityMemo) resolveConfigBySlug(projectID, name string) (*store.HarnessConfig, error) {
-	if name == "" || m == nil || m.s == nil {
+	if m == nil || m.s == nil {
 		return nil, nil
 	}
-	var lookupErr error
-	for _, sc := range m.s.harnessConfigLookupScopes(projectID) {
-		hc, err := m.lookupScope(name, sc.scope, sc.scopeID)
-		if err == nil && hc != nil {
-			return hc, nil
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			if m.s.agentLifecycleLog != nil {
-				m.s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
-					"slug", name, "scope_id", sc.scopeID, "error", err)
-			}
-			if !m.s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
-				return nil, err
-			}
-			lookupErr = err
-		}
-	}
-	return nil, lookupErr
+	return m.s.resolveHarnessConfigBySlugWith(projectID, name, m.lookupScope)
 }
 
 func (m *usageCapabilityMemo) resolve(projectID, harnessConfig string) *api.HarnessUsageCapabilities {

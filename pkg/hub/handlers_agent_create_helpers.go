@@ -3601,20 +3601,10 @@ func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.Respo
 // lookup is returned at once, so the project scope is never consulted
 // without knowing whether a global config of that slug exists.
 func (s *Server) resolveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
-	var lookupErr error
-	for _, sc := range s.harnessConfigLookupScopes(projectID) {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, sc.scope, sc.scopeID)
-		if err == nil && hc != nil {
-			return hc, nil
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
-				"slug", name, "scope_id", sc.scopeID, "error", err)
-			if !s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
-				return nil, err
-			}
-			lookupErr = err
-		}
+	if s == nil || s.store == nil {
+		return nil, nil
 	}
-	return nil, lookupErr
+	return s.resolveHarnessConfigBySlugWith(projectID, name, func(slug, scope, scopeID string) (*store.HarnessConfig, error) {
+		return s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
+	})
 }
