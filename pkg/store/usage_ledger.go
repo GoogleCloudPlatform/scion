@@ -502,7 +502,6 @@ type UsageAgentCountQuery struct {
 	Since          time.Time
 	Until          time.Time
 	ProjectID      string
-	BillingUserID  string
 	IncludeBuckets bool
 	// Limit bounds the number of per-bucket rows returned when IncludeBuckets
 	// is true (0 uses the store default). TotalUniqueAgents is always exact.

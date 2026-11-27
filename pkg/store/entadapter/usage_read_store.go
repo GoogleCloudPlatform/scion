@@ -822,10 +822,6 @@ func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.U
 		whereParts = append(whereParts, "project_id = ?")
 		whereArgs = append(whereArgs, q.ProjectID)
 	}
-	if q.BillingUserID != "" {
-		whereParts = append(whereParts, "billing_user_id = ?")
-		whereArgs = append(whereArgs, q.BillingUserID)
-	}
 	if !q.Since.IsZero() {
 		whereParts = append(whereParts, "bucket_start >= ?")
 		whereArgs = append(whereArgs, bucketFn(q.Since))

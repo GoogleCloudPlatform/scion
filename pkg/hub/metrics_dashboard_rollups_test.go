@@ -126,23 +126,42 @@ func makeDashUsageEvent(eventID, runID, projectID, agentID string, billingUserID
 }
 
 func TestComputeCacheHitRate(t *testing.T) {
-	// Normal ratio: 36000 / (12000 + 36000 + 2000) = 0.72
-	r := computeCacheHitRate(i64ptr(12000), i64ptr(36000), i64ptr(2000))
+	// Fully known ratio: 36000 / (12000 + 36000 + 2000) = 0.72, partial=false
+	r, partial := computeCacheHitRate(i64ptr(12000), i64ptr(36000), i64ptr(2000), nil)
 	require.NotNil(t, r)
 	assert.InDelta(t, 0.72, *r, 1e-9)
+	assert.False(t, partial)
 
-	// Zero cache_read with positive input -> 0.0 (known zero, not nil)
-	rZero := computeCacheHitRate(i64ptr(1000), i64ptr(0), i64ptr(0))
+	// Zero cache_read with positive input -> 0.0 (known zero, not nil), partial=false
+	rZero, partialZero := computeCacheHitRate(i64ptr(1000), i64ptr(0), i64ptr(0), nil)
 	require.NotNil(t, rZero)
 	assert.Equal(t, 0.0, *rZero)
+	assert.False(t, partialZero)
 
-	// Zero denominator -> nil (never divide by zero / NaN)
-	assert.Nil(t, computeCacheHitRate(i64ptr(0), i64ptr(0), i64ptr(0)))
+	// Zero denominator -> (nil, false) (never divide by zero / NaN)
+	rNil, partialNil := computeCacheHitRate(i64ptr(0), i64ptr(0), i64ptr(0), nil)
+	assert.Nil(t, rNil)
+	assert.False(t, partialNil)
 
-	// Any nil component (unknown) -> nil
-	assert.Nil(t, computeCacheHitRate(nil, i64ptr(100), i64ptr(0)))
-	assert.Nil(t, computeCacheHitRate(i64ptr(100), nil, i64ptr(0)))
-	assert.Nil(t, computeCacheHitRate(i64ptr(100), i64ptr(50), nil))
+	// Unknown input or cacheRead -> (nil, false)
+	rInNil, pInNil := computeCacheHitRate(nil, i64ptr(100), i64ptr(0), nil)
+	assert.Nil(t, rInNil)
+	assert.False(t, pInNil)
+	rCRNil, pCRNil := computeCacheHitRate(i64ptr(100), nil, i64ptr(0), nil)
+	assert.Nil(t, rCRNil)
+	assert.False(t, pCRNil)
+
+	// Unknown cacheWrite (e.g. legacy rows) -> upper bound 50/(100+50) with partial=true
+	rCWNil, pCWNil := computeCacheHitRate(i64ptr(100), i64ptr(50), nil, nil)
+	require.NotNil(t, rCWNil)
+	assert.InDelta(t, 50.0/150.0, *rCWNil, 1e-9)
+	assert.True(t, pCWNil)
+
+	// Mixed known+unknown cacheWrite -> upper bound 900/(1100+900+0)=0.45 with partial=true
+	rMixed, pMixed := computeCacheHitRate(i64ptr(1100), i64ptr(900), i64ptr(0), &AgentUsageBucketUnknownEvents{CacheWrite: 1})
+	require.NotNil(t, rMixed)
+	assert.InDelta(t, 0.45, *rMixed, 1e-9)
+	assert.True(t, pMixed)
 }
 
 // TestHubRollupSource_SummaryNullableTokensAndHitRate runs against SQLite by
@@ -533,7 +552,7 @@ func TestHubRollupSource_ProjectSummary24h(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, MetricsSourceHubRollups, ps.Source)
 	assert.Equal(t, store.UsageGranularityHour, ps.Granularity)
-	assert.Equal(t, "Last 24 hours", ps.PeriodLabel)
+	assert.Equal(t, "Last 24h (hourly buckets)", ps.PeriodLabel)
 	assert.Equal(t, int64(3), ps.APICalls24h)
 	assert.Equal(t, int64(550), ps.TokenUsage24h)
 	assert.Equal(t, int64(1), ps.SessionsCount24h)
@@ -580,23 +599,25 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recProjSum.Body.Bytes(), &avail))
 	assert.Equal(t, false, avail["available"])
 
-	// Case 2: experiment OFF + CM configured -> cloud_monitoring; groupBy is ignored (no new 400s, O5).
+	// Case 2: experiment OFF + CM configured -> cloud_monitoring; source is omitted (O1) and groupBy is ignored (O5).
 	srv.mu.Lock()
 	srv.metricsDashboard = cmSvc
 	srv.mu.Unlock()
 
 	rec = doGET("/api/v1/metrics/?view=summary&period=7")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var sumCM DashboardSummary
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sumCM))
-	assert.Equal(t, MetricsSourceCloudMonitoring, sumCM.Source)
+	var sumCMRaw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sumCMRaw))
+	_, hasSourceOff := sumCMRaw["source"]
+	assert.False(t, hasSourceOff, "experiment-off CM response must omit source field (O1)")
 
 	for _, rawGroup := range []string{"user", "bogus"} {
 		rec = doGET("/api/v1/metrics/?view=tokens&period=7&groupBy=" + rawGroup)
 		require.Equal(t, http.StatusOK, rec.Code, "experiment off must ignore groupBy=%s (no new 400s)", rawGroup)
-		var tokCM TokensView
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tokCM))
-		assert.Equal(t, MetricsSourceCloudMonitoring, tokCM.Source)
+		var tokCMRaw map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tokCMRaw))
+		_, tokHasSource := tokCMRaw["source"]
+		assert.False(t, tokHasSource, "experiment-off CM tokens response must omit source field (O1)")
 	}
 
 	// Case 3: experiment ON + CM unconfigured -> hub_rollups for all views & project summary.
@@ -914,4 +935,191 @@ func TestHubRollupSource_SessionsMeasurementMatchesSummary(t *testing.T) {
 	require.NotNil(t, sess.Measurement)
 	assert.Equal(t, MeasurementStatusMeasured, sum.Measurement.Status)
 	assert.Equal(t, sum.Measurement.Status, sess.Measurement.Status, "sessions and summary must agree on measurement.status")
+}
+
+// TestHubRollupSource_PartialCacheHitRateProbe pins R1:
+//   - Mixed known+unknown cache_write (E1 input=100, cache_read=900, cache_write=0;
+//     E2 input=1000, cache_read=0, cache_write=NULL) computes the upper-bound rate
+//     0.45 with cacheHitRatePartial=true and unknownEvents.cacheWrite=1 across
+//     QuerySummary, QueryTokens (totals + dailyCacheHitRate), and QueryProjectSummary.
+//   - All-known events emit cacheHitRatePartial=false and omit unknownEvents.
+//   - Legacy-style all-NULL cache_write (input=100, cache_read=50, cache_write=NULL)
+//     computes upper-bound 50/150 with cacheHitRatePartial=true.
+func TestHubRollupSource_PartialCacheHitRateProbe(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	eventTS := dbNow.Add(-2 * time.Hour).Truncate(time.Minute)
+
+	u1 := &store.User{ID: uuid.NewString(), Email: "partial-hr@example.com", DisplayName: "U1", Role: "member", Status: "active"}
+	require.NoError(t, cs.CreateUser(ctx, u1))
+
+	projMixed := &store.Project{ID: uuid.NewString(), Name: "hr-mixed", Slug: "hr-mixed-" + uuid.NewString()[:8]}
+	projKnown := &store.Project{ID: uuid.NewString(), Name: "hr-known", Slug: "hr-known-" + uuid.NewString()[:8]}
+	projLegacy := &store.Project{ID: uuid.NewString(), Name: "hr-legacy", Slug: "hr-legacy-" + uuid.NewString()[:8]}
+	require.NoError(t, cs.CreateProject(ctx, projMixed))
+	require.NoError(t, cs.CreateProject(ctx, projKnown))
+	require.NoError(t, cs.CreateProject(ctx, projLegacy))
+
+	agMixed, runMixed := seedDashboardAgentAndRun(t, cs, projMixed.ID, u1.ID, "ag-mixed", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
+	agKnown, runKnown := seedDashboardAgentAndRun(t, cs, projKnown.ID, u1.ID, "ag-known", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
+	agLegacy, runLegacy := seedDashboardAgentAndRun(t, cs, projLegacy.ID, u1.ID, "ag-legacy", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
+
+	// Mixed probe: E1 (100, 900, 0) + E2 (1000, 0, NULL) -> 900 / 2000 = 0.45, partial=true, unknownEvents.cacheWrite=1.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agMixed,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("hr-m1", runMixed, projMixed.ID, agMixed, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(50), i64ptr(900), i64ptr(0)),
+			makeDashUsageEvent("hr-m2", runMixed, projMixed.ID, agMixed, &u1.ID, "claude", "claude-sonnet-4-6", 2, eventTS.Add(time.Minute), 1, i64ptr(1000), i64ptr(50), i64ptr(0), nil),
+		},
+	})
+	require.NoError(t, err)
+
+	// Fully known control: (100, 900, 0) -> 0.90, partial=false.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agKnown,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("hr-k1", runKnown, projKnown.ID, agKnown, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(50), i64ptr(900), i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+
+	// Legacy-style all-NULL cache_write: (100, 50, NULL) -> 50/150, partial=true.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agLegacy,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("hr-l1", runLegacy, projLegacy.ID, agLegacy, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(20), i64ptr(50), nil),
+		},
+	})
+	require.NoError(t, err)
+
+	setHourlyCoverageStartForTest(t, client, dbNow.AddDate(0, 0, -10))
+	src := NewHubRollupSource(cs)
+
+	// 1. Mixed probe assertions
+	sumMixed, err := src.QuerySummary(ctx, 7, WithProjectID(projMixed.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumMixed.CacheHitRate)
+	assert.InDelta(t, 0.45, *sumMixed.CacheHitRate, 1e-9)
+	assert.True(t, sumMixed.CacheHitRatePartial)
+	require.NotNil(t, sumMixed.Tokens)
+	assert.True(t, sumMixed.Tokens.CacheHitRatePartial)
+	require.NotNil(t, sumMixed.Tokens.UnknownEvents)
+	assert.Equal(t, int64(1), sumMixed.Tokens.UnknownEvents.CacheWrite)
+
+	tokMixed, err := src.QueryTokens(ctx, 7, WithProjectID(projMixed.ID))
+	require.NoError(t, err)
+	require.NotNil(t, tokMixed.Totals)
+	require.NotNil(t, tokMixed.Totals.CacheHitRate)
+	assert.InDelta(t, 0.45, *tokMixed.Totals.CacheHitRate, 1e-9)
+	assert.True(t, tokMixed.Totals.CacheHitRatePartial)
+	require.NotNil(t, tokMixed.Totals.UnknownEvents)
+	assert.Equal(t, int64(1), tokMixed.Totals.UnknownEvents.CacheWrite)
+	require.Len(t, tokMixed.DailyCacheHitRate, 1)
+	require.NotNil(t, tokMixed.DailyCacheHitRate[0].Value)
+	assert.InDelta(t, 0.45, *tokMixed.DailyCacheHitRate[0].Value, 1e-9)
+	assert.True(t, tokMixed.DailyCacheHitRate[0].Partial)
+
+	psMixed, err := src.QueryProjectSummary(ctx, projMixed.ID)
+	require.NoError(t, err)
+	require.NotNil(t, psMixed.CacheHitRate)
+	assert.InDelta(t, 0.45, *psMixed.CacheHitRate, 1e-9)
+	assert.True(t, psMixed.CacheHitRatePartial)
+
+	// 2. Fully-known control assertions
+	sumKnown, err := src.QuerySummary(ctx, 7, WithProjectID(projKnown.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumKnown.CacheHitRate)
+	assert.InDelta(t, 0.90, *sumKnown.CacheHitRate, 1e-9)
+	assert.False(t, sumKnown.CacheHitRatePartial)
+	require.NotNil(t, sumKnown.Tokens)
+	assert.False(t, sumKnown.Tokens.CacheHitRatePartial)
+	assert.Nil(t, sumKnown.Tokens.UnknownEvents)
+
+	tokKnown, err := src.QueryTokens(ctx, 7, WithProjectID(projKnown.ID))
+	require.NoError(t, err)
+	require.Len(t, tokKnown.DailyCacheHitRate, 1)
+	assert.False(t, tokKnown.DailyCacheHitRate[0].Partial)
+
+	// 3. Legacy all-NULL cache_write assertions
+	sumLegacy, err := src.QuerySummary(ctx, 7, WithProjectID(projLegacy.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumLegacy.CacheHitRate)
+	assert.InDelta(t, 50.0/150.0, *sumLegacy.CacheHitRate, 1e-9)
+	assert.True(t, sumLegacy.CacheHitRatePartial)
+	assert.Nil(t, sumLegacy.Tokens.CacheWrite)
+}
+
+// TestHubRollupSource_D7bCoverageDayConsistencyDeterministic pins R2
+// independently of wall-clock time of day: tz=UTC, period=2, hourly coverage
+// marker at 00:00Z of the window's first UTC day. A control assertion proves
+// the window resolves to hourly when consistent, then a daily-only discrepancy
+// on that first (coverage) UTC day forces fallback to daily. Any mutant that
+// skips the first overlapped UTC day fails at every hour of the day.
+func TestHubRollupSource_D7bCoverageDayConsistencyDeterministic(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	todayDay := time.Date(dbNow.UTC().Year(), dbNow.UTC().Month(), dbNow.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	firstDay := todayDay.AddDate(0, 0, -1)
+
+	u1 := &store.User{ID: uuid.NewString(), Email: "d7b-det@example.com", DisplayName: "U1", Role: "member", Status: "active"}
+	require.NoError(t, cs.CreateUser(ctx, u1))
+	proj := &store.Project{ID: uuid.NewString(), Name: "d7b-det", Slug: "d7b-det-" + uuid.NewString()[:8]}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	ag, runID := seedDashboardAgentAndRun(t, cs, proj.ID, u1.ID, "ag-d7b", "claude", string(state.PhaseRunning), firstDay)
+
+	// Seed a consistent hourly+daily event on firstDay (02:00Z).
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("d7b-1", runID, proj.ID, ag, &u1.ID, "claude", "claude-sonnet-4-6", 1, firstDay.Add(2*time.Hour), 2, i64ptr(100), i64ptr(50), i64ptr(0), i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+
+	// Coverage starts at exact 00:00Z of the 2-day UTC window's first day.
+	setHourlyCoverageStartForTest(t, client, firstDay)
+
+	src := NewHubRollupSource(cs)
+
+	// Control assertion: with no discrepancy, period=2 in UTC MUST resolve hourly.
+	ctrl, err := src.QueryModelCalls(ctx, 2, WithProjectID(proj.ID))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityHour, ctrl.Granularity, "control: consistent 2-day UTC window starting at coverage 00:00Z must resolve hourly")
+
+	// Inject a daily-only discrepancy on firstDay (the coverage day itself).
+	_, err = client.UsageRollupDaily.Create().
+		SetBucketStart(firstDay).
+		SetProjectID(proj.ID).
+		SetBillingUserID(u1.ID).
+		SetAgentID(ag).
+		SetHarness("claude").
+		SetModel("claude-haiku-4-5").
+		SetUsageSource(store.UsageSourceNative).
+		SetCalls(1).
+		SetInput(10).
+		SetOutput(5).
+		SetEvents(1).
+		SetInputKnownEvents(1).
+		SetOutputKnownEvents(1).
+		SetPresenceTrackedEvents(1).
+		SetFirstEventTs(firstDay.Add(3 * time.Hour)).
+		SetLastEventTs(firstDay.Add(3 * time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// Now D7b cross-check over [firstDay, todayDay] MUST detect the mismatch on firstDay and fall back to daily.
+	after, err := src.QueryModelCalls(ctx, 2, WithProjectID(proj.ID))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, after.Granularity, "D7b: discrepancy on first (coverage) UTC day must force daily fallback at any hour")
+	assert.Equal(t, "UTC", after.TimeZone)
 }

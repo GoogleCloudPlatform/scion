@@ -189,7 +189,8 @@ const (
 )
 
 // MetricsDashboardSource abstracts the backing telemetry data source for the
-// metrics dashboard (CloudMonitoringSource or HubRollupSource).
+// metrics dashboard (MetricsDashboardService for Cloud Monitoring, or
+// HubRollupSource for Hub usage rollups).
 type MetricsDashboardSource interface {
 	Name() string
 	QuerySummary(ctx context.Context, periodDays int, opts ...QueryOption) (*DashboardSummary, error)
@@ -198,10 +199,6 @@ type MetricsDashboardSource interface {
 	QueryTokens(ctx context.Context, periodDays int, opts ...QueryOption) (*TokensView, error)
 	QueryProjectSummary(ctx context.Context, projectID string) (*ProjectMetricsSummary, error)
 }
-
-// CloudMonitoringSource is an alias for MetricsDashboardService, which queries
-// Google Cloud Monitoring and implements MetricsDashboardSource.
-type CloudMonitoringSource = MetricsDashboardService
 
 // MetricsDashboardService queries Google Cloud Monitoring for Scion telemetry metrics.
 type MetricsDashboardService struct {
@@ -272,19 +269,37 @@ func (s *MetricsDashboardService) Close() error {
 	return s.rawClient.Close()
 }
 
+// DashboardTokenUnknownEvents reports per-bucket counts of events in the
+// window where that bucket was NULL while other events in the same scope
+// reported known values (mixed known+unknown).
+type DashboardTokenUnknownEvents struct {
+	Input        int64 `json:"input,omitempty"`
+	Output       int64 `json:"output,omitempty"`
+	CacheRead    int64 `json:"cacheRead,omitempty"`
+	CacheWrite   int64 `json:"cacheWrite,omitempty"`
+	CacheWrite1h int64 `json:"cacheWrite1h,omitempty"`
+	Reasoning    int64 `json:"reasoning,omitempty"`
+}
+
 // DashboardTokenTotals holds nullable canonical Track 1 token totals and the
-// derived cache hit rate (cache_read / (input + cache_read + cache_write)).
+// derived cache hit rate (cache_read / (input + cache_read + known_cache_write)).
 // Unknown buckets serialize as JSON null and are never fabricated as 0.
+// When any denominator component (input, cacheRead, cacheWrite) has unknown
+// events in the scope (including legacy rows with NULL cache_write),
+// CacheHitRate is computed from known values as an upper bound and
+// CacheHitRatePartial is true.
 type DashboardTokenTotals struct {
-	Input          *int64   `json:"input"`
-	Output         *int64   `json:"output"`
-	CacheRead      *int64   `json:"cacheRead"`
-	CacheWrite     *int64   `json:"cacheWrite"`
-	CacheWrite1h   *int64   `json:"cacheWrite1h"`
-	Reasoning      *int64   `json:"reasoning"`
-	SummableTokens *int64   `json:"summableTokens"`
-	CacheHitRate   *float64 `json:"cacheHitRate"`
-	Saturated      bool     `json:"saturated,omitempty"`
+	Input               *int64                       `json:"input"`
+	Output              *int64                       `json:"output"`
+	CacheRead           *int64                       `json:"cacheRead"`
+	CacheWrite          *int64                       `json:"cacheWrite"`
+	CacheWrite1h        *int64                       `json:"cacheWrite1h"`
+	Reasoning           *int64                       `json:"reasoning"`
+	SummableTokens      *int64                       `json:"summableTokens"`
+	CacheHitRate        *float64                     `json:"cacheHitRate"`
+	CacheHitRatePartial bool                         `json:"cacheHitRatePartial,omitempty"`
+	UnknownEvents       *DashboardTokenUnknownEvents `json:"unknownEvents,omitempty"`
+	Saturated           bool                         `json:"saturated,omitempty"`
 }
 
 // DashboardMeasurement summarizes Track 1 measurement coverage for a dashboard
@@ -297,11 +312,13 @@ type DashboardMeasurement struct {
 }
 
 // NullableFloatPoint represents a time-series point whose value may be unknown
-// (JSON null), such as daily cache hit rate when tokens are unmeasured or the
-// denominator is zero.
+// (JSON null), such as daily cache hit rate when input or cacheRead is unknown
+// or the denominator is zero. Partial is true when at least one denominator
+// component had unknown events on that day, making Value an upper bound.
 type NullableFloatPoint struct {
 	Timestamp string   `json:"timestamp"`
 	Value     *float64 `json:"value"`
+	Partial   bool     `json:"partial,omitempty"`
 }
 
 // DashboardSummary contains aggregate metric counts for a period.
@@ -311,7 +328,8 @@ type DashboardSummary struct {
 	// period window ("UTC" when the request named no valid zone or when
 	// HubRollupSource falls back to daily UTC rollups).
 	TimeZone string `json:"timeZone"`
-	// Source identifies the backing data source ("cloud_monitoring" or "hub_rollups").
+	// Source identifies the backing data source ("cloud_monitoring" or "hub_rollups"),
+	// emitted only when tokenomics.usage_ledger is enabled.
 	Source string `json:"source,omitempty"`
 	// Granularity reports the rollup grain used by HubRollupSource ("hour" or "day").
 	Granularity   string `json:"granularity,omitempty"`
@@ -321,9 +339,12 @@ type DashboardSummary struct {
 	UniqueAgents  int    `json:"uniqueAgents"`
 	// Tokens carries nullable canonical token buckets when served from Hub rollups.
 	Tokens *DashboardTokenTotals `json:"tokens,omitempty"`
-	// CacheHitRate is cache_read / (input + cache_read + cache_write), or nil when
-	// any component is unknown or the denominator is zero.
-	CacheHitRate *float64 `json:"cacheHitRate,omitempty"`
+	// CacheHitRate is cache_read / (input + cache_read + known_cache_write),
+	// or nil when input or cacheRead is unknown or the denominator is zero.
+	// When CacheHitRatePartial is true, at least one denominator component had
+	// unknown events and the rate is an upper bound.
+	CacheHitRate        *float64 `json:"cacheHitRate,omitempty"`
+	CacheHitRatePartial bool     `json:"cacheHitRatePartial,omitempty"`
 	// Measurement surfaces Track 1 coverage status and agent counts.
 	Measurement *DashboardMeasurement `json:"measurement,omitempty"`
 	// PartialFailure is true when one or more backing sub-queries failed.
@@ -668,7 +689,7 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
-	summary := &DashboardSummary{PeriodDays: periodDays, TimeZone: cfg.zoneName(), Source: MetricsSourceCloudMonitoring}
+	summary := &DashboardSummary{PeriodDays: periodDays, TimeZone: cfg.zoneName()}
 	var queryErrors []string
 
 	sessions, err := s.querySum(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter)
@@ -720,7 +741,7 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
 	loc := cfg.location()
-	view := &SessionsView{PeriodDays: periodDays, TimeZone: cfg.zoneName(), Source: MetricsSourceCloudMonitoring}
+	view := &SessionsView{PeriodDays: periodDays, TimeZone: cfg.zoneName()}
 	var queryErrors []string
 
 	// DailyCounts is a sum of session-count deltas, so it goes through
@@ -755,7 +776,7 @@ func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDay
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.model", errorLabel: "by model"},
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.harness", errorLabel: "by harness"},
 	}, func(series [][]LabeledTimeSeries) *ModelCallsView {
-		return &ModelCallsView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Source: MetricsSourceCloudMonitoring, ByModel: series[0], ByHarness: series[1]}
+		return &ModelCallsView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), ByModel: series[0], ByHarness: series[1]}
 	})
 }
 
@@ -770,7 +791,7 @@ func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays in
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache read tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheRead)}},
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache write tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheWrite)}},
 	}, func(series [][]LabeledTimeSeries) *TokensView {
-		return &TokensView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Source: MetricsSourceCloudMonitoring, Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
+		return &TokensView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
 	})
 }
 
@@ -1102,18 +1123,19 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 
 // ProjectMetricsSummary contains lightweight scalar metrics for a project's status bar.
 type ProjectMetricsSummary struct {
-	Source           string                `json:"source,omitempty"`
-	Granularity      string                `json:"granularity,omitempty"`
-	SessionsCount24h int64                 `json:"sessionsCount24h"`
-	APICalls24h      int64                 `json:"apiCalls24h"`
-	TokenUsage24h    int64                 `json:"tokenUsage24h"`
-	ActiveAgents24h  int                   `json:"activeAgents24h"`
-	PeriodLabel      string                `json:"periodLabel"`
-	Tokens           *DashboardTokenTotals `json:"tokens,omitempty"`
-	CacheHitRate     *float64              `json:"cacheHitRate,omitempty"`
-	Measurement      *DashboardMeasurement `json:"measurement,omitempty"`
-	PartialFailure   bool                  `json:"partialFailure,omitempty"`
-	PartialErrors    []string              `json:"partialErrors,omitempty"`
+	Source              string                `json:"source,omitempty"`
+	Granularity         string                `json:"granularity,omitempty"`
+	SessionsCount24h    int64                 `json:"sessionsCount24h"`
+	APICalls24h         int64                 `json:"apiCalls24h"`
+	TokenUsage24h       int64                 `json:"tokenUsage24h"`
+	ActiveAgents24h     int                   `json:"activeAgents24h"`
+	PeriodLabel         string                `json:"periodLabel"`
+	Tokens              *DashboardTokenTotals `json:"tokens,omitempty"`
+	CacheHitRate        *float64              `json:"cacheHitRate,omitempty"`
+	CacheHitRatePartial bool                  `json:"cacheHitRatePartial,omitempty"`
+	Measurement         *DashboardMeasurement `json:"measurement,omitempty"`
+	PartialFailure      bool                  `json:"partialFailure,omitempty"`
+	PartialErrors       []string              `json:"partialErrors,omitempty"`
 
 	// sessionsFailed, when true, causes MarshalJSON to serialize
 	// sessionsCount24h as JSON null rather than a fabricated 0.
@@ -1149,7 +1171,7 @@ func (s *MetricsDashboardService) QueryProjectSummary(ctx context.Context, proje
 
 	filter := []string{projectFilter(projectID)}
 
-	summary := &ProjectMetricsSummary{Source: MetricsSourceCloudMonitoring, PeriodLabel: "Last 24 hours"}
+	summary := &ProjectMetricsSummary{PeriodLabel: "Last 24 hours"}
 	var queryErrors []string
 
 	sessions, err := s.querySum(ctx, telemetrycontract.MetricSessionCount, start, now, filter)
@@ -1284,18 +1306,18 @@ func validateDashboardGroupBy(view, raw string) (string, error) {
 }
 
 // selectMetricsDashboardSource chooses the backing MetricsDashboardSource for
-// the given view and optional breakdown dimension:
-//   - When tokenomics.usage_ledger is OFF: Cloud Monitoring only (nil if
-//     unconfigured; callers preserve pre-existing 503 / unavailable behavior).
-//   - When tokenomics.usage_ledger is ON:
+// the given view and optional breakdown dimension using the already-resolved
+// ledgerEnabled flag (resolved once per request):
+//   - When ledgerEnabled is false: Cloud Monitoring only (nil if unconfigured;
+//     callers preserve pre-existing 503 / unavailable behavior).
+//   - When ledgerEnabled is true:
 //     1. Default to HubRollupSource when Cloud Monitoring is unconfigured.
 //     2. Route to HubRollupSource for breakdowns Cloud Monitoring cannot
 //     provide (per-user, or per-harness on tokens), even when Cloud Monitoring
 //     is configured.
 //     3. Otherwise use CloudMonitoringSource.
-func (s *Server) selectMetricsDashboardSource(view, groupBy string) MetricsDashboardSource {
+func (s *Server) selectMetricsDashboardSource(ledgerEnabled bool, view, groupBy string) MetricsDashboardSource {
 	cm := s.currentMetricsDashboard()
-	ledgerEnabled := s.experimentEnabled(experiments.TokenomicsUsageLedger)
 	if !ledgerEnabled {
 		if cm == nil {
 			return nil
@@ -1362,7 +1384,8 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 	}
 
 	// If no metrics source is available, return unavailable indicator.
-	dashboard := s.selectMetricsDashboardSource("summary", "")
+	ledgerEnabled := s.experimentEnabled(experiments.TokenomicsUsageLedger)
+	dashboard := s.selectMetricsDashboardSource(ledgerEnabled, "summary", "")
 	if dashboard == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"available": false})
 		return
@@ -1376,6 +1399,11 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		slog.Warn("Partial project metrics summary failure", "projectID", projectID, "source", dashboard.Name(), "error", err)
+	}
+	if ledgerEnabled && data != nil && data.Source == "" {
+		cp := *data
+		cp.Source = dashboard.Name()
+		data = &cp
 	}
 	writeJSON(w, http.StatusOK, data)
 }
@@ -1465,11 +1493,12 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		view = "summary"
 	}
 
-	// Only parse and validate groupBy when tokenomics.usage_ledger is enabled;
-	// with the experiment off, ignore groupBy so pre-existing behavior is
-	// unchanged (no new 400s).
+	// Resolve the experiment flag once per request (O2). When off, ignore
+	// groupBy and omit the source field so experiment-off responses stay
+	// byte-for-byte unchanged (O1, O5).
+	ledgerEnabled := s.experimentEnabled(experiments.TokenomicsUsageLedger)
 	var groupBy string
-	if s.experimentEnabled(experiments.TokenomicsUsageLedger) {
+	if ledgerEnabled {
 		var err error
 		groupBy, err = validateDashboardGroupBy(view, r.URL.Query().Get("groupBy"))
 		if err != nil {
@@ -1478,7 +1507,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		}
 	}
 
-	dashboard := s.selectMetricsDashboardSource(view, groupBy)
+	dashboard := s.selectMetricsDashboardSource(ledgerEnabled, view, groupBy)
 	if dashboard == nil {
 		writeError(w, http.StatusServiceUnavailable, "metrics_unavailable",
 			"Metrics dashboard is not configured (no telemetry project ID)", nil)
@@ -1521,12 +1550,19 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
+		var hint string
 		if dashboard.Name() == MetricsSourceCloudMonitoring {
-			if hint := s.metricsTelemetryHint(ctx, applyQueryOptions(opts).ProjectID); hint != "" {
-				cp := *data
-				cp.TelemetryHint = hint
-				data = &cp
+			hint = s.metricsTelemetryHint(ctx, applyQueryOptions(opts).ProjectID)
+		}
+		if (ledgerEnabled && data.Source == "") || hint != "" {
+			cp := *data
+			if ledgerEnabled && cp.Source == "" {
+				cp.Source = dashboard.Name()
 			}
+			if hint != "" {
+				cp.TelemetryHint = hint
+			}
+			data = &cp
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -1540,6 +1576,11 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
+		if ledgerEnabled && data.Source == "" {
+			cp := *data
+			cp.Source = dashboard.Name()
+			data = &cp
+		}
 		writeJSON(w, http.StatusOK, data)
 
 	case "model-calls":
@@ -1552,6 +1593,11 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
+		if ledgerEnabled && data.Source == "" {
+			cp := *data
+			cp.Source = dashboard.Name()
+			data = &cp
+		}
 		writeJSON(w, http.StatusOK, data)
 
 	case "tokens":
@@ -1563,6 +1609,11 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 				return
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
+		}
+		if ledgerEnabled && data.Source == "" {
+			cp := *data
+			cp.Source = dashboard.Name()
+			data = &cp
 		}
 		writeJSON(w, http.StatusOK, data)
 

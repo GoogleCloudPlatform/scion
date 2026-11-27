@@ -171,18 +171,47 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string
 	}, nil
 }
 
-// computeCacheHitRate returns cache_read / (input + cache_read + cache_write),
-// or nil when any component is unknown (nil) or the denominator is <= 0.
-func computeCacheHitRate(input, cacheRead, cacheWrite *int64) *float64 {
-	if input == nil || cacheRead == nil || cacheWrite == nil {
-		return nil
+// computeCacheHitRate returns cache_read / (input + cache_read + known_cache_write)
+// and whether the rate is partial (an upper bound because at least one
+// denominator component had unknown events in the scope or bucket, including
+// legacy rows where cache_write is NULL). Returns (nil, false) when input or
+// cacheRead is unknown or the denominator is <= 0.
+func computeCacheHitRate(input, cacheRead, cacheWrite *int64, unknown *AgentUsageBucketUnknownEvents) (*float64, bool) {
+	if input == nil || cacheRead == nil {
+		return nil, false
 	}
-	denom := float64(*input) + float64(*cacheRead) + float64(*cacheWrite)
+	var cw float64
+	partial := false
+	if cacheWrite != nil {
+		cw = float64(*cacheWrite)
+	} else {
+		// cache_write is unknown for all events in this scope/bucket (e.g.
+		// legacy session-metrics rows or harnesses that do not report cache_write).
+		partial = true
+	}
+	if unknown != nil && (unknown.Input > 0 || unknown.CacheRead > 0 || unknown.CacheWrite > 0) {
+		partial = true
+	}
+	denom := float64(*input) + float64(*cacheRead) + cw
 	if denom <= 0 {
-		return nil
+		return nil, false
 	}
 	rate := float64(*cacheRead) / denom
-	return &rate
+	return &rate, partial
+}
+
+func dashboardUnknownEvents(u *AgentUsageBucketUnknownEvents) *DashboardTokenUnknownEvents {
+	if u == nil {
+		return nil
+	}
+	return &DashboardTokenUnknownEvents{
+		Input:        u.Input,
+		Output:       u.Output,
+		CacheRead:    u.CacheRead,
+		CacheWrite:   u.CacheWrite,
+		CacheWrite1h: u.CacheWrite1h,
+		Reasoning:    u.Reasoning,
+	}
 }
 
 func dashboardTokenTotalsFromRollup(t store.UsageRollupTotals) *DashboardTokenTotals {
@@ -194,16 +223,19 @@ func dashboardTokenTotalsFromRollup(t store.UsageRollupTotals) *DashboardTokenTo
 	if t.Saturated {
 		resolved.Saturated = true
 	}
+	rate, partial := computeCacheHitRate(resolved.Input, resolved.CacheRead, resolved.CacheWrite, resolved.UnknownEvents)
 	return &DashboardTokenTotals{
-		Input:          resolved.Input,
-		Output:         resolved.Output,
-		CacheRead:      resolved.CacheRead,
-		CacheWrite:     resolved.CacheWrite,
-		CacheWrite1h:   resolved.CacheWrite1h,
-		Reasoning:      resolved.Reasoning,
-		SummableTokens: resolved.SummableTokens,
-		CacheHitRate:   computeCacheHitRate(resolved.Input, resolved.CacheRead, resolved.CacheWrite),
-		Saturated:      resolved.Saturated,
+		Input:               resolved.Input,
+		Output:              resolved.Output,
+		CacheRead:           resolved.CacheRead,
+		CacheWrite:          resolved.CacheWrite,
+		CacheWrite1h:        resolved.CacheWrite1h,
+		Reasoning:           resolved.Reasoning,
+		SummableTokens:      resolved.SummableTokens,
+		CacheHitRate:        rate,
+		CacheHitRatePartial: partial,
+		UnknownEvents:       dashboardUnknownEvents(resolved.UnknownEvents),
+		Saturated:           resolved.Saturated,
 	}
 }
 
@@ -255,14 +287,15 @@ func (s *HubRollupSource) QuerySummary(ctx context.Context, periodDays int, opts
 
 	tokens := dashboardTokenTotalsFromRollup(rollupRes.Totals)
 	summary := &DashboardSummary{
-		PeriodDays:    periodDays,
-		TimeZone:      w.reportLoc.String(),
-		Source:        MetricsSourceHubRollups,
-		Granularity:   w.granularity,
-		TotalAPICalls: rollupRes.Totals.Calls,
-		TotalTokens:   knownSummableTotal(tokens),
-		Tokens:        tokens,
-		CacheHitRate:  tokens.CacheHitRate,
+		PeriodDays:          periodDays,
+		TimeZone:            w.reportLoc.String(),
+		Source:              MetricsSourceHubRollups,
+		Granularity:         w.granularity,
+		TotalAPICalls:       rollupRes.Totals.Calls,
+		TotalTokens:         knownSummableTotal(tokens),
+		Tokens:              tokens,
+		CacheHitRate:        tokens.CacheHitRate,
+		CacheHitRatePartial: tokens.CacheHitRatePartial,
 	}
 
 	var queryErrors []string
@@ -705,9 +738,11 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 			acc.Input, acc.Output, acc.CacheRead, acc.CacheWrite, acc.CacheWrite1h, acc.Reasoning,
 			presenceFromTotals(*acc),
 		)
+		rate, partial := computeCacheHitRate(tok.Input, tok.CacheRead, tok.CacheWrite, tok.UnknownEvents)
 		dailyHitRate = append(dailyHitRate, NullableFloatPoint{
 			Timestamp: dk,
-			Value:     computeCacheHitRate(tok.Input, tok.CacheRead, tok.CacheWrite),
+			Value:     rate,
+			Partial:   partial,
 		})
 	}
 	sort.Slice(dailyHitRate, func(i, j int) bool {
@@ -759,20 +794,21 @@ func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID str
 		return nil, fmt.Errorf("query project 24h usage rollups: %w", err)
 	}
 
-	periodLabel := "Last 24 hours"
+	periodLabel := "Last 24h (hourly buckets)"
 	if w.granularity == store.UsageGranularityDay {
 		periodLabel = fmt.Sprintf("Since %s (UTC daily)", w.since.UTC().Format(dayKeyLayout))
 	}
 
 	tokens := dashboardTokenTotalsFromRollup(rollupRes.Totals)
 	summary := &ProjectMetricsSummary{
-		Source:        MetricsSourceHubRollups,
-		Granularity:   w.granularity,
-		APICalls24h:   rollupRes.Totals.Calls,
-		TokenUsage24h: knownSummableTotal(tokens),
-		PeriodLabel:   periodLabel,
-		Tokens:        tokens,
-		CacheHitRate:  tokens.CacheHitRate,
+		Source:              MetricsSourceHubRollups,
+		Granularity:         w.granularity,
+		APICalls24h:         rollupRes.Totals.Calls,
+		TokenUsage24h:       knownSummableTotal(tokens),
+		PeriodLabel:         periodLabel,
+		Tokens:              tokens,
+		CacheHitRate:        tokens.CacheHitRate,
+		CacheHitRatePartial: tokens.CacheHitRatePartial,
 	}
 
 	var queryErrors []string
