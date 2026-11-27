@@ -729,6 +729,44 @@ func TestTelemetryEnforced_CreateAndPatchRefusal(t *testing.T) {
 			json.RawMessage(`{"config":{"telemetry":{"enabled":true}}}`))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
+
+	t.Run("PATCH resending already-stored telemetry.enabled=false is allowed (O6)", func(t *testing.T) {
+		off := false
+		agent := &store.Agent{
+			ID:        tid("agent-tel-patch-stored-false"),
+			Slug:      "agent-tel-patch-stored-false",
+			Name:      "agent-tel-patch-stored-false",
+			ProjectID: project.ID,
+			Phase:     "stopped",
+			AppliedConfig: &store.AgentAppliedConfig{
+				InlineConfig: &api.ScionConfig{
+					Telemetry: &api.TelemetryConfig{Enabled: &off},
+				},
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		// Unchanged resend of already-stored false alongside another edit succeeds.
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false},"max_duration":"30m"}}`))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		// Changing to true, then back to false is refused with 400 telemetry_enforced_by_hub.
+		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":true}}}`))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false}}}`))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+	})
 }
 
 func TestTelemetryEnforced_OldBrokerRefusal(t *testing.T) {

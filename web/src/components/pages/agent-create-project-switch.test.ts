@@ -49,10 +49,17 @@ function stubFetch(): void {
       const held = (body: unknown): Promise<Response> =>
         new Promise((resolve) => releaseB.push(() => resolve(jsonResponse(body))));
 
-      if (url.includes('/api/v1/projects/proj-a/settings')) {
+      if (url.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
+      if (url.endsWith('/api/v1/projects/proj-a/settings')) {
         return respond({ defaultTemplate: 'tmpl-a', defaultMaxTurns: 11 });
       }
-      if (url.includes('/api/v1/projects/proj-b/settings')) {
+      if (url.endsWith('/api/v1/projects/proj-b/settings')) {
         return held({ defaultTemplate: 'tmpl-b', defaultMaxTurns: 22 });
       }
       if (url.includes('/api/v1/projects?')) {

@@ -92,6 +92,23 @@ func configDisablesTelemetry(cfg *api.ScionConfig) (string, bool) {
 	return "", false
 }
 
+// agentHasStoredTelemetryFalse reports whether agent already has telemetry
+// explicitly stored as disabled (either in CreateInputs.InlineConfig.Telemetry
+// or AppliedConfig.InlineConfig.Telemetry), so an unchanged PATCH resend is
+// allowed (mirroring project settings PUT I1).
+func agentHasStoredTelemetryFalse(agent *store.Agent) bool {
+	if agent == nil || agent.AppliedConfig == nil {
+		return false
+	}
+	if t := requesterTelemetry(agent.AppliedConfig); t != nil && t.Enabled != nil && !*t.Enabled {
+		return true
+	}
+	if ic := agent.AppliedConfig.InlineConfig; ic != nil && ic.Telemetry != nil && ic.Telemetry.Enabled != nil && !*ic.Telemetry.Enabled {
+		return true
+	}
+	return false
+}
+
 // writeTelemetryEnforcedRefusal writes a 400 telemetry_enforced_by_hub error
 // when a caller tries to disable telemetry on an agent while hub enforcement
 // is active.

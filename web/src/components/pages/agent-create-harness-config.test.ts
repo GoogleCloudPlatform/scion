@@ -71,6 +71,13 @@ function stubFetch(): void {
           json: () => Promise.resolve({ error: { message: 'stub: not created' } }),
         } as Response);
       }
+      if (url.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
       let body: unknown = { projects: [], brokers: [], templates: [], harnessConfigs: [] };
       if (url.includes('/settings/public')) {
         body = { ...hubSettings };
@@ -81,9 +88,9 @@ function stubFetch(): void {
             { id: 'p2', name: 'P2' },
           ],
         };
-      } else if (url.includes('/api/v1/projects/p1/settings')) {
+      } else if (url.endsWith('/api/v1/projects/p1/settings')) {
         body = { ...projectSettings };
-      } else if (url.includes('/api/v1/projects/p2/settings')) {
+      } else if (url.endsWith('/api/v1/projects/p2/settings')) {
         body = {};
       } else if (url.includes('/api/v1/templates')) {
         body = { templates };

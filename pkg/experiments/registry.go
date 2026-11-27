@@ -1491,7 +1491,7 @@ var compiled = []Experiment{
 		Title:       "Hub-enforced telemetry",
 		Description: "Lets a hub operator set telemetry.enforced in operational settings to make telemetry mandatory across all dispatched agents, overriding project and requester disable settings.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#9370",
 		Owner:       "@ptone",

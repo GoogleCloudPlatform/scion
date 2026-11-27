@@ -1313,7 +1313,11 @@ func startAgentViaHubWithSecrets(cmd *cobra.Command, hubCtx *HubContext, agentNa
 		if enableTelemetry {
 			configEnv["SCION_TELEMETRY_ENABLED"] = "true"
 		} else if disableTelemetry {
-			if err := checkDisableTelemetryAllowed(hubCtx.Client, projectID); err != nil {
+			var cmdCtx context.Context
+			if cmd != nil {
+				cmdCtx = cmd.Context()
+			}
+			if err := checkDisableTelemetryAllowed(cmdCtx, hubCtx.Client, projectID); err != nil {
 				return err
 			}
 			configEnv["SCION_TELEMETRY_ENABLED"] = "false"
@@ -2415,11 +2419,14 @@ func mergeUniqueWarnings(first, second []string) []string {
 // --disable-telemetry to a Hub. If the Hub reports telemetry is locked by the
 // hub operator, fail fast with a clear CLI message; if the endpoint is
 // unavailable (e.g. older Hub), fall through to the Hub's create validation.
-func checkDisableTelemetryAllowed(client hubclient.Client, projectID string) error {
+func checkDisableTelemetryAllowed(parentCtx context.Context, client hubclient.Client, projectID string) error {
 	if client == nil || projectID == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
 	defer cancel()
 	resolved, err := client.Projects().GetResolvedSettings(ctx, projectID)
 	if err != nil || resolved == nil {

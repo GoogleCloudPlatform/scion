@@ -36,6 +36,7 @@
       "status": 200,
       "fields": [
         "experiments.agent_policy.limit_ceilings:boolean",
+        "experiments.agent_policy.telemetry_enforcement:boolean",
         "experiments.federation.project_visitors:boolean",
         "experiments.hub.access_constraints:boolean",
         "experiments.hub.admin_managed_brokers:boolean",

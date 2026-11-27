@@ -120,7 +120,14 @@ function stubFetch(
       if (raw.includes('/api/v1/runtime-brokers')) {
         return ok({ brokers });
       }
-      if (raw.includes('/api/v1/projects/p1/settings')) {
+      if (raw.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
+      if (raw.endsWith('/api/v1/projects/p1/settings')) {
         return ok({
           defaultGCPIdentityMode: 'assign',
           defaultGCPIdentityServiceAccountID: 'sa-a',

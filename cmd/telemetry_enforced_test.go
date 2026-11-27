@@ -39,7 +39,7 @@ func TestCheckDisableTelemetryAllowed(t *testing.T) {
 		c, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
 
-		err = checkDisableTelemetryAllowed(c, "proj-1")
+		err = checkDisableTelemetryAllowed(t.Context(), c, "proj-1")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--disable-telemetry")
 		assert.Contains(t, err.Error(), "enforced by the hub operator")
@@ -55,7 +55,7 @@ func TestCheckDisableTelemetryAllowed(t *testing.T) {
 		c, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
 
-		require.NoError(t, checkDisableTelemetryAllowed(c, "proj-1"))
+		require.NoError(t, checkDisableTelemetryAllowed(t.Context(), c, "proj-1"))
 	})
 
 	t.Run("falls through on 404 older hub", func(t *testing.T) {
@@ -65,6 +65,6 @@ func TestCheckDisableTelemetryAllowed(t *testing.T) {
 		c, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
 
-		require.NoError(t, checkDisableTelemetryAllowed(c, "proj-1"))
+		require.NoError(t, checkDisableTelemetryAllowed(t.Context(), c, "proj-1"))
 	})
 }

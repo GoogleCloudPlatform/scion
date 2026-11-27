@@ -3417,6 +3417,11 @@ export class ScionPageProjectSettings extends LitElement {
                       : this.configTelemetryEnabled === false
                         ? 'disabled'
                         : 'inherit'}
+                  help-text=${this.isTelemetryLockedByHub()
+                    ? this.isTelemetryShadowedDisabled()
+                      ? 'Required by hub operator. Project setting (Disabled) is overridden.'
+                      : 'Required by hub operator'
+                    : nothing}
                   ?disabled=${!canEdit || this.isTelemetryLockedByHub()}
                   @sl-change=${(e: Event) => {
                     if (this.isTelemetryLockedByHub()) return;
@@ -3437,12 +3442,7 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="disabled">Disabled</sl-option>
                 </sl-select>
                 ${this.isTelemetryLockedByHub()
-                  ? html`<span class="field-help" data-testid="project-telemetry-locked-help"
-                      >Required by hub
-                      operator${this.isTelemetryShadowedDisabled()
-                        ? '. Project setting (Disabled) is overridden.'
-                        : ''}</span
-                    >`
+                  ? nothing
                   : html`<span class="field-help"
                       >Controls telemetry for agents in this project. "Use hub default" inherits the
                       server-level setting.</span

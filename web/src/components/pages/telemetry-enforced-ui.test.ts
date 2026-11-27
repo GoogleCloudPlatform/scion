@@ -16,6 +16,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import {
+  TELEMETRY_ENFORCEMENT_FLAG,
+  setFeatureFlag,
+  resetServerFlagStateForTests,
+} from '../../utils/feature-flags.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -27,6 +32,8 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe('Telemetry enforcement UI (P3b)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    setFeatureFlag(TELEMETRY_ENFORCEMENT_FLAG, false);
+    resetServerFlagStateForTests();
     document.body.innerHTML = '';
   });
 
@@ -35,7 +42,7 @@ describe('Telemetry enforcement UI (P3b)', () => {
       await import('../shared/agent-config-form.js');
     });
 
-    it('disables the telemetry select, hides Disabled, shows hub lock note, and emits no telemetry patch', async () => {
+    it('disables the telemetry select, hides Disabled, links hub lock reason via help-text (O4), and emits no telemetry patch', async () => {
       const form = document.createElement('scion-agent-config-form') as ScionAgentConfigForm;
       form.mode = 'create';
       form.telemetryLockedByHub = true;
@@ -51,16 +58,72 @@ describe('Telemetry enforcement UI (P3b)', () => {
       expect(select).not.toBeNull();
       expect(select.hasAttribute('disabled') || select.disabled).toBe(true);
       expect(select.value).toBe('true');
+      expect(select.getAttribute('help-text')).toBe('Required by hub operator');
 
       const options = Array.from(select.querySelectorAll('sl-option')).map((o) =>
         o.getAttribute('value')
       );
       expect(options).toEqual(['true']);
 
-      const note = field!.querySelector('[data-testid="telemetry-locked-note"]');
-      expect(note?.textContent).toContain('Required by hub operator');
-
       expect(form.collectConfigPatch()).toEqual({});
+    });
+  });
+
+  describe('agent-create shares one /settings/resolved fetch (O2)', () => {
+    beforeEach(async () => {
+      await import('./agent-create.js');
+    });
+
+    it('fetches /settings/resolved once per project and propagates telemetryLockedByHub to the form', async () => {
+      let resolvedFetches = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('/api/v1/projects?')) {
+          return Promise.resolve(jsonResponse({ projects: [{ id: 'p1', name: 'P1' }] }));
+        }
+        if (url.endsWith('/api/v1/projects/p1/settings/resolved')) {
+          resolvedFetches += 1;
+          return Promise.resolve(
+            jsonResponse({
+              project: { defaultTemplate: 'claude' },
+              settings: {
+                'scion.io/telemetry-enabled': {
+                  projectSet: false,
+                  projectValue: null,
+                  hubDefault: 'present',
+                  hubValue: true,
+                  lockedBy: 'hub',
+                  effective: true,
+                  storedValue: null,
+                },
+                'scion.io/default-max-turns': {
+                  projectSet: false,
+                  projectValue: null,
+                  hubDefault: 'absent',
+                  hubValue: null,
+                  ceiling: 50,
+                },
+              },
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const el = document.createElement('scion-page-agent-create') as HTMLElement & {
+        updateComplete: Promise<boolean>;
+      };
+      document.body.appendChild(el);
+
+      await vi.waitFor(() => {
+        const form = el.shadowRoot?.querySelector(
+          'scion-agent-config-form'
+        ) as ScionAgentConfigForm | null;
+        expect(form?.telemetryLockedByHub).toBe(true);
+      });
+
+      expect(resolvedFetches).toBe(1);
     });
   });
 
@@ -69,7 +132,7 @@ describe('Telemetry enforcement UI (P3b)', () => {
       await import('./project-settings.js');
     });
 
-    it('renders disabled dropdown with override helper text and omits telemetryEnabled from PUT', async () => {
+    it('renders disabled dropdown with linked help-text (O4) and omits telemetryEnabled from PUT', async () => {
       const putBodies: Array<Record<string, unknown>> = [];
       vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
         const url =
@@ -116,29 +179,25 @@ describe('Telemetry enforcement UI (P3b)', () => {
       const el = document.createElement('scion-page-project-settings') as HTMLElement & {
         projectId: string;
         updateComplete: Promise<boolean>;
-        handleSaveConfig?: () => Promise<void>;
       };
       el.projectId = 'proj-1';
       document.body.appendChild(el);
 
       await vi.waitFor(() => {
-        const help = el.shadowRoot?.querySelector('[data-testid="project-telemetry-locked-help"]');
-        expect(help).not.toBeNull();
+        const select = el.shadowRoot?.querySelector('[data-testid="project-telemetry-select"]');
+        expect(select?.getAttribute('help-text')).toContain('Required by hub operator');
       });
 
       const select = el.shadowRoot!.querySelector(
         '[data-testid="project-telemetry-select"]'
       ) as HTMLElement & { value: string; disabled: boolean };
-      expect(select).not.toBeNull();
       expect(select.hasAttribute('disabled') || select.disabled).toBe(true);
       expect(select.getAttribute('value') || select.value).toBe('enabled');
+      expect(select.getAttribute('help-text')).toContain('Required by hub operator');
+      expect(select.getAttribute('help-text')).toContain(
+        'Project setting (Disabled) is overridden'
+      );
 
-      const help = el.shadowRoot!.querySelector('[data-testid="project-telemetry-locked-help"]');
-      const helpText = (help?.textContent ?? '').replace(/\s+/g, ' ').trim();
-      expect(helpText).toContain('Required by hub operator');
-      expect(helpText).toContain('Project setting (Disabled) is overridden');
-
-      // Trigger save and verify telemetryEnabled is omitted from PUT payload.
       const saveBtn = el.shadowRoot!.querySelector(
         'sl-button[variant="primary"]'
       ) as HTMLElement | null;
@@ -152,17 +211,103 @@ describe('Telemetry enforcement UI (P3b)', () => {
     });
   });
 
-  describe('admin-server-config enforce telemetry toggle and L1 warning', () => {
+  describe('admin-server-config enforce telemetry gating (R1) and L1/O1 warning', () => {
     beforeEach(async () => {
       await import('./admin-server-config.js');
     });
 
-    it('disables enforce toggle unless telemetry.enabled is true and surfaces telemetry_enforced_warning', async () => {
+    it('R1: hides enforce switch when experiment is off and enforced is not stored', async () => {
+      setFeatureFlag(TELEMETRY_ENFORCEMENT_FLAG, false);
       vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
         const url =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (url.includes('/api/v1/admin/server-config/schema')) {
           return Promise.resolve(jsonResponse({ sections: {} }));
+        }
+        if (url.includes('/api/v1/admin/server-config')) {
+          return Promise.resolve(
+            jsonResponse({
+              settings_tier: 'db',
+              schema_version: '1',
+              telemetry: { enabled: true },
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const el = document.createElement('scion-page-admin-server-config') as HTMLElement & {
+        updateComplete: Promise<boolean>;
+      };
+      document.body.appendChild(el);
+
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('sl-tab-group')).not.toBeNull();
+      });
+
+      expect(el.shadowRoot!.querySelector('[data-testid="telemetry-enforced-switch"]')).toBeNull();
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="telemetry-enforcement-mismatch"]')
+      ).toBeNull();
+    });
+
+    it('R1: shows mismatch alert (not checked switch) when experiment is off and enforced:true is stored', async () => {
+      setFeatureFlag(TELEMETRY_ENFORCEMENT_FLAG, false);
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('/api/v1/admin/server-config/schema')) {
+          return Promise.resolve(jsonResponse({ sections: {} }));
+        }
+        if (url.includes('/api/v1/admin/server-config')) {
+          return Promise.resolve(
+            jsonResponse({
+              settings_tier: 'db',
+              schema_version: '1',
+              telemetry: { enabled: true, enforced: true },
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const el = document.createElement('scion-page-admin-server-config') as HTMLElement & {
+        updateComplete: Promise<boolean>;
+      };
+      document.body.appendChild(el);
+
+      await vi.waitFor(() => {
+        expect(
+          el.shadowRoot?.querySelector('[data-testid="telemetry-enforcement-mismatch"]')
+        ).not.toBeNull();
+      });
+
+      expect(el.shadowRoot!.querySelector('[data-testid="telemetry-enforced-switch"]')).toBeNull();
+      const alert = el.shadowRoot!.querySelector('[data-testid="telemetry-enforcement-mismatch"]');
+      expect(alert?.textContent).toContain('telemetry.enforced');
+      expect(alert?.textContent).toContain(TELEMETRY_ENFORCEMENT_FLAG);
+    });
+
+    it('R1 + O1: with experiment on, disables enforce switch unless enabled=true, shows L1 warning, and sends enforced:false when enabling telemetry with an invalid stored row', async () => {
+      setFeatureFlag(TELEMETRY_ENFORCEMENT_FLAG, true);
+      const putBodies: Array<Record<string, unknown>> = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/api/v1/admin/server-config/schema')) {
+          return Promise.resolve(jsonResponse({ sections: {} }));
+        }
+        if (url.includes('/api/v1/admin/server-config') && method === 'PUT') {
+          const rawBody = typeof init?.body === 'string' ? init.body : '{}';
+          putBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(
+            jsonResponse({
+              settings_tier: 'db',
+              schema_version: '1',
+              telemetry: { enabled: true, enforced: false },
+            })
+          );
         }
         if (url.includes('/api/v1/admin/server-config')) {
           return Promise.resolve(
@@ -180,6 +325,8 @@ describe('Telemetry enforcement UI (P3b)', () => {
 
       const el = document.createElement('scion-page-admin-server-config') as HTMLElement & {
         updateComplete: Promise<boolean>;
+        telemetryEnabled: boolean | null;
+        handleSave: () => Promise<void>;
       };
       document.body.appendChild(el);
 
@@ -197,6 +344,18 @@ describe('Telemetry enforcement UI (P3b)', () => {
       const warn = el.shadowRoot!.querySelector('[data-testid="telemetry-enforced-warning"]');
       expect(warn).not.toBeNull();
       expect(warn?.textContent).toContain('failed validation');
+
+      // O1: Admin enables telemetry without touching the enforce switch, then saves.
+      // Payload MUST explicitly send enforced: false so the stray stored enforced=true
+      // is cleared rather than silently armed.
+      el.telemetryEnabled = true;
+      await el.updateComplete;
+      await el.handleSave();
+
+      expect(putBodies.length).toBe(1);
+      const tel = putBodies[0].telemetry as Record<string, unknown>;
+      expect(tel.enabled).toBe(true);
+      expect(tel.enforced).toBe(false);
     });
   });
 });

@@ -334,7 +334,13 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 		}
 	}
 	if s.telemetryEnforced() {
-		if field, disabled := configDisablesTelemetry(withChangedEnvOnly(cfg, stored, ep)); disabled {
+		patchCfg := withChangedEnvOnly(cfg, stored, ep)
+		if agentHasStoredTelemetryFalse(agent) && patchCfg != nil && patchCfg.Telemetry != nil && patchCfg.Telemetry.Enabled != nil && !*patchCfg.Telemetry.Enabled {
+			cp := *patchCfg
+			cp.Telemetry = nil
+			patchCfg = &cp
+		}
+		if field, disabled := configDisablesTelemetry(patchCfg); disabled {
 			writeTelemetryEnforcedRefusal(w, field)
 			return false
 		}

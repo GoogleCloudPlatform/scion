@@ -1833,11 +1833,16 @@ export class ScionAgentConfigForm extends LitElement {
   ) {
     if (f.control === 'telemetry' && this.telemetryLockedByHub) {
       return html`<div class="row">
-          <sl-select id=${id} size="small" .value=${'true'} disabled>
-            <sl-option value="true">Enabled</sl-option>
-          </sl-select>
-        </div>
-        <div class="note" data-testid="telemetry-locked-note">Required by hub operator</div>`;
+        <sl-select
+          id=${id}
+          size="small"
+          .value=${'true'}
+          help-text="Required by hub operator"
+          disabled
+        >
+          <sl-option value="true">Enabled</sl-option>
+        </sl-select>
+      </div>`;
     }
     const options =
       f.control === 'choice' || f.control === 'top-choice' ? f.options : TOGGLE_OPTIONS;
