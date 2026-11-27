@@ -204,6 +204,9 @@ When the `hub.artifacts_review_requests` [experiment](/scion/reference/experimen
 # Request a review from one or more users (ID, user:<id>, or email)
 scion artifact request-review scion://artifact/5f1c2d3e-... --user alice@example.com --note "Please check section 3"
 
+# From an owning agent, request a review from your delegating user (grants bounded review access while they hold a project role)
+scion artifact request-review scion://artifact/5f1c2d3e-... --delegator --note "Ready for review"
+
 # List review requests on an artifact (publishers see all; others see their own)
 scion artifact review-requests scion://artifact/5f1c2d3e-...
 

@@ -803,3 +803,173 @@ func TestArtifactReviewWake_DeferredWakeGoroutineRecoversPanic(t *testing.T) {
 	}
 	f.srv.autoWakeWork.wg.Wait()
 }
+
+// TestArtifactReviewRequestDismissWake_SystemVsUserSuspended verifies design §4.7
+// [D: dismiss-agent-delivery] and acceptance §13 item 8:
+//   - a system-suspended agent owner/requester is auto-woken and receives the
+//     dismiss system message;
+//   - a user-suspended agent owner/requester is never woken.
+func TestArtifactReviewRequestDismissWake_SystemVsUserSuspended(t *testing.T) {
+	t.Run("system-suspended auto-wakes and delivers dismiss notice", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonIdle)
+		f.readyOnStart(t)
+
+		host := newArtifactHost(f.srv)
+		err := host.NotifyRequestDismissed(context.Background(), artifacts.ReviewRequestDismissNotice{
+			ArtifactID:    f.artifactID,
+			ArtifactTitle: "Wake Test Doc",
+			HomeScope:     f.project.ID,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   f.reviewUser.ID,
+			RequesterKind: artifacts.PrincipalKindAgent,
+			RequesterRef:  f.owner.ID,
+			OwnerKind:     artifacts.PrincipalKindAgent,
+			OwnerRef:      f.owner.ID,
+			ResponseNote:  "Will review tomorrow",
+		})
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			return len(f.disp.getStartCalls()) == 1 && len(f.disp.getMessageCalls()) == 1
+		}, 5*time.Second, 20*time.Millisecond, "system-suspended agent should auto-wake and receive dismiss notice")
+		assert.Contains(t, f.disp.getMessageCalls()[0].Message, `dismissed your review request on "Wake Test Doc"`)
+		assert.Contains(t, f.disp.getMessageCalls()[0].Message, "Will review tomorrow")
+	})
+
+	t.Run("user-suspended never wakes", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonUser)
+		f.readyOnStart(t)
+
+		host := newArtifactHost(f.srv)
+		err := host.NotifyRequestDismissed(context.Background(), artifacts.ReviewRequestDismissNotice{
+			ArtifactID:    f.artifactID,
+			ArtifactTitle: "Wake Test Doc",
+			HomeScope:     f.project.ID,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   f.reviewUser.ID,
+			RequesterKind: artifacts.PrincipalKindAgent,
+			RequesterRef:  f.owner.ID,
+			OwnerKind:     artifacts.PrincipalKindAgent,
+			OwnerRef:      f.owner.ID,
+			ResponseNote:  "Do not wake",
+		})
+		require.Error(t, err, "user-suspended agent cannot be woken or delivered to")
+		assert.Empty(t, f.disp.getStartCalls(), "user-suspended agent must never be woken")
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+}
+
+type blockingDismissDispatcher struct {
+	recordingDispatcher
+	started chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingDismissDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, msg string, interrupt bool, structured *messages.StructuredMessage) error {
+	select {
+	case d.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return d.recordingDispatcher.DispatchAgentMessage(ctx, agent, msg, interrupt, structured)
+}
+
+// TestArtifactReviewRequestDismiss_RunningAgentAsyncNonBlocking verifies R1:
+// dismissing a review request for a running agent dispatches the system notice
+// asynchronously so a slow/blocked broker never delays the HTTP response.
+func TestArtifactReviewRequestDismiss_RunningAgentAsyncNonBlocking(t *testing.T) {
+	f := newArtifactReviewWakeFixture(t, true)
+	blocking := &blockingDismissDispatcher{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	f.srv.SetDispatcher(blocking)
+
+	done := make(chan error, 1)
+	go func() {
+		host := newArtifactHost(f.srv)
+		done <- host.NotifyRequestDismissed(context.Background(), artifacts.ReviewRequestDismissNotice{
+			ArtifactID:    f.artifactID,
+			ArtifactTitle: "Async Dismiss Doc",
+			HomeScope:     f.project.ID,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   f.reviewUser.ID,
+			RequesterKind: artifacts.PrincipalKindAgent,
+			RequesterRef:  f.owner.ID,
+			OwnerKind:     artifacts.PrincipalKindAgent,
+			OwnerRef:      f.owner.ID,
+			ResponseNote:  "Async note",
+		})
+	}()
+
+	// NotifyRequestDismissed must return before blocking.release is closed.
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		close(blocking.release)
+		t.Fatal("NotifyRequestDismissed blocked on broker delivery for a running agent")
+	}
+
+	// Wait until the background goroutine has entered DispatchAgentMessage, then release it.
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		close(blocking.release)
+		t.Fatal("background dismiss dispatch did not reach dispatcher")
+	}
+	assert.Empty(t, blocking.getCalls(), "message should not be recorded before release")
+	close(blocking.release)
+
+	require.Eventually(t, func() bool {
+		return len(blocking.getCalls()) == 1
+	}, 5*time.Second, 10*time.Millisecond, "dismiss notice should be delivered after release")
+	calls := blocking.getCalls()
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Contains(t, calls[0].StructuredMessage.Msg, `dismissed your review request on "Async Dismiss Doc"`)
+	assert.Contains(t, calls[0].StructuredMessage.Msg, "Async note")
+	f.srv.autoWakeWork.wg.Wait()
+}
+
+// TestArtifactReviewRequestDismiss_HeldAgentWithheld verifies review round 2
+// finding 7: a dismiss notice addressed to a held agent is withheld via
+// heldNoticeWithheld (ptone/scion#7145) with no wake and no dispatch.
+func TestArtifactReviewRequestDismiss_HeldAgentWithheld(t *testing.T) {
+	f := newArtifactReviewWakeFixture(t, true)
+	ctx := context.Background()
+	_, err := f.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID:           f.owner.ID,
+		ProjectID:         f.project.ID,
+		Cause:             store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser,
+		RootPrincipalID:   f.adminUser.ID,
+		Trigger:           store.MembershipLossTriggerMemberRemove,
+		ActorKind:         "system",
+		ActorID:           "hub",
+		CorrelationID:     "test-dismiss-hold",
+	}})
+	require.NoError(t, err)
+
+	host := newArtifactHost(f.srv)
+	err = host.NotifyRequestDismissed(ctx, artifacts.ReviewRequestDismissNotice{
+		ArtifactID:    f.artifactID,
+		ArtifactTitle: "Held Dismiss Doc",
+		HomeScope:     f.project.ID,
+		ReviewerKind:  artifacts.PrincipalKindUser,
+		ReviewerRef:   f.reviewUser.ID,
+		RequesterKind: artifacts.PrincipalKindAgent,
+		RequesterRef:  f.owner.ID,
+		OwnerKind:     artifacts.PrincipalKindAgent,
+		OwnerRef:      f.owner.ID,
+		ResponseNote:  "Should be withheld",
+	})
+	f.srv.autoWakeWork.wg.Wait()
+	require.Error(t, err, "held agent must not receive dismiss notice")
+	assert.Empty(t, f.disp.getStartCalls(), "held agent must not be woken")
+	assert.Empty(t, f.disp.getMessageCalls(), "held agent must not be dispatched a dismiss notice")
+}

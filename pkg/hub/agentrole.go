@@ -105,6 +105,7 @@ func scopesForRole(role AgentRole) []AgentTokenScope {
 			// readers on other brokers or in the web UI; it only writes
 			// artifacts homed in the agent's own project.
 			ScopeProjectArtifactWrite,
+			ScopeProjectArtifactRequestReview,
 		}
 	case AgentRoleFull:
 		return []AgentTokenScope{
@@ -122,6 +123,7 @@ func scopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentSetMessageMode,
 			ScopeProjectArtifactRead,
 			ScopeProjectArtifactWrite,
+			ScopeProjectArtifactRequestReview,
 		}
 	case "":
 		return nil

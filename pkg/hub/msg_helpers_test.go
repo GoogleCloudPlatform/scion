@@ -135,6 +135,13 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "artifacts_review.go", function: "deliverArtifactReview", symbol: "dispatchWithBrokerRetry",
 		class: "exempt", reason: "derivative: review notice to the artifact's owning agent after an authorized finalize"},
 
+	// artifacts_review.go: dispatchReviewRequestDismissNotice — derivative notice
+	// (ptone/scion#5548). Sent after the artifact service dismissed an open
+	// review request for the request-authenticated reviewer; it goes to the
+	// artifact's agent owner/requester, as "system", with a hub-built body.
+	{file: "artifacts_review.go", function: "dispatchReviewRequestDismissNotice", symbol: "dispatchWithBrokerRetry",
+		class: "exempt", reason: "derivative: review-request dismiss notice to the artifact's agent owner/requester after an authorized dismiss"},
+
 	// artifacts_transfer.go: dispatchTransferNotice — derivative notice
 	// (ptone/scion#9337). Sent after an authorized steward committed an
 	// ownership transfer; goes to the new owner (and live former owner) as

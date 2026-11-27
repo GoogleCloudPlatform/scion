@@ -24,9 +24,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Review-request notifications (ptone/scion#9296, design §4.7): the hub's
-// artifacts.ReviewRequestNotifier. In Phase 1 (ptone/scion#9306), only user
-// requesters and in-app user notifications are implemented.
+// Review-request notifications (ptone/scion#9296, ptone/scion#5548, design §4.7):
+// the hub's artifacts.ReviewRequestNotifier. Supports both user and agent
+// requesters, in-app user notifications, and system-message dismiss delivery to
+// agent authors/requesters via artifacts_review.go.
 
 var _ artifacts.ReviewRequestNotifier = (*artifactHost)(nil)
 
@@ -39,9 +40,9 @@ const reviewRequestTitleMaxRunes = 120
 const reviewRequestAskedPhrase = " asked you to review "
 
 var (
-	errReviewRequestNoticeActor       = errors.New("hub: review request notices require a user actor in phase 1")
+	errReviewRequestNoticeActor       = errors.New("hub: review request notices require a user or agent actor")
 	errReviewRequestNoticeUnavailable = errors.New("hub: review request notices are unavailable")
-	errReviewRequestDismissNoTarget   = errors.New("hub: no user recipient for review request dismiss notice")
+	errReviewRequestDismissNoTarget   = errors.New("hub: no recipient for review request dismiss notice")
 )
 
 // IsInteractiveSession implements artifacts.ReviewRequestNotifier: reports
@@ -61,14 +62,21 @@ func (h *artifactHost) MayNotifyReviewer(ctx context.Context, reviewerUserID str
 
 // NotifyReviewRequest implements artifacts.ReviewRequestNotifier: writes an
 // in-app ARTIFACT_REVIEW_REQUESTED notification to the requested reviewer.
+// Accepts both user requesters and agent requesters (labelled "agent <slug>").
 func (h *artifactHost) NotifyReviewRequest(ctx context.Context, n artifacts.ReviewRequestNotice) error {
-	if n.RequesterKind != artifacts.PrincipalKindUser || n.RequesterRef == "" {
+	if n.RequesterRef == "" || (n.RequesterKind != artifacts.PrincipalKindUser && n.RequesterKind != artifacts.PrincipalKindAgent) {
 		return errReviewRequestNoticeActor
 	}
 	if h.server == nil {
 		return errReviewRequestNoticeUnavailable
 	}
-	label := h.server.grantNoticeLabel(ctx, n.ReviewerUserID, n.RequesterRef)
+	var label string
+	switch n.RequesterKind {
+	case artifacts.PrincipalKindUser:
+		label = h.server.grantNoticeLabel(ctx, n.ReviewerUserID, n.RequesterRef)
+	case artifacts.PrincipalKindAgent:
+		label = h.server.reviewRequestAgentLabel(ctx, n.RequesterRef)
+	}
 	title := cleanNotificationText(n.ArtifactTitle, reviewRequestTitleMaxRunes)
 	if title == "" {
 		title = "untitled"
@@ -87,11 +95,26 @@ func (h *artifactHost) NotifyReviewRequest(ctx context.Context, n artifacts.Revi
 	})
 }
 
+// reviewRequestAgentLabel returns "agent <slug>" for an agent requester, or
+// "an agent" if the agent cannot be looked up or has no slug (design §4.7).
+func (s *Server) reviewRequestAgentLabel(ctx context.Context, agentID string) string {
+	if s.store != nil && agentID != "" {
+		if a, err := s.store.GetAgent(ctx, agentID); err == nil && a != nil {
+			if slug := cleanNotificationText(a.Slug, 80); slug != "" {
+				return "agent " + slug
+			}
+		}
+	}
+	return "an agent"
+}
+
 // NotifyRequestDismissed implements artifacts.ReviewRequestNotifier: best-effort
 // acknowledges the reviewer's unacknowledged ARTIFACT_REVIEW_REQUESTED
-// notifications for the artifact, then writes an in-app
-// ARTIFACT_REVIEW_DISMISSED notification to the requester and, when different,
-// to the artifact's user owner.
+// notifications for the artifact, then notifies the requester and, when
+// different, the artifact owner. User recipients receive an in-app
+// ARTIFACT_REVIEW_DISMISSED notification; agent recipients receive a
+// SystemCategoryArtifactReview system message via artifacts_review.go dispatch
+// (design §4.7 [D: dismiss-agent-delivery]).
 func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.ReviewRequestDismissNotice) error {
 	if h.server == nil {
 		return errReviewRequestNoticeUnavailable
@@ -99,14 +122,27 @@ func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.R
 	if n.ReviewerKind == artifacts.PrincipalKindUser && n.ReviewerRef != "" && n.ArtifactID != "" {
 		h.ackReviewRequestNotifications(ctx, n.ReviewerRef, n.ArtifactID)
 	}
-	var recipients []string
+	var userRecipients []string
 	if n.RequesterKind == artifacts.PrincipalKindUser && n.RequesterRef != "" {
-		recipients = append(recipients, n.RequesterRef)
+		userRecipients = append(userRecipients, n.RequesterRef)
 	}
-	if n.OwnerKind == artifacts.PrincipalKindUser && n.OwnerRef != "" && n.OwnerRef != n.RequesterRef {
-		recipients = append(recipients, n.OwnerRef)
+	if n.OwnerKind == artifacts.PrincipalKindUser && n.OwnerRef != "" &&
+		(n.RequesterKind != artifacts.PrincipalKindUser || n.OwnerRef != n.RequesterRef) {
+		userRecipients = append(userRecipients, n.OwnerRef)
 	}
-	if len(recipients) == 0 {
+	type agentTarget struct {
+		id          string
+		isRequester bool
+	}
+	var agentRecipients []agentTarget
+	if n.RequesterKind == artifacts.PrincipalKindAgent && n.RequesterRef != "" {
+		agentRecipients = append(agentRecipients, agentTarget{id: n.RequesterRef, isRequester: true})
+	}
+	if n.OwnerKind == artifacts.PrincipalKindAgent && n.OwnerRef != "" &&
+		(n.RequesterKind != artifacts.PrincipalKindAgent || n.OwnerRef != n.RequesterRef) {
+		agentRecipients = append(agentRecipients, agentTarget{id: n.OwnerRef, isRequester: false})
+	}
+	if len(userRecipients) == 0 && len(agentRecipients) == 0 {
 		return errReviewRequestDismissNoTarget
 	}
 
@@ -117,7 +153,7 @@ func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.R
 	excerpt := cleanNotificationText(n.ResponseNote, reviewExcerptMaxRunes)
 
 	var firstErr error
-	for _, recipientID := range recipients {
+	for _, recipientID := range userRecipients {
 		label := h.server.grantNoticeLabel(ctx, recipientID, n.ReviewerRef)
 		var msg string
 		if n.RequesterKind == artifacts.PrincipalKindUser && recipientID == n.RequesterRef {
@@ -137,6 +173,15 @@ func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.R
 		}); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	var anyAgentDelivered bool
+	for _, target := range agentRecipients {
+		if h.server.deliverReviewRequestDismissToAgent(ctx, n, target.id, target.isRequester) {
+			anyAgentDelivered = true
+		}
+	}
+	if len(userRecipients) == 0 && !anyAgentDelivered {
+		return errReviewRequestNoticeUnavailable
 	}
 	return firstErr
 }

@@ -587,7 +587,7 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
-		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and refuses non-interactive credentials at the route level with 403 interactive_session_required before charging the limiter; TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 403 interactive_session_required) and agent callers",
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and refuses non-interactive user credentials at the route level with 403 interactive_session_required before charging the limiter while admitting owning agents on the bounded path; TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 403 interactive_session_required) and owning/non-owning agent callers",
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.withdraw", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests/{rid}/withdraw"}: {

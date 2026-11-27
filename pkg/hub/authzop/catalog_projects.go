@@ -2014,12 +2014,12 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.review.request.create",
 		Domain:      "artifact",
-		Description: "Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and an interactive user session (403 interactive_session_required for non-interactive credentials before charging the limiter); reviewers who already can review get access=existing, and user requesters who may administer the artifact raise the reviewer's grant to review in the same transaction (access=raised); rate limited per requester (LimitReviewRequest)",
+		Description: "Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306, ptone/scion#9307, ptone/scion#5548); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and either an interactive user session (403 interactive_session_required for non-interactive user credentials before charging the limiter) or an owning agent in its own home project (403 for non-owning agents or after a move); reviewers who already can review get access=existing, user requesters who may administer raise the reviewer's grant to review (access=raised), and owning agents write a role-gated bounded review grant for reviewers reading via a home-project role (access=bounded, at most 10 bounded grants per artifact); rate limited per requester (30/h users via LimitReviewRequest, 10/h agents via LimitReviewRequestAgent)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-requests", Method: "POST"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialAgentJWT},
 		ResourceResolver: "artifact-home-project",
 		BasePermission:   "artifact.request_review",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectUpdateResource},
