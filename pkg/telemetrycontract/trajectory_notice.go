@@ -14,11 +14,50 @@
 
 package telemetrycontract
 
+import "strings"
+
+// TrajectoryCaptureProjectAnnotation is the project annotation key carrying
+// the per-project Track 2 trajectory capture policy override. Shared across
+// Hub and store so capture-policy resolution cannot drift.
+const TrajectoryCaptureProjectAnnotation = "scion.io/trajectory-capture"
+
 // TrajectoryNoticeVersion is the canonical version identifier stamped on
 // run_attribution.notice_version when Track 2 trajectory capture is effective
 // for a run (experiment tokenomics.trajectory_capture enabled and effective
 // policy is not "off"). Bump whenever the user-visible notice semantics change.
 const TrajectoryNoticeVersion = "v1"
+
+// ResolveTrajectoryCapturePolicy resolves the effective Track 2 capture policy
+// from the Hub's allowProjectOptOut setting and the raw project annotation
+// value (TrajectoryCaptureProjectAnnotation).
+//
+// Precedence:
+//  1. When allowProjectOptOut is false (Hub opt-out lock active), the effective
+//     policy is always "full" with EnforcedByHub = true, regardless of any
+//     project annotation.
+//  2. Otherwise, if annotation (trimmed) is a valid policy ("full",
+//     "metadata_only", or "off"), that policy is effective with
+//     EnforcedByHub = false.
+//  3. Otherwise (unset or invalid), the effective policy defaults to "full"
+//     with EnforcedByHub = false.
+func ResolveTrajectoryCapturePolicy(allowProjectOptOut bool, annotation string) TrajectoryCapturePolicyStatus {
+	if !allowProjectOptOut {
+		return TrajectoryCapturePolicyStatus{
+			Policy:        TrajectoryCapturePolicyFull,
+			EnforcedByHub: true,
+		}
+	}
+	if val := strings.TrimSpace(annotation); IsValidTrajectoryCapturePolicy(val) {
+		return TrajectoryCapturePolicyStatus{
+			Policy:        val,
+			EnforcedByHub: false,
+		}
+	}
+	return TrajectoryCapturePolicyStatus{
+		Policy:        TrajectoryCapturePolicyFull,
+		EnforcedByHub: false,
+	}
+}
 
 // IsTrajectoryCaptureEffective reports whether policy results in trajectory
 // data or metadata being captured for a run ("full" or "metadata_only").

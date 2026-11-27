@@ -21,7 +21,15 @@
  * via the session registry and Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from 'lit';
+import {
+  LitElement,
+  html,
+  css,
+  nothing,
+  unsafeCSS,
+  type PropertyValues,
+  type TemplateResult,
+} from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
@@ -1600,7 +1608,9 @@ export class ScionTerminalPane extends LitElement {
       if (this.measurable()) {
         this.fitAddon?.fit();
         this.sendResize();
-        if (this.shouldAutoFocusTerminal()) this.terminal?.focus();
+        if (this.shouldAutoFocusTerminal() && !this.isInputGatedForCaptureNotice()) {
+          this.terminal?.focus();
+        }
       }
     }
   }
@@ -1620,15 +1630,36 @@ export class ScionTerminalPane extends LitElement {
   /** Metadata is consumed independently of transport/resize snapshots. */
   private applyMetadata(value: TerminalAgentMetadata): void {
     if (this.disposed) return;
+    const wasInputGated = this.isInputGatedForCaptureNotice();
     this.metadataError = value.error;
     this.error = value.error ?? this.session?.state.error ?? null;
     this.agentStopping = value.availability !== 'deleted' && value.agent?.phase === 'stopping';
     const agent = value.agent;
-    if (!agent) return;
+    if (!agent) {
+      if (
+        wasInputGated &&
+        !this.isInputGatedForCaptureNotice() &&
+        this.connected &&
+        this.measurable() &&
+        this.shouldAutoFocusTerminal()
+      ) {
+        this.terminal?.focus();
+      }
+      return;
+    }
     const previousProject = this.projectId;
     const previousName = this.agentName;
     this.agent = agent;
     this.agentName = agent.name;
+    if (
+      wasInputGated &&
+      !this.isInputGatedForCaptureNotice() &&
+      this.connected &&
+      this.measurable() &&
+      this.shouldAutoFocusTerminal()
+    ) {
+      this.terminal?.focus();
+    }
     this.projectId = agent.projectId ?? '';
     this.agentPhase = agent.phase;
     this.agentActivity = agent.activity ?? '';
@@ -2137,7 +2168,22 @@ export class ScionTerminalPane extends LitElement {
     el.addEventListener('touchcancel', end, { passive: true, signal });
   }
 
+  /**
+   * When Track 2 trajectory capture is enabled, hold interactive terminal input
+   * (and initial auto-focus) until the agent metadata snapshot settles — so the
+   * user sees the effective capture notice banner before typing into the TTY.
+   * Unblocks once `this.agent` is loaded or `this.metadataError` is set (so a
+   * transient metadata outage does not permanently lock out the terminal).
+   */
+  private isInputGatedForCaptureNotice(): boolean {
+    if (!trajectoryCaptureEnabled()) return false;
+    return !this.agent && !this.metadataError;
+  }
+
   private sendData(data: string): void {
+    if (this.isInputGatedForCaptureNotice()) {
+      return;
+    }
     this.session?.sendData(data);
   }
 
@@ -3222,7 +3268,7 @@ export class ScionTerminalPane extends LitElement {
     >`;
   }
 
-  private renderTrajectoryCaptureBanner() {
+  private renderTrajectoryCaptureBanner(): TemplateResult | typeof nothing {
     if (!trajectoryCaptureEnabled() || !this.agent?.trajectory_capture) {
       return nothing;
     }

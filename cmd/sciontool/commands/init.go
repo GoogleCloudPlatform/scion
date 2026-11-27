@@ -1364,6 +1364,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
 	removeStaleHarnessExitFiles()
+
+	// Best-effort tmux first-line capture notice: check injectable shape before
+	// contacting the Hub and before taking harnessLaunchedAt so Hub latency is
+	// not counted as harness launch time.
+	childArgs = maybeInjectTmuxTrajectoryNotice(ctx, hubClient, childArgs, trajectoryNoticeFetchTimeout)
+
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first
@@ -1373,10 +1379,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 		conduitSSH = prepareConduitSSH(hubClient, !opts.DisableConduit,
 			conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
 			sshSessionEnv(config), os.Getenv)
-	}
-
-	if notice := fetchTrajectoryCaptureNotice(ctx, hubClient, trajectoryNoticeFetchTimeout); notice != "" {
-		childArgs = injectTmuxTrajectoryNotice(childArgs, notice)
 	}
 
 	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines

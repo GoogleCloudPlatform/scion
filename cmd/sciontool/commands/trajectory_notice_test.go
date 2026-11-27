@@ -32,11 +32,13 @@ type stubTrajectoryPolicyFetcher struct {
 	status     *telemetrycontract.TrajectoryCapturePolicyStatus
 	err        error
 	delay      time.Duration
+	calls      int
 }
 
 func (s *stubTrajectoryPolicyFetcher) IsConfigured() bool { return s.configured }
 
 func (s *stubTrajectoryPolicyFetcher) GetTrajectoryCapturePolicy(ctx context.Context) (*telemetrycontract.TrajectoryCapturePolicyStatus, error) {
+	s.calls++
 	if s.delay > 0 {
 		select {
 		case <-time.After(s.delay):
@@ -137,5 +139,42 @@ func TestInjectTmuxTrajectoryNotice(t *testing.T) {
 		orig := []string{"sh", "-c", "tmux new-session -d -s scion -n agent sh -c 'claude'"}
 		got := injectTmuxTrajectoryNotice(orig, "")
 		assert.Equal(t, orig, got)
+	})
+}
+
+func TestMaybeInjectTmuxTrajectoryNotice_SkipsFetchOnNonInjectableShapes(t *testing.T) {
+	fullStatus := &telemetrycontract.TrajectoryCapturePolicyStatus{
+		Policy:        telemetrycontract.TrajectoryCapturePolicyFull,
+		EnforcedByHub: false,
+	}
+
+	t.Run("Cloud Run-shaped /bin/sh command makes no Hub GET and stays unchanged", func(t *testing.T) {
+		f := &stubTrajectoryPolicyFetcher{configured: true, status: fullStatus}
+		orig := []string{
+			"/bin/sh", "-c",
+			"tmux new-session -d -s scion -n agent /bin/sh -c 'claude --no-chrome' \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
+		}
+		got := maybeInjectTmuxTrajectoryNotice(context.Background(), f, orig, time.Second)
+		assert.Equal(t, 0, f.calls, "must not call Hub GET for non-injectable Cloud Run command")
+		assert.Equal(t, orig, got)
+	})
+
+	t.Run("K8s sh -c $SCION_START_CMD shape makes no Hub GET and stays unchanged", func(t *testing.T) {
+		f := &stubTrajectoryPolicyFetcher{configured: true, status: fullStatus}
+		orig := []string{"sh", "-c", `"$SCION_START_CMD"`}
+		got := maybeInjectTmuxTrajectoryNotice(context.Background(), f, orig, time.Second)
+		assert.Equal(t, 0, f.calls, "must not call Hub GET for K8s $SCION_START_CMD shape")
+		assert.Equal(t, orig, got)
+	})
+
+	t.Run("Docker/Podman non-FUSE shape fetches once and injects notice", func(t *testing.T) {
+		f := &stubTrajectoryPolicyFetcher{configured: true, status: fullStatus}
+		orig := []string{
+			"sh", "-c",
+			"tmux new-session -d -s scion -n agent sh -c 'claude --no-chrome' \\; attach-session -t scion",
+		}
+		got := maybeInjectTmuxTrajectoryNotice(context.Background(), f, orig, time.Second)
+		assert.Equal(t, 1, f.calls)
+		assert.Contains(t, got[2], `printf "%s\n" "Notice: `+telemetrycontract.TrajectoryCaptureNotice(*fullStatus)+`"; claude --no-chrome`)
 	})
 }

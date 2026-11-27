@@ -90,11 +90,6 @@ func (s *AgentStore) RunAttributionConfigInstalled() bool {
 	return s.runAttribution.load() != nil
 }
 
-// trajectoryCaptureProjectAnnotation is the project annotation key carrying
-// the per-project Track 2 trajectory capture policy override. Must match
-// projectSettingTrajectoryCapture in pkg/hub/project_settings_handlers.go.
-const trajectoryCaptureProjectAnnotation = "scion.io/trajectory-capture"
-
 // trajectoryCaptureStateSlot holds the Hub-provided TrajectoryCaptureStateFunc
 // atomically so AgentStore and UsageLedgerStore can stamp capture_policy and
 // notice_version on newly created run_attribution rows without locking or
@@ -467,23 +462,22 @@ func resolveRunAttributionCaptureFields(ctx context.Context, client *ent.Client,
 	if !enabled {
 		return "", ""
 	}
-	policy := telemetrycontract.TrajectoryCapturePolicyFull
+	var annotation string
 	if allowProjectOptOut && projectID != uuid.Nil {
 		proj, err := client.Project.Query().
 			Where(entproject.IDEQ(projectID)).
 			Select(entproject.FieldAnnotations).
 			Only(ctx)
 		if err == nil && proj != nil && proj.Annotations != nil {
-			if val := strings.TrimSpace(proj.Annotations[trajectoryCaptureProjectAnnotation]); telemetrycontract.IsValidTrajectoryCapturePolicy(val) {
-				policy = val
-			}
+			annotation = proj.Annotations[telemetrycontract.TrajectoryCaptureProjectAnnotation]
 		}
 	}
+	status := telemetrycontract.ResolveTrajectoryCapturePolicy(allowProjectOptOut, annotation)
 	noticeVersion := ""
-	if telemetrycontract.IsTrajectoryCaptureEffective(policy) {
+	if telemetrycontract.IsTrajectoryCaptureEffective(status.Policy) {
 		noticeVersion = telemetrycontract.TrajectoryNoticeVersion
 	}
-	return policy, noticeVersion
+	return status.Policy, noticeVersion
 }
 
 // buildRunAttributionFromAgentRow constructs the immutable run_attribution
@@ -801,7 +795,10 @@ func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Contex
 			if err := ctx.Err(); err != nil {
 				return inserted, err
 			}
-			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID, "", s.trajectoryCapture.load())
+			// Pass nil for captureState on backfill: runs already active when the
+			// ledger is enabled predate the notice, so backfill must not attest
+			// notice_version (or retroactively stamp live capture_policy).
+			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID, "", nil)
 			if err != nil {
 				slog.Warn("run_attribution backfill: failed to build attribution for agent",
 					"agent_id", row.ID.String(), "run_id", row.RunID, "error", err)

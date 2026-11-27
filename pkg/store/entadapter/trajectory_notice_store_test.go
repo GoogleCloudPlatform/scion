@@ -53,7 +53,7 @@ func TestRunAttribution_NoticeVersionAndCapturePolicyStamping(t *testing.T) {
 		}
 		if policy != "" {
 			proj.Annotations = map[string]string{
-				trajectoryCaptureProjectAnnotation: policy,
+				telemetrycontract.TrajectoryCaptureProjectAnnotation: policy,
 			}
 		}
 		require.NoError(t, cs.CreateProject(ctx, proj))
@@ -148,4 +148,56 @@ func TestRunAttribution_NoticeVersionAndCapturePolicyStamping(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyMetadataOnly, lazyAttr.CapturePolicy)
 	assert.Equal(t, telemetrycontract.TrajectoryNoticeVersion, lazyAttr.NoticeVersion)
+
+	// 8. BackfillActiveRunAttributions for a run already active before the ledger
+	// was enabled must NOT stamp notice_version (or live capture_policy).
+	agBackfill := newAgent(projDefault, "ag-backfill")
+	_, err = cs.SetAgentRunID(ctx, agBackfill.ID, "run-backfill-active", nil)
+	require.NoError(t, err)
+	_, err = cs.GetRunAttribution(ctx, "run-backfill-active")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	inserted, err := cs.BackfillActiveRunAttributions(ctx, "hub-notice")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, inserted, 1)
+	bfAttr, err := cs.GetRunAttribution(ctx, "run-backfill-active")
+	require.NoError(t, err)
+	assert.Empty(t, bfAttr.NoticeVersion, "backfilled run_attribution must not stamp notice_version")
+	assert.Empty(t, bfAttr.CapturePolicy, "backfilled run_attribution must not retroactively stamp capture_policy")
+}
+
+func TestResolveRunAttributionCaptureFields_MatchesTelemetryContract(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+
+	annotations := []string{"", "invalid", "full", "metadata_only", "off"}
+	for _, allowOptOut := range []bool{true, false} {
+		for _, ann := range annotations {
+			pid := uuid.New()
+			proj := &store.Project{
+				ID:   pid.String(),
+				Name: "p-" + pid.String()[:8],
+				Slug: "p-" + pid.String()[:8],
+			}
+			if ann != "" {
+				proj.Annotations = map[string]string{
+					telemetrycontract.TrajectoryCaptureProjectAnnotation: ann,
+				}
+			}
+			require.NoError(t, cs.CreateProject(ctx, proj))
+
+			wantStatus := telemetrycontract.ResolveTrajectoryCapturePolicy(allowOptOut, ann)
+			wantNotice := ""
+			if telemetrycontract.IsTrajectoryCaptureEffective(wantStatus.Policy) {
+				wantNotice = telemetrycontract.TrajectoryNoticeVersion
+			}
+
+			gotPolicy, gotNotice := resolveRunAttributionCaptureFields(ctx, client, pid, func() (bool, bool) {
+				return true, allowOptOut
+			})
+			assert.Equal(t, wantStatus.Policy, gotPolicy, "allowOptOut=%v ann=%q", allowOptOut, ann)
+			assert.Equal(t, wantNotice, gotNotice, "allowOptOut=%v ann=%q", allowOptOut, ann)
+		}
+	}
 }

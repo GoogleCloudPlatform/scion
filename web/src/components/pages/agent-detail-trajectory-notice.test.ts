@@ -187,5 +187,87 @@ describe('Trajectory capture notice banners (P5.1c)', () => {
         expect(banner!.textContent).toContain(formatTrajectoryCaptureNotice(status));
       });
     }
+
+    it('gates terminal input until agent metadata and capture policy arrive', async () => {
+      setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
+      const sendDataSpy = vi.fn();
+      const el = document.createElement('scion-terminal-pane') as HTMLElement & {
+        loading: boolean;
+        agent: Record<string, unknown> | null;
+        session: { sendData: (d: string) => void } | null;
+        sendData: (d: string) => void;
+        applyMetadata: (value: {
+          agent: Record<string, unknown> | null;
+          availability: 'loading' | 'ready' | 'deleted' | 'unavailable';
+          error: string | null;
+        }) => void;
+        updateComplete: Promise<boolean>;
+      };
+      el.loading = false;
+      el.agent = null;
+      Object.defineProperty(el, 'session', {
+        value: { sendData: sendDataSpy, setFrontmost: vi.fn(), state: { error: null } },
+        configurable: true,
+      });
+      document.body.appendChild(el);
+      await el.updateComplete;
+
+      // Before metadata resolves, banner is absent and input is held back.
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="terminal-trajectory-capture-banner"]')
+      ).toBeNull();
+      el.sendData('ls\n');
+      expect(sendDataSpy).not.toHaveBeenCalled();
+
+      // Once agent metadata arrives, banner renders and input is forwarded.
+      const status: TrajectoryCapturePolicyStatus = { policy: 'full', enforced_by_hub: true };
+      el.applyMetadata({
+        agent: {
+          id: 'agent-1',
+          name: 'test-agent',
+          projectId: 'proj-1',
+          template: 'claude',
+          phase: 'running',
+          trajectory_capture: status,
+        },
+        availability: 'ready',
+        error: null,
+      });
+      await el.updateComplete;
+
+      const banner = el.shadowRoot!.querySelector(
+        '[data-testid="terminal-trajectory-capture-banner"]'
+      ) as HTMLElement | null;
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain(formatTrajectoryCaptureNotice(status));
+
+      el.sendData('ls\n');
+      expect(sendDataSpy).toHaveBeenCalledTimes(1);
+      expect(sendDataSpy).toHaveBeenCalledWith('ls\n');
+    });
+
+    it('does not gate terminal input when trajectory capture experiment is off', async () => {
+      setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, false);
+      const sendDataSpy = vi.fn();
+      const el = document.createElement('scion-terminal-pane') as HTMLElement & {
+        loading: boolean;
+        agent: Record<string, unknown> | null;
+        session: { sendData: (d: string) => void } | null;
+        sendData: (d: string) => void;
+        updateComplete: Promise<boolean>;
+      };
+      el.loading = false;
+      el.agent = null;
+      Object.defineProperty(el, 'session', {
+        value: { sendData: sendDataSpy, setFrontmost: vi.fn(), state: { error: null } },
+        configurable: true,
+      });
+      document.body.appendChild(el);
+      await el.updateComplete;
+
+      el.sendData('ls\n');
+      expect(sendDataSpy).toHaveBeenCalledTimes(1);
+      expect(sendDataSpy).toHaveBeenCalledWith('ls\n');
+    });
   });
 });

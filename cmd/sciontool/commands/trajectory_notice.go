@@ -78,22 +78,54 @@ func escapeForDoubleQuotedInSingleQuotes(s string) string {
 	return r.Replace(s)
 }
 
-// injectTmuxTrajectoryNotice prepends a best-effort printf of notice as the
-// first line printed in the tmux "agent" window before the harness starts and
-// accepts input. Leaves childArgs untouched if notice is empty or childArgs
-// does not match the canonical `sh -c "tmux new-session -d -s scion -n agent sh -c '...'"`
-// launch shape.
-func injectTmuxTrajectoryNotice(childArgs []string, notice string) []string {
-	if notice == "" || len(childArgs) < 3 {
-		return childArgs
+// canInjectTmuxNotice reports whether childArgs has the literal inline tmux
+// agent-window command shape that injectTmuxTrajectoryNotice can safely rewrite:
+//
+//	sh -c "tmux new-session -d -s scion -n agent sh -c '<harness>...' ..."
+//
+// Runtime coverage (best-effort surface; CLI, web agent detail, and web
+// terminal are the required surfaces):
+//   - Receives the tmux first-line banner: Docker and Podman runtimes without
+//     FUSE mounts (pkg/runtime/common.go buildTmuxStartCmd).
+//   - Skipped (returns false, no Hub GET is made): Cloud Run, Cloud Run sandbox,
+//     and Substrate (which invoke `/bin/sh -c ...`), Kubernetes (which runs
+//     `sh -c "$SCION_START_CMD"`), and Docker/Podman with FUSE mounts (which
+//     also pass the command via `$SCION_START_CMD`).
+func canInjectTmuxNotice(childArgs []string) bool {
+	if len(childArgs) < 3 {
+		return false
 	}
 	if childArgs[0] != "sh" || childArgs[1] != "-c" {
+		return false
+	}
+	return strings.Contains(childArgs[2], tmuxAgentWindowShPrefix)
+}
+
+// maybeInjectTmuxTrajectoryNotice checks canInjectTmuxNotice(childArgs) before
+// contacting the Hub so runtimes whose command shape cannot accept the banner
+// never incur Hub fetch latency. When injectable and capture is effective, it
+// returns childArgs with the notice printf prepended inside the tmux agent
+// window; otherwise it returns childArgs unchanged.
+func maybeInjectTmuxTrajectoryNotice(ctx context.Context, client trajectoryPolicyFetcher, childArgs []string, timeout time.Duration) []string {
+	if !canInjectTmuxNotice(childArgs) {
+		return childArgs
+	}
+	notice := fetchTrajectoryCaptureNotice(ctx, client, timeout)
+	if notice == "" {
+		return childArgs
+	}
+	return injectTmuxTrajectoryNotice(childArgs, notice)
+}
+
+// injectTmuxTrajectoryNotice prepends a best-effort printf of notice as the
+// first line printed in the tmux "agent" window before the harness starts and
+// accepts input. Leaves childArgs untouched if notice is empty or
+// canInjectTmuxNotice(childArgs) is false.
+func injectTmuxTrajectoryNotice(childArgs []string, notice string) []string {
+	if notice == "" || !canInjectTmuxNotice(childArgs) {
 		return childArgs
 	}
 	idx := strings.Index(childArgs[2], tmuxAgentWindowShPrefix)
-	if idx < 0 {
-		return childArgs
-	}
 	insertAt := idx + len(tmuxAgentWindowShPrefix)
 	escaped := escapeForDoubleQuotedInSingleQuotes(notice)
 	prefix := `printf "%s\n" "Notice: ` + escaped + `"; `

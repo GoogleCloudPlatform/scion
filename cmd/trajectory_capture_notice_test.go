@@ -15,10 +15,8 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,22 +31,29 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 )
 
-func captureNoticeStderr(t *testing.T, fn func()) string {
+// captureNoticeStderr redirects os.Stderr to a temp file and passes a snapshot
+// reader to fn so stubs (such as attachToAgentFn) can inspect the exact bytes
+// already written to stderr at the moment attach begins.
+func captureNoticeStderr(t *testing.T, fn func(readSoFar func() string)) string {
 	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr-*")
+	require.NoError(t, err)
 	orig := os.Stderr
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = w
-	defer func() { os.Stderr = orig }()
+	os.Stderr = f
+	defer func() {
+		os.Stderr = orig
+		_ = f.Close()
+	}()
 
-	fn()
+	readSoFar := func() string {
+		_ = f.Sync()
+		b, readErr := os.ReadFile(f.Name())
+		require.NoError(t, readErr)
+		return string(b)
+	}
 
-	require.NoError(t, w.Close())
-	var buf bytes.Buffer
-	_, err = io.Copy(&buf, r)
-	require.NoError(t, err)
-	require.NoError(t, r.Close())
-	return buf.String()
+	fn(readSoFar)
+	return readSoFar()
 }
 
 func TestAttachViaHub_PrintsTrajectoryCaptureNoticeBeforeAttach(t *testing.T) {
@@ -120,11 +125,6 @@ func TestAttachViaHub_PrintsTrajectoryCaptureNoticeBeforeAttach(t *testing.T) {
 			resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
 				return &fakeTransportSource{token: "test-transport-token"}, transportauth.HeaderAuthorization, nil
 			}
-			attachCalled := false
-			attachToAgentFn = func(_ context.Context, _, _, _ string, _ ...wsclient.AttachOption) error {
-				attachCalled = true
-				return nil
-			}
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -148,8 +148,17 @@ func TestAttachViaHub_PrintsTrajectoryCaptureNoticeBeforeAttach(t *testing.T) {
 				ProjectID: "proj-1",
 			}
 
-			var runErr error
-			stderr := captureNoticeStderr(t, func() {
+			var (
+				runErr             error
+				attachCalled       bool
+				stderrBeforeAttach string
+			)
+			stderr := captureNoticeStderr(t, func(readSoFar func() string) {
+				attachToAgentFn = func(_ context.Context, _, _, _ string, _ ...wsclient.AttachOption) error {
+					attachCalled = true
+					stderrBeforeAttach = readSoFar()
+					return nil
+				}
 				runErr = attachViaHub(hubCtx, "a1")
 			})
 			require.NoError(t, runErr)
@@ -157,7 +166,8 @@ func TestAttachViaHub_PrintsTrajectoryCaptureNoticeBeforeAttach(t *testing.T) {
 			if tc.wantNotice == "" {
 				assert.NotContains(t, stderr, "Notice:")
 			} else {
-				assert.Contains(t, stderr, "Notice: "+tc.wantNotice)
+				assert.Contains(t, stderrBeforeAttach, "Notice: "+tc.wantNotice,
+					"notice must be written to stderr before attachToAgentFn runs")
 			}
 		})
 	}
@@ -218,16 +228,19 @@ func TestFinishHubStart_PrintsTrajectoryCaptureNotice(t *testing.T) {
 		ProjectID: "proj-1",
 	}
 
-	// Verify notice is printed before attachToAgentFn runs when --attach is set.
+	// Verify notice is printed to stderr BEFORE attachToAgentFn runs when --attach is set.
 	attach = true
-	attached := false
-	attachToAgentFn = func(_ context.Context, _, _, _ string, _ ...wsclient.AttachOption) error {
-		attached = true
-		return nil
-	}
-
-	var runErr error
-	stderr := captureNoticeStderr(t, func() {
+	var (
+		runErr             error
+		attached           bool
+		stderrBeforeAttach string
+	)
+	captureNoticeStderr(t, func(readSoFar func() string) {
+		attachToAgentFn = func(_ context.Context, _, _, _ string, _ ...wsclient.AttachOption) error {
+			attached = true
+			stderrBeforeAttach = readSoFar()
+			return nil
+		}
 		runErr = finishHubStart(hubCtx, "proj-1", "a1", false, false, &hubclient.CreateAgentResponse{
 			Agent: &hubclient.Agent{
 				ID:     "agent-id-1",
@@ -240,5 +253,95 @@ func TestFinishHubStart_PrintsTrajectoryCaptureNotice(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 	assert.True(t, attached)
-	assert.Contains(t, stderr, "Notice: "+wantNotice)
+	assert.Contains(t, stderrBeforeAttach, "Notice: "+wantNotice,
+		"notice must be written to stderr before attachToAgentFn runs")
+}
+
+func TestFinishHubStart_NoWaitAndSyncBoundedGetFallback(t *testing.T) {
+	origAttach := attach
+	origNoWait := startNoWait
+	origWaitReady := startWaitReady
+	origOutputFormat := outputFormat
+	t.Cleanup(func() {
+		attach = origAttach
+		startNoWait = origNoWait
+		startWaitReady = origWaitReady
+		outputFormat = origOutputFormat
+	})
+
+	attach = false
+	startWaitReady = false
+	outputFormat = ""
+
+	status := &telemetrycontract.TrajectoryCapturePolicyStatus{
+		Policy:        telemetrycontract.TrajectoryCapturePolicyMetadataOnly,
+		EnforcedByHub: false,
+	}
+	wantNotice := telemetrycontract.TrajectoryCaptureNotice(*status)
+
+	t.Run("no-wait fetches trajectory_capture via bounded GET and prints notice", func(t *testing.T) {
+		startNoWait = true
+		getCalls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/v1/projects/proj-1/agents/a1" {
+				getCalls++
+				_ = json.NewEncoder(w).Encode(hubclient.Agent{
+					ID:                "agent-id-1",
+					Name:              "a1",
+					Slug:              "a1",
+					Phase:             "provisioning",
+					TrajectoryCapture: status,
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+
+		var runErr error
+		stderr := captureNoticeStderr(t, func(_ func() string) {
+			runErr = finishHubStart(hubCtx, "proj-1", "a1", false, false, &hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{
+					ID:    "agent-id-1",
+					Name:  "a1",
+					Slug:  "a1",
+					Phase: "provisioning",
+				},
+			}, nil, false)
+		})
+		require.NoError(t, runErr)
+		assert.Equal(t, 1, getCalls)
+		assert.Contains(t, stderr, "Notice: "+wantNotice)
+	})
+
+	t.Run("sync start never fails when bounded GET returns error", func(t *testing.T) {
+		startNoWait = false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+
+		var runErr error
+		stderr := captureNoticeStderr(t, func(_ func() string) {
+			runErr = finishHubStart(hubCtx, "proj-1", "a1", false, false, &hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{
+					ID:    "agent-id-1",
+					Name:  "a1",
+					Slug:  "a1",
+					Phase: "running",
+				},
+			}, nil, false)
+		})
+		require.NoError(t, runErr)
+		assert.NotContains(t, stderr, "Notice:")
+	})
 }

@@ -61,3 +61,83 @@ func TestTrajectoryCaptureNotice_MatchesSharedFixture(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveTrajectoryCapturePolicy(t *testing.T) {
+	cases := []struct {
+		name        string
+		allowOptOut bool
+		annotation  string
+		want        TrajectoryCapturePolicyStatus
+	}{
+		{
+			name:        "unlocked unset defaults to full",
+			allowOptOut: true,
+			annotation:  "",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: false},
+		},
+		{
+			name:        "unlocked invalid defaults to full",
+			allowOptOut: true,
+			annotation:  "bogus",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: false},
+		},
+		{
+			name:        "unlocked full",
+			allowOptOut: true,
+			annotation:  "full",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: false},
+		},
+		{
+			name:        "unlocked metadata_only",
+			allowOptOut: true,
+			annotation:  " metadata_only ",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyMetadataOnly, EnforcedByHub: false},
+		},
+		{
+			name:        "unlocked off",
+			allowOptOut: true,
+			annotation:  "off",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyOff, EnforcedByHub: false},
+		},
+		{
+			name:        "locked unset enforces full",
+			allowOptOut: false,
+			annotation:  "",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: true},
+		},
+		{
+			name:        "locked invalid enforces full",
+			allowOptOut: false,
+			annotation:  "bogus",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: true},
+		},
+		{
+			name:        "locked full enforces full",
+			allowOptOut: false,
+			annotation:  "full",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: true},
+		},
+		{
+			name:        "locked metadata_only enforces full",
+			allowOptOut: false,
+			annotation:  "metadata_only",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: true},
+		},
+		{
+			name:        "locked off enforces full",
+			allowOptOut: false,
+			annotation:  "off",
+			want:        TrajectoryCapturePolicyStatus{Policy: TrajectoryCapturePolicyFull, EnforcedByHub: true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveTrajectoryCapturePolicy(tc.allowOptOut, tc.annotation)
+			if got != tc.want {
+				t.Fatalf("ResolveTrajectoryCapturePolicy(%v, %q) = %+v, want %+v",
+					tc.allowOptOut, tc.annotation, got, tc.want)
+			}
+		})
+	}
+}
