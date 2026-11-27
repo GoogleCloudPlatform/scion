@@ -31,11 +31,21 @@ import (
 )
 
 type recordingUploader struct {
-	mu       sync.Mutex
-	outcome  shipper.ShipOutcome
-	message  string
-	segments []shipper.Segment
-	ch       chan shipper.Segment
+	mu         sync.Mutex
+	outcome    shipper.ShipOutcome
+	message    string
+	segments   []shipper.Segment
+	probeCalls int
+	ch         chan shipper.Segment
+}
+
+func (u *recordingUploader) Probe(_ context.Context, _ shipper.Segment) (shipper.ShipResult, error) {
+	u.mu.Lock()
+	u.probeCalls++
+	outcome := u.outcome
+	msg := u.message
+	u.mu.Unlock()
+	return shipper.ShipResult{Outcome: outcome, SegmentID: "probe-1", Message: msg}, nil
 }
 
 func (u *recordingUploader) Ship(_ context.Context, seg shipper.Segment) (shipper.ShipResult, error) {
@@ -78,6 +88,7 @@ func TestRunner_TriggersWakeDebounceAndPreStop(t *testing.T) {
 	r, err := NewRunner(Config{
 		HomeDir:          home,
 		RunID:            "run-1",
+		Harness:          "claude",
 		Uploader:         up,
 		PeriodicInterval: time.Hour,
 		ModelEndDebounce: 40 * time.Millisecond,
@@ -189,6 +200,7 @@ func TestRunner_PolicyRefusalRebaselinesAndBacksOff(t *testing.T) {
 	r, err := NewRunner(Config{
 		HomeDir:            home,
 		RunID:              "run-pol",
+		Harness:            "claude",
 		Uploader:           up,
 		UnavailableBackoff: time.Hour,
 	})
@@ -266,6 +278,7 @@ func TestRunner_SessionEndWakeThrottledAndCoalesced(t *testing.T) {
 	r, err := NewRunner(Config{
 		HomeDir:               home,
 		RunID:                 "run-burst",
+		Harness:               "claude",
 		Uploader:              up,
 		PeriodicInterval:      time.Hour,
 		SessionEndMinInterval: 60 * time.Millisecond,
@@ -324,6 +337,7 @@ func TestRunner_CaptureUnavailableRebaselinesAcrossRestart(t *testing.T) {
 	r1, err := NewRunner(Config{
 		HomeDir:            home,
 		RunID:              "run-404",
+		Harness:            "claude",
 		Uploader:           up,
 		UnavailableBackoff: time.Hour,
 	})
@@ -341,26 +355,30 @@ func TestRunner_CaptureUnavailableRebaselinesAcrossRestart(t *testing.T) {
 	_, _ = f.WriteString(lineA)
 	_ = f.Close()
 
-	// Round gets 404 -> rebaselines to EOF (skipping A) and backs off.
+	// Round gets 404 -> rebaselines to line boundary (skipping A), sets
+	// RefusedPendingRebaseline=true, and backs off.
 	r1.executeRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}, time.Second)
 	if up.count() != 1 {
 		t.Fatalf("expected 1 prepare attempt (404), got %d", up.count())
 	}
 
-	// Flip experiment ON and append B.
-	up2 := &recordingUploader{outcome: shipper.OutcomeCommitted}
-	lineB := "{\"written_while_on\":\"B\"}\n"
-	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	// Append lineDuringBackoff while still in backoff/restarting, then flip ON.
+	lineDuringBackoff := "{\"written_during_backoff\":\"backoff\"}\n"
+	fBackoff, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
-		t.Fatalf("append B: %v", err)
+		t.Fatalf("append backoff: %v", err)
 	}
-	_, _ = f2.WriteString(lineB)
-	_ = f2.Close()
+	_, _ = fBackoff.WriteString(lineDuringBackoff)
+	_ = fBackoff.Close()
 
-	// Simulate container restart: fresh Runner over the same home runs resume_catchup.
+	// Simulate container restart: fresh Runner over the same home runs
+	// resume_catchup -> probes prepare (accepted), rebaselines past
+	// lineDuringBackoff without shipping it, and clears RefusedPendingRebaseline.
+	up2 := &recordingUploader{outcome: shipper.OutcomeCommitted}
 	r2, err := NewRunner(Config{
 		HomeDir:            home,
 		RunID:              "run-404-restarted",
+		Harness:            "claude",
 		Uploader:           up2,
 		UnavailableBackoff: time.Hour,
 	})
@@ -368,14 +386,40 @@ func TestRunner_CaptureUnavailableRebaselinesAcrossRestart(t *testing.T) {
 		t.Fatalf("NewRunner 2: %v", err)
 	}
 	r2.executeRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonResumeCatchup}, time.Second)
+	if up2.probeCalls != 1 || up2.count() != 0 {
+		t.Fatalf("expected 1 probe and 0 shipped backoff bytes, got probeCalls=%d shipped=%d", up2.probeCalls, up2.count())
+	}
+
+	// Now append B (written AFTER capture was accepted again): only B ships.
+	lineB := "{\"written_after_accept\":\"B\"}\n"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append B: %v", err)
+	}
+	_, _ = f2.WriteString(lineB)
+	_ = f2.Close()
+
+	r2.executeRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}, time.Second)
 
 	if up2.count() != 1 {
 		t.Fatalf("expected exactly 1 shipped segment (only B), got %d", up2.count())
 	}
-	wantStart := int64(len("{\"init\":0}\n") + len(lineA))
+	wantStart := int64(len("{\"init\":0}\n") + len(lineA) + len(lineDuringBackoff))
 	gotSeg := up2.segments[0]
 	if gotSeg.ByteStart != wantStart || gotSeg.RawSize != int64(len(lineB)) {
 		t.Fatalf("expected only B [start=%d len=%d] to ship, got [start=%d len=%d]",
 			wantStart, len(lineB), gotSeg.ByteStart, gotSeg.RawSize)
+	}
+}
+
+func TestNewRunner_RejectsEmptyHarness(t *testing.T) {
+	_, err := NewRunner(Config{
+		HomeDir:  t.TempDir(),
+		RunID:    "run-1",
+		Harness:  "",
+		Uploader: &recordingUploader{},
+	})
+	if err == nil {
+		t.Fatalf("expected NewRunner to reject empty Harness")
 	}
 }

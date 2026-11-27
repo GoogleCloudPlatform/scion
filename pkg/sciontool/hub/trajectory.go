@@ -305,9 +305,12 @@ func NewTrajectoryUploaderWithProvider(newClient func() *Client) *TrajectoryUplo
 	return &TrajectoryUploader{newClient: newClient}
 }
 
-// Ship delivers a prepared segment to the Hub (prepare -> PUT -> commit) and
-// maps every Hub response onto the shipper.ShipOutcome contract.
-func (u *TrajectoryUploader) Ship(ctx context.Context, seg shipper.Segment) (shipper.ShipResult, error) {
+// Probe checks whether the Hub currently accepts trajectory capture by calling
+// segments:prepare without uploading payload bytes or committing. Returns
+// OutcomeCommitted when the Hub answers 200 (upload_required or committed),
+// OutcomeCaptureUnavailable on 404, OutcomePolicyRefused on 403 policy refusal,
+// and OutcomeRetryable on transient errors.
+func (u *TrajectoryUploader) Probe(ctx context.Context, seg shipper.Segment) (shipper.ShipResult, error) {
 	if u == nil || u.newClient == nil {
 		return shipper.ShipResult{Outcome: shipper.OutcomeRetryable, Message: "hub client provider not configured"},
 			errors.New("trajectory uploader: hub client provider not configured")
@@ -317,8 +320,19 @@ func (u *TrajectoryUploader) Ship(ctx context.Context, seg shipper.Segment) (shi
 		return shipper.ShipResult{Outcome: shipper.OutcomeRetryable, Message: "hub client not configured"},
 			errors.New("trajectory uploader: hub client not configured")
 	}
+	prepReq := buildPrepareRequest(seg)
+	prepResp, err := client.PrepareTrajectorySegment(ctx, prepReq)
+	if err != nil {
+		return mapTrajectoryShipError(err)
+	}
+	return shipper.ShipResult{
+		Outcome:   shipper.OutcomeCommitted,
+		SegmentID: prepResp.SegmentID,
+	}, nil
+}
 
-	prepReq := telemetrycontract.TrajectorySegmentPrepareRequest{
+func buildPrepareRequest(seg shipper.Segment) telemetrycontract.TrajectorySegmentPrepareRequest {
+	return telemetrycontract.TrajectorySegmentPrepareRequest{
 		Harness:            seg.Harness,
 		NativeRelativePath: seg.NativeRelativePath,
 		ArtifactKind:       string(seg.ArtifactKind),
@@ -333,6 +347,22 @@ func (u *TrajectoryUploader) Ship(ctx context.Context, seg shipper.Segment) (shi
 		SessionID:          seg.SessionID,
 		OriginHubID:        seg.OriginHubID,
 	}
+}
+
+// Ship delivers a prepared segment to the Hub (prepare -> PUT -> commit) and
+// maps every Hub response onto the shipper.ShipOutcome contract.
+func (u *TrajectoryUploader) Ship(ctx context.Context, seg shipper.Segment) (shipper.ShipResult, error) {
+	if u == nil || u.newClient == nil {
+		return shipper.ShipResult{Outcome: shipper.OutcomeRetryable, Message: "hub client provider not configured"},
+			errors.New("trajectory uploader: hub client provider not configured")
+	}
+	client := u.newClient()
+	if client == nil || !client.IsConfigured() {
+		return shipper.ShipResult{Outcome: shipper.OutcomeRetryable, Message: "hub client not configured"},
+			errors.New("trajectory uploader: hub client not configured")
+	}
+
+	prepReq := buildPrepareRequest(seg)
 
 	prepResp, err := client.PrepareTrajectorySegment(ctx, prepReq)
 	if err != nil {

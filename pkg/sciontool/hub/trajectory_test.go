@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/shipper"
@@ -353,5 +354,39 @@ func TestTrajectoryUploader_PutErrorsAlwaysRetryable(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTrajectoryUploader_ProxiedPutUsesUploadTimeoutNotDefaultClientTimeout(t *testing.T) {
+	seg := testShipperSegment(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-slow") {
+			// Exceed the client's 50ms base Timeout to prove proxied PUTs use
+			// trajectoryUploadHTTPTimeout (2m) instead of client.Timeout.
+			time.Sleep(150 * time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := NewClientWithConfig(srv.URL, "tok-1", "agent-1")
+	client.client.Timeout = 50 * time.Millisecond
+
+	inst := telemetrycontract.TrajectorySegmentUploadInstruction{
+		Method: http.MethodPut,
+		URL:    srv.URL + telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-slow") + "?exp=9999999999&sig=abc",
+		Headers: map[string]string{
+			"Content-Type": "application/gzip",
+		},
+	}
+	status, err := client.UploadTrajectorySegment(context.Background(), inst, seg.Compressed)
+	if err != nil {
+		t.Fatalf("UploadTrajectorySegment failed against slow proxied PUT (likely used short client.Timeout instead of trajectoryUploadHTTPTimeout): %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status=%d, want 200", status)
 	}
 }

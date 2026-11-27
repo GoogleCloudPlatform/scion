@@ -134,7 +134,6 @@ type Runner struct {
 
 	mu           sync.Mutex
 	started      bool
-	stopped      bool
 	backoffUntil time.Time
 	loopCancel   context.CancelFunc
 	roundCancel  context.CancelFunc
@@ -158,7 +157,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		return nil, errors.New("trajectory runner: Uploader is required")
 	}
 	if cfg.Harness == "" {
-		cfg.Harness = "claude"
+		return nil, errors.New("trajectory runner: Harness is required")
 	}
 	if cfg.PeriodicInterval <= 0 {
 		cfg.PeriodicInterval = DefaultPeriodicInterval
@@ -382,7 +381,6 @@ func (r *Runner) PreStop(ctx context.Context) {
 		defer cancel()
 
 		r.mu.Lock()
-		r.stopped = true
 		loopCancel := r.loopCancel
 		roundCancel := r.roundCancel
 		doneCh := r.doneCh
@@ -463,11 +461,11 @@ func (r *Runner) executeRound(parent context.Context, opts shipper.RoundOptions,
 
 	if res.PolicyRefused {
 		reason := res.PolicyRefusedReason
-		rebaselineCtx, rebaselineCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		rebaselineCtx, rebaselineCancel := context.WithTimeout(parent, min(5*time.Second, timeout))
 		if _, rerr := r.shipper.Rebaseline(rebaselineCtx, reason); rerr != nil {
 			log.Warn("Trajectory policy refusal (%s): rebaseline failed: %v", reason, rerr)
 		} else {
-			log.Info("Trajectory capture refused by policy (%s); rebaselined to EOF and backing off", reason)
+			log.Info("Trajectory capture refused by policy (%s); rebaselined to line boundary and backing off", reason)
 		}
 		rebaselineCancel()
 		r.setBackoff()
@@ -475,11 +473,11 @@ func (r *Runner) executeRound(parent context.Context, opts shipper.RoundOptions,
 	}
 
 	if res.CaptureUnavailable {
-		rebaselineCtx, rebaselineCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		rebaselineCtx, rebaselineCancel := context.WithTimeout(parent, min(5*time.Second, timeout))
 		if _, rerr := r.shipper.Rebaseline(rebaselineCtx, "capture_unavailable"); rerr != nil {
 			log.Warn("Trajectory capture unavailable (404): rebaseline failed: %v", rerr)
 		} else {
-			log.Debug("Trajectory capture unavailable on Hub (404); rebaselined to EOF and backing off for %s", r.cfg.UnavailableBackoff)
+			log.Debug("Trajectory capture unavailable on Hub (404); rebaselined to line boundary and backing off for %s", r.cfg.UnavailableBackoff)
 		}
 		rebaselineCancel()
 		r.setBackoff()
