@@ -1365,3 +1365,61 @@ func TestHubRollupSource_PrePresenceLegacyMixedHitRate(t *testing.T) {
 	assert.InDelta(t, 0.90, *sumTrk.CacheHitRate, 1e-9)
 	assert.False(t, sumTrk.CacheHitRatePartial)
 }
+
+func TestHubRollupSource_HonoursHourlyRetentionHorizonAndSweptWatermark(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "Retention", Slug: "retention"}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	dbNow = dbNow.UTC()
+
+	// Set hourly coverage start well before the 7-day window so only retention
+	// horizon / swept-through watermark can trigger daily fallback.
+	setHourlyCoverageStartForTest(t, client, dbNow.AddDate(0, 0, -30))
+
+	nyLoc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+
+	// 1. Tight hourly retention horizon (2 days): 7-day window must fall back to
+	// UTC daily rollups, while a 1-day window stays hourly in America/New_York.
+	srcTight := NewHubRollupSource(cs)
+	srcTight.hourlyRetentionDays = func() int { return 2 }
+
+	sum7Tight, err := srcTight.QuerySummary(ctx, 7, WithProjectID(proj.ID), WithTimeZone(nyLoc))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, sum7Tight.Granularity)
+	assert.Equal(t, "UTC", sum7Tight.TimeZone)
+
+	sum1Tight, err := srcTight.QuerySummary(ctx, 1, WithProjectID(proj.ID), WithTimeZone(nyLoc))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityHour, sum1Tight.Granularity)
+	assert.Equal(t, "America/New_York", sum1Tight.TimeZone)
+
+	// 2. Wide retention horizon (30 days) + HourlySweptThrough watermark at
+	// dbNow - 2 days: 7-day window must still fall back to UTC daily rollups
+	// (preventing silent under-reporting after raising hourly_rollups_days),
+	// while a 1-day window stays hourly.
+	sweptThrough := dbNow.AddDate(0, 0, -2).Truncate(time.Hour)
+	require.NoError(t, cs.SaveUsageRetentionState(ctx, &store.UsageRetentionState{
+		HourlySweptThrough: &sweptThrough,
+	}))
+
+	srcWide := NewHubRollupSource(cs)
+	srcWide.hourlyRetentionDays = func() int { return 30 }
+
+	sum7Swept, err := srcWide.QuerySummary(ctx, 7, WithProjectID(proj.ID), WithTimeZone(nyLoc))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, sum7Swept.Granularity)
+	assert.Equal(t, "UTC", sum7Swept.TimeZone)
+
+	sum1Swept, err := srcWide.QuerySummary(ctx, 1, WithProjectID(proj.ID), WithTimeZone(nyLoc))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityHour, sum1Swept.Granularity)
+	assert.Equal(t, "America/New_York", sum1Swept.TimeZone)
+}

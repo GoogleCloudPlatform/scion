@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -32,6 +33,10 @@ const dashboardRollupGroupLimit = 5000
 // Pipeline C session metadata (agent_session_metrics).
 type HubRollupSource struct {
 	store store.Store
+	// hourlyRetentionDays optionally supplies the configured hourly rollup
+	// retention horizon (in days; 0 = unlimited). When nil, defaults to
+	// config.DefaultResolvedTelemetryRetention().HourlyRollupsDays.
+	hourlyRetentionDays func() int
 	// groupLimit optionally overrides dashboardRollupGroupLimit in tests to
 	// exercise truncation and daily degradation deterministically.
 	groupLimit int
@@ -40,6 +45,28 @@ type HubRollupSource struct {
 // NewHubRollupSource constructs a HubRollupSource backed by s.
 func NewHubRollupSource(s store.Store) *HubRollupSource {
 	return &HubRollupSource{store: s}
+}
+
+func (s *HubRollupSource) effectiveHourlyRetentionDays() int {
+	if s.hourlyRetentionDays != nil {
+		return s.hourlyRetentionDays()
+	}
+	return config.DefaultResolvedTelemetryRetention().HourlyRollupsDays
+}
+
+func (s *HubRollupSource) readHourlyHorizonInputs(ctx context.Context) (hourlyCoverageStart time.Time, hasHourlyCoverage bool, hourlyRetentionDays int, hourlySweptThrough time.Time, err error) {
+	hourlyCoverageStart, hasHourlyCoverage, err = s.store.GetUsageHourlyCoverageStart(ctx)
+	if err != nil {
+		return time.Time{}, false, 0, time.Time{}, fmt.Errorf("read hourly coverage marker: %w", err)
+	}
+	retentionState, err := s.store.GetUsageRetentionState(ctx)
+	if err != nil {
+		return time.Time{}, false, 0, time.Time{}, fmt.Errorf("read usage retention state: %w", err)
+	}
+	if retentionState != nil && retentionState.HourlySweptThrough != nil {
+		hourlySweptThrough = *retentionState.HourlySweptThrough
+	}
+	return hourlyCoverageStart, hasHourlyCoverage, s.effectiveHourlyRetentionDays(), hourlySweptThrough, nil
 }
 
 func (s *HubRollupSource) effectiveGroupLimit() int {
@@ -90,9 +117,9 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("read DB clock: %w", err)
 	}
-	hourlyCoverageStart, hasHourlyCoverage, err := s.store.GetUsageHourlyCoverageStart(ctx)
+	hourlyCoverageStart, hasHourlyCoverage, hourlyRetentionDays, hourlySweptThrough, err := s.readHourlyHorizonInputs(ctx)
 	if err != nil {
-		return resolvedRollupWindow{}, fmt.Errorf("read hourly coverage marker: %w", err)
+		return resolvedRollupWindow{}, err
 	}
 
 	reqWindow := metricsQueryWindowFor(dbNow, periodDays, cfg)
@@ -103,6 +130,8 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 		hourlyCoverageStart,
 		hasHourlyCoverage,
 		false,
+		hourlyRetentionDays,
+		hourlySweptThrough,
 	)
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("resolve rollup granularity: %w", err)
@@ -140,9 +169,9 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("read DB clock: %w", err)
 	}
-	hourlyCoverageStart, hasHourlyCoverage, err := s.store.GetUsageHourlyCoverageStart(ctx)
+	hourlyCoverageStart, hasHourlyCoverage, hourlyRetentionDays, hourlySweptThrough, err := s.readHourlyHorizonInputs(ctx)
 	if err != nil {
-		return resolvedRollupWindow{}, fmt.Errorf("read hourly coverage marker: %w", err)
+		return resolvedRollupWindow{}, err
 	}
 
 	start := dbNow.UTC().Add(-24 * time.Hour)
@@ -153,6 +182,8 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string
 		hourlyCoverageStart,
 		hasHourlyCoverage,
 		false,
+		hourlyRetentionDays,
+		hourlySweptThrough,
 	)
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("resolve 24h rollup granularity: %w", err)

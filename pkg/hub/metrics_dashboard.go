@@ -1331,7 +1331,11 @@ func (s *Server) selectMetricsDashboardSource(ledgerEnabled bool, view, groupBy 
 	}
 	if cm == nil || requiresHubRollupBreakdown(view, groupBy) {
 		if s.store != nil {
-			return NewHubRollupSource(s.store)
+			src := NewHubRollupSource(s.store)
+			src.hourlyRetentionDays = func() int {
+				return s.usageRetentionConfig().HourlyRollupsDays
+			}
+			return src
 		}
 		if cm == nil {
 			return nil
