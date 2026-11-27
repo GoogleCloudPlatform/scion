@@ -27,20 +27,24 @@
 //
 //	<home>/.scion/trajectory-shipper/state.json
 //
-// Both sciontool (inside the container) and the Runtime Broker (post-exit and
-// pre-delete harvest) read and update this file. The file is created and
-// replaced atomically (temp file + fsync + rename) through pkg/util/privatefs
-// with owner-only permissions (0600 on Unix, owner-only DACL on Windows) inside
-// a private directory (0700 on Unix).
+// Both sciontool (inside the container, including root init and agent-UID
+// hooks) and the Runtime Broker (post-exit and pre-delete harvest) read and
+// update this file. On Unix, the state directory, lock file, temp files, and
+// state.json are all opened, created, verified, and atomically replaced
+// (temp file + fchmod 0600 + fsync + renameat) through pinned openat(2)
+// O_NOFOLLOW directory descriptors rooted at homeDir, eliminating path-based
+// TOCTOU symlink redirection. On non-Unix platforms, state, lock, file-identity,
+// and artifact-open operations fail closed with errors.ErrUnsupported.
 //
-// Anchor symlink note for root callers and P6 broker reuse: before invoking
-// pkg/util/privatefs.OpenTree on <home>/.scion/trajectory-shipper, the library
-// verifies via Lstat that <home>/.scion and <home>/.scion/trajectory-shipper
-// (when present) are real directories (never symlinks) owned by the expected
-// UID, protecting root-privileged callers (such as sciontool) from static
-// symlink redirection. Because privatefs.OpenTree still opens its Unix anchor
-// by path, P6 broker reuse against untrusted host-readable homes should add an
-// openat-based no-follow anchor for full TOCTOU immunity.
+// Single-owner cross-UID contract: the home directory's owner UID is the single
+// canonical owner of the shipper state tree. When called as root (euid == 0),
+// every directory and file created by the shipper (trajectory-shipper/,
+// state.lock, temp files, and state.json) is chowned on its pinned descriptor
+// (fchown / fchownat with AT_SYMLINK_NOFOLLOW) to the home directory's owner.
+// Root readers accept directories, lock files, and state.json owned by either
+// root (0) or the home owner; non-root readers accept only their own euid. This
+// allows root sciontool init, agent-UID hook processes, and P6 broker harvest
+// to share the same state and lock without locking each other out.
 //
 // Each artifact entry is logically keyed by (native_relative_path, inode,
 // generation) and records:
@@ -87,13 +91,19 @@
 //     untracked artifact later discovered under one of these prefixes is
 //     lazily baselined at EOF on first open rather than shipped from offset 0.
 //   - truncated / truncated_run_id: run-scoped cap state set on
-//     OutcomeRunCapExceeded. Truncation stops shipping only for the matching
-//     run_id; when a new run starts (different Config.RunID or ResetForRun),
+//     OutcomeRunCapExceeded. Config.RunID is required for RunRound and
+//     ResumeCatchup. Truncation stops shipping only for the matching run_id;
+//     when a new run starts (different Config.RunID or ResetForRun),
 //     truncation clears automatically.
 //
 // External consumers (such as P7 normalizers advancing parsed_offset or P6
 // broker harvest) should use [WithLockedState] to perform locked
-// read-modify-write updates against state.json.
+// read-modify-write updates against state.json. Because P7 runs normalization
+// outside the lock, its [WithLockedState] callback MUST compare both
+// generation and inode against the snapshot it normalized—and verify
+// parsed_offset <= raw_committed_offset—before writing the updated
+// parsed_offset, so a concurrent generation bump cannot be overwritten by a
+// stale parse result.
 //
 // # Segment Framing and incomplete_tail
 //

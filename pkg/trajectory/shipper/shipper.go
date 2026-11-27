@@ -93,8 +93,10 @@ type Config struct {
 	// and .scion/trajectory-shipper/. Required.
 	HomeDir string
 
-	// RunID identifies the active agent run. Used to scope run-cap truncation
-	// so hitting the per-run cap on run A does not disable shipping on run B.
+	// RunID identifies the active agent run. Required for RunRound and
+	// ResumeCatchup (optional for Baseline and ResetForRun). Used to scope
+	// run-cap truncation and per-artifact rejection parks so hitting a limit on
+	// run A does not disable shipping on run B.
 	RunID string
 
 	// Harness names the built-in harness spec (for example "claude"). Ignored
@@ -428,11 +430,15 @@ func (s *Shipper) ResumeCatchup(ctx context.Context) (*RoundResult, error) {
 }
 
 // RunRound discovers artifacts, detects truncation/rotation/guard mismatches,
-// and ships pending segments under the exclusive state lock. Watermarks advance
-// only after Uploader.Ship returns OutcomeCommitted.
+// and ships pending segments under the exclusive state lock. Config.RunID and
+// Config.Uploader are required. Watermarks advance only after Uploader.Ship
+// returns OutcomeCommitted.
 func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult, error) {
 	if s.cfg.Uploader == nil {
 		return nil, errors.New("shipper: Uploader is required for RunRound")
+	}
+	if s.cfg.RunID == "" {
+		return nil, errors.New("shipper: RunID is required for RunRound")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

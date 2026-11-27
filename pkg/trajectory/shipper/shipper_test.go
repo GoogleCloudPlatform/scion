@@ -311,6 +311,7 @@ func TestBaselineSkipsPreExistingAndBackfillOption(t *testing.T) {
 			up := newFakeUploader()
 			s, err := shipper.New(shipper.Config{
 				HomeDir:          home,
+				RunID:            "run-1",
 				OriginHubID:      "hub-origin-1",
 				BackfillExisting: tc.backfill,
 				Uploader:         up,
@@ -384,6 +385,7 @@ func TestIncrementalAppendsPartialTailAndSegmentSplitting(t *testing.T) {
 	up := newFakeUploader()
 	s, err := shipper.New(shipper.Config{
 		HomeDir:         home,
+		RunID:           "run-1",
 		OriginHubID:     "hub-1",
 		MaxSegmentBytes: 40, // small cap to exercise splitting
 		Uploader:        up,
@@ -518,6 +520,7 @@ func TestGenerationBumpsOnTruncationGuardMismatchAndInodeChange(t *testing.T) {
 			up := newFakeUploader()
 			s, err := shipper.New(shipper.Config{
 				HomeDir:  home,
+				RunID:    "run-1",
 				Uploader: up,
 				Now:      fixedClock(),
 			})
@@ -588,7 +591,7 @@ func TestCrashBetweenUploadAndCommitReplaysIdempotently(t *testing.T) {
 		return shipper.ShipResult{}, nil, false
 	}
 
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -652,7 +655,7 @@ func TestSimulatedKill9MidRoundAndResumeCatchup(t *testing.T) {
 		return shipper.ShipResult{}, nil, false
 	}
 
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -674,7 +677,7 @@ func TestSimulatedKill9MidRoundAndResumeCatchup(t *testing.T) {
 
 	// New container starts up: ResumeCatchup ships the unshipped second file.
 	up.onShip = nil
-	s2, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s2, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New s2: %v", err)
 	}
@@ -707,7 +710,7 @@ func TestConflictCaptureUnavailableCapAndFaultIsolation(t *testing.T) {
 			return shipper.ShipResult{}, nil, false
 		}
 
-		s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+		s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -749,7 +752,7 @@ func TestConflictCaptureUnavailableCapAndFaultIsolation(t *testing.T) {
 			return shipper.ShipResult{Outcome: shipper.OutcomeCaptureUnavailable, Message: "404 experiment off"}, nil, true
 		}
 
-		s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+		s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -850,11 +853,11 @@ func TestConcurrentRunRoundSerializedByLock(t *testing.T) {
 		return shipper.ShipResult{}, nil, false
 	}
 
-	s1, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s1, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New s1: %v", err)
 	}
-	s2, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s2, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New s2: %v", err)
 	}
@@ -947,7 +950,7 @@ func TestStatePreservesUnknownFieldsAndParsedOffset(t *testing.T) {
 	abs := writeArtifact(t, home, rel, "{\"seq\":1}\n")
 
 	up := newFakeUploader()
-	s, err := shipper.New(shipper.Config{HomeDir: home, OriginHubID: "hub-a", Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", OriginHubID: "hub-a", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1013,6 +1016,7 @@ func TestRoundBudgetBoundsWork(t *testing.T) {
 	up := newFakeUploader()
 	s, err := shipper.New(shipper.Config{
 		HomeDir:         home,
+		RunID:           "run-1",
 		MaxSegmentBytes: 100,
 		MaxRoundBytes:   20,
 		Uploader:        up,
@@ -1187,7 +1191,7 @@ func TestParsedOffsetBaselineAndGenerationBumpReset(t *testing.T) {
 	abs := writeArtifact(t, home, rel, pre)
 
 	up := newFakeUploader()
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1273,7 +1277,7 @@ func TestDeviceChangeWithSameInodeDoesNotBumpGeneration(t *testing.T) {
 	abs := writeArtifact(t, home, rel, "{\"seq\":1}\n")
 
 	up := newFakeUploader()
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1317,7 +1321,7 @@ func TestOutcomeRejectedParksArtifactWithoutBlockingSiblings(t *testing.T) {
 		return shipper.ShipResult{}, nil, false
 	}
 
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1360,6 +1364,7 @@ func TestOversizeLineClampedToRoundBudget(t *testing.T) {
 	up := newFakeUploader()
 	s, err := shipper.New(shipper.Config{
 		HomeDir:         home,
+		RunID:           "run-1",
 		MaxSegmentBytes: 100,
 		MaxRoundBytes:   32, // smaller than MaxSegmentBytes -> must clamp
 		Uploader:        up,
@@ -1392,7 +1397,7 @@ func TestLazyBaselineEntryBaselinesAtFirstOpen(t *testing.T) {
 	abs := writeArtifact(t, home, rel, pre)
 
 	up := newFakeUploader()
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -2206,5 +2211,29 @@ func TestPendingReplayNotStarvedBySiblingBacklog(t *testing.T) {
 	}
 	if !bShipped {
 		t.Fatalf("artifact B's pending replay was starved over 2 rounds")
+	}
+}
+
+func TestRunRoundAndResumeCatchupRequireRunID(t *testing.T) {
+	home := t.TempDir()
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{
+		HomeDir:  home,
+		Uploader: up,
+		Now:      fixedClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Baseline does not require RunID.
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline without RunID: %v", err)
+	}
+	// RunRound and ResumeCatchup must fail with a clear error when RunID is empty.
+	if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err == nil || !strings.Contains(err.Error(), "RunID") {
+		t.Fatalf("RunRound without RunID: expected RunID error, got %v", err)
+	}
+	if _, err := s.ResumeCatchup(context.Background()); err == nil || !strings.Contains(err.Error(), "RunID") {
+		t.Fatalf("ResumeCatchup without RunID: expected RunID error, got %v", err)
 	}
 }

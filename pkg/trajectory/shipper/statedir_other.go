@@ -19,10 +19,23 @@ package shipper
 import (
 	"errors"
 	"fmt"
+	"os"
 )
 
-// verifyStateDirAncestors fails closed on platforms where Unix Lstat/UID
-// ancestor checks are not supported.
-func verifyStateDirAncestors(_ string) error {
-	return fmt.Errorf("verify state dir ancestors: %w on this platform", errors.ErrUnsupported)
+// openStateLockFile fails closed on platforms where pinned dirfd state locking
+// is not supported.
+func openStateLockFile(_ string) (*os.File, error) {
+	return nil, fmt.Errorf("open shipper lock: %w on this platform", errors.ErrUnsupported)
+}
+
+// readStateFile fails closed on platforms where pinned dirfd state reading is
+// not supported.
+func readStateFile(_ string) ([]byte, bool, error) {
+	return nil, false, fmt.Errorf("read shipper state: %w on this platform", errors.ErrUnsupported)
+}
+
+// writeStateFile fails closed on platforms where pinned dirfd state writing is
+// not supported.
+func writeStateFile(_ string, _ []byte) error {
+	return fmt.Errorf("write shipper state: %w on this platform", errors.ErrUnsupported)
 }

@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 const (
@@ -33,9 +32,9 @@ const (
 	lockPollMax = 50 * time.Millisecond
 )
 
-// acquireStateLock ensures the shipper state directory exists with private
-// permissions and acquires the exclusive cross-process lock at state.lock.
-// It honors both timeout and context cancellation.
+// acquireStateLock opens or creates the shipper state directory and state.lock
+// through pinned O_NOFOLLOW descriptors and acquires an exclusive cross-process
+// advisory lock, honoring both timeout and context cancellation.
 func acquireStateLock(ctx context.Context, homeDir string, timeout time.Duration) (*filelock.Lock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -44,15 +43,10 @@ func acquireStateLock(ctx context.Context, homeDir string, timeout time.Duration
 		timeout = DefaultLockTimeout
 	}
 
-	if err := verifyStateDirAncestors(homeDir); err != nil {
+	f, err := openStateLockFile(homeDir)
+	if err != nil {
 		return nil, err
 	}
-	stateDir := StateDir(homeDir)
-	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{CreateAnchor: true})
-	if err != nil {
-		return nil, fmt.Errorf("open shipper state dir %s: %w", stateDir, err)
-	}
-	_ = tree.Close()
 
 	lockPath := LockPath(homeDir)
 	deadline := time.Now().Add(timeout)
@@ -62,18 +56,21 @@ func acquireStateLock(ctx context.Context, homeDir string, timeout time.Duration
 
 	poll := lockPollMin
 	for {
-		lock, err := filelock.Acquire(lockPath, 0o600, 0)
+		lock, err := filelock.LockFile(f, 0)
 		if err == nil {
 			return lock, nil
 		}
 		if !errors.Is(err, filelock.ErrTimeout) {
+			_ = f.Close()
 			return nil, fmt.Errorf("acquire shipper lock %s: %w", lockPath, err)
 		}
 		if err := ctx.Err(); err != nil {
+			_ = f.Close()
 			return nil, err
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			_ = f.Close()
 			return nil, fmt.Errorf("acquire shipper lock %s: %w", lockPath, filelock.ErrTimeout)
 		}
 		wait := min(poll, remaining)
@@ -81,6 +78,7 @@ func acquireStateLock(ctx context.Context, homeDir string, timeout time.Duration
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			_ = f.Close()
 			return nil, ctx.Err()
 		case <-timer.C:
 		}

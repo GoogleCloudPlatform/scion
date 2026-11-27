@@ -21,11 +21,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 const (
@@ -284,28 +281,14 @@ func (a ArtifactState) MarshalJSON() ([]byte, error) {
 	return json.Marshal(merged)
 }
 
-// LoadState reads state.json from homeDir through privatefs. If the state
-// directory or state.json does not exist, it returns (nil, false, nil).
+// LoadState reads state.json from homeDir through pinned O_NOFOLLOW directory
+// descriptors. If the state directory or state.json does not exist, it returns
+// (nil, false, nil). On non-Unix platforms it fails closed with
+// errors.ErrUnsupported.
 func LoadState(homeDir string) (*State, bool, error) {
-	if err := verifyStateDirAncestors(homeDir); err != nil {
+	data, exists, err := readStateFile(homeDir)
+	if err != nil || !exists {
 		return nil, false, err
-	}
-	stateDir := StateDir(homeDir)
-	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{CreateAnchor: false})
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("open shipper state dir %s: %w", stateDir, err)
-	}
-	defer func() { _ = tree.Close() }()
-
-	data, err := tree.ReadPrivate(StateFileName, 0)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("read shipper state %s: %w", StatePath(homeDir), err)
 	}
 
 	var st State
@@ -318,8 +301,10 @@ func LoadState(homeDir string) (*State, bool, error) {
 	return &st, true, nil
 }
 
-// SaveState atomically writes st to state.json using privatefs (temp file +
-// fsync + rename with owner-only permissions).
+// SaveState atomically writes st to state.json through pinned O_NOFOLLOW
+// directory descriptors (temp file + fchmod 0600 + fchown to home owner when
+// root + fsync + renameat). On non-Unix platforms it fails closed with
+// errors.ErrUnsupported.
 func SaveState(homeDir string, st *State) error {
 	if st == nil {
 		return errors.New("state is nil")
@@ -331,46 +316,13 @@ func SaveState(homeDir string, st *State) error {
 		st.Artifacts = make(map[string]*ArtifactState)
 	}
 
-	if err := verifyStateDirAncestors(homeDir); err != nil {
-		return err
-	}
-	stateDir := StateDir(homeDir)
-	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{CreateAnchor: true})
-	if err != nil {
-		return fmt.Errorf("open shipper state dir %s: %w", stateDir, err)
-	}
-	defer func() { _ = tree.Close() }()
-
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal shipper state: %w", err)
 	}
 	data = append(data, '\n')
 
-	tmp, _, err := tree.CreateTemp("", "state-*.tmp", privatefs.Private)
-	if err != nil {
-		return fmt.Errorf("create temp shipper state file: %w", err)
-	}
-
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = tree.RemoveOpen(tmp)
-		}
-		_ = tmp.Close()
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("write temp shipper state file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("fsync temp shipper state file: %w", err)
-	}
-	if err := tree.RenameOpen(tmp, StateFileName); err != nil {
-		return fmt.Errorf("rename shipper state file: %w", err)
-	}
-	cleanup = false
-	return nil
+	return writeStateFile(homeDir, data)
 }
 
 // WithLockedState acquires the exclusive inter-process state lock for homeDir,

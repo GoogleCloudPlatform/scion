@@ -78,7 +78,7 @@ func TestBaselineReportsSkippedUnreadableArtifactUnix(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(abs, 0o644) })
 
 	up := newFakeUploader()
-	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
