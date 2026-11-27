@@ -14,7 +14,7 @@
 
 //go:build !unix
 
-package trajectory
+package wakesock
 
 import (
 	"errors"
@@ -22,12 +22,10 @@ import (
 	"io"
 )
 
-func startWakeListener(_ string, _, _ int, _ func(trigger byte)) (io.Closer, error) {
-	return nil, fmt.Errorf("trajectory wake listener: %w on this platform", errors.ErrUnsupported)
+// Listen fails closed with errors.ErrUnsupported on non-Unix platforms.
+func Listen(_ string, _ Options, _ func(byte)) (io.Closer, error) {
+	return nil, fmt.Errorf("wake socket listener: %w on this platform", errors.ErrUnsupported)
 }
 
-// NotifyWake is a no-op on non-Unix platforms.
-func NotifyWake(_ string, _ byte) {}
-
-// NotifyWakePath is a no-op on non-Unix platforms.
-func NotifyWakePath(_ string, _ byte) {}
+// Notify is a no-op on non-Unix platforms.
+func Notify(_ string, _ byte) {}

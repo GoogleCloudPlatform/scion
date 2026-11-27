@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/wakesock"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/shipper"
 )
 
@@ -45,6 +46,11 @@ const (
 	// DefaultModelEndDebounce is the debounce window for Claude Stop
 	// (model-end) wake notifications before running a ship round.
 	DefaultModelEndDebounce = 15 * time.Second
+
+	// DefaultSessionEndMinInterval is the minimum interval between
+	// session_end wake rounds; bursts within this window are coalesced into a
+	// single trailing round.
+	DefaultSessionEndMinInterval = 5 * time.Second
 
 	// DefaultUnavailableBackoff is how long the runner backs off after a 404
 	// (experiment off) or 403 policy refusal (after rebaselining).
@@ -83,23 +89,36 @@ func WakeSocketPath(agentHome string) string {
 	return filepath.Join(agentHome, ".scion", WakeSocketName)
 }
 
+// NotifyWake sends a best-effort, non-blocking 1-byte trigger datagram to the
+// trajectory runner's Unix domain socket. Safe to call from short-lived
+// `sciontool hook` processes; never blocks or fails the hook.
+func NotifyWake(agentHome string, trigger byte) {
+	NotifyWakePath(WakeSocketPath(agentHome), trigger)
+}
+
+// NotifyWakePath sends a best-effort 1-byte trigger datagram to sockPath.
+func NotifyWakePath(sockPath string, trigger byte) {
+	wakesock.Notify(sockPath, trigger)
+}
+
 // Config configures a Runner.
 type Config struct {
-	HomeDir            string
-	RunID              string
-	Harness            string
-	OriginHubID        string
-	Uploader           shipper.Uploader
-	PeriodicInterval   time.Duration
-	ModelEndDebounce   time.Duration
-	UnavailableBackoff time.Duration
-	RoundTimeout       time.Duration
-	PreStopTimeout     time.Duration
-	PreStopMaxBytes    int64
-	LockTimeout        time.Duration
-	OwnerUID           int
-	OwnerGID           int
-	Now                func() time.Time
+	HomeDir               string
+	RunID                 string
+	Harness               string
+	OriginHubID           string
+	Uploader              shipper.Uploader
+	PeriodicInterval      time.Duration
+	ModelEndDebounce      time.Duration
+	SessionEndMinInterval time.Duration
+	UnavailableBackoff    time.Duration
+	RoundTimeout          time.Duration
+	PreStopTimeout        time.Duration
+	PreStopMaxBytes       int64
+	LockTimeout           time.Duration
+	OwnerUID              int
+	OwnerGID              int
+	Now                   func() time.Time
 }
 
 // Runner coordinates trajectory shipping rounds inside sciontool init:
@@ -146,6 +165,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	if cfg.ModelEndDebounce <= 0 {
 		cfg.ModelEndDebounce = DefaultModelEndDebounce
+	}
+	if cfg.SessionEndMinInterval <= 0 {
+		cfg.SessionEndMinInterval = DefaultSessionEndMinInterval
 	}
 	if cfg.UnavailableBackoff <= 0 {
 		cfg.UnavailableBackoff = DefaultUnavailableBackoff
@@ -204,7 +226,11 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.mu.Unlock()
 
 	if sockPath := WakeSocketPath(r.cfg.HomeDir); sockPath != "" {
-		l, err := startWakeListener(sockPath, r.cfg.OwnerUID, r.cfg.OwnerGID, r.handleWakeByte)
+		var owner *wakesock.Owner
+		if r.cfg.OwnerUID > 0 {
+			owner = &wakesock.Owner{UID: r.cfg.OwnerUID, GID: r.cfg.OwnerGID}
+		}
+		l, err := wakesock.Listen(sockPath, wakesock.Options{Owner: owner}, r.handleWakeByte)
 		if err != nil {
 			log.Debug("Trajectory wake listener unavailable (periodic and pre_stop still active): %v", err)
 		} else {
@@ -261,6 +287,35 @@ func (r *Runner) loop(ctx context.Context) {
 	}
 	defer stopDebounce()
 
+	var (
+		lastSessionEnd  time.Time
+		sessionEndTimer *time.Timer
+		sessionEndC     <-chan time.Time
+	)
+	stopSessionEndTimer := func() {
+		if sessionEndTimer != nil {
+			if !sessionEndTimer.Stop() {
+				select {
+				case <-sessionEndTimer.C:
+				default:
+				}
+			}
+			sessionEndTimer = nil
+			sessionEndC = nil
+		}
+	}
+	defer stopSessionEndTimer()
+
+	runSessionEnd := func() {
+		stopDebounce()
+		stopSessionEndTimer()
+		lastSessionEnd = r.now()
+		r.executeRound(ctx, shipper.RoundOptions{
+			Final:  false,
+			Reason: shipper.ReasonSessionEnd,
+		}, r.cfg.RoundTimeout)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -274,11 +329,17 @@ func (r *Runner) loop(ctx context.Context) {
 			}, r.cfg.RoundTimeout)
 
 		case <-r.sessionEndCh:
-			stopDebounce()
-			r.executeRound(ctx, shipper.RoundOptions{
-				Final:  false,
-				Reason: shipper.ReasonSessionEnd,
-			}, r.cfg.RoundTimeout)
+			now := r.now()
+			if lastSessionEnd.IsZero() || now.Sub(lastSessionEnd) >= r.cfg.SessionEndMinInterval {
+				runSessionEnd()
+			} else if sessionEndTimer == nil {
+				wait := r.cfg.SessionEndMinInterval - now.Sub(lastSessionEnd)
+				sessionEndTimer = time.NewTimer(wait)
+				sessionEndC = sessionEndTimer.C
+			}
+
+		case <-sessionEndC:
+			runSessionEnd()
 
 		case <-r.modelEndCh:
 			if debounceTimer == nil {
@@ -414,7 +475,13 @@ func (r *Runner) executeRound(parent context.Context, opts shipper.RoundOptions,
 	}
 
 	if res.CaptureUnavailable {
-		log.Debug("Trajectory capture unavailable on Hub (404); backing off for %s", r.cfg.UnavailableBackoff)
+		rebaselineCtx, rebaselineCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if _, rerr := r.shipper.Rebaseline(rebaselineCtx, "capture_unavailable"); rerr != nil {
+			log.Warn("Trajectory capture unavailable (404): rebaseline failed: %v", rerr)
+		} else {
+			log.Debug("Trajectory capture unavailable on Hub (404); rebaselined to EOF and backing off for %s", r.cfg.UnavailableBackoff)
+		}
+		rebaselineCancel()
 		r.setBackoff()
 		return
 	}

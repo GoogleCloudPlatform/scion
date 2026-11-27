@@ -233,3 +233,149 @@ func TestResolveRunID_JWTFallback(t *testing.T) {
 		t.Fatalf("ResolveRunID=%q, want run-from-jwt", got)
 	}
 }
+
+func TestRunner_SessionEndWakeThrottledAndCoalesced(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	artPath := filepath.Join(projDir, "sess-burst.jsonl")
+	if err := os.WriteFile(artPath, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Uploader that always returns retryable so every round triggers a Ship call
+	// on the pending line (letting us count rounds triggered by wakes).
+	up := &recordingUploader{
+		outcome: shipper.OutcomeRetryable,
+		message: "count-round",
+	}
+
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-burst"})
+	if err != nil {
+		t.Fatalf("shipper.New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+	if err := os.WriteFile(artPath, []byte("{\"seq\":1}\n"), 0o644); err != nil {
+		t.Fatalf("write line: %v", err)
+	}
+
+	r, err := NewRunner(Config{
+		HomeDir:               home,
+		RunID:                 "run-burst",
+		Uploader:              up,
+		PeriodicInterval:      time.Hour,
+		SessionEndMinInterval: 60 * time.Millisecond,
+		PreStopTimeout:        time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for initial resume_catchup round.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && up.count() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	beforeBurst := up.count()
+
+	// Send 1000 session_end wakes over ~100ms.
+	burstStart := time.Now()
+	for i := 0; i < 1000; i++ {
+		NotifyWake(home, WakeSessionEnd)
+		if i%100 == 0 && time.Since(burstStart) < 100*time.Millisecond {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	// Allow at most one trailing coalesced timer to fire.
+	time.Sleep(100 * time.Millisecond)
+	r.PreStop(context.Background())
+
+	// Total rounds during the 200ms burst+tail (plus 1 PreStop) must be small
+	// and bounded (far below 1000).
+	burstRounds := up.count() - beforeBurst
+	if burstRounds < 1 || burstRounds > 6 {
+		t.Fatalf("expected 1..6 throttled/coalesced rounds for 1000 wakes, got %d", burstRounds)
+	}
+}
+
+func TestRunner_CaptureUnavailableRebaselinesAcrossRestart(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-404.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+	if err := os.WriteFile(artPath, []byte("{\"init\":0}\n"), 0o644); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+
+	// Start with experiment OFF (404).
+	up := &recordingUploader{outcome: shipper.OutcomeCaptureUnavailable}
+	r1, err := NewRunner(Config{
+		HomeDir:            home,
+		RunID:              "run-404",
+		Uploader:           up,
+		UnavailableBackoff: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner 1: %v", err)
+	}
+
+	// Initial baseline happens on first round, then append A while experiment is OFF.
+	r1.executeRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonResumeCatchup}, time.Second)
+	lineA := "{\"written_while_off\":\"A\"}\n"
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append A: %v", err)
+	}
+	_, _ = f.WriteString(lineA)
+	_ = f.Close()
+
+	// Round gets 404 -> rebaselines to EOF (skipping A) and backs off.
+	r1.executeRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}, time.Second)
+	if up.count() != 1 {
+		t.Fatalf("expected 1 prepare attempt (404), got %d", up.count())
+	}
+
+	// Flip experiment ON and append B.
+	up2 := &recordingUploader{outcome: shipper.OutcomeCommitted}
+	lineB := "{\"written_while_on\":\"B\"}\n"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append B: %v", err)
+	}
+	_, _ = f2.WriteString(lineB)
+	_ = f2.Close()
+
+	// Simulate container restart: fresh Runner over the same home runs resume_catchup.
+	r2, err := NewRunner(Config{
+		HomeDir:            home,
+		RunID:              "run-404-restarted",
+		Uploader:           up2,
+		UnavailableBackoff: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner 2: %v", err)
+	}
+	r2.executeRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonResumeCatchup}, time.Second)
+
+	if up2.count() != 1 {
+		t.Fatalf("expected exactly 1 shipped segment (only B), got %d", up2.count())
+	}
+	wantStart := int64(len("{\"init\":0}\n") + len(lineA))
+	gotSeg := up2.segments[0]
+	if gotSeg.ByteStart != wantStart || gotSeg.RawSize != int64(len(lineB)) {
+		t.Fatalf("expected only B [start=%d len=%d] to ship, got [start=%d len=%d]",
+			wantStart, len(lineB), gotSeg.ByteStart, gotSeg.RawSize)
+	}
+}
