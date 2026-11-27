@@ -8840,6 +8840,7 @@ func (s *Server) registerRoutes() {
 	// /api/v1/usage is an exact-match pattern (no trailing slash) so it never shadows /api/v1/usage/me.
 	s.mux.HandleFunc("/api/v1/usage", s.guarded("/api/v1/usage", s.handleGlobalUsage))
 	s.mux.HandleFunc("/api/v1/me/usage", s.guarded("/api/v1/me/usage", s.handleMeUsage))
+	s.mux.HandleFunc("/api/v1/me/usage/budgets", s.guarded("/api/v1/me/usage/budgets", s.handleMeUsageBudgets))
 
 	// Role management (PR-C1)
 	s.mux.HandleFunc("/api/v1/admin/roles", s.guarded("/api/v1/admin/roles", s.handleAdminRoles))

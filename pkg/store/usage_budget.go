@@ -26,6 +26,13 @@ const (
 	UsageBudgetStateOK        = "ok"
 	UsageBudgetStateWarn      = "warn"
 	UsageBudgetStateExhausted = "exhausted"
+
+	// Threshold notification bitmask positions for UsageBudgetState.ThresholdsNotified.
+	// Used to deduplicate soft (50%, 80%) and hard (100%) threshold alerts and to
+	// selectively clear bits when a cap raise lowers consumption below a threshold.
+	UsageBudgetThresholdBit50  int64 = 1 << 0
+	UsageBudgetThresholdBit80  int64 = 1 << 1
+	UsageBudgetThresholdBit100 int64 = 1 << 2
 )
 
 // ErrBudgetStateConflict is returned by CompareAndSwapUsageBudgetState when
@@ -179,10 +186,20 @@ type UsageBudgetStore interface {
 	// ErrNotFound if no row exists yet.
 	GetUsageBudgetState(ctx context.Context, key UsageBudgetStateKey) (*UsageBudgetState, error)
 
+	// GetUsageBudgetStateByID returns the usage_budget_state row with the given
+	// UUID, or ErrNotFound if no such row exists.
+	GetUsageBudgetStateByID(ctx context.Context, id string) (*UsageBudgetState, error)
+
 	// ListUsageBudgetStatesForScope returns all usage_budget_state rows for
 	// (scopeKind, scopeID, projectScopeID) whose window is active at activeAt
 	// (window_start_utc <= activeAt < window_end_utc).
 	ListUsageBudgetStatesForScope(ctx context.Context, scopeKind, scopeID, projectScopeID string, activeAt time.Time) ([]*UsageBudgetState, error)
+
+	// ListOpenUsageBudgetStatesByLimit returns up to limit open-window
+	// usage_budget_state rows (window_end_utc > activeAt) for limitDefinitionID,
+	// ordered by window_start_utc ASC, id ASC. When limit <= 0, no explicit cap
+	// is applied.
+	ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, limit int) ([]*UsageBudgetState, error)
 
 	// CreateUsageBudgetState inserts a new usage_budget_state row with
 	// state_version = 1 (or st.StateVersion if >= 1). Returns ErrAlreadyExists

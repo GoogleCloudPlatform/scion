@@ -1042,6 +1042,71 @@ var identityOperations = []OperationSpec{
 		}},
 		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestUserUsageRead_SelfTokenReadsOwn"},
 	},
+	{
+		ID:          "hub.user.usage.budgets.read",
+		Domain:      "hub",
+		Description: "Read another user's raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets). Requires hub.metrics.read on the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/usage/budgets", Method: "GET", Variant: "cross_user"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.metrics.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.usage.budgets.self.read",
+		Domain:      "user",
+		Description: "Read the caller's own raw-token budgets through GET /api/v1/users/{id}/usage/budgets naming the caller's own user ID (behind tokenomics.usage_ledger and tokenomics.token_budgets). A project-boundary user access token restricts user_project rows to its boundary project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/usage/budgets", Method: "GET", Variant: "self"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserUsageBudgetsRead_SelfTokenReadsOwn"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Returns only the caller's own raw-token budgets; carries no other user's records",
+			Scope:  "caller's own raw-token budgets only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestUserUsageBudgetsRead_SelfTokenReadsOwn"},
+	},
+	{
+		ID:          "quota.user.usage.budgets.override",
+		Domain:      "quota",
+		Description: "Set or clear an admin override on a user's raw-token budget state row (behind tokenomics.usage_ledger and tokenomics.token_budgets). Requires quota.update on the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/usage/budgets/{budgetId}:override", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "quota.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
 
 	// =====================================================================
 	// Domain: role — role definition and binding reads

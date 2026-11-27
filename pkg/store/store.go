@@ -5497,6 +5497,12 @@ type QuotaStore interface {
 	// Returns ErrNotFound if the binding doesn't exist.
 	UpdateEntitlementBinding(ctx context.Context, binding *EntitlementBinding) (*EntitlementBinding, error)
 
+	// UpdateEntitlementBindingIfMatch atomically updates an existing entitlement
+	// binding only if its stored updated_at (at microsecond precision) matches
+	// expectedUpdatedAt. Returns ErrRevisionConflict on mismatch or ErrNotFound
+	// if the binding does not exist.
+	UpdateEntitlementBindingIfMatch(ctx context.Context, binding *EntitlementBinding, expectedUpdatedAt time.Time) (*EntitlementBinding, error)
+
 	// DeleteEntitlementBinding deletes an entitlement binding by ID.
 	// Returns ErrNotFound if the binding doesn't exist.
 	DeleteEntitlementBinding(ctx context.Context, id string) error

@@ -153,6 +153,19 @@ func (s *UsageLedgerStore) GetUsageBudgetState(ctx context.Context, key store.Us
 	return entUsageBudgetStateToStore(row), nil
 }
 
+// GetUsageBudgetStateByID implements store.UsageBudgetStore.GetUsageBudgetStateByID.
+func (s *UsageLedgerStore) GetUsageBudgetStateByID(ctx context.Context, id string) (*store.UsageBudgetState, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.client.UsageBudgetState.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entUsageBudgetStateToStore(row), nil
+}
+
 // ListUsageBudgetStatesForScope implements store.UsageBudgetStore.ListUsageBudgetStatesForScope.
 func (s *UsageLedgerStore) ListUsageBudgetStatesForScope(ctx context.Context, scopeKind, scopeID, projectScopeID string, activeAt time.Time) ([]*store.UsageBudgetState, error) {
 	atUTC := activeAt.UTC().Truncate(time.Microsecond)
@@ -166,6 +179,33 @@ func (s *UsageLedgerStore) ListUsageBudgetStatesForScope(ctx context.Context, sc
 		).
 		Order(ent.Asc(usagebudgetstate.FieldWindowStartUtc)).
 		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.UsageBudgetState, len(rows))
+	for i, r := range rows {
+		out[i] = entUsageBudgetStateToStore(r)
+	}
+	return out, nil
+}
+
+// ListOpenUsageBudgetStatesByLimit implements store.UsageBudgetStore.ListOpenUsageBudgetStatesByLimit.
+func (s *UsageLedgerStore) ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, limit int) ([]*store.UsageBudgetState, error) {
+	ldUID, err := parseGetID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	atUTC := activeAt.UTC().Truncate(time.Microsecond)
+	q := s.client.UsageBudgetState.Query().
+		Where(
+			usagebudgetstate.LimitDefinitionIDEQ(ldUID),
+			usagebudgetstate.WindowEndUtcGT(atUTC),
+		).
+		Order(ent.Asc(usagebudgetstate.FieldWindowStartUtc), ent.Asc(usagebudgetstate.FieldID))
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}

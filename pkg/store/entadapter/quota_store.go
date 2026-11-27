@@ -205,6 +205,7 @@ func (q *QuotaStore) CreateEntitlementBinding(ctx context.Context, binding *stor
 		return nil, err
 	}
 
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	builder := q.client.EntitlementBinding.Create().
 		SetLimitDefinitionID(ldUID).
 		SetSubjectType(entitlementbinding.SubjectType(binding.SubjectType)).
@@ -213,7 +214,9 @@ func (q *QuotaStore) CreateEntitlementBinding(ctx context.Context, binding *stor
 		SetScopeID(binding.ScopeID).
 		SetValue(binding.Value).
 		SetNillableTokenAction(binding.TokenAction).
-		SetCreatedBy(binding.CreatedBy)
+		SetCreatedBy(binding.CreatedBy).
+		SetCreatedAt(now).
+		SetUpdatedAt(now)
 
 	if binding.ID != "" {
 		uid, err := parseUUID(binding.ID)
@@ -288,8 +291,16 @@ func (q *QuotaStore) UpdateEntitlementBinding(ctx context.Context, binding *stor
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if !binding.UpdatedAt.IsZero() {
+		prev := binding.UpdatedAt.UTC().Truncate(time.Microsecond)
+		if !now.After(prev) {
+			now = prev.Add(time.Microsecond)
+		}
+	}
 	upd := q.client.EntitlementBinding.UpdateOneID(uid).
-		SetValue(binding.Value)
+		SetValue(binding.Value).
+		SetUpdatedAt(now)
 	if binding.TokenAction != nil && *binding.TokenAction != "" {
 		upd.SetTokenAction(*binding.TokenAction)
 	} else {
@@ -300,6 +311,59 @@ func (q *QuotaStore) UpdateEntitlementBinding(ctx context.Context, binding *stor
 		return nil, mapError(err)
 	}
 	return entEntitlementBindingToStore(updated), nil
+}
+
+// UpdateEntitlementBindingIfMatch implements store.QuotaStore.UpdateEntitlementBindingIfMatch.
+// Uses a [expectedUTC, expectedUTC+1µs) window so conditional updates are atomic
+// on both Postgres (microsecond TIMESTAMPTZ) and SQLite (nanosecond text timestamps),
+// and always advances updated_at by at least 1µs past expectedUTC.
+func (q *QuotaStore) UpdateEntitlementBindingIfMatch(ctx context.Context, binding *store.EntitlementBinding, expectedUpdatedAt time.Time) (*store.EntitlementBinding, error) {
+	uid, err := parseGetID(binding.ID)
+	if err != nil {
+		return nil, err
+	}
+	expectedUTC := expectedUpdatedAt.UTC().Truncate(time.Microsecond)
+	nextUpdatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if !nextUpdatedAt.After(expectedUTC) {
+		nextUpdatedAt = expectedUTC.Add(time.Microsecond)
+	}
+
+	upd := q.client.EntitlementBinding.Update().
+		Where(
+			entitlementbinding.IDEQ(uid),
+			entitlementbinding.UpdatedAtGTE(expectedUTC),
+			entitlementbinding.UpdatedAtLT(expectedUTC.Add(time.Microsecond)),
+		).
+		SetValue(binding.Value).
+		SetUpdatedAt(nextUpdatedAt)
+	if binding.TokenAction != nil && *binding.TokenAction != "" {
+		upd.SetTokenAction(*binding.TokenAction)
+	} else {
+		upd.ClearTokenAction()
+	}
+
+	n, err := upd.Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		exists, existsErr := q.client.EntitlementBinding.Query().
+			Where(entitlementbinding.IDEQ(uid)).
+			Exist(ctx)
+		if existsErr != nil {
+			return nil, mapError(existsErr)
+		}
+		if !exists {
+			return nil, store.ErrNotFound
+		}
+		return nil, store.ErrRevisionConflict
+	}
+
+	row, err := q.client.EntitlementBinding.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entEntitlementBindingToStore(row), nil
 }
 
 // DeleteEntitlementBinding deletes an entitlement binding by ID.

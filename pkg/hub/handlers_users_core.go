@@ -182,7 +182,14 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	case "usage":
 		s.handleUserUsage(w, r, id)
 		return
+	case "usage/budgets":
+		s.handleUserUsageBudgets(w, r, id)
+		return
 	default:
+		if budgetID, ok := parseUsageBudgetOverrideSubpath(action); ok {
+			s.handleUserUsageBudgetOverride(w, r, id, budgetID)
+			return
+		}
 		NotFound(w, "User resource")
 		return
 	}

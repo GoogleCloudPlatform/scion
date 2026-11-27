@@ -2902,9 +2902,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tokenomics Track 1 project usage summary (GET /api/v1/projects/{id}/usage).
+	// Tokenomics Track 1 project usage summary (GET /api/v1/projects/{id}/usage)
+	// and token budgets (GET /api/v1/projects/{id}/usage/budgets,
+	// POST /api/v1/projects/{id}/usage/budgets/{budgetId}:override).
 	if subPath == "usage" {
 		s.handleProjectUsage(w, r, projectID)
+		return
+	}
+	if subPath == "usage/budgets" {
+		s.handleProjectUsageBudgets(w, r, projectID)
+		return
+	}
+	if budgetID, ok := parseUsageBudgetOverrideSubpath(subPath); ok {
+		s.handleProjectUsageBudgetOverride(w, r, projectID, budgetID)
 		return
 	}
 	if strings.HasPrefix(subPath, "usage/") {

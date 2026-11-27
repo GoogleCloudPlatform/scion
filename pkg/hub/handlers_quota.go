@@ -472,6 +472,7 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		existing.ResourceType = req.ResourceType
 		existing.Unit = req.Unit
 	}
+	prevDefaultValue := existing.DefaultValue
 	existing.Description = req.Description
 	existing.DefaultValue = req.DefaultValue
 	existing.UpdatedAt = time.Now()
@@ -484,6 +485,12 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	if updated.ResourceType == store.LimitResourceTypeLLMTokens && updated.DefaultValue != prevDefaultValue {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ReevaluateAfterLimitDefaultChange(r.Context(), updated)
+		}
 	}
 
 	slog.Info("limit definition updated",
@@ -630,6 +637,13 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		}
 	}
 
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ReevaluateAfterEntitlementChange(r.Context(), limitDef, created)
+		}
+	}
+
+	setEntitlementETag(w, created)
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -643,6 +657,7 @@ func (s *Server) getEntitlement(w http.ResponseWriter, r *http.Request, id strin
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	setEntitlementETag(w, binding)
 	writeJSON(w, http.StatusOK, binding)
 }
 
@@ -661,6 +676,45 @@ func (s *Server) listEntitlements(w http.ResponseWriter, r *http.Request, limitI
 	})
 }
 
+// entitlementRevision returns the canonical microsecond-truncated UTC revision
+// string for an EntitlementBinding (used in ETag / If-Match CAS headers).
+func entitlementRevision(updatedAt time.Time) string {
+	return updatedAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+}
+
+func setEntitlementETag(w http.ResponseWriter, binding *store.EntitlementBinding) {
+	if binding == nil || binding.UpdatedAt.IsZero() {
+		return
+	}
+	w.Header().Set("ETag", `"`+entitlementRevision(binding.UpdatedAt)+`"`)
+}
+
+// parseEntitlementIfMatch parses an If-Match header containing a quoted or
+// unquoted RFC3339/RFC3339Nano timestamp revision (optionally prefixed with W/).
+func parseEntitlementIfMatch(raw string) (time.Time, error) {
+	v := strings.TrimSpace(raw)
+	v = strings.TrimPrefix(v, "W/")
+	v = strings.Trim(v, `"`)
+	v = strings.TrimSpace(v)
+	if v == "" || v == "*" {
+		return time.Time{}, fmt.Errorf("entitlement revision timestamp is required")
+	}
+	ts, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid If-Match revision timestamp: %w", err)
+	}
+	return ts.UTC().Truncate(time.Microsecond), nil
+}
+
+// updateEntitlement handles PUT /api/v1/admin/entitlements/{id}.
+//
+// Optimistic concurrency (If-Match): when an If-Match header is provided, it
+// must match the binding's current revision (microsecond-truncated UTC
+// updatedAt / ETag) or the request fails with 412 Precondition Failed. Omitting
+// If-Match preserves unconditional update behavior for existing clients.
+//
+// Note on tokenAction: PUT is a full replacement of the editable fields, so
+// omitting tokenAction clears it back to NULL (effective action: pause_new).
 func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
 	var req updateEntitlementBindingRequest
 	if err := readJSON(r, &req); err != nil {
@@ -682,6 +736,18 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	var hasIfMatch bool
+	var expectedUpdatedAt time.Time
+	if rawIfMatch := strings.TrimSpace(r.Header.Get("If-Match")); rawIfMatch != "" {
+		ts, err := parseEntitlementIfMatch(rawIfMatch)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return
+		}
+		hasIfMatch = true
+		expectedUpdatedAt = ts
+	}
+
 	existing, err := s.store.GetEntitlementBinding(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -689,6 +755,12 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if hasIfMatch && !existing.UpdatedAt.UTC().Truncate(time.Microsecond).Equal(expectedUpdatedAt) {
+		writeError(w, http.StatusPreconditionFailed, ErrCodeRevisionConflict,
+			"entitlement binding revision mismatch; refresh and retry", nil)
 		return
 	}
 
@@ -739,10 +811,19 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 	existing.ScopeID = req.ScopeID
 	existing.Value = req.Value
 	existing.TokenAction = tokenAction
-	existing.UpdatedAt = time.Now()
 
-	updated, err := s.store.UpdateEntitlementBinding(r.Context(), existing)
+	var updated *store.EntitlementBinding
+	if hasIfMatch {
+		updated, err = s.store.UpdateEntitlementBindingIfMatch(r.Context(), existing, expectedUpdatedAt)
+	} else {
+		updated, err = s.store.UpdateEntitlementBinding(r.Context(), existing)
+	}
 	if err != nil {
+		if errors.Is(err, store.ErrRevisionConflict) {
+			writeError(w, http.StatusPreconditionFailed, ErrCodeRevisionConflict,
+				"entitlement binding revision mismatch; refresh and retry", nil)
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Entitlement Binding")
 			return
@@ -779,12 +860,20 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ReevaluateAfterEntitlementChange(r.Context(), limitDef, updated)
+		}
+	}
+
+	setEntitlementETag(w, updated)
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
-	// Fetch binding before delete so we can close a pooled group's charging
-	// episode if this was its last active pooled binding (D6a).
+	// Fetch binding and its limit definition before deletion so we can close a
+	// pooled group's charging episode (D6a) and re-evaluate affected llm_tokens
+	// budget states after the binding is removed.
 	existing, getErr := s.store.GetEntitlementBinding(r.Context(), id)
 	if getErr != nil {
 		if errors.Is(getErr, store.ErrNotFound) {
@@ -793,6 +882,12 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 		}
 		writeErrorFromErr(w, getErr, "")
 		return
+	}
+	var limitDef *store.LimitDefinition
+	if existing != nil {
+		if def, defErr := s.store.GetLimitDefinition(r.Context(), existing.LimitDefinitionID); defErr == nil {
+			limitDef = def
+		}
 	}
 
 	if err := s.store.DeleteEntitlementBinding(r.Context(), id); err != nil {
@@ -807,14 +902,19 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 	slog.Info("entitlement binding deleted",
 		"binding_id", id, "actor", user.Email())
 	s.InvalidatePooledGroupCacheAll()
-	if existing != nil && existing.SubjectType == store.EntitlementSubjectGroup && existing.Value > 0 {
-		if limitDef, defErr := s.store.GetLimitDefinition(r.Context(), existing.LimitDefinitionID); defErr == nil && limitDef != nil && pooledGroupLimit(limitDef.Name) {
-			if seeder := s.GroupBudgetSeeder(); seeder != nil {
-				if seedErr := seeder.OnGroupBindingDeactivated(r.Context(), existing.SubjectID, time.Time{}); seedErr != nil {
-					slog.Warn("failed to close pooled group charging episode on binding delete",
-						"binding_id", id, "group_id", existing.SubjectID, "error", seedErr)
-				}
+	if existing != nil && existing.SubjectType == store.EntitlementSubjectGroup && existing.Value > 0 &&
+		limitDef != nil && pooledGroupLimit(limitDef.Name) {
+		if seeder := s.GroupBudgetSeeder(); seeder != nil {
+			if seedErr := seeder.OnGroupBindingDeactivated(r.Context(), existing.SubjectID, time.Time{}); seedErr != nil {
+				slog.Warn("failed to close pooled group charging episode on binding delete",
+					"binding_id", id, "group_id", existing.SubjectID, "error", seedErr)
 			}
+		}
+	}
+
+	if limitDef != nil && existing != nil && limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ReevaluateAfterEntitlementChange(r.Context(), limitDef, existing)
 		}
 	}
 

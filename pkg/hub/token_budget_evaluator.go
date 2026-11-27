@@ -855,7 +855,15 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		}
 
 		// Monotonic within window: evaluator never moves state downward (D4).
-		nextState := maxBudgetState(existing.State, computedState)
+		// While an admin override is active (override_until > evaluator clock),
+		// do not re-raise state above existing.State (ok); state resumes rising
+		// once override_until elapses.
+		var nextState string
+		if existing.OverrideUntil != nil && existing.OverrideUntil.After(e.now()) {
+			nextState = existing.State
+		} else {
+			nextState = maxBudgetState(existing.State, computedState)
+		}
 		nextConsumed := consumed
 		if existing.ConsumedAtEval > nextConsumed {
 			nextConsumed = existing.ConsumedAtEval

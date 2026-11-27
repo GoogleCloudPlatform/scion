@@ -1297,6 +1297,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/metrics/summary":                   {"id": f.project},
 		"/api/v1/projects/{id}/metrics":                           {"id": f.project},
 		"/api/v1/projects/{id}/usage":                             {"id": f.project},
+		"/api/v1/projects/{id}/usage/budgets":                     {"id": f.project},
+		"/api/v1/projects/{id}/usage/budgets/{budgetId}:override": {"id": f.project, "budgetId": "00000000-0000-0000-0000-000000000001"},
 		"/api/v1/projects/{id}/pre-start-hooks":                   {"id": f.project},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":          {"id": f.project, "hookId": f.projectPreStartHook},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate": {"id": f.project, "hookId": f.projectPreStartHook},
@@ -1327,11 +1329,13 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
 		// --- user family ---
-		"/api/v1/users/{id}":                 {"id": f.user},
-		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
-		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
-		"/api/v1/users/{id}/deletion":        {"id": f.userDeletion},
-		"/api/v1/users/{id}/usage":           {"id": f.user},
+		"/api/v1/users/{id}":                                   {"id": f.user},
+		"/api/v1/users/{id}/revoke-sessions":                   {"id": f.user},
+		"/api/v1/users/{id}/delete-blockers":                   {"id": f.user},
+		"/api/v1/users/{id}/deletion":                          {"id": f.userDeletion},
+		"/api/v1/users/{id}/usage":                             {"id": f.user},
+		"/api/v1/users/{id}/usage/budgets":                     {"id": f.user},
+		"/api/v1/users/{id}/usage/budgets/{budgetId}:override": {"id": f.user, "budgetId": "00000000-0000-0000-0000-000000000001"},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
