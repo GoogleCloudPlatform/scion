@@ -73,11 +73,10 @@ def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
          tier such as "medium" set directly on harness_config (e.g. by an
          older template or an explicit override) is resolved the same way
          SCION_MODEL would be, instead of reaching agy unresolved.
-      3. AGY_MODEL (operator-set env var fallback).
-      4. harness_config.model_aliases["medium"] (the default tier alias from
+      3. harness_config.model_aliases["medium"] (the default tier alias from
          config.yaml, so updating the alias table changes the default with no
          code change).
-      5. FLASH_MODEL (last-resort fallback when model_aliases is missing or
+      4. FLASH_MODEL (last-resort fallback when model_aliases is missing or
          omits "medium").
     """
     resolved = scion_harness.resolve_model(ctx)
@@ -88,9 +87,6 @@ def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
     )
     if configured:
         return configured
-    agy_model = os.environ.get("AGY_MODEL", "").strip()
-    if agy_model:
-        return agy_model
     aliases = (
         ctx.harness_config.get("model_aliases")
         if isinstance(ctx.harness_config, dict)
@@ -533,13 +529,18 @@ fi
     if model:
         model_block = f"""
 # Default model fallback: pass --model when caller argv omits it (e.g. older
-# brokers, resumed agents, or AGY_MODEL overrides). agy's --model accepts
-# model IDs, whereas settings.json "model" only matches display labels
-# (ptone/scion#9679).
+# brokers or resumed agents). agy's --model accepts model IDs, whereas
+# settings.json "model" only matches display labels (ptone/scion#9679).
 _has_model_flag=false
+_skip_next=false
 for _arg in "$@"; do
+    if [ "$_skip_next" = "true" ]; then
+        _skip_next=false
+        continue
+    fi
     case "$_arg" in
         --) break ;;
+        -prompt-interactive|--prompt-interactive) _skip_next=true ;;
         --model|--model=*|-model|-model=*) _has_model_flag=true; break ;;
     esac
 done

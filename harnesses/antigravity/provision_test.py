@@ -293,63 +293,65 @@ class ExplicitOAuthTokenTest(unittest.TestCase):
 
 class ModelResolutionTest(unittest.TestCase):
     """Covers model resolution precedence in _resolve_model (ptone/scion#2453,
-    ptone/scion#9153):
+    ptone/scion#9153, ptone/scion#9679):
       1. SCION_MODEL (via scion_harness.resolve_model)
       2. harness_config.model (via scion_harness.normalize_model_alias, not raw)
-      3. AGY_MODEL (operator env var fallback)
-      4. harness_config.model_aliases["medium"] (default tier from config.yaml)
-      5. FLASH_MODEL (last-resort fallback when model_aliases lacks "medium")
+      3. harness_config.model_aliases["medium"] (default tier from config.yaml)
+      4. FLASH_MODEL (last-resort fallback when model_aliases lacks "medium")
     """
 
     def test_scion_model_tier_resolves_through_config_model_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
-            with env_vars(SCION_MODEL="medium", AGY_MODEL=None):
+            with env_vars(SCION_MODEL="medium"):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-4-hydrogen-medium")
 
     def test_scion_model_concrete_id_case_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
-            with env_vars(SCION_MODEL="Gemini-Custom-Preview", AGY_MODEL=None):
+            with env_vars(SCION_MODEL="Gemini-Custom-Preview"):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "Gemini-Custom-Preview")
 
     def test_scion_model_unset_uses_harness_config_model_tier(self) -> None:
         # harness_config.model carries a raw tier (e.g. from an older
         # template) -- it must be resolved through model_aliases exactly like
-        # SCION_MODEL would be, not passed through to settings.json raw.
+        # SCION_MODEL would be, not passed through raw.
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="large")
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+            with env_vars(SCION_MODEL=None):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-4-neon-medium")
 
     def test_scion_model_unset_uses_harness_config_model_extra_large(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="extra-large")
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+            with env_vars(SCION_MODEL=None):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-4-neon-high")
 
     def test_scion_model_unset_uses_harness_config_model_xl_shorthand(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="xl")
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+            with env_vars(SCION_MODEL=None):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-4-neon-high")
 
-    def test_agy_model_env_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
-            ctx = make_ctx(tmp)
-            with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
-                model = provision._resolve_model(ctx)
-        self.assertEqual(model, "agy-operator-model")
+    def test_agy_model_env_is_ignored(self) -> None:
+        # AGY_MODEL support was removed (ptone/scion#9679): it must be ignored
+        # both when harness_config.model is set and when it is omitted.
+        for label, cfg_model in (("with_config_model", "medium"), ("without_config_model", None)):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                ctx = make_ctx(tmp, model=cfg_model)
+                with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
+                    model = provision._resolve_model(ctx)
+                self.assertEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
 
     def test_medium_alias_fallback_when_nothing_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+            with env_vars(SCION_MODEL=None):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
         self.assertNotEqual(model, provision.FLASH_MODEL)
@@ -358,7 +360,7 @@ class ModelResolutionTest(unittest.TestCase):
         custom_aliases = dict(ANTIGRAVITY_MODEL_ALIASES, medium="gemini-next-medium")
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model_aliases=custom_aliases)
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+            with env_vars(SCION_MODEL=None):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-next-medium")
 
@@ -374,7 +376,7 @@ class ModelResolutionTest(unittest.TestCase):
             with self.subTest(case=label):
                 with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
                     ctx = make_ctx(tmp, model_aliases=aliases)
-                    with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                    with env_vars(SCION_MODEL=None):
                         model = provision._resolve_model(ctx)
                 self.assertEqual(model, provision.FLASH_MODEL)
 
@@ -386,46 +388,23 @@ class ModelResolutionTest(unittest.TestCase):
     def test_scion_model_wins_over_harness_config_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="large")
-            with env_vars(SCION_MODEL="medium", AGY_MODEL=None):
+            with env_vars(SCION_MODEL="medium"):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-4-hydrogen-medium")
-
-    def test_harness_config_model_wins_over_agy_model(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
-            ctx = make_ctx(tmp, model="large")
-            with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
-                model = provision._resolve_model(ctx)
-        self.assertEqual(model, "gemini-4-neon-medium")
-
-    def test_agy_model_wins_over_medium_alias_and_flash_model(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
-            ctx = make_ctx(tmp)
-            with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
-                model = provision._resolve_model(ctx)
-        self.assertEqual(model, "agy-operator-model")
-        self.assertNotEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
-        self.assertNotEqual(model, provision.FLASH_MODEL)
-
-    def test_blank_agy_model_falls_through_to_medium_alias(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
-            ctx = make_ctx(tmp)
-            with env_vars(SCION_MODEL=None, AGY_MODEL="   "):
-                model = provision._resolve_model(ctx)
-        self.assertEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
 
     def test_blank_scion_model_falls_through_to_harness_config_model(self) -> None:
         # Whitespace-only SCION_MODEL must be treated as unset, not as a
         # (non-matching) concrete model that would block the fallback chain.
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="small")
-            with env_vars(SCION_MODEL="  ", AGY_MODEL=None):
+            with env_vars(SCION_MODEL="  "):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "gemini-4-hydrogen-low")
 
     def test_harness_config_model_concrete_id_case_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="Gemini-Custom-Preview")
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+            with env_vars(SCION_MODEL=None):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "Gemini-Custom-Preview")
 
@@ -672,13 +651,44 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
         self.assertEqual(settings["trustedWorkspaces"], [workspace])
 
 
+def _load_shipped_config() -> dict[str, Any]:
+    """Load model and model_aliases from the shipped harnesses/antigravity/config.yaml."""
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    cfg: dict[str, Any] = {}
+    in_aliases = False
+    aliases: dict[str, str] = {}
+    with open(config_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.split("#", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            if not line[0].isspace():
+                in_aliases = False
+                key, sep, val = line.partition(":")
+                if not sep:
+                    continue
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key == "model" and val:
+                    cfg["model"] = val
+                elif key == "model_aliases":
+                    in_aliases = True
+            elif in_aliases:
+                key, sep, val = line.strip().partition(":")
+                if sep:
+                    aliases[key.strip()] = val.strip().strip('"').strip("'")
+    if aliases:
+        cfg["model_aliases"] = aliases
+    return cfg
+
+
 class ProvisionModelWiringTest(unittest.TestCase):
     """Covers ptone/scion#2453, #9153, and #9679: drive the real provision()
     entry point via _invoke and execute the generated agy-wrapper.sh against a
     stub agy binary so we verify both:
       1. The resolved model reaches agy via --model on argv when omitted by the
-         caller (default, SCION_MODEL, AGY_MODEL), while an explicit --model
-         passed on argv wins without duplication.
+         caller (default, SCION_MODEL), while an explicit --model passed on
+         argv wins without duplication, and legacy AGY_MODEL is ignored.
       2. settings.json is never given a model ID in its "model" key (which agy
          1.5.18 matches against display labels only).
     """
@@ -689,20 +699,24 @@ class ProvisionModelWiringTest(unittest.TestCase):
         wrapper_args: list[str],
         *,
         scion_model: str | None = None,
-        agy_model: str | None = None,
+        extra_env: dict[str, str] | None = None,
         harness_config: dict[str, Any] | None = None,
     ) -> tuple[list[str], dict[str, Any]]:
         """Provision with vertex-ai (ADC, skips dbus/keyring) and execute
         agy-wrapper.sh with stubbed agy, returning (agy_argv, settings_json)."""
         if harness_config is None:
-            harness_config = {"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)}
-        with env_vars(
-            SCION_MODEL=scion_model,
-            AGY_MODEL=agy_model,
-            GOOGLE_CLOUD_PROJECT="test-proj",
-            GOOGLE_CLOUD_LOCATION="global",
-            GOOGLE_CLOUD_REGION=None,
-        ), unittest.mock.patch.object(provision, "_get_agy_version", return_value=(1, 5, 18)):
+            harness_config = _load_shipped_config()
+        provision_env: dict[str, str | None] = {
+            "SCION_MODEL": scion_model,
+            "GOOGLE_CLOUD_PROJECT": "test-proj",
+            "GOOGLE_CLOUD_LOCATION": "global",
+            "GOOGLE_CLOUD_REGION": None,
+        }
+        if extra_env:
+            provision_env.update(extra_env)
+        with env_vars(**provision_env), unittest.mock.patch.object(
+            provision, "_get_agy_version", return_value=(1, 5, 18)
+        ):
             _invoke(
                 tmp,
                 env_vars=["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
@@ -733,6 +747,8 @@ class ProvisionModelWiringTest(unittest.TestCase):
             "GOOGLE_CLOUD_PROJECT": "test-proj",
             "GOOGLE_CLOUD_LOCATION": "global",
         }
+        if extra_env:
+            run_env.update(extra_env)
         res = subprocess.run(
             [wrapper_path, *wrapper_args],
             env=run_env,
@@ -784,17 +800,89 @@ class ProvisionModelWiringTest(unittest.TestCase):
         self.assertEqual(argv[1:3], ["--model", ANTIGRAVITY_MODEL_ALIASES["medium"]])
         self.assertEqual(argv[3:], ["--", "--model", "not-a-flag"])
 
+    def test_task_text_matching_model_flag_still_injects_default(self) -> None:
+        for task_args in (
+            ["-prompt-interactive", "--model"],
+            ["-prompt-interactive", "--model=not-a-flag"],
+            ["--prompt-interactive", "-model"],
+        ):
+            with self.subTest(task_args=task_args), tempfile.TemporaryDirectory() as tmp:
+                argv, _ = self._run_wrapper(tmp, task_args)
+                self.assertEqual(argv[1:3], ["--model", ANTIGRAVITY_MODEL_ALIASES["medium"]])
+                self.assertEqual(argv[3:], task_args)
+
     def test_resume_without_model_flag_receives_default_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             argv, _ = self._run_wrapper(tmp, ["-continue"])
         self.assertEqual(argv[1:3], ["--model", ANTIGRAVITY_MODEL_ALIASES["medium"]])
         self.assertIn("-continue", argv)
 
-    def test_agy_model_env_fallback_reaches_agy_via_wrapper(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            argv, settings = self._run_wrapper(tmp, [], agy_model="agy-operator-model")
-        self.assertNotIn("model", settings)
-        self.assertEqual(argv[1:3], ["--model", "agy-operator-model"])
+    def test_shipped_config_precedence_and_ignores_agy_model(self) -> None:
+        """Runs against the real shipped harnesses/antigravity/config.yaml:
+        asserts config.yaml declares model: medium, verifies precedence
+        explicit --model (all four flag forms) > template model > harness
+        default medium, and confirms AGY_MODEL in the environment is ignored.
+        """
+        shipped = _load_shipped_config()
+        self.assertEqual(
+            shipped.get("model"),
+            "medium",
+            "shipped harnesses/antigravity/config.yaml must declare model: medium",
+        )
+        expected_default = shipped["model_aliases"]["medium"]
+        expected_template = shipped["model_aliases"]["large"]
+        ignored_env = {"AGY_MODEL": "agy-operator-model"}
+
+        # 1. Harness default wins when no explicit flag or template model is set,
+        #    and AGY_MODEL is ignored (both with shipped config and when model is
+        #    omitted from harness_config).
+        shipped_no_model = {"model_aliases": dict(shipped["model_aliases"])}
+        for label, cfg in (("shipped", shipped), ("without_model_key", shipped_no_model)):
+            with self.subTest(case=f"default_{label}"), tempfile.TemporaryDirectory() as tmp:
+                argv, settings = self._run_wrapper(
+                    tmp,
+                    ["-prompt-interactive", "hello"],
+                    extra_env=ignored_env,
+                    harness_config=cfg,
+                )
+                self.assertNotIn("model", settings)
+                self.assertEqual(argv[1:3], ["--model", expected_default])
+                self.assertNotIn("agy-operator-model", argv)
+
+        # 2. Template model (SCION_MODEL) beats harness default and AGY_MODEL.
+        with self.subTest(case="template_over_default"), tempfile.TemporaryDirectory() as tmp:
+            argv, settings = self._run_wrapper(
+                tmp,
+                ["-prompt-interactive", "hello"],
+                scion_model="large",
+                extra_env=ignored_env,
+                harness_config=shipped,
+            )
+            self.assertNotIn("model", settings)
+            self.assertEqual(argv[1:3], ["--model", expected_template])
+            self.assertNotIn("agy-operator-model", argv)
+
+        # 3. Explicit --model (all four flag forms) beats template model,
+        #    harness default, and AGY_MODEL without duplication.
+        for flag_args in (
+            ["--model", "explicit-model", "-prompt-interactive", "hi"],
+            ["--model=explicit-model", "-prompt-interactive", "hi"],
+            ["-model", "explicit-model", "-prompt-interactive", "hi"],
+            ["-model=explicit-model", "-prompt-interactive", "hi"],
+        ):
+            with self.subTest(case="explicit", flag_args=flag_args), tempfile.TemporaryDirectory() as tmp:
+                argv, settings = self._run_wrapper(
+                    tmp,
+                    flag_args,
+                    scion_model="large",
+                    extra_env=ignored_env,
+                    harness_config=shipped,
+                )
+                self.assertNotIn("model", settings)
+                self.assertEqual(argv[1:], flag_args)
+                self.assertNotIn(expected_default, argv)
+                self.assertNotIn(expected_template, argv)
+                self.assertNotIn("agy-operator-model", argv)
 
     def test_model_with_spaces_is_shell_quoted_as_single_argv_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -842,7 +930,7 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
             real_warn(ctx, message)
 
         with tempfile.TemporaryDirectory() as tmp:
-            with env_vars(SCION_THINKING_LEVEL=raw, SCION_MODEL=None, AGY_MODEL=None), \
+            with env_vars(SCION_THINKING_LEVEL=raw, SCION_MODEL=None), \
                     unittest.mock.patch.object(scion_harness.ProvisionContext, "warn", capture):
                 _invoke(
                     tmp,
