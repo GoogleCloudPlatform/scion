@@ -95,6 +95,11 @@ func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 		runID := uuid.NewString()
 		_, err := env.HubA.Store.SetAgentRunID(ctx, ag.ID, runID, nil)
 		require.NoError(t, err)
+		if i == 0 {
+			require.NoError(t, env.HubA.Store.UpdateAgentExposedPorts(ctx, ag.ID, []store.ExposedPort{
+				{Port: 8080, Host: "127.0.0.1", Mode: "rw"},
+			}))
+		}
 		agentSlugs[ag.ID] = slug
 
 		node := env.HubA
@@ -164,13 +169,16 @@ func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 		},
 		BrokerRPC: func(callCtx context.Context, seq int) error {
 			path := "/v1/broker/list"
+			node := env.HubA
 			if seq%2 == 1 {
 				path = "/v1/broker/status"
+				node = env.HubB
 			}
-			return env.HubA.Router().Do(callCtx, router.Request{
+			return node.Router().Do(callCtx, router.Request{
 				Op:   router.OpStatefulRPC,
 				Kind: registry.PrincipalBroker,
 				ID:   env.BrokerID,
+				Want: registry.Want{Capability: conduit.RPCImageStatus},
 			}, func(c context.Context, r router.Resolved) error {
 				resp, err := r.Session.Call(c, &conduitv1.RpcRequest{
 					Method: http.MethodGet,

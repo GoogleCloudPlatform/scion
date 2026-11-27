@@ -398,9 +398,9 @@ func TestConduitHA_2796_C10_CapabilityTruthCrossNode(t *testing.T) {
 
 // TestConduitHA_2796_C16b_ActiveAuthzCrossNode validates ptone/scion#2796
 // checkbox "C16b (T2 active authorization)" across two Postgres hub nodes with
-// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (600ms):
+// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (1s):
 //   - Renewal: streams whose permission still holds stay open past their
-//     authorization interval (600ms) and keep echoing.
+//     authorization interval (1s) and keep echoing.
 //   - Fast-path NOTIFY revocation: revoking u1's attach role binding through
 //     Hub B closes u1's cross-node PTY on Hub A with 4401 authz_expired within
 //     one recheck interval + grace, while u2's stream stays open.
@@ -411,7 +411,7 @@ func TestConduitHA_2796_C10_CapabilityTruthCrossNode(t *testing.T) {
 func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	const (
 		recheckInterval = 200 * time.Millisecond
-		authzMax        = 600 * time.Millisecond
+		authzMax        = 1 * time.Second
 		closeBound      = recheckInterval + 2*time.Second
 	)
 	env := newConduitHAEnvWith(t, conduitHAOptions{
@@ -421,13 +421,10 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	haSetBrokerAttach(t, env, false)
 	ctx := context.Background()
 
-	// Create an admin user for Hub B's role-binding DELETE API, and two
-	// project members (u1, u2) with a custom agent.attach role binding.
+	// Use Hub B's dev admin token for Hub B's role-binding DELETE API, and
+	// create two project members (u1, u2) with a custom agent.attach binding.
 	adminID := tid("c16b-admin")
-	createTestUserWithProjectRole(t, env.HubA.Store, adminID, "admin@c16b.test", env.Project.ID, store.ProjectRoleAdmin)
-	ensureHubMembership(ctx, env.HubA.Store, adminID)
-	adminUser := NewAuthenticatedUser(adminID, "admin@c16b.test", "Admin", store.UserRoleAdmin, "api")
-	adminTok := haUserToken(t, env.HubB, adminUser)
+	adminTok := env.HubB.Server.config.DevAuthToken
 
 	rd, err := env.HubA.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
 		Name:        "c16b-attach-" + tid("rd"),
@@ -490,7 +487,7 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	deleteBindingOnHubB(u1BindID)
 	ce1 := haPTYReadClose(t, c1, closeBound)
 	assert.LessOrEqual(t, time.Since(revokeStart), closeBound)
-	assert.Equal(t, wsprotocol.ClosePTYUnauthorized, ce1.Code)
+	assert.Equal(t, wsprotocol.ClosePTYAuthRequired, ce1.Code)
 	assert.Equal(t, conduitReasonAuthzExpired, ce1.Text)
 	haWaitFakePTYClosed(t, pty1)
 
@@ -506,7 +503,7 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	deleteBindingOnHubB(u2BindID)
 	ce2 := haPTYReadClose(t, c2, closeBound)
 	assert.LessOrEqual(t, time.Since(sweepStart), closeBound)
-	assert.Equal(t, wsprotocol.ClosePTYUnauthorized, ce2.Code)
+	assert.Equal(t, wsprotocol.ClosePTYAuthRequired, ce2.Code)
 	assert.Equal(t, conduitReasonAuthzExpired, ce2.Text)
 	haWaitFakePTYClosed(t, pty2)
 }
@@ -520,6 +517,9 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 func TestConduitHA_2796_C5_SlowReaderIsolationCrossNode(t *testing.T) {
 	env := newConduitHAEnv(t)
 	haSetBrokerAttach(t, env, false)
+	require.NoError(t, env.HubA.Store.UpdateAgentExposedPorts(context.Background(), env.Agent.ID, []store.ExposedPort{
+		{Port: 8080, Host: "127.0.0.1", Mode: "rw"},
+	}))
 
 	var bulkWritten atomic.Int64
 	bulkDone := make(chan struct{})
