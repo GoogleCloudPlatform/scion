@@ -555,6 +555,8 @@ profiles:
 }
 
 func TestTelemetryEnforced_ResolvedSettings(t *testing.T) {
+	assert.Equal(t, store.AnnotationProjectTelemetryEnabled, projectSettingTelemetryEnabled,
+		"hub projectSettingTelemetryEnabled must match store.AnnotationProjectTelemetryEnabled")
 	srv, s := testServer(t)
 	ctx := t.Context()
 	project := createTestProjectForSettings(t, s)

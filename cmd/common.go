@@ -2432,7 +2432,7 @@ func checkDisableTelemetryAllowed(parentCtx context.Context, client hubclient.Cl
 	if err != nil || resolved == nil {
 		return nil
 	}
-	if entry, ok := resolved.Settings["scion.io/telemetry-enabled"]; ok && entry.LockedBy != nil && *entry.LockedBy == "hub" {
+	if entry, ok := resolved.Settings[store.AnnotationProjectTelemetryEnabled]; ok && entry.LockedBy != nil && *entry.LockedBy == "hub" {
 		return fmt.Errorf("cannot use --disable-telemetry: telemetry is enforced by the hub operator")
 	}
 	return nil

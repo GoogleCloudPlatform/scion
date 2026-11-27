@@ -1071,6 +1071,12 @@ const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
 // one.
 const AnnotationProjectActiveProfile = "scion.io/active-profile"
 
+// AnnotationProjectTelemetryEnabled is the project annotation that holds the
+// project's telemetryEnabled setting and keys its entry in GET /settings/resolved.
+// pkg/hub keeps its own literal (projectSettingTelemetryEnabled) and pins that
+// the two agree; readers outside pkg/hub, such as the CLI preflight, use this one.
+const AnnotationProjectTelemetryEnabled = "scion.io/telemetry-enabled"
+
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
 // the value "true".
