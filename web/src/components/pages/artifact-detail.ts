@@ -747,6 +747,15 @@ export class ScionPageArtifactDetail extends LitElement {
         font-size: 0.8125rem;
         color: var(--sl-color-neutral-600);
       }
+      .attachment-provenance {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+      .attachment-provenance .provenance-link {
+        color: var(--scion-primary);
+        text-decoration: underline;
+      }
       .meta code,
       .ref code {
         font-family: var(--scion-font-mono, monospace);
@@ -3261,6 +3270,28 @@ export class ScionPageArtifactDetail extends LitElement {
    * The shown version's facts in the header (ptone/scion#6852): its number,
    * whether it is the current version, its kind and author, and its date.
    */
+  /**
+   * Provenance line for a version published from a chat attachment by
+   * reference (ptone/scion#4598, #4599). The link to the conversation is
+   * shown only when `sourceMessageId` is present (already viewer-scoped by
+   * the backend).
+   */
+  private renderAttachmentProvenance(v: ArtifactVersion): TemplateResult | typeof nothing {
+    if (!v.sourceAttachmentId) return nothing;
+    if (v.sourceMessageId) {
+      const href = `/chat#msg-${encodeURIComponent(v.sourceMessageId)}`;
+      return html`<span class="attachment-provenance">
+        <sl-icon name="paperclip"></sl-icon>
+        Published from an attachment in
+        <a class="provenance-link" href=${href}>a conversation</a>
+      </span>`;
+    }
+    return html`<span class="attachment-provenance">
+      <sl-icon name="paperclip"></sl-icon>
+      Published from an attachment in a conversation
+    </span>`;
+  }
+
   private renderVersionInfo(v: ArtifactVersion): TemplateResult {
     const latest = this.latestSeq;
     const state = v.seq === latest ? 'current' : `older, current is v${latest}`;
@@ -3385,6 +3416,7 @@ export class ScionPageArtifactDetail extends LitElement {
               </span>`
             : nothing}
           ${v ? this.renderVersionInfo(v) : nothing}
+          ${v?.sourceAttachmentId ? this.renderAttachmentProvenance(v) : nothing}
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
           <span class="expires"

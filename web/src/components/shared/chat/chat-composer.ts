@@ -247,6 +247,10 @@ export class ScionChatComposer extends LitElement {
   @property()
   projectId = '';
 
+  /** Project display name for the attachment visibility line (v2 mode). */
+  @property()
+  projectName = '';
+
   /** The signed-in user's id; the artifact picker shows their artifacts as "You". */
   @property()
   currentUserId = '';
@@ -858,6 +862,15 @@ export class ScionChatComposer extends LitElement {
 
     .pending-file .remove-btn:hover {
       color: var(--scion-danger-600, #dc2626);
+    }
+
+    .attachment-visibility {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0 0.25rem;
+      font-size: var(--chat-fs-xs);
+      color: var(--scion-text-muted);
     }
 
     .upload-failures {
@@ -1866,6 +1879,20 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
+  /** Visibility notice shown under pending attachment chips (ptone/scion#4598, #4599). */
+  private attachmentVisibilityText(): string {
+    if (this.isDirectMessage()) {
+      return this.peerName
+        ? `Visible to you and ${this.peerName}`
+        : 'Visible to you and the other participant';
+    }
+    const project = this.projectName || this.projectId;
+    if (project) {
+      return `Visible to everyone in ${project}`;
+    }
+    return 'Visible to members of this conversation';
+  }
+
   /** Render the pending uploaded files as previews/chips. */
   private renderPendingFiles() {
     return html`
@@ -1884,6 +1911,7 @@ export class ScionChatComposer extends LitElement {
           `
         )}
       </div>
+      <div class="attachment-visibility">${this.attachmentVisibilityText()}</div>
     `;
   }
 

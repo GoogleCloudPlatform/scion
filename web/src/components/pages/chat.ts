@@ -7197,6 +7197,7 @@ export class ScionPageChat extends LitElement {
             <scion-chat-thread
               conversationKey=${conv.conversationKey}
               projectId=${conv.projectId}
+              projectName=${conv.projectSlug || ''}
               threadName=${conv.threadName}
               .defaultAgent=${conv.defaultAgent}
               ?isDM=${conv.isDM}

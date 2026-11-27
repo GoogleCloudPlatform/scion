@@ -24,7 +24,7 @@ import { apiFetch, extractApiError } from './api.js';
 import { wakeOfferFromErrorBody } from './wake-offer.js';
 import type { WakeOffer } from './wake-offer.js';
 
-export { ARTIFACTS_FLAG } from './artifacts-flag.js';
+export { ARTIFACTS_FLAG, ATTACHMENT_ARTIFACTS_FLAG } from './artifacts-flag.js';
 
 export interface ArtifactFile {
   path: string;
@@ -52,6 +52,16 @@ export interface ArtifactVersion {
   createdAt: string;
   state: string;
   files: ArtifactFile[];
+  /**
+   * Attachment id this version was published from by reference, omitted for
+   * ordinary publishes (ptone/scion#4599).
+   */
+  sourceAttachmentId?: string;
+  /**
+   * Message id the source attachment was sent in, populated only when the
+   * viewer may read that message.
+   */
+  sourceMessageId?: string;
 }
 
 export interface Artifact {
@@ -1927,6 +1937,50 @@ export interface MessageArtifactRef {
 /** Canonical reference string of an artifact, pinned to seq when seq > 0. */
 export function formatArtifactRef(id: string, seq?: number): string {
   return seq && seq > 0 ? `scion://artifact/${id}@${seq}` : `scion://artifact/${id}`;
+}
+
+/** Canonical reference string of a chat attachment (ptone/scion#4599). */
+export function formatAttachmentRef(id: string): string {
+  return `scion://attachment/${id}`;
+}
+
+/** Request body for POST /api/v1/artifacts with fromAttachment (ptone/scion#4599). */
+export interface PublishFromAttachmentRequest {
+  /** Attachment ID or canonical scion://attachment/<id> reference. */
+  fromAttachment: string;
+  /** Target home project ID. */
+  scopeRef: string;
+  /** Optional artifact title; defaults to the attachment file name on the hub. */
+  title?: string;
+  /** Optional stable key; appends a new version when an artifact with that key exists. */
+  key?: string;
+  /** Optional version note. */
+  note?: string;
+}
+
+/**
+ * Publishes an existing chat attachment as an artifact (or appends a new
+ * version to an existing keyed artifact) by reference, copying no blob bytes.
+ */
+export async function publishFromAttachment(
+  req: PublishFromAttachmentRequest
+): Promise<ArtifactResponse> {
+  const body: Record<string, string> = {
+    fromAttachment: req.fromAttachment,
+    scopeRef: req.scopeRef,
+  };
+  if (req.title?.trim()) body.title = req.title.trim();
+  if (req.key?.trim()) body.key = req.key.trim();
+  if (req.note?.trim()) body.note = req.note.trim();
+
+  const res = await apiFetch('/api/v1/artifacts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const refused = await reviewOpenError(res);
+  if (refused) throw refused;
+  return okJSON<ArtifactResponse>(res);
 }
 
 /**
