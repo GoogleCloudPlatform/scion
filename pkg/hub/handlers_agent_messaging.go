@@ -2115,6 +2115,16 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			message, details := quotaRefusal(store.LimitMaxNeverSuspendAgentsPerProject, err)
+			writeError(w, http.StatusConflict, ErrCodeQuotaExceeded, message, details)
+			return
+		}
+		if errors.Is(err, ErrQuotaLockContention) {
+			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+				"quota check temporarily unavailable, please retry", nil)
+			return
+		}
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
 			return

@@ -412,4 +412,91 @@ func TestAgentStore_SetAgentSuspendPolicy_RunningCountsAndFilter(t *testing.T) {
 			assert.Equal(t, store.SuspendPolicyAuto, item.SuspendPolicy)
 		}
 	})
+
+	t.Run("CountNeverSuspendAgentsInProject, CountNeverSuspendAgents, and ListNeverSuspendAgents", func(t *testing.T) {
+		s2, projA := newTestAgentStore(t)
+		projB := uuid.New().String()
+		require.NoError(t, s2.client.Project.Create().
+			SetID(uuid.MustParse(projB)).
+			SetName("Project B").
+			SetSlug("project-b").
+			SetGitRemote("https://example.com/b.git").
+			Exec(ctx))
+
+		creatorID := uuid.New().String()
+
+		aRun := makeAgent(projA, "q-a-run")
+		aRun.Phase = string(state.PhaseRunning)
+		aRun.SuspendPolicy = store.SuspendPolicyNever
+		aRun.CreatedBy = creatorID
+		require.NoError(t, s2.CreateAgent(ctx, aRun))
+
+		aStop := makeAgent(projA, "q-a-stop")
+		aStop.Phase = string(state.PhaseStopped)
+		aStop.SuspendPolicy = store.SuspendPolicyNever
+		// Leave CreatedBy empty to verify nullable created_by handling.
+		require.NoError(t, s2.CreateAgent(ctx, aStop))
+
+		aAuto := makeAgent(projA, "q-a-auto")
+		aAuto.Phase = string(state.PhaseRunning)
+		aAuto.SuspendPolicy = store.SuspendPolicyAuto
+		require.NoError(t, s2.CreateAgent(ctx, aAuto))
+
+		aDeleted := makeAgent(projA, "q-a-deleted")
+		aDeleted.Phase = string(state.PhaseRunning)
+		aDeleted.SuspendPolicy = store.SuspendPolicyNever
+		require.NoError(t, s2.CreateAgent(ctx, aDeleted))
+		_, err := s2.client.Agent.UpdateOneID(uuid.MustParse(aDeleted.ID)).
+			SetDeletedAt(time.Now().UTC()).
+			Save(ctx)
+		require.NoError(t, err)
+
+		bProv := makeAgent(projB, "q-b-prov")
+		bProv.Phase = string(state.PhaseProvisioning)
+		bProv.SuspendPolicy = store.SuspendPolicyNever
+		bProv.CreatedBy = creatorID
+		require.NoError(t, s2.CreateAgent(ctx, bProv))
+
+		cntA, err := s2.CountNeverSuspendAgentsInProject(ctx, projA)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), cntA, "counts all non-deleted never rows in projA across phases")
+
+		cntB, err := s2.CountNeverSuspendAgentsInProject(ctx, projB)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), cntB)
+
+		_, err = s2.CountNeverSuspendAgentsInProject(ctx, "not-a-uuid")
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+		total, err := s2.CountNeverSuspendAgents(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+
+		listed, err := s2.ListNeverSuspendAgents(ctx)
+		require.NoError(t, err)
+		require.Len(t, listed, 3)
+
+		byID := make(map[string]store.NeverSuspendAgentSummary, len(listed))
+		for _, item := range listed {
+			byID[item.ID] = item
+		}
+		assert.Equal(t, projA, byID[aRun.ID].ProjectID)
+		assert.Equal(t, creatorID, byID[aRun.ID].CreatedBy)
+		assert.False(t, byID[aRun.ID].Created.IsZero())
+
+		assert.Equal(t, projA, byID[aStop.ID].ProjectID)
+		assert.Equal(t, "", byID[aStop.ID].CreatedBy)
+
+		assert.Equal(t, projB, byID[bProv.ID].ProjectID)
+		assert.Equal(t, creatorID, byID[bProv.ID].CreatedBy)
+
+		// Clearing suspend_policy immediately reduces count.
+		changed, err := s2.SetAgentSuspendPolicy(ctx, aStop.ID, store.SuspendPolicyAuto)
+		require.NoError(t, err)
+		assert.True(t, changed)
+
+		cntA, err = s2.CountNeverSuspendAgentsInProject(ctx, projA)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), cntA)
+	})
 }

@@ -1077,6 +1077,11 @@ func quotaRefusal(limitName string, err error) (string, map[string]interface{}) 
 				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
 			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
 	}
+	if exceeded.Limit == store.LimitMaxNeverSuspendAgentsPerProject && exceeded.ScopeType == store.QuotaScopeProject {
+		return fmt.Sprintf("%s (project %s: %d of %d never-suspend agents in use); clear suspendPolicy or delete a never-suspend agent in this project to free a slot",
+				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
+	}
 	if exceeded.Limit == store.LimitMaxAgentsPerBroker && exceeded.ScopeType == store.QuotaScopeBroker {
 		if exceeded.Max > 0 {
 			details := map[string]interface{}{"count": exceeded.Count, "limit": exceeded.Max}
@@ -2925,6 +2930,10 @@ func (s *Server) createAgentInProject(
 		SAOrigin:     saOrigin,
 	}); err != nil {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+		if errors.Is(err, store.ErrQuotaExceeded) || errors.Is(err, ErrQuotaLockContention) {
+			writeQuotaReserveError(w, store.LimitMaxNeverSuspendAgentsPerProject, err)
+			return
+		}
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
 			return
@@ -5483,11 +5492,16 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 
 	var suspensionInFlight bool
 	var suspendPolicyChanged bool
-	writeSuspendPolicyTx := func(tx store.Store) error {
+	writeSuspendPolicyTx := func(tx store.Store, effectiveLimit int64) error {
 		target := *updates.SuspendPolicy
 		changed, err := tx.SetAgentSuspendPolicy(ctx, agent.ID, target)
 		if err != nil {
 			return err
+		}
+		if changed && target == store.SuspendPolicyNever && effectiveLimit > 0 {
+			if err := checkNeverSuspendQuotaAfterWriteInTx(ctx, tx, agent.ProjectID, effectiveLimit); err != nil {
+				return err
+			}
 		}
 		suspendPolicyChanged = changed
 		if changed {
@@ -5523,26 +5537,38 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	if updates.SuspendPolicy != nil {
-		err := s.store.WithTx(ctx, func(tx store.Store) error {
-			if needsRowUpdate {
-				if err := tx.UpdateAgent(ctx, agent); err != nil {
-					return err
-				}
-				if updates.Name != "" {
-					keys := api.IdentityKeysFor(agent.Slug, agent.Name)
-					if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys); err != nil {
+		runPatchTx := func(effectiveLimit int64) error {
+			return s.store.WithTx(ctx, func(tx store.Store) error {
+				if needsRowUpdate {
+					if err := tx.UpdateAgent(ctx, agent); err != nil {
 						return err
 					}
-				}
-				if saWrite != nil {
-					if err := saWrite.apply(r, tx, agent.ID); err != nil {
-						return err
+					if updates.Name != "" {
+						keys := api.IdentityKeysFor(agent.Slug, agent.Name)
+						if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys); err != nil {
+							return err
+						}
+					}
+					if saWrite != nil {
+						if err := saWrite.apply(r, tx, agent.ID); err != nil {
+							return err
+						}
 					}
 				}
-			}
-			return writeSuspendPolicyTx(tx)
-		})
+				return writeSuspendPolicyTx(tx, effectiveLimit)
+			})
+		}
+		var err error
+		if *updates.SuspendPolicy == store.SuspendPolicyNever {
+			err = s.withNeverSuspendQuotaLock(ctx, projectQuotaSubject(agent), agent.ProjectID, runPatchTx)
+		} else {
+			err = runPatchTx(0)
+		}
 		if err != nil {
+			if errors.Is(err, store.ErrQuotaExceeded) || errors.Is(err, ErrQuotaLockContention) {
+				writeQuotaReserveError(w, store.LimitMaxNeverSuspendAgentsPerProject, err)
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}

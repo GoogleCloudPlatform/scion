@@ -100,6 +100,24 @@ func TestQuotaRefusal_MaxAgentsPerBroker(t *testing.T) {
 	})
 }
 
+func TestQuotaRefusal_MaxNeverSuspendAgentsPerProject(t *testing.T) {
+	msg, details := quotaRefusal(store.LimitMaxNeverSuspendAgentsPerProject, &QuotaExceededError{
+		Limit:     store.LimitMaxNeverSuspendAgentsPerProject,
+		ScopeType: store.QuotaScopeProject,
+		ScopeID:   "proj-123",
+		Count:     2,
+		Max:       2,
+	})
+	assert.Equal(t,
+		"quota exceeded: max_never_suspend_agents_per_project (project proj-123: 2 of 2 never-suspend agents in use); clear suspendPolicy or delete a never-suspend agent in this project to free a slot",
+		msg)
+	assert.Equal(t, map[string]interface{}{
+		"projectId": "proj-123",
+		"count":     int64(2),
+		"limit":     int64(2),
+	}, details)
+}
+
 func TestBrokerQuotaCountedPhase_ExcludesStoppedAndSuspended(t *testing.T) {
 	excluded := []state.Phase{
 		state.PhaseStopped,

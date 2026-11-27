@@ -134,6 +134,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 	// Per-object class IDs must not collide with singletons or each other.
 	classIDs := []AdvisoryLockKey{
 		LockQuotaEnforcement,
+		LockNeverSuspendQuota,
 		LockPendingSecretOwnerWrite,
 		LockScheduledEventQuota,
 		LockScheduledExecOverlap,
@@ -245,6 +246,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockTriggerQuota", LockTriggerQuota},
 		{"LockTriggerSubjectOverlap", LockTriggerSubjectOverlap},
 		{"LockTriggerOfflineQueue", LockTriggerOfflineQueue},
+		{"LockNeverSuspendQuota", LockNeverSuspendQuota},
 	}
 
 	// --- Check 1: value uniqueness ---

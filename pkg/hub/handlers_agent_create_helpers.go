@@ -1994,6 +1994,15 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
+		// If the recreate flips auto -> never, check never-suspend headroom
+		// before tearing down the existing provisioning row so an over-cap
+		// request does not destroy the row and then fail at commitAgentCreate.
+		if req.SuspendPolicy == store.SuspendPolicyNever && existingAgent.SuspendPolicy != store.SuspendPolicyNever {
+			if err := s.checkNeverSuspendQuotaHeadroom(ctx, createdBy, existingAgent.ProjectID); err != nil {
+				writeQuotaReserveError(w, store.LimitMaxNeverSuspendAgentsPerProject, err)
+				return existingAgentErrored
+			}
+		}
 		// Snapshot any agent-scoped secrets before tearing down the existing
 		// provisioning agent so they survive recreate under the replacement
 		// agent's new ID. Fail closed on read error before deleting anything.

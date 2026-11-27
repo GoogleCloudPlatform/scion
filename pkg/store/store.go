@@ -717,6 +717,22 @@ type AgentStore interface {
 	// and runtime broker.
 	CountRunningNeverSuspendAgents(ctx context.Context) ([]RunningNeverSuspendCount, error)
 
+	// CountNeverSuspendAgentsInProject returns the number of non-deleted agents
+	// (in any phase) in projectID with suspend_policy = "never". Used for
+	// row-only enforcement of LimitMaxNeverSuspendAgentsPerProject inside the
+	// writer transaction.
+	CountNeverSuspendAgentsInProject(ctx context.Context, projectID string) (int64, error)
+
+	// CountNeverSuspendAgents returns the total number of non-deleted agents
+	// (in any phase) across all projects with suspend_policy = "never". Used
+	// by the admin usage summary view.
+	CountNeverSuspendAgents(ctx context.Context) (int64, error)
+
+	// ListNeverSuspendAgents returns a narrow summary of every non-deleted
+	// agent (in any phase) with suspend_policy = "never". Used by the admin
+	// usage-by-limit view.
+	ListNeverSuspendAgents(ctx context.Context) ([]NeverSuspendAgentSummary, error)
+
 	// DeleteAgent removes an agent by ID.
 	// It does not deactivate the agent's delegation edges or service-account
 	// assignments, which have no foreign key to the agent. A caller must
