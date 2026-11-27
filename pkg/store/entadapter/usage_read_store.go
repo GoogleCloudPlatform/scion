@@ -127,7 +127,7 @@ func getUsageHourlyCoverageStartTx(ctx context.Context, client *ent.Client) (tim
 		if !ent.IsNotFound(err) {
 			return time.Time{}, false, mapError(err)
 		}
-		row, err = s.client.HubSetting.Query().
+		row, err = client.HubSetting.Query().
 			Where(hubsetting.SectionEQ(store.LegacyUsageRollupHourlyCoverageSection)).
 			Only(ctx)
 		if err != nil {
