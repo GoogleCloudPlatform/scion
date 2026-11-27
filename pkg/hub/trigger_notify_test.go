@@ -63,8 +63,6 @@ func (d *notifyTestDispatcher) DispatchAgentStructuredMessage(ctx context.Contex
 	return d.recordingDispatcher.DispatchAgentStructuredMessage(ctx, agent, msg, interrupt)
 }
 
-func boolPtr(v bool) *bool { return &v }
-
 func TestTriggerNotify_AuthoringValidationAndRevisionBump(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
