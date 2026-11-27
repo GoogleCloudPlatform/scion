@@ -686,3 +686,65 @@ func TestUsageEventMinimalFromBuilderMarshals(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageAnalytics_DisabledAndInactiveNeverReturnAppendWritten(t *testing.T) {
+	setAnalyticsEnv(t, "antigravity")
+	obs := UsageObservation{
+		SourceKind:    "antigravity.sqlite_usage",
+		Identity:      telemetrycontract.SourceIdentityComposite,
+		SourceEventID: "cmp1:disabled-check",
+		Status:        telemetrycontract.StatusSuccess,
+		Calls:         0,
+		Input:         i64(100),
+		Output:        i64(25),
+		TokenStatus:   telemetrycontract.TokenStatusReported,
+	}
+
+	t.Run("nil_producer", func(t *testing.T) {
+		var nilAnalytics *UsageAnalytics
+		if !nilAnalytics.IsDisabled() {
+			t.Fatal("nil.IsDisabled() = false, want true")
+		}
+		if out, err := nilAnalytics.Record(obs); err != nil || out != AppendDisabled {
+			t.Fatalf("nil.Record() = (%v, %v), want (AppendDisabled, nil)", out, err)
+		}
+		if out, err := nilAnalytics.RecordUnique(obs); err != nil || out != AppendDisabled {
+			t.Fatalf("nil.RecordUnique() = (%v, %v), want (AppendDisabled, nil)", out, err)
+		}
+	})
+
+	t.Run("detached_producer", func(t *testing.T) {
+		o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "ob"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := NewUsageAnalytics(o, telemetrycontract.UsageSourceSQLiteNative)
+		if a.IsDisabled() {
+			t.Fatal("active producer IsDisabled() = true, want false")
+		}
+		a.detach()
+		if !a.IsDisabled() {
+			t.Fatal("detached producer IsDisabled() = false, want true")
+		}
+		if out, err := a.Record(obs); err != nil || out != AppendDisabled {
+			t.Fatalf("detached.Record() = (%v, %v), want (AppendDisabled, nil)", out, err)
+		}
+		if out, err := a.RecordUnique(obs); err != nil || out != AppendDisabled {
+			t.Fatalf("detached.RecordUnique() = (%v, %v), want (AppendDisabled, nil)", out, err)
+		}
+		if got := len(stagedEvents(t, o)); got != 0 {
+			t.Fatalf("detached producer wrote %d events, want 0", got)
+		}
+	})
+
+	t.Run("hub_only_inactive", func(t *testing.T) {
+		home := t.TempDir()
+		a := NewLazyHookUsageAnalyticsForSource(home, false, nil, telemetrycontract.UsageSourceSQLiteNative)
+		if out, err := a.Record(obs); err != nil || out != AppendDisabled {
+			t.Fatalf("hubOnly inactive Record() = (%v, %v), want (AppendDisabled, nil)", out, err)
+		}
+		if out, err := a.RecordUnique(obs); err != nil || out != AppendDisabled {
+			t.Fatalf("hubOnly inactive RecordUnique() = (%v, %v), want (AppendDisabled, nil)", out, err)
+		}
+	})
+}

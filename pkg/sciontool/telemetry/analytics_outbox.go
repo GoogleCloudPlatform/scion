@@ -226,6 +226,9 @@ const (
 	// consumed, persisted relocated_refused count). Lines already appended
 	// keep their bytes and still finalize and drain with the pinned hub.
 	AppendRefusedRelocated
+	// AppendDisabled means the analytics producer is nil, detached, or has no
+	// active outbox sink; nothing was written and no producer_seq was consumed.
+	AppendDisabled
 )
 
 // ErrAnalyticsOutboxRelocated is returned by finalize once the outbox has

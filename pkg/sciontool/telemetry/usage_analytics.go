@@ -323,6 +323,12 @@ func (a *UsageAnalytics) detach() {
 	a.metaMu.Unlock()
 }
 
+// IsDisabled reports whether this producer is nil or has been detached
+// (for example after a Hub 404 capability revocation in Hub-only mode).
+func (a *UsageAnalytics) IsDisabled() bool {
+	return a == nil || a.disabled.Load()
+}
+
 // HubOutbox returns the tee Hub outbox when attached, or nil.
 func (a *UsageAnalytics) HubOutbox() *AnalyticsOutbox {
 	if a == nil {
@@ -403,7 +409,7 @@ func (a *UsageAnalytics) RecordUnique(obs UsageObservation) (AppendOutcome, erro
 
 func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (AppendOutcome, error) {
 	if a == nil || a.disabled.Load() {
-		return 0, nil
+		return AppendDisabled, nil
 	}
 	appendFn := func(o *AnalyticsOutbox, ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
 		if uniqueByEventID {
@@ -429,17 +435,17 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 		} else {
 			a.invalid.Add(1)
 		}
-		return 0, err
+		return AppendDisabled, err
 	}
 	if hubOnly {
 		hubOutbox, active, herr := a.resolveHubOutbox()
 		if !active {
-			return 0, nil
+			return AppendDisabled, nil
 		}
 		if herr != nil {
 			a.invalid.Add(1)
 			a.recordOpenFailure()
-			return 0, herr
+			return AppendDisabled, herr
 		}
 		outcome, err := appendFn(hubOutbox, ev)
 		if err != nil {
@@ -456,7 +462,7 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 	// Hub outbox assigns its own independent epoch, seq, and occurrence state.
 	hubEv := *ev
 
-	var outcome AppendOutcome
+	outcome := AppendDisabled
 	var primaryErr error
 	if oerr := a.ensureOpen(); oerr != nil {
 		a.invalid.Add(1)
@@ -471,7 +477,7 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 		}
 	}
 
-	var hubOutcome AppendOutcome
+	hubOutcome := AppendDisabled
 	var hubErr error
 	hubAppended := false
 	if hubOutbox, active, herr := a.resolveHubOutbox(); active {

@@ -119,6 +119,11 @@ type AntigravitySQLiteConfig struct {
 	// and the Hub re-emits the stamped UsageEvents instead; when suppression is
 	// off, direct container export delivers them to Cloud Monitoring / OTLP.
 	LoopbackConfig *Config
+	// OTelExportActive, when set, reports whether a cloud/OTLP exporter is
+	// configured and direct OTel export is not currently suppressed. Used to
+	// decide whether cursors may advance via direct OTel export after Analytics
+	// is detached (for example in Hub + generic OTLP mode after Hub 404).
+	OTelExportActive func() bool
 	// SessionUsage, when set, receives decoded token counts (calls=0) so
 	// session-level metrics stay in sync with the live tailer.
 	SessionUsage SessionUsageSink
@@ -462,11 +467,23 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 	return err
 }
 
+// canAdvanceWithoutAnalytics reports whether the tailer may record tokens via
+// direct OTel export and advance cursors when Analytics is disabled or
+// detached (for example after a Hub 404 revocation in Hub + generic OTLP mode).
+// Pure Hub-only mode has no cloud/OTLP exporter so this returns false and
+// cursors are withheld instead of silently consuming rows.
+func (t *AntigravitySQLiteTailer) canAdvanceWithoutAnalytics() bool {
+	return t.tokens != nil && t.cfg.OTelExportActive != nil && t.cfg.OTelExportActive()
+}
+
 func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool) error {
 
-	// Do not consume rows or advance persisted cursors when no analytics sink
-	// is configured (O2).
+	// Do not consume rows or advance persisted cursors when no active token
+	// sink (Analytics or direct OTel export) is available (O2).
 	if t.cfg.Analytics == nil || t.cfg.ConversationsDir == "" {
+		return nil
+	}
+	if t.cfg.Analytics.IsDisabled() && !t.canAdvanceWithoutAnalytics() {
 		return nil
 	}
 	entries, err := os.ReadDir(t.cfg.ConversationsDir)
@@ -676,11 +693,27 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 			}
 			// Only accumulate session usage and OTel token counters on an actual
 			// append, never on a replayed AppendCertainDuplicate (O5, R1).
-			if outcome == AppendWritten {
+			// When Analytics is disabled/inactive (AppendDisabled), advance only
+			// if direct OTel export is active; otherwise withhold cursor commit
+			// so rows are not silently dropped.
+			switch outcome {
+			case AppendWritten:
 				accumulateSessionUsage(&sessionDelta, rec.Tokens)
 				if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
 					*otelRecorded = true
 				}
+			case AppendDisabled:
+				if !t.canAdvanceWithoutAnalytics() {
+					appendFailed = true
+				} else {
+					accumulateSessionUsage(&sessionDelta, rec.Tokens)
+					if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
+						*otelRecorded = true
+					}
+				}
+			}
+			if appendFailed {
+				break
 			}
 		}
 		if appendFailed {
