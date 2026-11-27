@@ -268,11 +268,12 @@ func (s *Server) resolveFireDefinitionName(ctx context.Context, defKind, defID s
 			return req.Event.Schedule.Name
 		}
 	}
-	if defKind == hubfire.DefinitionKindTrigger {
+	switch defKind {
+	case hubfire.DefinitionKindTrigger:
 		if tr, err := s.store.GetTrigger(ctx, defID); err == nil && tr != nil && tr.Name != "" {
 			return tr.Name
 		}
-	} else if defKind == hubfire.DefinitionKindSchedule {
+	case hubfire.DefinitionKindSchedule:
 		if sched, err := s.store.GetSchedule(ctx, defID); err == nil && sched != nil && sched.Name != "" {
 			return sched.Name
 		}
