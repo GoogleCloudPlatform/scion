@@ -106,7 +106,7 @@ func TestTriggerNotify_TwoServersRace_Postgres(t *testing.T) {
 			AuthorizationRevision:   1,
 		},
 		AuthorityCeiling: store.EffectCeiling{
-			Kind:    store.EffectCeilingUnbounded,
+			Kind:    store.EffectCeilingPrincipal,
 			Version: 1,
 		},
 	}
