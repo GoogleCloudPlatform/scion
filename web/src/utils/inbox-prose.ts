@@ -24,6 +24,8 @@ export const INBOX_NOTHING_WAITING = 'Nothing Waiting';
 
 export type InboxLinkKey =
   | 'primary'
+  | 'secrets-requests'
+  | 'secrets-pending'
   | 'chat-unread'
   | 'chat-mentions'
   | 'chat-starred'
@@ -88,6 +90,44 @@ export function formatInboxProseSegments(
   const projects = breakdown?.projects ?? 0;
 
   switch (category) {
+    case 'secrets': {
+      const requests = breakdown?.secretRequests ?? 0;
+      const pending = breakdown?.pendingSecrets ?? 0;
+      const requestsCapped =
+        Boolean(breakdown?.secretRequestsCapped) || (capped && requests > 0 && pending === 0);
+      const pendingCapped =
+        Boolean(breakdown?.pendingSecretsCapped) || (capped && pending > 0 && requests === 0);
+
+      if (requests <= 0 && pending <= 0) {
+        return 'nothing';
+      }
+
+      const segments: ProseSegment[] = [];
+      if (requests > 0) {
+        segments.push({
+          text: formatCountNoun(requests, requestsCapped, 'secret request', 'secret requests'),
+          link: 'secrets-requests',
+        });
+        if (agents > 0) {
+          appendUnlinked(segments, ` from ${pluralize(agents, 'agent', 'agents')}`);
+        }
+      }
+      if (pending > 0) {
+        if (requests > 0) {
+          appendUnlinked(segments, ', ');
+        }
+        segments.push({
+          text: formatCountNoun(pending, pendingCapped, 'pending secret', 'pending secrets'),
+          link: 'secrets-pending',
+        });
+        appendUnlinked(segments, ' to approve');
+      }
+      if (projects > 0) {
+        appendUnlinked(segments, `, across ${pluralize(projects, 'project', 'projects')}`);
+      }
+      return segments;
+    }
+
     case 'decisions':
       if (count <= 0) return 'nothing';
       return primaryWithAgentsProjects(

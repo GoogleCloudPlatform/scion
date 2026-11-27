@@ -138,6 +138,11 @@ describe('<scion-page-profile-inbox>', () => {
         href: '/profile/decisions?tab=pending',
         breakdown: { agents: 3, projects: 2 },
       }),
+      agent_secrets: makeCat({
+        count: 5,
+        href: '/profile/agent-secrets',
+        breakdown: { agents: 2, projects: 1, secretsProjects: 2 },
+      }),
       waiting: makeCat({
         count: 2,
         href: '/agents?q=activity%3Awaiting_for_input',
@@ -189,8 +194,8 @@ describe('<scion-page-profile-inbox>', () => {
     const cards = Array.from(page.shadowRoot?.querySelectorAll('[data-inbox-card]') ?? []);
     expect(cards.map((c) => c.getAttribute('data-inbox-card'))).toEqual([
       'decisions',
+      'secrets',
       'waiting',
-      'pending_secrets',
       'reviews',
       'chat',
     ]);
@@ -243,16 +248,19 @@ describe('<scion-page-profile-inbox>', () => {
     checkCard('decisions', 'Decisions', '8', '8 decisions from 3 agents in 2 projects', [
       { text: '8 decisions', href: '/profile/decisions?tab=pending' },
     ]);
+    checkCard(
+      'secrets',
+      'Secrets',
+      '55+',
+      '5 secret requests from 2 agents, 50+ pending secrets to approve, across 2 projects',
+      [
+        { text: '5 secret requests', href: '/profile/agent-secrets' },
+        { text: '50+ pending secrets', href: '/profile/secrets' },
+      ]
+    );
     checkCard('waiting', 'Agents Waiting', '2', '2 agents waiting in 1 project', [
       { text: '2 agents waiting', href: '/agents?q=activity%3Awaiting_for_input' },
     ]);
-    checkCard(
-      'pending_secrets',
-      'Pending Secrets',
-      '50+',
-      '50+ pending secrets from 4 agents in 2 projects',
-      [{ text: '50+ pending secrets', href: '/profile/secrets' }]
-    );
     checkCard('reviews', 'Reviews', '3', '3 pending reviews', [
       { text: '3 pending reviews', href: '/artifacts?review_on_latest=1&owner=me' },
     ]);
@@ -345,13 +353,13 @@ describe('<scion-page-profile-inbox>', () => {
     expect(waitingCard?.querySelector('a')).toBeNull();
 
     // Unavailable card shows descriptor and sign-in message, no badge, no links.
-    const pendingCard = page.shadowRoot?.querySelector('[data-inbox-card="pending_secrets"]');
-    expect(pendingCard?.querySelector('[data-card-descriptor]')?.textContent?.trim()).toBeTruthy();
-    expect(pendingCard?.querySelector('[data-card-unavailable]')?.textContent?.trim()).toBe(
+    const secretsCard = page.shadowRoot?.querySelector('[data-inbox-card="secrets"]');
+    expect(secretsCard?.querySelector('[data-card-descriptor]')?.textContent?.trim()).toBeTruthy();
+    expect(secretsCard?.querySelector('[data-card-unavailable]')?.textContent?.trim()).toBe(
       'Not available with this sign-in'
     );
-    expect(pendingCard?.querySelector('[data-card-count]')).toBeNull();
-    expect(pendingCard?.querySelector('a')).toBeNull();
+    expect(secretsCard?.querySelector('[data-card-count]')).toBeNull();
+    expect(secretsCard?.querySelector('a')).toBeNull();
 
     // Error card shows "Couldn't load" and Retry button, no links.
     const reviewsCard = page.shadowRoot?.querySelector('[data-inbox-card="reviews"]');
@@ -483,5 +491,110 @@ describe('<scion-page-profile-inbox>', () => {
     expect(chatCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
       '2 unread conversations, 4+ starred messages across 2 projects'
     );
+  });
+
+  it('merged Secrets card handles disabled+ok, error+ok, and both disabled states', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    // 1. agent_secrets disabled, pending_secrets ok -> renders only pending_secrets clause using pending_secrets.breakdown.projects
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeSummary({
+            agent_secrets: makeCat({
+              state: 'disabled',
+              count: 0,
+              countsTowardTotal: false,
+              href: '/profile/agent-secrets',
+            }),
+            pending_secrets: makeCat({
+              state: 'ok',
+              count: 2,
+              href: '/profile/secrets',
+              breakdown: { agents: 1, projects: 2 },
+            }),
+          })
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const page1 = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page1);
+    await flush();
+    await page1.updateComplete;
+
+    const card1 = page1.shadowRoot?.querySelector('[data-inbox-card="secrets"]');
+    expect(card1?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('2');
+    expect(card1?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '2 pending secrets to approve, across 2 projects'
+    );
+    const links1 = Array.from(card1?.querySelectorAll('a.card-prose-link') ?? []);
+    expect(links1.map((a) => [a.textContent?.trim(), a.getAttribute('href')])).toEqual([
+      ['2 pending secrets', '/profile/secrets'],
+    ]);
+    page1.remove();
+    inboxSummaryStore.resetForTests();
+
+    // 2. agent_secrets error, pending_secrets ok -> shows Retry error state
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeSummary({
+            agent_secrets: makeCat({
+              state: 'error',
+              errorCode: 'timeout',
+              count: 0,
+              countsTowardTotal: false,
+              href: '/profile/agent-secrets',
+            }),
+            pending_secrets: makeCat({
+              state: 'ok',
+              count: 1,
+              href: '/profile/secrets',
+              breakdown: { agents: 1, projects: 1 },
+            }),
+          })
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const page2 = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page2);
+    await flush();
+    await page2.updateComplete;
+
+    const card2 = page2.shadowRoot?.querySelector('[data-inbox-card="secrets"]');
+    expect(card2?.querySelector('[data-card-error]')?.textContent).toContain("Couldn't load");
+    page2.remove();
+    inboxSummaryStore.resetForTests();
+
+    // 3. both disabled -> Secrets card is hidden
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeSummary({
+            agent_secrets: makeCat({
+              state: 'disabled',
+              count: 0,
+              countsTowardTotal: false,
+              href: '/profile/agent-secrets',
+            }),
+            pending_secrets: makeCat({
+              state: 'disabled',
+              count: 0,
+              countsTowardTotal: false,
+              href: '/profile/secrets',
+            }),
+          })
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const page3 = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page3);
+    await flush();
+    await page3.updateComplete;
+
+    expect(page3.shadowRoot?.querySelector('[data-inbox-card="secrets"]')).toBeNull();
   });
 });

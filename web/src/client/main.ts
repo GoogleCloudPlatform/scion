@@ -700,6 +700,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-decisions.js'),
   },
   {
+    pattern: /^\/profile\/agent-secrets$/,
+    tag: 'scion-page-profile-agent-secrets',
+    load: () => import('../components/pages/profile-agent-secrets.js'),
+  },
+  {
     pattern: /^\/profile\/env$/,
     tag: 'scion-page-profile-env-vars',
     load: () => import('../components/pages/profile-env-vars.js'),
@@ -904,6 +909,7 @@ const STANDALONE_ROUTE_TITLES = new Map<string, string>([
 const PROFILE_ROUTES = new Set([
   'scion-page-profile-inbox',
   'scion-page-profile-decisions',
+  'scion-page-profile-agent-secrets',
   'scion-page-profile-env-vars',
   'scion-page-profile-secrets',
   'scion-page-profile-settings',

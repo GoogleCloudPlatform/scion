@@ -25,7 +25,13 @@
 
 import { css, html, nothing, type TemplateResult } from 'lit';
 import { getLastKnownProfileDecisionAvailability } from '../../client/profile-decisions.js';
-import { decisionsEnabled, isInboxDashboardEnabled } from '../../utils/feature-flags.js';
+import {
+  agentSecretsEnabled,
+  decisionsEnabled,
+  isInboxDashboardEnabled,
+} from '../../utils/feature-flags.js';
+
+export type InboxTabId = 'overview' | 'decisions' | 'agent-secrets';
 
 export interface InboxTabStripOptions {
   /**
@@ -37,7 +43,7 @@ export interface InboxTabStripOptions {
 }
 
 export interface InboxTabConfig {
-  id: string;
+  id: InboxTabId;
   label: string;
   icon: string;
   href: string;
@@ -46,8 +52,8 @@ export interface InboxTabConfig {
 
 /**
  * Canonical Inbox tab registry (design §6.4). Order determines tab strip order.
- * Phase 5b appends Agent Secrets here; future message-action kinds follow the
- * same pattern without changing `<scion-profile-nav>` or `renderInboxTabStrip`.
+ * Future message-action kinds append an entry here without changing
+ * `<scion-profile-nav>` or `renderInboxTabStrip`.
  */
 export const INBOX_TABS: readonly InboxTabConfig[] = [
   {
@@ -66,6 +72,13 @@ export const INBOX_TABS: readonly InboxTabConfig[] = [
       options?.decisionsVisible !== undefined
         ? decisionsEnabled() && options.decisionsVisible
         : decisionsEnabled() && getLastKnownProfileDecisionAvailability() === true,
+  },
+  {
+    id: 'agent-secrets',
+    label: 'Agent Secrets',
+    icon: 'shield-lock',
+    href: '/profile/agent-secrets',
+    isVisible: (): boolean => agentSecretsEnabled(),
   },
 ];
 
@@ -116,7 +129,7 @@ export const inboxTabStripStyles = css`
 `;
 
 export function renderInboxTabStrip(
-  active: string,
+  active: InboxTabId,
   options?: InboxTabStripOptions
 ): TemplateResult | typeof nothing {
   if (!isInboxDashboardEnabled()) return nothing;

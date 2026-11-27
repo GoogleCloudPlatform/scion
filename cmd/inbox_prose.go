@@ -26,12 +26,14 @@ const inboxNothingWaitingProse = "Nothing Waiting"
 type inboxLinkKey string
 
 const (
-	// inboxLinkPrimary resolves to the category's hub href; chat-* link keys
-	// resolve to chat rail filter routes mirroring web/src/utils/inbox-prose.ts.
-	inboxLinkPrimary      inboxLinkKey = "primary"
-	inboxLinkChatUnread   inboxLinkKey = "chat-unread"
-	inboxLinkChatMentions inboxLinkKey = "chat-mentions"
-	inboxLinkChatStarred  inboxLinkKey = "chat-starred"
+	// inboxLinkPrimary resolves to the category's hub href; merged secrets and
+	// chat-* link keys mirror web/src/utils/inbox-prose.ts.
+	inboxLinkPrimary         inboxLinkKey = "primary"
+	inboxLinkSecretsRequests inboxLinkKey = "secrets-requests"
+	inboxLinkSecretsPending  inboxLinkKey = "secrets-pending"
+	inboxLinkChatUnread      inboxLinkKey = "chat-unread"
+	inboxLinkChatMentions    inboxLinkKey = "chat-mentions"
+	inboxLinkChatStarred     inboxLinkKey = "chat-starred"
 )
 
 type inboxProseSegment struct {
@@ -44,6 +46,38 @@ type inboxProseSegment struct {
 // (design §6.2, §9, §14.3).
 func formatInboxProseSegments(category string, count int, capped bool, breakdown map[string]int) []inboxProseSegment {
 	switch category {
+	case "secrets":
+		requests := breakdown["secretRequests"]
+		pending := breakdown["pendingSecrets"]
+		requestsCapped := breakdown["secretRequestsCapped"] > 0 || (capped && requests > 0 && pending == 0)
+		pendingCapped := breakdown["pendingSecretsCapped"] > 0 || (capped && pending > 0 && requests == 0)
+		if requests <= 0 && pending <= 0 {
+			return nil
+		}
+		var segments []inboxProseSegment
+		if requests > 0 {
+			segments = append(segments, inboxProseSegment{
+				Text: formatCountNoun(requests, requestsCapped, "secret request", "secret requests"),
+				Link: inboxLinkSecretsRequests,
+			})
+			if agents := breakdown[hubclient.InboxBreakdownAgents]; agents > 0 {
+				segments = appendUnlinkedSegment(segments, " from "+pluralizeInbox(agents, "agent", "agents"))
+			}
+		}
+		if pending > 0 {
+			if requests > 0 {
+				segments = appendUnlinkedSegment(segments, ", ")
+			}
+			segments = append(segments, inboxProseSegment{
+				Text: formatCountNoun(pending, pendingCapped, "pending secret", "pending secrets"),
+				Link: inboxLinkSecretsPending,
+			})
+			segments = appendUnlinkedSegment(segments, " to approve")
+		}
+		if projects := breakdown[hubclient.InboxBreakdownProjects]; projects > 0 {
+			segments = appendUnlinkedSegment(segments, ", across "+pluralizeInbox(projects, "project", "projects"))
+		}
+		return segments
 	case hubclient.InboxCategoryDecisions:
 		if count <= 0 {
 			return nil

@@ -39,6 +39,7 @@ import {
   resetProfileDecisionProbeCacheForTests,
 } from '../../client/profile-decisions.js';
 import {
+  AGENT_SECRETS_FLAG,
   DECISIONS_FLAG,
   INBOX_DASHBOARD_FLAG,
   resetServerFlagStateForTests,
@@ -71,9 +72,35 @@ describe('inbox-tabs registry and visibility (ptone/scion#9291)', () => {
   });
 
   it('derives INBOX_CHILD_ROUTES from INBOX_TABS in canonical order', () => {
-    expect(INBOX_TABS.map((t) => t.id)).toEqual(['overview', 'decisions']);
+    expect(INBOX_TABS.map((t) => t.id)).toEqual(['overview', 'decisions', 'agent-secrets']);
     expect(INBOX_CHILD_ROUTES).toEqual(INBOX_TABS.map((t) => t.href));
-    expect(INBOX_CHILD_ROUTES).toEqual(['/profile/inbox', '/profile/decisions']);
+    expect(INBOX_CHILD_ROUTES).toEqual([
+      '/profile/inbox',
+      '/profile/decisions',
+      '/profile/agent-secrets',
+    ]);
+  });
+
+  it('shows Overview | Agent Secrets when hub.agent_secrets is on, and all three when Decisions is also available', () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+
+    const host = document.createElement('div');
+    render(renderInboxTabStrip('agent-secrets'), host);
+    const tabs2 = Array.from(host.querySelectorAll<HTMLAnchorElement>('[data-inbox-tab]'));
+    expect(tabs2.map((a) => a.dataset.inboxTab)).toEqual(['overview', 'agent-secrets']);
+    expect(tabs2[1].classList.contains('active')).toBe(true);
+    expect(tabs2[1].getAttribute('aria-current')).toBe('page');
+
+    setFeatureFlag(DECISIONS_FLAG, true);
+    dispatchProfileDecisionsCountChanged(1);
+    render(renderInboxTabStrip('overview'), host);
+    const tabs3 = Array.from(host.querySelectorAll<HTMLAnchorElement>('[data-inbox-tab]'));
+    expect(tabs3.map((a) => a.dataset.inboxTab)).toEqual([
+      'overview',
+      'decisions',
+      'agent-secrets',
+    ]);
   });
 
   it('omits the tab strip when web.inbox_dashboard is off', () => {

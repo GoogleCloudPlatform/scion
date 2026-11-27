@@ -2287,4 +2287,31 @@ describe('scion-chat-secret-request', () => {
     const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
     expect(sent.values).toEqual({ KEY_A: 'secret-a', KEY_B: 'secret-b' });
   });
+
+  it('hydrates from .card property without issuing a fetch', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('scion-chat-secret-request') as ScionChatSecretRequest;
+    el.surface = 'standalone_page';
+    el.card = {
+      messageId: 'msg-preloaded',
+      projectId: 'proj-9',
+      projectName: 'Preloaded Project',
+      agentId: 'agent-9',
+      agentName: 'preload-bot',
+      threadId: 'thread-9',
+      rows: [makeRow({ rowId: 'r-pre', messageId: 'msg-preloaded', key: 'PRELOADED_KEY' })],
+      canRespond: true,
+    };
+    document.body.appendChild(el);
+    await settle(el);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(el.messageId).toBe('msg-preloaded');
+    expect(el.agentName).toBe('preload-bot');
+    expect(el.projectName).toBe('Preloaded Project');
+    expect(el.shadowRoot!.textContent).toContain('PRELOADED_KEY');
+    expect(el.shadowRoot!.textContent).toContain('Preloaded Project');
+  });
 });

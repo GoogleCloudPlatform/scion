@@ -55,11 +55,18 @@ const MAX_EXPIRY_TIMER_MS = 60 * 60 * 1000; // 1 hour clamp
 
 export type InboxCategoryState = 'ok' | 'disabled' | 'unavailable' | 'error';
 
-export type InboxCategoryKey = 'decisions' | 'waiting' | 'pending_secrets' | 'reviews' | 'chat';
+export type InboxCategoryKey =
+  | 'decisions'
+  | 'agent_secrets'
+  | 'waiting'
+  | 'pending_secrets'
+  | 'reviews'
+  | 'chat';
 
 export type InboxBreakdownKey =
   | 'agents'
   | 'projects'
+  | 'secretsProjects'
   | 'toAddress'
   | 'requested'
   | 'drafts'
@@ -255,6 +262,7 @@ export class InboxSummaryStore {
     stateManager.addEventListener('inbox-changed', this.boundOnInboxChanged);
     stateManager.addEventListener('notification-created', this.boundOnTriggerEvent);
     stateManager.addEventListener('decision-updated', this.boundOnTriggerEvent);
+    stateManager.addEventListener('message-action-updated', this.boundOnTriggerEvent);
     stateManager.addEventListener('chat-message-received', this.boundOnTriggerEvent);
     stateManager.addEventListener('chat-read-state-updated', this.boundOnTriggerEvent);
     stateManager.addEventListener('chat-stars-updated', this.boundOnTriggerEvent);
@@ -289,6 +297,7 @@ export class InboxSummaryStore {
     stateManager.removeEventListener('inbox-changed', this.boundOnInboxChanged);
     stateManager.removeEventListener('notification-created', this.boundOnTriggerEvent);
     stateManager.removeEventListener('decision-updated', this.boundOnTriggerEvent);
+    stateManager.removeEventListener('message-action-updated', this.boundOnTriggerEvent);
     stateManager.removeEventListener('chat-message-received', this.boundOnTriggerEvent);
     stateManager.removeEventListener('chat-read-state-updated', this.boundOnTriggerEvent);
     stateManager.removeEventListener('chat-stars-updated', this.boundOnTriggerEvent);

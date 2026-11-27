@@ -39,13 +39,18 @@ const (
 	inboxPreviewQuestionMaxRunes  = 100
 )
 
+const (
+	// inboxMergedSecretsKey is the synthetic display key for the merged
+	// Secrets row (combining agent_secrets and pending_secrets).
+	inboxMergedSecretsKey = "secrets"
+)
+
 // inboxCategoryOrder is the canonical display order for inbox categories
-// (design §6.3, §9).
+// (design §6.3, §9, amended 2026-11-26 for the single merged Secrets row).
 var inboxCategoryOrder = []string{
 	hubclient.InboxCategoryDecisions,
-	hubclient.InboxCategoryAgentSecrets,
+	inboxMergedSecretsKey,
 	hubclient.InboxCategoryWaiting,
-	hubclient.InboxCategoryPendingSecrets,
 	hubclient.InboxCategoryReviews,
 	hubclient.InboxCategoryChat,
 }
@@ -196,6 +201,12 @@ func writeInboxSummary(out io.Writer, summary *hubclient.InboxSummaryResponse, h
 	keys := orderedInboxCategoryKeys(summary.Categories)
 	shown := 0
 	for _, key := range keys {
+		if key == inboxMergedSecretsKey {
+			if writeMergedSecretsCategory(out, summary.Categories, hubBaseURL) {
+				shown++
+			}
+			continue
+		}
 		cat, ok := summary.Categories[key]
 		if !ok || cat.State == hubclient.InboxStateDisabled {
 			continue
@@ -210,9 +221,19 @@ func writeInboxSummary(out io.Writer, summary *hubclient.InboxSummaryResponse, h
 
 func orderedInboxCategoryKeys(categories map[string]hubclient.InboxCategory) []string {
 	keys := make([]string, 0, len(categories))
-	seen := make(map[string]bool, len(inboxCategoryOrder))
+	seen := make(map[string]bool, len(inboxCategoryOrder)+2)
+	_, hasAS := categories[hubclient.InboxCategoryAgentSecrets]
+	_, hasPS := categories[hubclient.InboxCategoryPendingSecrets]
 	for _, k := range inboxCategoryOrder {
 		seen[k] = true
+		if k == inboxMergedSecretsKey {
+			seen[hubclient.InboxCategoryAgentSecrets] = true
+			seen[hubclient.InboxCategoryPendingSecrets] = true
+			if hasAS || hasPS {
+				keys = append(keys, k)
+			}
+			continue
+		}
 		if _, ok := categories[k]; ok {
 			keys = append(keys, k)
 		}
@@ -225,6 +246,145 @@ func orderedInboxCategoryKeys(categories map[string]hubclient.InboxCategory) []s
 	}
 	sort.Strings(extras)
 	return append(keys, extras...)
+}
+
+func writeMergedSecretsCategory(out io.Writer, categories map[string]hubclient.InboxCategory, hubBaseURL string) bool {
+	asCat, hasAS := categories[hubclient.InboxCategoryAgentSecrets]
+	psCat, hasPS := categories[hubclient.InboxCategoryPendingSecrets]
+	if !hasAS && !hasPS {
+		return false
+	}
+
+	asState := hubclient.InboxStateDisabled
+	if hasAS {
+		asState = asCat.State
+	}
+	psState := hubclient.InboxStateDisabled
+	if hasPS {
+		psState = psCat.State
+	}
+
+	// Hidden only when both are disabled.
+	if asState == hubclient.InboxStateDisabled && psState == hubclient.InboxStateDisabled {
+		return false
+	}
+
+	const label = "Secrets"
+
+	// Error takes precedence if either category errored.
+	if asState == hubclient.InboxStateError || psState == hubclient.InboxStateError {
+		code := ""
+		if asState == hubclient.InboxStateError {
+			code = safeText(asCat.ErrorCode)
+		}
+		if code == "" && psState == hubclient.InboxStateError {
+			code = safeText(psCat.ErrorCode)
+		}
+		if code == "" {
+			code = hubclient.InboxErrorInternal
+		}
+		_, _ = fmt.Fprintf(out, "%-16s %4s   error (%s)\n", label, "!", code)
+		return true
+	}
+
+	asOK := asState == hubclient.InboxStateOK
+	psOK := psState == hubclient.InboxStateOK
+
+	// If neither is ok (both unavailable, or one unavailable and one disabled),
+	// show the unavailable note.
+	if !asOK && !psOK {
+		var targets []string
+		if hasAS && asState == hubclient.InboxStateUnavailable {
+			if t := inboxWebTarget(hubBaseURL, asCat.Href); t != "" {
+				targets = append(targets, t)
+			}
+		}
+		if hasPS && psState == hubclient.InboxStateUnavailable {
+			if t := inboxWebTarget(hubBaseURL, psCat.Href); t != "" {
+				targets = append(targets, t)
+			}
+		}
+		if len(targets) > 0 {
+			_, _ = fmt.Fprintf(out, "%-16s %4s   unavailable with token auth (open %s in the browser)\n",
+				label, "–", strings.Join(targets, ", "))
+		} else {
+			_, _ = fmt.Fprintf(out, "%-16s %4s   unavailable with token auth\n", label, "–")
+		}
+		return true
+	}
+
+	totalCount := 0
+	capped := false
+	breakdown := map[string]int{}
+	var targets []string
+
+	if asOK {
+		totalCount += asCat.Count
+		if asCat.Capped {
+			capped = true
+			breakdown["secretRequestsCapped"] = 1
+		}
+		breakdown["secretRequests"] = asCat.Count
+		breakdown[hubclient.InboxBreakdownAgents] = asCat.Breakdown[hubclient.InboxBreakdownAgents]
+		if t := inboxWebTarget(hubBaseURL, asCat.Href); t != "" {
+			targets = append(targets, t)
+		}
+	}
+	if psOK {
+		totalCount += psCat.Count
+		if psCat.Capped {
+			capped = true
+			breakdown["pendingSecretsCapped"] = 1
+		}
+		breakdown["pendingSecrets"] = psCat.Count
+		if t := inboxWebTarget(hubBaseURL, psCat.Href); t != "" {
+			targets = append(targets, t)
+		}
+	}
+
+	// Distinct union of projects: prefer agent_secrets.breakdown.secretsProjects
+	// when agent_secrets is ok; otherwise fall back to pending_secrets.breakdown.projects.
+	projects := 0
+	if asOK {
+		if sp, ok := asCat.Breakdown[hubclient.InboxBreakdownSecretsProjects]; ok {
+			projects = sp
+		} else {
+			projects = asCat.Breakdown[hubclient.InboxBreakdownProjects]
+			if psOK && projects == 0 {
+				projects = psCat.Breakdown[hubclient.InboxBreakdownProjects]
+			}
+		}
+	} else if psOK {
+		projects = psCat.Breakdown[hubclient.InboxBreakdownProjects]
+	}
+	breakdown[hubclient.InboxBreakdownProjects] = projects
+
+	countStr := formatInboxCount(totalCount, capped)
+	detail := strings.Join(targets, "  ")
+	if detail != "" {
+		_, _ = fmt.Fprintf(out, "%-16s %4s   %s\n", label, countStr, detail)
+	} else {
+		_, _ = fmt.Fprintf(out, "%-16s %4s\n", label, countStr)
+	}
+
+	if prose := formatInboxProse(inboxMergedSecretsKey, totalCount, capped, breakdown); prose != "" {
+		_, _ = fmt.Fprintf(out, "  %s\n", prose)
+	}
+	if asOK {
+		for _, raw := range asCat.Previews {
+			if line := formatInboxPreview(hubclient.InboxCategoryAgentSecrets, raw); line != "" {
+				_, _ = fmt.Fprintf(out, "  • %s\n", line)
+			}
+		}
+	}
+	if psOK {
+		for _, raw := range psCat.Previews {
+			if line := formatInboxPreview(hubclient.InboxCategoryPendingSecrets, raw); line != "" {
+				_, _ = fmt.Fprintf(out, "  • %s\n", line)
+			}
+		}
+	}
+	return true
 }
 
 func writeInboxCategory(out io.Writer, key string, cat hubclient.InboxCategory, hubBaseURL string) {
