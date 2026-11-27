@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -403,5 +404,21 @@ func TestAPIOutcomeGrokBuildAPIError(t *testing.T) {
 	out := apiOutcomeFromRecord(records[0], usageIncrement{Model: "xai/grok-nonexistent-test", Status: telemetrycontract.StatusError, Calls: 1}, time.Now())
 	if out.OK || out.Model != "xai/grok-nonexistent-test" || out.Message != "invalid_request" {
 		t.Fatalf("outcome = %+v, want OK=false Model=xai/grok-nonexistent-test Message=invalid_request", out)
+	}
+}
+
+func TestGrokBuildVerifiedVersionsMatchesFixture(t *testing.T) {
+	if len(GrokBuildVerifiedVersions) == 0 {
+		t.Fatal("GrokBuildVerifiedVersions must not be empty")
+	}
+	matched := false
+	for _, v := range GrokBuildVerifiedVersions {
+		if strings.Contains(grokBuildUsageFixturePath, "grok-build-"+v+".pb.json") {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("GrokBuildVerifiedVersions %v does not include fixture %q", GrokBuildVerifiedVersions, grokBuildUsageFixturePath)
 	}
 }

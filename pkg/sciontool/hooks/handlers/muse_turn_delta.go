@@ -98,14 +98,30 @@ func maxInt64(a, b int64) int64 {
 	return b
 }
 
+// MuseCodeVerifiedVersions lists the Muse Code (`muse`) CLI versions whose
+// PostLLMCall turn-cumulative usage semantics have been verified against live
+// captures and pinned by
+// pkg/sciontool/hooks/dialects/testdata/muse-code/session-usage-*.jsonl
+// fixtures.
+//
+// Upstream release tags carry a build suffix (e.g. "1.4.25-R9361.1"); entries
+// here record the canonical semver ("1.4.25") matching the fixture filename
+// and `muse --version` prefix. See
+// docs-site/src/content/docs/contributing/harness-cli-version-bump.md for the
+// bump and re-verification process.
+var MuseCodeVerifiedVersions = []string{
+	"1.4.25",
+}
+
 // normalizeMuseTurnUsage converts Muse Code's turn-cumulative PostLLMCall.usage
 // into a per-step canonical increment keyed by (session_id, turn_id).
 //
 // Version note: cumulative-per-turn PostLLMCall.usage semantics were verified
-// live against muse 1.4.25 (1.4.25-R9361.1). Because harnesses/muse-code/Dockerfile
-// does not pin a muse version, these semantics must be re-verified on muse
-// upgrades: if a future release changes PostLLMCall.usage to per-step counts,
-// this high-water subtraction would under-count steps after step 0.
+// live against muse 1.4.25 (1.4.25-R9361.1; see MuseCodeVerifiedVersions).
+// These semantics must be re-verified on muse upgrades: if a future release
+// changes PostLLMCall.usage to per-step counts, this high-water subtraction
+// would under-count steps after step 0. See
+// docs-site/src/content/docs/contributing/harness-cli-version-bump.md.
 //
 // Out-of-order hooks: if step N+1's hook process acquires the lock before
 // step N's, the monotonic high-water mark keeps summed turn totals exact,

@@ -623,6 +623,18 @@ func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
 //   - cache_read = cache_read_tokens
 //   - cache_write = cache_creation_tokens
 //   - reasoning = reasoning_tokens (informational subset of output)
+//
+// GrokBuildVerifiedVersions lists the Grok Build (`grok`) CLI versions whose
+// native OTLP log schema and token semantics have been verified against live
+// captures and pinned by testdata/usage/grok-build-*.pb.json fixtures.
+//
+// Keep in sync with harnesses/grok-build/Dockerfile (ARG GROK_VERSION). See
+// docs-site/src/content/docs/contributing/harness-cli-version-bump.md for the
+// bump and re-verification process.
+var GrokBuildVerifiedVersions = []string{
+	"1.0.92",
+}
+
 const (
 	grokBuildAPIRequestEvent = "grok_code.api_request"
 	grokBuildAPIErrorEvent   = "grok_code.api_error"

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
@@ -552,5 +553,14 @@ func TestMuseTurnUsage_CorruptStateFileRecovers(t *testing.T) {
 	}
 	if delta2.Input != 500 || delta2.Output != 70 {
 		t.Errorf("step 1 delta = %+v, want input=500 output=70", delta2)
+	}
+}
+
+func TestMuseCodeVerifiedVersionsMatchesFixture(t *testing.T) {
+	if len(MuseCodeVerifiedVersions) == 0 {
+		t.Fatal("MuseCodeVerifiedVersions must not be empty")
+	}
+	if !slices.Contains(MuseCodeVerifiedVersions, "1.4.25") {
+		t.Fatalf("MuseCodeVerifiedVersions %v does not include fixture version 1.4.25", MuseCodeVerifiedVersions)
 	}
 }

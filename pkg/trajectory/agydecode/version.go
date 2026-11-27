@@ -31,7 +31,8 @@ import (
 // to call from PID-1 processes.
 //
 // Adding a version here requires verifying the schema/wire layout against that
-// agy release and updating testdata fixtures if anything changed.
+// agy release and updating testdata fixtures if anything changed. See
+// docs-site/src/content/docs/contributing/harness-cli-version-bump.md.
 var VerifiedVersions = []string{
 	"1.5.18",
 }
