@@ -244,6 +244,15 @@ func TestRequestArtifactReviewDelegatorCLI(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "agent mode") {
 		t.Errorf("expected non-agent mode error for --delegator, got %v", err)
 	}
+
+	// Email --user in agent mode gives a clear error pointing to user ID or --delegator.
+	t.Setenv("SCION_CLI_MODE", "agent")
+	err = requestArtifactReview(context.Background(), svc, nil, &out, "scion://artifact/"+artID, requestReviewOptions{
+		Users: []string{"alice@example.com"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "email lookup is not available in agent mode") {
+		t.Errorf("expected agent-mode email error, got %v", err)
+	}
 }
 
 func TestListArtifactReviewRequestsCLI(t *testing.T) {

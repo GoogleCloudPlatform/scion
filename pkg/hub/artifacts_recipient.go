@@ -34,10 +34,14 @@ import (
 //     reviewers who can still read the artifact.
 //   - ReapLostAccessReviewDrafts (ptone/scion#8475): deletes saved review
 //     drafts whose author no longer has review access (definitive deny only).
-//   - classifyReviewer (ptone/scion#9296): classifies a requested reviewer as
-//     unavailable, can-review, or needs-raise; never grants access itself (any
-//     raised grant is written separately under the requester's own
-//     adminAuthorityWith).
+//   - classifyReviewer (ptone/scion#9296, ptone/scion#5548): classifies a
+//     requested reviewer as unavailable, can-review, needs-raise,
+//     needs-bounded, or cannot-review; never grants access itself. Any raised
+//     grant is written separately under the requester's own adminAuthorityWith.
+//     A needs-bounded classification leads to a bounded review grant
+//     (CreatedByRef = BoundedReviewCreator) under the owning-agent check, which
+//     stays safe only because grantAllows re-checks host.Authorize(read) in the
+//     home project at every use (so the role gate must not be removed).
 //   - ReapReviewRequests (ptone/scion#9296): expires open review requests on a
 //     definitive deny (lookup errors leave the request open).
 //   - handleListReviewRequests (ptone/scion#9296): computes advisory

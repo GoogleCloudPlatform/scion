@@ -381,24 +381,34 @@ func (s *Server) deliverReviewRequestDismissToAgent(ctx context.Context, n artif
 	if state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended {
 		return false
 	}
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactReviewNoticeTimeout)
-	defer cancel()
-	if err := s.dispatchReviewRequestDismissNotice(dctx, agent, text); err != nil {
-		var idleErr *errAgentIdleSuspending
-		if errors.As(err, &idleErr) {
-			target := idleErr.agent
-			if target == nil {
-				target = agent
+	// Running (or other non-suspended phase): dispatch asynchronously in a
+	// tracked goroutine so the reviewer's dismiss request never blocks on a
+	// broker (matches notifyArtifactReviewWithDelivery).
+	target := *agent
+	return s.autoWakeWork.goTracked(func(bgCtx context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("artifacts: review request dismiss notice panicked",
+					"artifact_id", n.ArtifactID, "agent_id", target.ID, "panic", fmt.Sprint(r))
 			}
-			if s.canAutoWakeActionAsker(ctx, target) && s.queueAutoWake(target, s.artifactReviewDismissAutoWakeItem(n.ArtifactID, target.ID, text)) {
-				return true
+		}()
+		dctx, cancel := context.WithTimeout(bgCtx, artifactReviewNoticeTimeout)
+		defer cancel()
+		if err := s.dispatchReviewRequestDismissNotice(dctx, &target, text); err != nil {
+			var idleErr *errAgentIdleSuspending
+			if errors.As(err, &idleErr) {
+				idleTarget := idleErr.agent
+				if idleTarget == nil {
+					idleTarget = &target
+				}
+				if s.canAutoWakeActionAsker(bgCtx, idleTarget) && s.queueAutoWake(idleTarget, s.artifactReviewDismissAutoWakeItem(n.ArtifactID, idleTarget.ID, text)) {
+					return
+				}
 			}
+			slog.WarnContext(bgCtx, "artifacts: review request dismiss notice not delivered",
+				"artifact_id", n.ArtifactID, "agent_id", target.ID, "error", err)
 		}
-		slog.WarnContext(ctx, "artifacts: review request dismiss notice not delivered",
-			"artifact_id", n.ArtifactID, "agent_id", agentID, "error", err)
-		return false
-	}
-	return true
+	})
 }
 
 func (s *Server) artifactReviewDismissAutoWakeItem(artifactID, agentID, text string) autoWakeItem {

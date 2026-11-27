@@ -63,7 +63,6 @@ const (
 	CodeReviewerUnavailable        = "reviewer_unavailable"
 	CodeReviewerCannotReview       = "reviewer_cannot_review"
 	CodeRequestClosed              = "request_closed"
-	CodeAgentCannotRequestRev      = "agent_cannot_request_review"
 	CodeInteractiveSessionRequired = "interactive_session_required"
 	CodeUseReviewRequests          = "use_review_requests"
 	CodeUnavailable                = "unavailable"

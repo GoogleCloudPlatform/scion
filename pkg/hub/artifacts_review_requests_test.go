@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -440,7 +441,7 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	}
 	assert.True(t, agentNoticeFound, "expected Bob to receive review request notice from agent rr-agent")
 
-	// Bob dismisses -> running agent receives a SystemCategoryArtifactReview system message.
+	// Bob dismisses -> running agent receives a SystemCategoryArtifactReview system message asynchronously.
 	disp := &recordingDispatcher{}
 	srv.SetDispatcher(disp)
 	dismissAgentRec := doAsUser(bob, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
@@ -449,8 +450,10 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	var dismissAgentResp artifacts.DismissReviewRequestResponse
 	require.NoError(t, json.Unmarshal(dismissAgentRec.Body.Bytes(), &dismissAgentResp))
 	assert.True(t, dismissAgentResp.AuthorNotified)
+	require.Eventually(t, func() bool {
+		return len(disp.getCalls()) == 1
+	}, 5*time.Second, 10*time.Millisecond, "expected async dismiss system message to be delivered to running agent")
 	calls := disp.getCalls()
-	require.Len(t, calls, 1)
 	require.NotNil(t, calls[0].StructuredMessage)
 	assert.Contains(t, calls[0].StructuredMessage.Msg, `dismissed your review request on "Agent Report"`)
 	assert.Contains(t, calls[0].StructuredMessage.Msg, "Needs benchmark numbers")

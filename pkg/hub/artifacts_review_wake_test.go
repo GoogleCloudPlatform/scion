@@ -859,3 +859,79 @@ func TestArtifactReviewRequestDismissWake_SystemVsUserSuspended(t *testing.T) {
 		assert.Empty(t, f.disp.getMessageCalls())
 	})
 }
+
+type blockingDismissDispatcher struct {
+	recordingDispatcher
+	started chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingDismissDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, msg string, interrupt bool, structured *messages.StructuredMessage) error {
+	select {
+	case d.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return d.recordingDispatcher.DispatchAgentMessage(ctx, agent, msg, interrupt, structured)
+}
+
+// TestArtifactReviewRequestDismiss_RunningAgentAsyncNonBlocking verifies R1:
+// dismissing a review request for a running agent dispatches the system notice
+// asynchronously so a slow/blocked broker never delays the HTTP response.
+func TestArtifactReviewRequestDismiss_RunningAgentAsyncNonBlocking(t *testing.T) {
+	f := newArtifactReviewWakeFixture(t, true)
+	blocking := &blockingDismissDispatcher{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	f.srv.SetDispatcher(blocking)
+
+	done := make(chan error, 1)
+	go func() {
+		host := newArtifactHost(f.srv)
+		done <- host.NotifyRequestDismissed(context.Background(), artifacts.ReviewRequestDismissNotice{
+			ArtifactID:    f.artifactID,
+			ArtifactTitle: "Async Dismiss Doc",
+			HomeScope:     f.project.ID,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   f.reviewUser.ID,
+			RequesterKind: artifacts.PrincipalKindAgent,
+			RequesterRef:  f.owner.ID,
+			OwnerKind:     artifacts.PrincipalKindAgent,
+			OwnerRef:      f.owner.ID,
+			ResponseNote:  "Async note",
+		})
+	}()
+
+	// NotifyRequestDismissed must return before blocking.release is closed.
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		close(blocking.release)
+		t.Fatal("NotifyRequestDismissed blocked on broker delivery for a running agent")
+	}
+
+	// Wait until the background goroutine has entered DispatchAgentMessage, then release it.
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		close(blocking.release)
+		t.Fatal("background dismiss dispatch did not reach dispatcher")
+	}
+	assert.Empty(t, blocking.getCalls(), "message should not be recorded before release")
+	close(blocking.release)
+
+	require.Eventually(t, func() bool {
+		return len(blocking.getCalls()) == 1
+	}, 5*time.Second, 10*time.Millisecond, "dismiss notice should be delivered after release")
+	calls := blocking.getCalls()
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Contains(t, calls[0].StructuredMessage.Msg, `dismissed your review request on "Async Dismiss Doc"`)
+	assert.Contains(t, calls[0].StructuredMessage.Msg, "Async note")
+	f.srv.autoWakeWork.wg.Wait()
+}

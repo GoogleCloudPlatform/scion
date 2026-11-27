@@ -42,11 +42,12 @@ var artifactRequestReviewCmd = &cobra.Command{
 	Long: `Ask one or more users to review an artifact, or withdraw an open review
 request with --withdraw (requires the hub.artifacts_review_requests experiment).
 
-Each --user flag accepts a user ID, user:<id>, or email address. Repeat
---user to request reviews from up to 10 users at once.
+Each --user flag accepts a user ID, user:<id>, or (in human mode) an email
+address. Repeat --user to request reviews from up to 10 users at once.
 
-In agent mode, --delegator requests a review from the agent's delegating user
-without needing to pass their user ID.
+In agent mode, pass a user ID (<id> or user:<id>) or --delegator to request a
+review from the agent's delegating user; email lookup is not available in agent
+mode.
 
 Note: --withdraw resolves the request ID through the artifact's review-requests
 list view, so a requester who has lost publish access cannot withdraw a request
@@ -110,6 +111,9 @@ func resolveReviewerPrincipal(ctx context.Context, users hubclient.UserService, 
 	}
 	if !strings.Contains(s, "@") {
 		return "user:" + s, nil
+	}
+	if resolveMode() == ModeAgent {
+		return "", fmt.Errorf("--user %q: email lookup is not available in agent mode; pass a user ID or use --delegator", raw)
 	}
 	if users == nil {
 		return "", fmt.Errorf("cannot resolve email %q without user lookup service; pass a user ID instead", s)

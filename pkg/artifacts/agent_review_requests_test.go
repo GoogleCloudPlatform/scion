@@ -567,3 +567,197 @@ func TestRaiseOverRoleGatedOrExpiredGrant(t *testing.T) {
 		t.Fatalf("after raise over expired grant: principalCanReview(bob) = %v, %v; want true, nil", canBob, err)
 	}
 }
+
+// TestAgentReviewRequests_BoundedConflictExpiredAndNonOwnerWriteGrant covers R2
+// (review 1 mutations m8, m12, and m6):
+//  1. Unexpired human read grant + home role -> refused reviewer_cannot_review,
+//     grant row unchanged (catches m8).
+//  2. Expired ordinary grant + home role -> bounded, grant row rewritten to
+//     review / system:review_request / expires_at NULL, principalCanReview true,
+//     and the rewrite counts against the cap of 10 (catches m12).
+//  3. Agent holding a write grant on another principal's artifact -> 403, and
+//     no review request row is created (catches m6).
+func TestAgentReviewRequests_BoundedConflictExpiredAndNonOwnerWriteGrant(t *testing.T) {
+	t.Run("unexpired human read grant is never overwritten by bounded request", func(t *testing.T) {
+		svc, _, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		futureExp := now.Add(24 * time.Hour)
+		sqlSt := st.(*sqlStore)
+
+		_, err := sqlSt.db.ExecContext(ctx, sqlSt.rebind(`INSERT INTO artifact_grant
+			(id, artifact_id, subject_kind, subject_ref, permission, expires_at, created_by_ref, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+			"human-read-bob", agentArtID, SubjectPrincipal, "user:bob", GrantRead, sqlSt.timeArg(futureExp), "user:alice", sqlSt.timeArg(now))
+		if err != nil {
+			t.Fatalf("insert human read grant: %v", err)
+		}
+
+		// Bob has a proj-1 home role AND an unexpired human read grant.
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("bounded over unexpired read grant = %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		var resp CreateReviewRequestsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Requests) != 1 || resp.Requests[0].Outcome != ReviewRequestOutcomeRefused || resp.Requests[0].Code != CodeReviewerCannotReview {
+			t.Fatalf("result = %+v, want refused(%s)", resp.Requests, CodeReviewerCannotReview)
+		}
+
+		// Verify the human grant row is completely unchanged.
+		gs, err := st.ListGrants(ctx, agentArtID)
+		if err != nil {
+			t.Fatalf("ListGrants: %v", err)
+		}
+		var bobGrant *Grant
+		for i := range gs {
+			if gs[i].SubjectKind == SubjectPrincipal && gs[i].SubjectRef == "user:bob" {
+				bobGrant = &gs[i]
+			}
+		}
+		if bobGrant == nil {
+			t.Fatalf("expected bob grant to remain, grants=%+v", gs)
+		}
+		if bobGrant.Permission != GrantRead || bobGrant.CreatedByRef != "user:alice" || bobGrant.ExpiresAt == nil || !bobGrant.ExpiresAt.Equal(futureExp) {
+			t.Errorf("human grant mutated: got %+v, want permission=%s created_by_ref=user:alice expires_at=%v",
+				bobGrant, GrantRead, futureExp)
+		}
+	})
+
+	t.Run("expired ordinary grant rewritten to live bounded grant and counted against cap", func(t *testing.T) {
+		svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		pastExp := now.Add(-time.Hour)
+		sqlSt := st.(*sqlStore)
+
+		_, err := sqlSt.db.ExecContext(ctx, sqlSt.rebind(`INSERT INTO artifact_grant
+			(id, artifact_id, subject_kind, subject_ref, permission, expires_at, created_by_ref, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+			"expired-read-bob", agentArtID, SubjectPrincipal, "user:bob", GrantRead, sqlSt.timeArg(pastExp), "user:alice", sqlSt.timeArg(pastExp))
+		if err != nil {
+			t.Fatalf("insert expired read grant: %v", err)
+		}
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("bounded over expired read grant = %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		var resp CreateReviewRequestsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Requests) != 1 || resp.Requests[0].Outcome != ReviewRequestOutcomeCreated || resp.Requests[0].Access != ReviewRequestAccessBounded {
+			t.Fatalf("result = %+v, want created(bounded)", resp.Requests)
+		}
+
+		// Verify the grant row was rewritten to review / BoundedReviewCreator / expires_at NULL.
+		gs, err := st.ListGrants(ctx, agentArtID)
+		if err != nil {
+			t.Fatalf("ListGrants: %v", err)
+		}
+		var bobGrant *Grant
+		for i := range gs {
+			if gs[i].SubjectKind == SubjectPrincipal && gs[i].SubjectRef == "user:bob" {
+				bobGrant = &gs[i]
+			}
+		}
+		if bobGrant == nil || bobGrant.Permission != GrantReview || bobGrant.CreatedByRef != BoundedReviewCreator || bobGrant.ExpiresAt != nil {
+			t.Fatalf("rewritten grant = %+v, want permission=review created_by_ref=%s expires_at=nil", bobGrant, BoundedReviewCreator)
+		}
+
+		// principalCanReview must now be true for Bob.
+		a, err := st.GetArtifact(ctx, agentArtID)
+		if err != nil {
+			t.Fatalf("GetArtifact: %v", err)
+		}
+		canBob, err := principalCanReview(ctx, h.resolveMap["bob"], a, PrincipalKindUser, "bob", now, func() ([]Grant, error) {
+			return st.ListGrants(ctx, agentArtID)
+		})
+		if err != nil || !canBob {
+			t.Fatalf("principalCanReview(bob) after rewrite = %v, %v; want true, nil", canBob, err)
+		}
+
+		// Fill the remaining 9 bounded grant slots (total 10 including Bob's rewrite).
+		extra := make([]string, 0, 10)
+		for i := 1; i <= 10; i++ {
+			uid := fmt.Sprintf("cap-u-%02d", i)
+			h.resolveMap[uid] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+			extra = append(extra, "user:"+uid)
+		}
+		rec = doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: extra[:9]})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("fill remaining 9 slots = %d %s", rec.Code, rec.Body.String())
+		}
+		var fillResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &fillResp)
+		for i, r := range fillResp.Requests {
+			if r.Outcome != ReviewRequestOutcomeCreated || r.Access != ReviewRequestAccessBounded {
+				t.Fatalf("slot[%d] = %+v, want created(bounded)", i, r)
+			}
+		}
+
+		// 11th bounded grant (even over an expired ordinary grant) must hit too_many_grants.
+		_, err = sqlSt.db.ExecContext(ctx, sqlSt.rebind(`INSERT INTO artifact_grant
+			(id, artifact_id, subject_kind, subject_ref, permission, expires_at, created_by_ref, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+			"expired-read-11", agentArtID, SubjectPrincipal, extra[9], GrantRead, sqlSt.timeArg(pastExp), "user:alice", sqlSt.timeArg(pastExp))
+		if err != nil {
+			t.Fatalf("insert 11th expired grant: %v", err)
+		}
+		rec = doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{extra[9]}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("11th bounded request = %d %s", rec.Code, rec.Body.String())
+		}
+		var capResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &capResp)
+		if len(capResp.Requests) != 1 || capResp.Requests[0].Outcome != ReviewRequestOutcomeRefused || capResp.Requests[0].Code != CodeTooManyGrants {
+			t.Errorf("11th bounded rewrite = %+v, want refused(%s)", capResp.Requests, CodeTooManyGrants)
+		}
+	})
+
+	t.Run("agent with write grant on another principal's artifact is refused 403", func(t *testing.T) {
+		svc, _, st, _, userArtID := newAgentReviewFixture(t)
+		ctx := context.Background()
+		now := time.Now().UTC()
+
+		// Give Bob review access (so access=existing would succeed) and agent-1 a
+		// write grant (so agent-1 passes canPublish!) on Alice's artifact.
+		_, err := st.PutGrant(ctx, &Grant{
+			ID: "bob-review", ArtifactID: userArtID, SubjectKind: SubjectPrincipal,
+			SubjectRef: "user:bob", Permission: GrantReview, CreatedByRef: "user:alice", CreatedAt: now,
+		}, MaxGrantsPerArtifact, false, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+		if err != nil {
+			t.Fatalf("grant bob review: %v", err)
+		}
+		_, err = st.PutGrant(ctx, &Grant{
+			ID: "agent-write", ArtifactID: userArtID, SubjectKind: SubjectPrincipal,
+			SubjectRef: "agent:agent-1", Permission: GrantWrite, CreatedByRef: "user:alice", CreatedAt: now,
+		}, MaxGrantsPerArtifact, false, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+		if err != nil {
+			t.Fatalf("grant agent-1 write: %v", err)
+		}
+
+		// agent-1 holds write access on Alice's artifact but does NOT own it -> 403.
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+userArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("non-owner agent with write grant = %d %s, want 403", rec.Code, rec.Body.String())
+		}
+
+		// Verify no review request row was created.
+		reqs, err := st.ListReviewRequests(ctx, userArtID, 10)
+		if err != nil {
+			t.Fatalf("ListReviewRequests: %v", err)
+		}
+		if len(reqs) != 0 {
+			t.Errorf("expected 0 review request rows, got %+v", reqs)
+		}
+	})
+}
