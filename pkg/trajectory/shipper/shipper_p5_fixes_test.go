@@ -1,0 +1,300 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build unix
+
+package shipper
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+type countingRetryableUploader struct {
+	attemptedBytes int64
+	calls          int
+}
+
+func (u *countingRetryableUploader) Ship(_ context.Context, seg Segment) (ShipResult, error) {
+	u.attemptedBytes += seg.RawSize
+	u.calls++
+	return ShipResult{Outcome: OutcomeRetryable, Message: "transient hub error"}, errors.New("transient hub error")
+}
+
+func TestFailedShipAttemptsChargedToRoundBudget(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	line := strings.Repeat("x", 999) + "\n" // 1000 bytes
+	for i := 0; i < 10; i++ {
+		p := filepath.Join(projDir, fmt.Sprintf("sess-%02d.jsonl", i))
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+
+	up := &countingRetryableUploader{}
+	s, err := New(Config{
+		HomeDir:       home,
+		RunID:         "run-budget",
+		MaxRoundBytes: 1000,
+		Uploader:      up,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		p := filepath.Join(projDir, fmt.Sprintf("sess-%02d.jsonl", i))
+		if err := os.WriteFile(p, []byte(line), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	res, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if up.attemptedBytes > 1000 {
+		t.Fatalf("attemptedBytes=%d exceeds MaxRoundBytes=1000 (calls=%d)", up.attemptedBytes, up.calls)
+	}
+	if up.calls != 1 {
+		t.Fatalf("expected 1 Ship call against 1000-byte budget, got %d", up.calls)
+	}
+	if !res.BudgetExhausted {
+		t.Fatalf("expected BudgetExhausted=true when failed attempt consumes budget")
+	}
+}
+
+func TestFairnessCursorPersistedAcrossFreshShipperInstances(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pathA := filepath.Join(projDir, "a.jsonl")
+	pathB := filepath.Join(projDir, "b.jsonl")
+	if err := os.WriteFile(pathA, nil, 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.WriteFile(pathB, nil, 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+
+	baseShipper, err := New(Config{HomeDir: home, RunID: "run-fair"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := baseShipper.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Append 1000 bytes to b once, and 2000 bytes to a every round, with a 1000-byte round budget.
+	chunk1000 := strings.Repeat("b", 999) + "\n"
+	chunk2000 := strings.Repeat("a", 999) + "\n" + strings.Repeat("a", 999) + "\n"
+	if err := os.WriteFile(pathB, []byte(chunk1000), 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+
+	shippedByPath := make(map[string]int64)
+	up := uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+		shippedByPath[seg.NativeRelativePath] += seg.RawSize
+		return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+	})
+
+	for round := 0; round < 3; round++ {
+		f, err := os.OpenFile(pathA, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatalf("open a: %v", err)
+		}
+		_, _ = f.WriteString(chunk2000)
+		_ = f.Close()
+
+		// Fresh Shipper instance every round (simulating short-lived hook/harvest processes).
+		s, err := New(Config{
+			HomeDir:       home,
+			RunID:         "run-fair",
+			MaxRoundBytes: 1000,
+			Uploader:      up,
+		})
+		if err != nil {
+			t.Fatalf("New round %d: %v", round, err)
+		}
+		if _, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic}); err != nil {
+			t.Fatalf("RunRound %d: %v", round, err)
+		}
+	}
+
+	relB := ".claude/projects/-workspace/b.jsonl"
+	if shippedByPath[relB] != 1000 {
+		t.Fatalf("expected b.jsonl to ship 1000 bytes within 3 rounds across fresh Shipper instances, got %v", shippedByPath)
+	}
+
+	st, ok, err := LoadState(home)
+	if err != nil || !ok {
+		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+	}
+	if st.NextStartPath == "" {
+		t.Fatalf("expected NextStartPath to be persisted in state.json")
+	}
+}
+
+func TestPolicyRefusalAndRebaseline(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-policy.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+
+	line1 := "{\"seq\":1}\n"
+	if err := os.WriteFile(artPath, []byte(line1), 0o644); err != nil {
+		t.Fatalf("write line1: %v", err)
+	}
+
+	var shipped []string
+	policyDenied := true
+	up := uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+		if policyDenied {
+			return ShipResult{Outcome: OutcomePolicyRefused, Message: "capture_disabled"}, nil
+		}
+		shipped = append(shipped, fmt.Sprintf("%d:%d", seg.ByteStart, seg.ByteEnd))
+		return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-1"}, nil
+	})
+
+	s, err := New(Config{HomeDir: home, RunID: "run-policy", Uploader: up})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Append line2 while capture is disabled by policy.
+	line2 := "{\"seq\":2,\"while_disabled\":true}\n"
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append line2: %v", err)
+	}
+	_, _ = f.WriteString(line2)
+	_ = f.Close()
+
+	res, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if !res.PolicyRefused || res.PolicyRefusedReason != "capture_disabled" {
+		t.Fatalf("expected PolicyRefused=true reason=capture_disabled, got %+v", res)
+	}
+
+	// Rebaseline moves offsets to current EOF, clears pending, and records reason.
+	reb, err := s.Rebaseline(context.Background(), res.PolicyRefusedReason)
+	if err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+	if reb.ArtifactsRebased != 1 || reb.Reason != "capture_disabled" {
+		t.Fatalf("unexpected RebaselineResult: %+v", reb)
+	}
+
+	st, ok, err := LoadState(home)
+	if err != nil || !ok {
+		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+	}
+	if st.LastRebaselineReason != "capture_disabled" || st.LastRebaselineAt == nil {
+		t.Fatalf("expected LastRebaselineReason/At to be recorded, got %+v", st)
+	}
+	wantEOF := int64(len(line1) + len(line2))
+	entry := st.Artifacts[rel]
+	if entry.RawCommittedOffset != wantEOF || entry.ParsedOffset != wantEOF || entry.BaselineOffset != wantEOF || entry.Pending != nil {
+		t.Fatalf("rebaselined entry offsets/pending inconsistent: %+v (wantEOF=%d)", entry, wantEOF)
+	}
+
+	// Re-enable capture and append line3: only line3 must ship (no backlog from line2).
+	policyDenied = false
+	line3 := "{\"seq\":3,\"after_reenable\":true}\n"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append line3: %v", err)
+	}
+	_, _ = f2.WriteString(line3)
+	_ = f2.Close()
+
+	res2, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound after re-enable: %v", err)
+	}
+	if res2.SegmentsShipped != 1 || res2.BytesShipped != int64(len(line3)) {
+		t.Fatalf("expected only line3 (%d bytes) to ship, got %+v", len(line3), res2)
+	}
+	wantRange := fmt.Sprintf("%d:%d", wantEOF, wantEOF+int64(len(line3)))
+	if len(shipped) != 1 || shipped[0] != wantRange {
+		t.Fatalf("shipped=%v, want [%s]", shipped, wantRange)
+	}
+}
+
+func TestHardLinkedArtifactRefusedWhenRoot(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(home, "secret.txt")
+	if err := os.WriteFile(outside, []byte("{\"secret\":true}\n"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	hardlinkRel := ".claude/projects/-workspace/linked.jsonl"
+	hardlinkPath := filepath.Join(home, filepath.FromSlash(hardlinkRel))
+	if err := os.Link(outside, hardlinkPath); err != nil {
+		t.Fatalf("os.Link: %v", err)
+	}
+
+	origEUID := geteuidFn
+	t.Cleanup(func() { geteuidFn = origEUID })
+
+	// As root (euid == 0), openArtifactNoFollow must refuse Nlink > 1.
+	geteuidFn = func() int { return 0 }
+	f, _, err := openArtifactNoFollow(home, hardlinkRel)
+	if f != nil {
+		_ = f.Close()
+	}
+	if !errors.Is(err, ErrHardLinkRefused) {
+		t.Fatalf("expected ErrHardLinkRefused as root, got %v", err)
+	}
+
+	// Non-root (euid != 0) is allowed to open the hard link.
+	geteuidFn = func() int { return 1000 }
+	f2, _, err := openArtifactNoFollow(home, hardlinkRel)
+	if err != nil {
+		t.Fatalf("expected non-root open to succeed, got %v", err)
+	}
+	_ = f2.Close()
+}
+
+type uploaderFunc func(ctx context.Context, seg Segment) (ShipResult, error)
+
+func (f uploaderFunc) Ship(ctx context.Context, seg Segment) (ShipResult, error) {
+	return f(ctx, seg)
+}

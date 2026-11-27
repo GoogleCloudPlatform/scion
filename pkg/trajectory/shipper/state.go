@@ -51,6 +51,19 @@ const (
 	GenReasonConflict      = "segment_conflict"
 )
 
+// Sentinel errors returned by shipper filesystem safety checks.
+var (
+	// ErrRootSquashChownRefused is returned when running as root (euid == 0)
+	// and fchown on shipper state directories or files is refused (EPERM /
+	// EACCES), such as on a root-squashed NFS home export. Callers on such
+	// filesystems should run the shipper as the home directory's owner.
+	ErrRootSquashChownRefused = errors.New("shipper: chown refused under root-squashed filesystem; run shipper as home owner")
+
+	// ErrHardLinkRefused is returned when running as root (euid == 0) and an
+	// artifact leaf has more than one hard link (st_nlink > 1).
+	ErrHardLinkRefused = errors.New("shipper: hard-linked artifact refused when running as root")
+)
+
 // StateDir returns the absolute path to the shipper state directory under homeDir.
 func StateDir(homeDir string) string {
 	return filepath.Join(homeDir, filepath.FromSlash(StateDirRel))
@@ -66,7 +79,9 @@ func LockPath(homeDir string) string {
 	return filepath.Join(StateDir(homeDir), LockFileName)
 }
 
-// ArtifactKey is the logical identity of an artifact generation tracked in state.
+// ArtifactKey is the logical identity of an artifact generation tracked in
+// state. Exported as part of the public API for downstream consumers (such as
+// P6 broker harvest and P7 normalizers).
 type ArtifactKey struct {
 	NativeRelativePath string
 	Inode              uint64
@@ -90,8 +105,11 @@ type State struct {
 	OriginHubID              string                    `json:"origin_hub_id,omitempty"`
 	Baselined                bool                      `json:"baselined"`
 	BaselinedAt              *time.Time                `json:"baselined_at,omitempty"`
+	LastRebaselineReason     string                    `json:"last_rebaseline_reason,omitempty"`
+	LastRebaselineAt         *time.Time                `json:"last_rebaseline_at,omitempty"`
 	BackfillExisting         bool                      `json:"backfill_existing,omitempty"`
 	DeferredBaselinePrefixes []string                  `json:"deferred_baseline_prefixes,omitempty"`
+	NextStartPath            string                    `json:"next_start_path,omitempty"`
 	Truncated                bool                      `json:"truncated,omitempty"`
 	TruncatedRunID           string                    `json:"truncated_run_id,omitempty"`
 	TruncatedReason          string                    `json:"truncated_reason,omitempty"`
@@ -152,8 +170,11 @@ var knownStateFields = map[string]struct{}{
 	"origin_hub_id":              {},
 	"baselined":                  {},
 	"baselined_at":               {},
+	"last_rebaseline_reason":     {},
+	"last_rebaseline_at":         {},
 	"backfill_existing":          {},
 	"deferred_baseline_prefixes": {},
+	"next_start_path":            {},
 	"truncated":                  {},
 	"truncated_run_id":           {},
 	"truncated_reason":           {},

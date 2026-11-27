@@ -56,6 +56,9 @@ func acquireStateLock(ctx context.Context, homeDir string, timeout time.Duration
 
 	poll := lockPollMin
 	for {
+		// Safe to use filelock.LockFile here: Unix opens state.lock through a
+		// pinned openat(O_NOFOLLOW) descriptor and never unlinks it, and
+		// non-Unix fails closed in statedir_other.go before reaching this call.
 		lock, err := filelock.LockFile(f, 0)
 		if err == nil {
 			return lock, nil

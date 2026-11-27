@@ -24,7 +24,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
@@ -37,6 +36,7 @@ var fileIdentityFn = fileIdentity
 const (
 	ReasonPeriodic      = "periodic"
 	ReasonSessionEnd    = "session_end"
+	ReasonModelEnd      = "model_end"
 	ReasonPreStop       = "pre_stop"
 	ReasonResumeCatchup = "resume_catchup"
 )
@@ -58,10 +58,16 @@ const (
 	// and records the error without overwriting prior segments.
 	OutcomeConflict ShipOutcome = "conflict"
 
-	// OutcomeCaptureUnavailable indicates capture is disabled or the experiment
-	// is off on the Hub (e.g. 404 / 403 capture_disabled). The shipper stops the
-	// round and signals callers to back off rather than retry hot.
+	// OutcomeCaptureUnavailable indicates capture is unavailable on the Hub
+	// (e.g. 404 experiment off). The shipper stops the round and signals
+	// callers to back off rather than retry hot.
 	OutcomeCaptureUnavailable ShipOutcome = "capture_unavailable"
+
+	// OutcomePolicyRefused indicates the Hub refused capture by policy
+	// (e.g. 403 capture_disabled or capture_metadata_only). The shipper stops
+	// the round and signals callers to call Rebaseline(ctx, reason) and back
+	// off so no backlog accumulates while capture is disabled.
+	OutcomePolicyRefused ShipOutcome = "policy_refused"
 
 	// OutcomeRunCapExceeded indicates the Hub rejected the segment with 413
 	// run_cap_exceeded. The shipper records truncated=true for the current run
@@ -138,10 +144,9 @@ type Config struct {
 // uploads them through an Uploader, and maintains durable watermarks under an
 // exclusive inter-process lock.
 type Shipper struct {
-	cfg       Config
-	spec      HarnessSpec
-	now       func() time.Time
-	nextStart atomic.Int64
+	cfg  Config
+	spec HarnessSpec
+	now  func() time.Time
 }
 
 // New constructs a validated Shipper.
@@ -236,6 +241,200 @@ func (s *Shipper) Baseline(ctx context.Context) (*BaselineResult, error) {
 		ArtifactsTracked:   len(st.Artifacts),
 		RefusedPaths:       refused,
 		SkippedPaths:       skipped,
+	}, nil
+}
+
+// RebaselineResult summarizes a Rebaseline call.
+type RebaselineResult struct {
+	Reason           string
+	ArtifactsRebased int
+	RefusedPaths     []RefusedPath
+	SkippedPaths     []RefusedPath
+}
+
+// Rebaseline moves every discovered artifact's baseline, raw_committed_offset,
+// and parsed_offset to current EOF under the exclusive state lock, clears any
+// pending segments, and records reason on state.json.
+//
+// Call this when the Hub refuses capture by policy (403 capture_disabled or
+// 403 capture_metadata_only) before backing off, so no backlog accumulates
+// while capture is disabled and ships if capture is later re-enabled.
+func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lock, err := acquireStateLock(ctx, s.cfg.HomeDir, s.cfg.LockTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Unlock()
+
+	resolvedHome, err := pathcanon.Resolve(s.cfg.HomeDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve home directory %s: %w", s.cfg.HomeDir, err)
+	}
+	disc, err := Discover(resolvedHome, s.spec)
+	if err != nil {
+		return nil, err
+	}
+
+	st, exists, err := LoadState(s.cfg.HomeDir)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now().UTC()
+	if !exists || st == nil {
+		st = &State{
+			Version:   StateVersion,
+			Harness:   s.spec.Name,
+			Artifacts: make(map[string]*ArtifactState),
+		}
+	}
+	if st.Version == 0 {
+		st.Version = StateVersion
+	}
+	if st.Harness == "" {
+		st.Harness = s.spec.Name
+	}
+	if st.OriginHubID == "" {
+		st.OriginHubID = s.cfg.OriginHubID
+	}
+	st.Baselined = true
+	st.BaselinedAt = &now
+	st.LastRebaselineReason = reason
+	st.LastRebaselineAt = &now
+	st.DeferredBaselinePrefixes = mergeDeferredPrefixes(st.DeferredBaselinePrefixes, disc.Refused)
+
+	discoveredSet := make(map[string]struct{}, len(disc.Artifacts))
+	var skipped []RefusedPath
+	rebased := 0
+
+	for _, art := range disc.Artifacts {
+		discoveredSet[art.NativeRelativePath] = struct{}{}
+		existing := st.Artifacts[art.NativeRelativePath]
+
+		f, fi, oerr := openArtifactNoFollow(resolvedHome, art.NativeRelativePath)
+		if oerr != nil {
+			skipped = append(skipped, RefusedPath{
+				NativeRelativePath: art.NativeRelativePath,
+				Reason:             oerr.Error(),
+			})
+			if existing == nil {
+				st.Artifacts[art.NativeRelativePath] = &ArtifactState{
+					NativeRelativePath: art.NativeRelativePath,
+					ArtifactKind:       art.Kind,
+					Generation:         0,
+					Baseline:           true,
+					NeedsBaseline:      true,
+					OriginHubID:        st.OriginHubID,
+					LastError:          oerr.Error(),
+					UpdatedAt:          &now,
+				}
+			} else {
+				existing.Pending = nil
+				existing.Baseline = true
+				existing.NeedsBaseline = true
+				existing.LastError = oerr.Error()
+				existing.UpdatedAt = &now
+			}
+			continue
+		}
+
+		fid, fidErr := fileIdentityFn(fi)
+		if fidErr != nil {
+			_ = f.Close()
+			skipped = append(skipped, RefusedPath{
+				NativeRelativePath: art.NativeRelativePath,
+				Reason:             fidErr.Error(),
+			})
+			if existing != nil {
+				existing.Pending = nil
+				existing.Baseline = true
+				existing.NeedsBaseline = true
+				existing.LastError = fidErr.Error()
+				existing.UpdatedAt = &now
+			}
+			continue
+		}
+
+		offset := fi.Size()
+		var guardHash string
+		var guardLen int
+		if offset > 0 {
+			var gerr error
+			guardHash, guardLen, gerr = ComputeGuardHash(f, offset)
+			if gerr != nil {
+				_ = f.Close()
+				skipped = append(skipped, RefusedPath{
+					NativeRelativePath: art.NativeRelativePath,
+					Reason:             gerr.Error(),
+				})
+				if existing != nil {
+					existing.Pending = nil
+					existing.Baseline = true
+					existing.NeedsBaseline = true
+					existing.LastError = gerr.Error()
+					existing.UpdatedAt = &now
+				}
+				continue
+			}
+		}
+		_ = f.Close()
+
+		gen := 0
+		originHubID := st.OriginHubID
+		if existing != nil {
+			gen = existing.Generation
+			if existing.OriginHubID != "" {
+				originHubID = existing.OriginHubID
+			}
+			// If the file shrank below the previously committed watermark or
+			// its inode changed, advance generation so future segments cannot
+			// collide with committed segments in the old generation.
+			if existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode)) {
+				gen++
+			}
+		}
+
+		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
+			NativeRelativePath: art.NativeRelativePath,
+			ArtifactKind:       art.Kind,
+			Inode:              fid.Ino,
+			Device:             fid.Dev,
+			FileID:             fid.String(),
+			Generation:         gen,
+			RawCommittedOffset: offset,
+			ParsedOffset:       offset,
+			GuardHash:          guardHash,
+			GuardLen:           guardLen,
+			Pending:            nil,
+			Baseline:           true,
+			BaselineOffset:     offset,
+			BaselineGuardHash:  guardHash,
+			BaselineGuardLen:   guardLen,
+			NeedsBaseline:      false,
+			OriginHubID:        originHubID,
+			UpdatedAt:          &now,
+		}
+		rebased++
+	}
+
+	// Clear any pending segments on tracked artifacts not seen in this scan.
+	for path, entry := range st.Artifacts {
+		if _, seen := discoveredSet[path]; !seen && entry != nil && entry.Pending != nil {
+			entry.Pending = nil
+			entry.UpdatedAt = &now
+		}
+	}
+
+	if err := SaveState(s.cfg.HomeDir, st); err != nil {
+		return nil, err
+	}
+	return &RebaselineResult{
+		Reason:           reason,
+		ArtifactsRebased: rebased,
+		RefusedPaths:     disc.Refused,
+		SkippedPaths:     skipped,
 	}, nil
 }
 
@@ -408,16 +607,18 @@ type RoundOptions struct {
 
 // RoundResult summarizes a single RunRound or ResumeCatchup execution.
 type RoundResult struct {
-	Reason             string
-	ArtifactsScanned   int
-	SegmentsShipped    int
-	BytesShipped       int64
-	GenerationBumps    int
-	CaptureUnavailable bool
-	Truncated          bool
-	BudgetExhausted    bool
-	RefusedPaths       []RefusedPath
-	ArtifactErrors     map[string]error
+	Reason              string
+	ArtifactsScanned    int
+	SegmentsShipped     int
+	BytesShipped        int64
+	GenerationBumps     int
+	CaptureUnavailable  bool
+	PolicyRefused       bool
+	PolicyRefusedReason string
+	Truncated           bool
+	BudgetExhausted     bool
+	RefusedPaths        []RefusedPath
+	ArtifactErrors      map[string]error
 }
 
 // ResumeCatchup ships any unshipped complete bytes left by a prior container or
@@ -507,10 +708,16 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 
 	n := len(disc.Artifacts)
 	completedFullScan := true
+	stateDirty := false
 	if n > 0 {
-		start := int(s.nextStart.Load()) % n
-		if start < 0 {
-			start = 0
+		start := 0
+		if st.NextStartPath != "" {
+			idx := sort.Search(n, func(i int) bool {
+				return disc.Artifacts[i].NativeRelativePath >= st.NextStartPath
+			})
+			if idx < n {
+				start = idx
+			}
 		}
 		lastIdx := start
 		firstBudgetSkipIdx := -1
@@ -519,7 +726,8 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 			lastIdx = idx
 			art := disc.Artifacts[idx]
 			if err := ctx.Err(); err != nil {
-				s.nextStart.Store(int64((lastIdx + 1) % n))
+				st.NextStartPath = disc.Artifacts[(lastIdx+1)%n].NativeRelativePath
+				_ = SaveState(s.cfg.HomeDir, st)
 				return res, err
 			}
 			if remainingBudget <= 0 {
@@ -532,18 +740,23 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 			}
 
 			budgetBefore := res.BudgetExhausted
-			bytesBefore := res.BytesShipped
+			remainingBefore := remainingBudget
 			stopRound, err := s.shipArtifactLocked(ctx, resolvedHome, st, art, effectiveMaxSeg, opts.Final, &remainingBudget, res)
 			if err != nil {
-				s.nextStart.Store(int64((lastIdx + 1) % n))
+				st.NextStartPath = disc.Artifacts[(lastIdx+1)%n].NativeRelativePath
+				_ = SaveState(s.cfg.HomeDir, st)
 				return res, err
 			}
-			if !budgetBefore && res.BudgetExhausted && res.BytesShipped == bytesBefore && firstBudgetSkipIdx == -1 {
+			if !budgetBefore && res.BudgetExhausted && remainingBudget == remainingBefore && firstBudgetSkipIdx == -1 {
 				firstBudgetSkipIdx = idx
 			}
 			if stopRound {
 				completedFullScan = false
-				s.nextStart.Store(int64((lastIdx + 1) % n))
+				nextPath := disc.Artifacts[(lastIdx+1)%n].NativeRelativePath
+				if st.NextStartPath != nextPath {
+					st.NextStartPath = nextPath
+					stateDirty = true
+				}
 				break
 			}
 			if remainingBudget <= 0 {
@@ -559,10 +772,16 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 				break
 			}
 		}
-		if firstBudgetSkipIdx >= 0 {
-			s.nextStart.Store(int64(firstBudgetSkipIdx))
-		} else {
-			s.nextStart.Store(int64((lastIdx + 1) % n))
+		if completedFullScan || firstBudgetSkipIdx >= 0 {
+			nextIdx := (lastIdx + 1) % n
+			if firstBudgetSkipIdx >= 0 {
+				nextIdx = firstBudgetSkipIdx
+			}
+			nextPath := disc.Artifacts[nextIdx].NativeRelativePath
+			if st.NextStartPath != nextPath {
+				st.NextStartPath = nextPath
+				stateDirty = true
+			}
 		}
 	}
 
@@ -573,9 +792,12 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 		pruned := pruneResolvedDeferredPrefixes(st.DeferredBaselinePrefixes, disc.Refused)
 		if len(pruned) != len(st.DeferredBaselinePrefixes) {
 			st.DeferredBaselinePrefixes = pruned
-			if err := SaveState(s.cfg.HomeDir, st); err != nil {
-				return res, err
-			}
+			stateDirty = true
+		}
+	}
+	if stateDirty {
+		if err := SaveState(s.cfg.HomeDir, st); err != nil {
+			return res, err
 		}
 	}
 
@@ -854,6 +1076,10 @@ func (s *Shipper) shipArtifactLocked(
 
 		shipRes, shipErr := s.cfg.Uploader.Ship(ctx, seg)
 		now := s.now().UTC()
+		// Charge every Ship attempt's raw bytes against the round budget so
+		// repeated post-PUT failures (422, timeouts, network drops) cannot
+		// exceed MaxRoundBytes in a single round.
+		*remainingBudget -= seg.RawSize
 
 		switch shipRes.Outcome {
 		case OutcomeCommitted:
@@ -866,6 +1092,9 @@ func (s *Shipper) shipArtifactLocked(
 					return true, err
 				}
 				res.ArtifactErrors[art.NativeRelativePath] = shipErr
+				if *remainingBudget <= 0 {
+					res.BudgetExhausted = true
+				}
 				return false, nil
 			}
 			entry.RawCommittedOffset = byteEnd
@@ -880,7 +1109,6 @@ func (s *Shipper) shipArtifactLocked(
 			}
 			res.SegmentsShipped++
 			res.BytesShipped += seg.RawSize
-			*remainingBudget -= seg.RawSize
 
 		case OutcomeConflict:
 			msg := shipRes.Message
@@ -894,6 +1122,9 @@ func (s *Shipper) shipArtifactLocked(
 				return true, err
 			}
 			res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("segment conflict: %s", msg)
+			if *remainingBudget <= 0 {
+				res.BudgetExhausted = true
+			}
 			return false, nil
 
 		case OutcomeRejected:
@@ -919,6 +1150,18 @@ func (s *Shipper) shipArtifactLocked(
 
 		case OutcomeCaptureUnavailable:
 			res.CaptureUnavailable = true
+			return true, nil
+
+		case OutcomePolicyRefused:
+			msg := shipRes.Message
+			if msg == "" && shipErr != nil {
+				msg = shipErr.Error()
+			}
+			if msg == "" {
+				msg = "capture_policy_refused"
+			}
+			res.PolicyRefused = true
+			res.PolicyRefusedReason = msg
 			return true, nil
 
 		case OutcomeRunCapExceeded:
@@ -959,6 +1202,9 @@ func (s *Shipper) shipArtifactLocked(
 				return true, err
 			}
 			res.ArtifactErrors[art.NativeRelativePath] = errObj
+			if *remainingBudget <= 0 {
+				res.BudgetExhausted = true
+			}
 			return false, nil
 		}
 	}

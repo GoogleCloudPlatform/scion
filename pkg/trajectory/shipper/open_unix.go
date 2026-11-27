@@ -89,5 +89,16 @@ func openArtifactNoFollow(resolvedHome, nativeRelativePath string) (*os.File, os
 		_ = f.Close()
 		return nil, nil, fmt.Errorf("refusing %s: not a regular file", nativeRelativePath)
 	}
+	if geteuidFn() == 0 {
+		var st unix.Stat_t
+		if err := unix.Fstat(leafFD, &st); err != nil {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("fstat artifact nlink: %w", err)
+		}
+		if st.Nlink > 1 {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("refusing hard-linked artifact %s (nlink=%d): %w", nativeRelativePath, st.Nlink, ErrHardLinkRefused)
+		}
+	}
 	return f, fi, nil
 }

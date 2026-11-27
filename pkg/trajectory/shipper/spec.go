@@ -82,6 +82,9 @@ func HarnessSpecFor(name string) (HarnessSpec, bool) {
 }
 
 // DiscoveredArtifact is a validated artifact file located under an agent home.
+// AbsPath, RuleRootAbs, and RelWithinRuleRoot are exported as part of the
+// public discovery API for downstream consumers (such as P6 broker harvest and
+// P7 normalizers).
 type DiscoveredArtifact struct {
 	NativeRelativePath string
 	AbsPath            string

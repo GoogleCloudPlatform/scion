@@ -43,14 +43,20 @@ var (
 		return unix.Fchown(fd, uid, gid)
 	}
 
-	fchownatFD = func(dirfd int, name string, uid, gid int, _ string) error {
-		return unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW)
-	}
-
 	renameatFD = func(olddirfd int, oldpath string, newdirfd int, newpath string, _, _ string) error {
 		return unix.Renameat(olddirfd, oldpath, newdirfd, newpath)
 	}
 )
+
+// wrapRootChownErr annotates EPERM/EACCES from root fchown calls with
+// ErrRootSquashChownRefused so root-squashed NFS exports fail with a distinct,
+// actionable error.
+func wrapRootChownErr(label string, err error) error {
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		return fmt.Errorf("%s: %w: %w", label, ErrRootSquashChownRefused, err)
+	}
+	return fmt.Errorf("%s: %w", label, err)
+}
 
 // checkOwnerUID enforces the single-owner contract using geteuidFn:
 //   - Root (euid == 0) accepts objects owned by root (0) or by homeUID.
@@ -114,11 +120,6 @@ func openOrCreateDirNoFollow(parentFD int, name, displayPath string, homeUID, ho
 	if create {
 		if err := unix.Mkdirat(parentFD, name, 0o700); err == nil {
 			created = true
-			if geteuidFn() == 0 {
-				if cerr := fchownatFD(parentFD, name, int(homeUID), int(homeGID), displayPath); cerr != nil {
-					return -1, fmt.Errorf("chown %s: %w", displayPath, cerr)
-				}
-			}
 		} else if !errors.Is(err, syscall.EEXIST) {
 			return -1, fmt.Errorf("mkdirat %s: %w", displayPath, err)
 		}
@@ -154,7 +155,7 @@ func openOrCreateDirNoFollow(parentFD int, name, displayPath string, homeUID, ho
 	if created && geteuidFn() == 0 && ownerUID != homeUID {
 		if cerr := fchownFD(fd, int(homeUID), int(homeGID), displayPath); cerr != nil {
 			_ = unix.Close(fd)
-			return -1, fmt.Errorf("fchown %s: %w", displayPath, cerr)
+			return -1, wrapRootChownErr("fchown "+displayPath, cerr)
 		}
 	}
 
@@ -207,7 +208,7 @@ func openStateLockFile(homeDir string) (*os.File, error) {
 		if geteuidFn() == 0 {
 			if err := fchownFD(fd, int(homeUID), int(homeGID), lockPath); err != nil {
 				_ = unix.Close(fd)
-				return nil, fmt.Errorf("fchown lock file %s: %w", lockPath, err)
+				return nil, wrapRootChownErr("fchown lock file "+lockPath, err)
 			}
 		}
 	} else {
@@ -219,7 +220,7 @@ func openStateLockFile(homeDir string) (*os.File, error) {
 		if geteuidFn() == 0 && ownerUID != homeUID {
 			if err := fchownFD(fd, int(homeUID), int(homeGID), lockPath); err != nil {
 				_ = unix.Close(fd)
-				return nil, fmt.Errorf("fchown lock file %s: %w", lockPath, err)
+				return nil, wrapRootChownErr("fchown lock file "+lockPath, err)
 			}
 		}
 	}
@@ -340,7 +341,7 @@ func writeStateFile(homeDir string, data []byte) error {
 	}
 	if geteuidFn() == 0 {
 		if err := fchownFD(tmpFD, int(homeUID), int(homeGID), tmpPath); err != nil {
-			return fmt.Errorf("fchown temp shipper state file: %w", err)
+			return wrapRootChownErr("fchown temp shipper state file", err)
 		}
 	}
 

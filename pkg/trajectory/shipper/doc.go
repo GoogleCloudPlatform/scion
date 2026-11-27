@@ -40,11 +40,17 @@
 // canonical owner of the shipper state tree. When called as root (euid == 0),
 // every directory and file created by the shipper (trajectory-shipper/,
 // state.lock, temp files, and state.json) is chowned on its pinned descriptor
-// (fchown / fchownat with AT_SYMLINK_NOFOLLOW) to the home directory's owner.
-// Root readers accept directories, lock files, and state.json owned by either
-// root (0) or the home owner; non-root readers accept only their own euid. This
-// allows root sciontool init, agent-UID hook processes, and P6 broker harvest
-// to share the same state and lock without locking each other out.
+// (fchown) to the home directory's owner. Root readers accept directories, lock
+// files, and state.json owned by either root (0) or the home owner; non-root
+// readers accept only their own euid. This allows root sciontool init,
+// agent-UID hook processes, and P6 broker harvest to share the same state and
+// lock without locking each other out.
+//
+// Root-squashed filesystems (for example NFS exports with root_squash): when
+// euid == 0 and fchown is refused with EPERM/EACCES, the shipper fails closed
+// with [ErrRootSquashChownRefused] rather than leaving nobody-owned state
+// behind. On root-squashed homes, callers must run the shipper as the home
+// directory's owner instead of root.
 //
 // Each artifact entry is logically keyed by (native_relative_path, inode,
 // generation) and records:
@@ -131,6 +137,21 @@
 // first use with owner-only permissions (0600) and is never unlinked, ensuring
 // that sciontool and broker harvest always synchronize on the same inode.
 //
+// The exclusive lock is held across [Uploader.Ship] (network I/O) for the full
+// duration of a [Shipper.RunRound] call (bounded by MaxRoundBytes and the
+// caller's context), so other lock users (hook processes, P6 broker harvest, P7
+// normalizers using [WithLockedState]) must size LockTimeout and context
+// deadlines accordingly.
+//
+// # Policy Refusal Rebaselining
+//
+// When the Hub refuses capture by policy (e.g. 403 capture_disabled or
+// capture_metadata_only), callers should invoke [Shipper.Rebaseline] to move
+// every discovered artifact's baseline, raw_committed_offset, and parsed_offset
+// to current EOF (clearing any pending segments) and record the reason under
+// the lock, then back off. This prevents a backlog from accumulating while
+// capture is disabled and shipping later if capture is re-enabled.
+//
 // # Safe Artifact Opening and Containment
 //
 // Discovery refuses every symlink at or below a matched harness rule root
@@ -138,9 +159,10 @@
 // trusted resolved home directory once with O_DIRECTORY and walks every
 // component below it (rule-root ancestors, intermediate directories, and leaf)
 // with openat(2) and O_NOFOLLOW (O_DIRECTORY on directories, O_NONBLOCK on the
-// leaf), then verifies the opened descriptor is a regular file via fstat. This
-// prevents TOCTOU symlink swaps at any component between the home directory
-// and the leaf.
+// leaf), then verifies the opened descriptor is a regular file via fstat. When
+// running as root (euid == 0), regular files with Nlink > 1 (hard links) are
+// also refused with [ErrHardLinkRefused]. This prevents TOCTOU symlink swaps
+// and hard-link aliasing at any component between the home directory and leaf.
 //
 // # Generation Bumps and Pre-Baseline Privacy
 //

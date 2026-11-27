@@ -52,7 +52,6 @@ func installSimulatedUIDFS(t *testing.T, homeDir string, homeUID uint32, initial
 	origEUID := geteuidFn
 	origStat := statOwnerFn
 	origFchown := fchownFD
-	origFchownat := fchownatFD
 	origRenameat := renameatFD
 
 	geteuidFn = func() int {
@@ -70,13 +69,6 @@ func installSimulatedUIDFS(t *testing.T, homeDir string, homeUID uint32, initial
 		return uint32(sim.euid), uint32(sim.euid)
 	}
 	fchownFD = func(_ int, uid, _ int, displayPath string) error {
-		sim.mu.Lock()
-		defer sim.mu.Unlock()
-		sim.owners[displayPath] = uint32(uid)
-		sim.chownedPaths[displayPath] = uint32(uid)
-		return nil
-	}
-	fchownatFD = func(_ int, _ string, uid, _ int, displayPath string) error {
 		sim.mu.Lock()
 		defer sim.mu.Unlock()
 		sim.owners[displayPath] = uint32(uid)
@@ -102,7 +94,6 @@ func installSimulatedUIDFS(t *testing.T, homeDir string, homeUID uint32, initial
 		geteuidFn = origEUID
 		statOwnerFn = origStat
 		fchownFD = origFchown
-		fchownatFD = origFchownat
 		renameatFD = origRenameat
 	})
 	return sim
@@ -288,6 +279,54 @@ func TestCrossUIDStateSharingRootAndHomeOwner(t *testing.T) {
 		wantOffset := int64(len(line1) + len(line2) + len(line3))
 		if st.Artifacts[rel].RawCommittedOffset != wantOffset {
 			t.Fatalf("RawCommittedOffset=%d, want %d", st.Artifacts[rel].RawCommittedOffset, wantOffset)
+		}
+	})
+
+	t.Run("root creates lock once then home-owner locks immediately with no intervening root call", func(t *testing.T) {
+		home := t.TempDir()
+		sim := installSimulatedUIDFS(t, home, homeUID, 0)
+
+		sRoot, err := New(Config{HomeDir: home, RunID: "run-1"})
+		if err != nil {
+			t.Fatalf("New root: %v", err)
+		}
+		// Baseline acquires state.lock once (creating it) and does not reopen it.
+		if _, err := sRoot.Baseline(context.Background()); err != nil {
+			t.Fatalf("Baseline as root: %v", err)
+		}
+
+		// Immediately switch to home owner with no second root lock open:
+		// this independently pins the fchownFD on newly created state.lock.
+		sim.setEUID(int(homeUID))
+		called := false
+		if err := WithLockedState(context.Background(), home, 0, func(st *State) (bool, error) {
+			called = true
+			return false, nil
+		}); err != nil {
+			t.Fatalf("WithLockedState as home owner right after root lock create: %v", err)
+		}
+		if !called {
+			t.Fatalf("expected WithLockedState callback to run")
+		}
+	})
+
+	t.Run("root-squashed filesystem chown EPERM returns ErrRootSquashChownRefused", func(t *testing.T) {
+		home := t.TempDir()
+		_ = installSimulatedUIDFS(t, home, homeUID, 0)
+		fchownFD = func(_ int, _, _ int, _ string) error {
+			return unix.EPERM
+		}
+
+		sRoot, err := New(Config{HomeDir: home, RunID: "run-1"})
+		if err != nil {
+			t.Fatalf("New root: %v", err)
+		}
+		_, err = sRoot.Baseline(context.Background())
+		if !errors.Is(err, ErrRootSquashChownRefused) {
+			t.Fatalf("expected ErrRootSquashChownRefused on root-squashed EPERM, got %v", err)
+		}
+		if !errors.Is(err, unix.EPERM) {
+			t.Fatalf("expected underlying EPERM to remain wrapped, got %v", err)
 		}
 	})
 }
