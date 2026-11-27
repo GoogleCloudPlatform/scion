@@ -105,6 +105,7 @@ import {
   AGENT_LIMIT_CEILINGS_FLAG,
   TELEMETRY_ENFORCEMENT_FLAG,
   agentLimitCeilingsEnabled,
+  telemetryEnforcementEnabled,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
@@ -3091,7 +3092,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       const telemetry: Record<string, unknown> = {};
       putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
       if (
-        (isFeatureEnabled(TELEMETRY_ENFORCEMENT_FLAG) &&
+        (telemetryEnforcementEnabled() &&
           this.telemetryEnforced !== this.loadedTelemetryEnforced) ||
         (Boolean(this.telemetryEnforcedWarning) && !this.telemetryEnforced)
       ) {
@@ -4790,7 +4791,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   })}
                   <span class="hint">Default opt-in state for new agents</span>
                 </div>
-                ${isFeatureEnabled(TELEMETRY_ENFORCEMENT_FLAG)
+                ${telemetryEnforcementEnabled()
                   ? html`<div class="form-field full-width">
                       <sl-switch
                         data-testid="telemetry-enforced-switch"
