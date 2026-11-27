@@ -1160,8 +1160,11 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 	var capturedAuthHeader string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "github.com" {
+			if req.URL.Host != "api.github.com" {
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
+			}
+			if req.URL.Path != "/repos/chiefkarlin/scion-experiments/tarball/main" {
+				return nil, fmt.Errorf("unexpected request path: %s", req.URL.Path)
 			}
 
 			capturedAuthHeader = req.Header.Get("Authorization")
@@ -1286,8 +1289,11 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	var capturedAuthHeader string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "github.com" {
+			if req.URL.Host != "api.github.com" {
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
+			}
+			if req.URL.Path != "/repos/chiefkarlin/scion-experiments/tarball/main" {
+				return nil, fmt.Errorf("unexpected request path: %s", req.URL.Path)
 			}
 			capturedAuthHeader = req.Header.Get("Authorization")
 
@@ -1343,8 +1349,8 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 
 // TestImportTemplatesFromRemote_NoSparseCheckoutFallback verifies that a
 // hosted Hub does not fall back to sparse git checkout when the GitHub
-// tarball download fails: it tries branch, tag, and commit archive URLs and
-// then fails without invoking git or persisting anything.
+// tarball download fails: a credentialed fetch tries the REST tarball URL on
+// api.github.com once and then fails without invoking git or persisting anything.
 func TestImportTemplatesFromRemote_NoSparseCheckoutFallback(t *testing.T) {
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
@@ -1382,7 +1388,7 @@ func TestImportTemplatesFromRemote_NoSparseCheckoutFallback(t *testing.T) {
 	var tarballRequests []string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "github.com" {
+			if req.URL.Host != "api.github.com" {
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
 			tarballRequests = append(tarballRequests, req.URL.Path)
@@ -1394,12 +1400,10 @@ func TestImportTemplatesFromRemote_NoSparseCheckoutFallback(t *testing.T) {
 		t.Fatal("expected importTemplatesFromRemote to fail without sparse-checkout fallback")
 	}
 	wantRequests := []string{
-		"/chiefkarlin/scion-experiments/archive/refs/heads/main.tar.gz",
-		"/chiefkarlin/scion-experiments/archive/refs/tags/main.tar.gz",
-		"/chiefkarlin/scion-experiments/archive/main.tar.gz",
+		"/repos/chiefkarlin/scion-experiments/tarball/main",
 	}
-	if len(tarballRequests) != len(wantRequests) {
-		t.Errorf("expected archive requests %v, got %v", wantRequests, tarballRequests)
+	if len(tarballRequests) != len(wantRequests) || tarballRequests[0] != wantRequests[0] {
+		t.Errorf("expected REST tarball request %v, got %v", wantRequests, tarballRequests)
 	}
 	assertLsRemoteCalledWithToken(t, lsRemote)
 	if calls := checkout.Calls(); len(calls) != 0 {
