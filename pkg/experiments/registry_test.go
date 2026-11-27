@@ -426,6 +426,15 @@ func TestConduitDeliverExperimentRegistered(t *testing.T) {
 	if !strings.Contains(e.Description, "Requires hub.conduit") {
 		t.Fatalf("description must name the hub.conduit dependency: %q", e.Description)
 	}
+	if !strings.Contains(e.Description, "server.broker.conduit_deliver_runtimes") {
+		t.Fatalf("description must name server.broker.conduit_deliver_runtimes: %q", e.Description)
+	}
+	if !strings.Contains(e.Description, "several hubs") {
+		t.Fatalf("description must note that brokers connected to several hubs use exec: %q", e.Description)
+	}
+	if strings.Contains(e.Description, "Docker and Kubernetes agents keep using exec") {
+		t.Fatalf("description still carries stale Phase A text: %q", e.Description)
+	}
 	if _, ok := Default().Lookup("hub.conduit"); !ok {
 		t.Fatal("hub.conduit, its dependency, is not registered")
 	}

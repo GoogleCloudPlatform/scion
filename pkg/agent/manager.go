@@ -189,8 +189,9 @@ type AgentManager struct {
 
 	// conduit, when set, delivers messages over the agent's conduit session
 	// for agents that support it (SetConduitDeliverer, conduit_deliver.go).
-	conduitMu sync.Mutex
-	conduit   ConduitDeliverer
+	conduitMu       sync.Mutex
+	conduit         ConduitDeliverer
+	conduitRuntimes map[string]bool
 }
 
 // defaultBufferDelay is the debounce window for message delivery.

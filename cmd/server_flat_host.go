@@ -739,12 +739,17 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	if err != nil {
 		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
 	}
+	conduitDeliverRuntimes, err := config.ResolveConduitDeliverRuntimes(cfg.RuntimeBroker.ConduitDeliverRuntimes)
+	if err != nil {
+		return fmt.Errorf("invalid server.broker.conduit_deliver_runtimes: %w", err)
+	}
 
 	shared := flatServerShared{
 		cfg:                     cfg,
 		mode:                    mode,
 		hubEndpoint:             hubEndpointForRH,
 		initFirewall:            brokerInitFirewall,
+		conduitDeliverRuntimes:  conduitDeliverRuntimes,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		storageLayout:           brokerLayout,
@@ -1014,6 +1019,7 @@ type flatServerShared struct {
 	cfg                     *config.GlobalConfig
 	mode                    brokerhost.Mode
 	hubEndpoint             string
+	conduitDeliverRuntimes  []string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
 	storageLayout           projectfs.Layout
@@ -1064,6 +1070,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		InitFirewall:                  sh.initFirewall,
+		ConduitDeliverRuntimes:        sh.conduitDeliverRuntimes,
 		NFSConfig:                     sh.nfs,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,

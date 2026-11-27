@@ -1058,7 +1058,7 @@ var compiled = []Experiment{
 	{
 		Name:        ConduitDeliver,
 		Title:       "Message delivery over Conduit",
-		Description: "Delivers messages to Cloud Run agents over their Conduit session (the deliver-message control route) instead of through runtime exec, so no IAP exec connector is needed. Requires hub.conduit. Agents started before it is turned on keep using exec until they restart; Docker and Kubernetes agents keep using exec. Text and interrupts only: messages with attachments, oversize text or delivery settings outside the route bounds use exec where the runtime has it. Before an agent's session is up, delivery retries, then uses exec or fails before anything is pasted.",
+		Description: "Delivers messages to agents over their Conduit session (the deliver-message control route) instead of through runtime exec, so no IAP exec connector is needed on Cloud Run. Requires hub.conduit. Covers Cloud Run, Kubernetes and Docker by default; other runtimes are opt-in per broker through server.broker.conduit_deliver_runtimes. Brokers connected to several hubs use exec. Agents started before it is turned on keep using exec until they restart. Text and interrupts only: messages with attachments, oversize text or delivery settings outside the route bounds use exec where the runtime has it. Before an agent's session is up, delivery retries, then uses exec or fails before anything is pasted.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

@@ -2343,6 +2343,12 @@ type V1BrokerConfig struct {
 	// InitFirewall configures the operator-authoritative egress firewall
 	// policy applied when an agent opts into SCION_INIT_FIREWALL.
 	InitFirewall *V1InitFirewallConfig `json:"init_firewall,omitempty" yaml:"init_firewall,omitempty" koanf:"init_firewall"`
+	// ConduitDeliverRuntimes lists the runtime names whose agents may deliver
+	// messages over Conduit when the hub enables hub.conduit_deliver. When
+	// unset, defaults to [cloudrun, kubernetes, docker]; an explicit empty list
+	// disables Conduit delivery on all runtimes. Brokers connected to several
+	// hubs always use exec regardless of this setting.
+	ConduitDeliverRuntimes []string `json:"conduit_deliver_runtimes,omitempty" yaml:"conduit_deliver_runtimes,omitempty" koanf:"conduit_deliver_runtimes"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
 	// Empty or absent means legacy hosting. Each key must be unique; there is
@@ -5068,6 +5074,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				AllowSSH:     v1.Broker.InitFirewall.AllowSSH,
 			}
 		}
+		if v1.Broker.ConduitDeliverRuntimes != nil {
+			gc.RuntimeBroker.ConduitDeliverRuntimes = append([]string{}, v1.Broker.ConduitDeliverRuntimes...)
+		}
 		gc.RuntimeBroker.Instances = v1InstancesToGlobal(v1.Broker.Instances)
 	}
 
@@ -5579,6 +5588,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowDomains: append([]string(nil), gc.RuntimeBroker.InitFirewall.AllowDomains...),
 			AllowSSH:     gc.RuntimeBroker.InitFirewall.AllowSSH,
 		}
+	}
+	if gc.RuntimeBroker.ConduitDeliverRuntimes != nil {
+		v1.Broker.ConduitDeliverRuntimes = append([]string{}, gc.RuntimeBroker.ConduitDeliverRuntimes...)
 	}
 
 	// Database config

@@ -213,6 +213,14 @@ type ServerConfig struct {
 	// SCION_INIT_FIREWALL on a runtime-managed netns-setup path.
 	InitFirewall firewallpolicy.Policy
 
+	// ConduitDeliverRuntimes lists the runtime names whose agents may deliver
+	// messages over Conduit when the hub enables hub.conduit_deliver
+	// (server.broker.conduit_deliver_runtimes). Nil uses the default set
+	// (cloudrun, kubernetes, docker); an explicit non-nil empty slice disables
+	// Conduit delivery on all runtimes. Brokers connected to several hubs
+	// always use exec regardless of this setting.
+	ConduitDeliverRuntimes []string
+
 	// NFSConfig holds NFS workspace storage settings for this broker. The
 	// server command sets it from server.workspace_storage when the backend
 	// is "nfs" (see brokerNFSConfig in cmd). When non-nil with shares
@@ -743,6 +751,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		agentLifecycleLog: logging.Subsystem("broker.agent-lifecycle"),
 		messageLog:        logging.Subsystem("broker.messages"),
 		envSecretLog:      logging.Subsystem("broker.env-secrets"),
+	}
+	if mgr != nil {
+		srv.applyConduitDeliverRuntimes(mgr)
 	}
 	// A flat instance's own loggers carry its identity, so several
 	// instances in one process log distinguishably without changing the
