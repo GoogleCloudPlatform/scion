@@ -3684,6 +3684,53 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
+	log.Printf("Database: %s (%s)", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
+
+	// Warn once (outside the settings retry loop below) about SCION_SERVER_*
+	// and SCION_SEED_* names that no loader maps to a setting, so a
+	// misspelled override is not silently ignored (ptone/scion#1081). Names
+	// only, never values.
+	config.WarnUnmatchedSettingsEnv(slog.Default(), os.Environ(), opsettings.IsLayer1Key)
+
+	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
+	// Driver-agnostic: initOperationalSettings handles both postgres (advisory
+	// locking) and SQLite (single-writer) via the existing AdvisoryLocker branch.
+	//
+	// Runs before resource bootstrap and storage sync so startup resource
+	// hashing (e.g. hub.content_hash_v2) honors stored experiment overrides,
+	// and fail-closed startup checks abort before mutating storage or spawning
+	// background sync goroutines.
+	//
+	// Fail-closed: if settings cannot be loaded the hub must not serve ordinary
+	// traffic, because a DB-persisted admin_mode=true would be invisible to this
+	// process. Retry with exponential backoff to tolerate transient DB issues,
+	// then fail the hub startup if all attempts are exhausted.
+	// NOTE: this call and its error-return chain (up to runServerStart) is what makes
+	// settings init fail-closed. Do NOT revert to the old log-and-continue
+	// pattern — that would let the server accept traffic without authoritative
+	// settings, silently bypassing a DB-persisted admin_mode=true.
+	// See TestInitOperationalSettings_FailClosed for the regression test.
+	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
+		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
+			cfg.Database.Driver, err)
+	}
+	// Test admin tier G8, second half: no federation in the stored
+	// operational settings either.
+	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
+	}
+	// A hub that starts without the offline hub-admin delegation setting
+	// ends every offline hub-admin delegation and revokes the identities
+	// they issued. Nothing listens yet; a failure refuses startup.
+	if err := hubSrv.EndOfflineAdminDelegationsWhenOff(ctx); err != nil {
+		return nil, err
+	}
+	// A keyring file needs the server.secret_rotation experiment, read
+	// from the operational settings just loaded; nothing listens yet.
+	if err := verifyKeyringExperiment(hubSrv); err != nil {
+		return nil, err
+	}
+
 	if hostedMode {
 		// Hosted mode: bootstrap bundled resources directly into the Hub from
 		// the binary's embedded catalog. This removes the dependency on local
@@ -3717,48 +3764,6 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// the local DB reflects reality before any dispatch is attempted.
 	go hubSrv.SyncAllHarnessConfigsFromStorage(ctx)
 	go hubSrv.SyncAllTemplatesFromStorage(ctx)
-
-	log.Printf("Database: %s (%s)", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
-
-	// Warn once (outside the settings retry loop below) about SCION_SERVER_*
-	// and SCION_SEED_* names that no loader maps to a setting, so a
-	// misspelled override is not silently ignored (ptone/scion#1081). Names
-	// only, never values.
-	config.WarnUnmatchedSettingsEnv(slog.Default(), os.Environ(), opsettings.IsLayer1Key)
-
-	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
-	// Driver-agnostic: initOperationalSettings handles both postgres (advisory
-	// locking) and SQLite (single-writer) via the existing AdvisoryLocker branch.
-	//
-	// Fail-closed: if settings cannot be loaded the hub must not serve ordinary
-	// traffic, because a DB-persisted admin_mode=true would be invisible to this
-	// process. Retry with exponential backoff to tolerate transient DB issues,
-	// then fail the hub startup if all attempts are exhausted.
-	// NOTE: this call and its error-return chain (up to runServerStart) is what makes
-	// settings init fail-closed. Do NOT revert to the old log-and-continue
-	// pattern — that would let the server accept traffic without authoritative
-	// settings, silently bypassing a DB-persisted admin_mode=true.
-	// See TestInitOperationalSettings_FailClosed for the regression test.
-	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
-		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
-			cfg.Database.Driver, err)
-	}
-	// Test admin tier G8, second half: no federation in the stored
-	// operational settings either.
-	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
-		return nil, err
-	}
-	// A hub that starts without the offline hub-admin delegation setting
-	// ends every offline hub-admin delegation and revokes the identities
-	// they issued. Nothing listens yet; a failure refuses startup.
-	if err := hubSrv.EndOfflineAdminDelegationsWhenOff(ctx); err != nil {
-		return nil, err
-	}
-	// A keyring file needs the server.secret_rotation experiment, read
-	// from the operational settings just loaded; nothing listens yet.
-	if err := verifyKeyringExperiment(hubSrv); err != nil {
-		return nil, err
-	}
 
 	// ptone/scion#1316 fault 3: confirm the hub's own agent_defaults resolve
 	// to registered resources now that bundled resources are seeded and

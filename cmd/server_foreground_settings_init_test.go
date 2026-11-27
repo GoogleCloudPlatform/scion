@@ -414,6 +414,71 @@ func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T)
 	}
 }
 
+// TestInitHubServer_InitsOperationalSettingsBeforeResourceBootstrap guards the
+// startup ordering in initHubServer: operational settings (including stored
+// experiment overrides such as hub.content_hash_v2) must be loaded before
+// bundled/workstation resource bootstrap or storage sync runs, so disabling
+// hub.content_hash_v2 and restarting converges built-ins back to v1.
+func TestInitHubServer_InitsOperationalSettingsBeforeResourceBootstrap(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "initHubServer" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("initHubServer not found in server_foreground.go")
+	}
+
+	var opsPos token.Pos
+	afterTargets := map[string]token.Pos{
+		"BootstrapBundledResources":        token.NoPos,
+		"bootstrapWorkstationResources":    token.NoPos,
+		"SyncAllHarnessConfigsFromStorage": token.NoPos,
+		"SyncAllTemplatesFromStorage":      token.NoPos,
+	}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var name string
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			name = fun.Name
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		}
+		if name == "initOperationalSettingsWithRetry" && !opsPos.IsValid() {
+			opsPos = call.Pos()
+		}
+		if pos, want := afterTargets[name]; want && !pos.IsValid() {
+			afterTargets[name] = call.Pos()
+		}
+		return true
+	})
+
+	if !opsPos.IsValid() {
+		t.Fatal("initHubServer does not call initOperationalSettingsWithRetry")
+	}
+	for name, pos := range afterTargets {
+		if !pos.IsValid() {
+			t.Errorf("initHubServer does not call %s", name)
+			continue
+		}
+		if opsPos >= pos {
+			t.Errorf("initOperationalSettingsWithRetry (%s) must run before %s (%s)",
+				fset.Position(opsPos), name, fset.Position(pos))
+		}
+	}
+}
+
 // TestInitOperationalSettings_TelemetryGCPProjectIDFromDB verifies that a
 // DB-saved telemetry.cloud.gcp_project_id is loaded at startup by
 // initOperationalSettings (which runs after hub.New and applies the snapshot
