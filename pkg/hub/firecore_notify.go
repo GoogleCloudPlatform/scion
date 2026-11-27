@@ -469,7 +469,7 @@ func (s *Server) sendAgentFireNotification(
 		Attempts: 1,
 	}
 
-	// Execute through fireAction directly (catalog entry point triggerNotify:message)
+	// Execute through fireAction directly (catalog entry point sendAgentFireNotification:message)
 	// so live RecordedAuthority, standing, frozen ceiling, and target message
 	// authorization run without re-entering the trigger dispatcher or rate limits.
 	notifyOut, action, rawErr := s.fireActionWithError(writeCtx, notifyReq)
