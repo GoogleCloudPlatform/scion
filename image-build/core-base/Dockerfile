@@ -65,9 +65,11 @@ ARG GO_VERSION=1.26.11
 # reproducible, and refresh that digest on a schedule — a vendored binary stops
 # receiving Chainguard's rebuild cadence the moment it is copied out.
 ARG GIT_IMAGE=chainguard/git:latest
+ARG BUN_IMAGE=oven/bun:latest
+ARG NODE_IMAGE=node:24-trixie-slim
 
 # Bun runtime source
-FROM oven/bun:latest AS bun-source
+FROM ${BUN_IMAGE} AS bun-source
 
 # Git source (vendored binary + helpers)
 FROM ${GIT_IMAGE} AS git-source
@@ -76,7 +78,7 @@ FROM ${GIT_IMAGE} AS git-source
 # See ../lib/stage-vendored-git.sh for why the libpcre2 override is a RUNPATH
 # on five binaries rather than an image-wide LD_LIBRARY_PATH. patchelf and
 # binutils are confined to this stage and never reach the final image.
-FROM node:24-trixie-slim AS git-patched
+FROM ${NODE_IMAGE} AS git-patched
 RUN apt-get update && apt-get install -y --no-install-recommends \
     patchelf \
     binutils \
@@ -88,7 +90,7 @@ COPY --from=git-source /usr/share/git-core   /staged/usr/share/git-core
 COPY --from=git-source /usr/lib/libpcre2-8.so.0 /staged/usr/local/lib/scion-git/libpcre2-8.so.0
 RUN bash /tmp/stage-vendored-git.sh /staged
 
-FROM node:24-trixie-slim
+FROM ${NODE_IMAGE}
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -157,7 +159,13 @@ ARG HELM_SHA256_ARM64
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh helm \
     "${HELM_VERSION}" "${HELM_SHA256_AMD64}" "${HELM_SHA256_ARM64}"
 
+ARG KUBECTL_VERSION
+ARG KUBECTL_SHA256_AMD64
+ARG KUBECTL_SHA256_ARM64
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh kubectl
+ARG GOLANGCI_LINT_VERSION
+ARG GOLANGCI_LINT_SHA256_AMD64
+ARG GOLANGCI_LINT_SHA256_ARM64
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh golangci-lint
 
 # Copy Bun from bun-source
