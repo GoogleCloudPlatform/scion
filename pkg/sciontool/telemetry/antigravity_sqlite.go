@@ -802,6 +802,13 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 				break
 			}
 		}
+		// Forward any tokens already durably appended (AppendWritten) even if a
+		// later record in the same poll failed: on the next poll those records
+		// replay as AppendCertainDuplicate and would otherwise be dropped from
+		// local session metrics.
+		if t.cfg.SessionUsage != nil && !sessionDelta.IsZero() {
+			t.cfg.SessionUsage(sessionDelta)
+		}
 		if appendFailed {
 			// Do not advance cursor or commit candDedupe; next poll will
 			// re-decode and re-emit with identical EmissionKeys.
@@ -817,10 +824,6 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 			Cursor:      res.Cursor,
 		}
 		dirty = true
-
-		if t.cfg.SessionUsage != nil && !sessionDelta.IsZero() {
-			t.cfg.SessionUsage(sessionDelta)
-		}
 	}
 
 	if dirty {

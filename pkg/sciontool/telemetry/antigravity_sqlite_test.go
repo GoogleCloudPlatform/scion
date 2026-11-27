@@ -3158,3 +3158,68 @@ func TestAntigravitySQLiteTailer_DriftSentinelRetry(t *testing.T) {
 		}
 	})
 }
+
+func TestAntigravitySQLiteTailer_PartialAppendFailurePreservesSessionDelta(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	seedEmptyAgyState(t, home)
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-partial-session.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795743000, testAgyUsage{
+		modelID: 1466, input: 300, output: 50, cacheRead: 100, reasoning: 10, id11: "partial-sess-0",
+	})
+	gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795743005, testAgyUsage{
+		modelID: 1466, input: 700, output: 150, cacheRead: 200, reasoning: 20, id11: "partial-sess-1",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?), (1, ?, ?)`, gen0, len(gen0), gen1, len(gen1)); err != nil {
+		t.Fatalf("insert gen_metadata: %v", err)
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+	// Fail ONLY the 2nd record append on poll 1 (record 0 succeeds durably).
+	callNum := 0
+	analytics.setRunAndActivity("run-agy-test", func(time.Time) {
+		callNum++
+		if callNum == 2 {
+			_ = os.Setenv("SCION_AGENT_ID", "")
+		}
+	})
+
+	var sessionTotal SessionUsage
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics,
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		SessionUsage: func(u SessionUsage) {
+			sessionTotal.TokensInput += u.TokensInput
+			sessionTotal.TokensOutput += u.TokensOutput
+			sessionTotal.TokensCached += u.TokensCached
+			sessionTotal.TokensReasoning += u.TokensReasoning
+		},
+	})
+
+	if err := tailer.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected PollOnce to fail on 2nd record append")
+	}
+
+	// Restore agent identity and retry: record 0 replays as AppendCertainDuplicate
+	// and record 1 writes as AppendWritten.
+	t.Setenv("SCION_AGENT_ID", "agent-agy-test")
+	analytics.setRunAndActivity("run-agy-test", nil)
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("retry PollOnce: %v", err)
+	}
+
+	if sessionTotal.TokensInput != 1000 || sessionTotal.TokensOutput != 200 ||
+		sessionTotal.TokensCached != 300 || sessionTotal.TokensReasoning != 30 {
+		t.Fatalf("sessionTotal = %+v, want input=1000 output=200 cached=300 reasoning=30 (no loss and no double-count)", sessionTotal)
+	}
+}
