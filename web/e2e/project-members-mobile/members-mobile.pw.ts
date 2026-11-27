@@ -197,56 +197,64 @@ test.describe('Project Settings > Members responsive layout', () => {
     });
   });
 
-  test.describe('700px viewport with long names and custom roles (no sidebar, table mode)', () => {
-    test.use({ viewport: { width: 700, height: 800 } });
-
-    for (const showVisitorsTab of [true, false]) {
-      const mode = showVisitorsTab ? 'standalone (Visitors tab)' : 'compact';
-      test(`keeps all row actions unclipped and full name accessible in ${mode} mode`, async ({
-        page,
-      }) => {
-        await setupProjectMembersHub(page, { showVisitorsTab, longNames: true });
+  test.describe('3-column table threshold (660px) with long names and custom roles', () => {
+    for (const cfg of [
+      {
+        width: 700,
+        showVisitorsTab: false,
+        label: '700px no-sidebar compact (just below 660px -> stacked)',
+      },
+      {
+        width: 1000,
+        showVisitorsTab: true,
+        label: '1000px sidebar expanded (just below 660px -> stacked)',
+      },
+    ]) {
+      test(`stacks without clipping or truncating at ${cfg.label}`, async ({ page }) => {
+        await page.setViewportSize({ width: cfg.width, height: 800 });
+        await setupProjectMembersHub(page, {
+          showVisitorsTab: cfg.showVisitorsTab,
+          longNames: true,
+        });
         await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
 
         const editor = page.locator('scion-project-members-editor');
         await expect(editor).toBeVisible({ timeout: 10_000 });
         await expect(editor.locator('tbody tr')).toHaveCount(2);
 
+        // Below 660px table width, rows stack (thead hidden) so actions and long names stay visible.
+        await expect(editor.locator('thead')).toBeHidden();
+
         const tableContainer = editor.locator('.table-container');
         const tableRect = await rectOf(tableContainer);
-        expect(tableRect.right).toBeLessThanOrEqual(700);
+        expect(tableRect.right).toBeLessThanOrEqual(cfg.width);
 
         const selfRow = editor.locator(`tr[data-principal="user:${SELF_USER_ID}"]`);
-        const selfName = selfRow.locator('.member-name');
-        await expect(selfName).toHaveAttribute('title', LONG_SELF_NAME);
-        await expect(selfName).toHaveText(LONG_SELF_NAME);
+        await expect(selfRow.locator('.member-name')).toHaveAttribute('title', LONG_SELF_NAME);
+        const selfNameTruncated = await selfRow
+          .locator('.member-name')
+          .evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+        expect(selfNameTruncated).toBe(false);
 
         const selfEdit = selfRow.locator('sl-icon-button[label="Edit roles"]');
         const selfLeave = selfRow.locator('sl-button[data-self-leave]');
         await expect(selfEdit).toBeVisible();
         await expect(selfLeave).toBeVisible();
-        const selfEditRect = await rectOf(selfEdit);
+        expect((await rectOf(selfEdit)).right).toBeLessThanOrEqual(tableRect.right + 1);
         const selfLeaveRect = await rectOf(selfLeave);
-        expect(selfEditRect.right).toBeLessThanOrEqual(tableRect.right + 1);
         expect(selfLeaveRect.left).toBeGreaterThanOrEqual(tableRect.left - 1);
         expect(selfLeaveRect.right).toBeLessThanOrEqual(tableRect.right + 1);
-        expect(selfLeaveRect.right).toBeLessThanOrEqual(700);
 
         const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
-        const otherName = otherRow.locator('.member-name');
-        await expect(otherName).toHaveAttribute('title', LONG_OTHER_NAME);
-        await expect(otherName).toHaveText(LONG_OTHER_NAME);
-
+        await expect(otherRow.locator('.member-name')).toHaveAttribute('title', LONG_OTHER_NAME);
         const otherEdit = otherRow.locator('sl-icon-button[label="Edit roles"]');
         const otherRemove = otherRow.locator('sl-icon-button[label="Remove member"]');
         await expect(otherEdit).toBeVisible();
         await expect(otherRemove).toBeVisible();
-        const otherEditRect = await rectOf(otherEdit);
+        expect((await rectOf(otherEdit)).right).toBeLessThanOrEqual(tableRect.right + 1);
         const otherRemoveRect = await rectOf(otherRemove);
-        expect(otherEditRect.right).toBeLessThanOrEqual(tableRect.right + 1);
         expect(otherRemoveRect.left).toBeGreaterThanOrEqual(tableRect.left - 1);
         expect(otherRemoveRect.right).toBeLessThanOrEqual(tableRect.right + 1);
-        expect(otherRemoveRect.right).toBeLessThanOrEqual(700);
 
         const tableOverflow = await tableContainer.evaluate(
           (el) => el.scrollWidth > el.clientWidth + 1
@@ -254,12 +262,11 @@ test.describe('Project Settings > Members responsive layout', () => {
         expect(tableOverflow).toBe(false);
       });
     }
-  });
 
-  test.describe('960px viewport with long names and custom roles (sidebar visible, table mode)', () => {
-    test.use({ viewport: { width: 960, height: 800 } });
-
-    test('keeps all row actions unclipped and full name accessible', async ({ page }) => {
+    test('renders desktop table mode just above 660px (1060px sidebar expanded) without clipping', async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 1060, height: 800 });
       await setupProjectMembersHub(page, { showVisitorsTab: true, longNames: true });
       await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
 
@@ -267,43 +274,89 @@ test.describe('Project Settings > Members responsive layout', () => {
       await expect(editor).toBeVisible({ timeout: 10_000 });
       await expect(editor.locator('tbody tr')).toHaveCount(2);
 
-      const editorRect = await rectOf(editor);
-      expect(editorRect.left).toBeGreaterThanOrEqual(240);
-
+      await expect(editor.locator('thead')).toBeVisible();
       const tableContainer = editor.locator('.table-container');
       const tableRect = await rectOf(tableContainer);
-      expect(tableRect.right).toBeLessThanOrEqual(960);
-
-      const selfRow = editor.locator(`tr[data-principal="user:${SELF_USER_ID}"]`);
-      await expect(selfRow.locator('.member-name')).toHaveAttribute('title', LONG_SELF_NAME);
-      const selfEdit = selfRow.locator('sl-icon-button[label="Edit roles"]');
-      const selfLeave = selfRow.locator('sl-button[data-self-leave]');
-      await expect(selfEdit).toBeVisible();
-      await expect(selfLeave).toBeVisible();
-      const selfEditRect = await rectOf(selfEdit);
-      const selfLeaveRect = await rectOf(selfLeave);
-      expect(selfEditRect.right).toBeLessThanOrEqual(tableRect.right + 1);
-      expect(selfLeaveRect.left).toBeGreaterThanOrEqual(tableRect.left - 1);
-      expect(selfLeaveRect.right).toBeLessThanOrEqual(tableRect.right + 1);
-      expect(selfLeaveRect.right).toBeLessThanOrEqual(960);
-
-      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
-      await expect(otherRow.locator('.member-name')).toHaveAttribute('title', LONG_OTHER_NAME);
-      const otherEdit = otherRow.locator('sl-icon-button[label="Edit roles"]');
-      const otherRemove = otherRow.locator('sl-icon-button[label="Remove member"]');
-      await expect(otherEdit).toBeVisible();
-      await expect(otherRemove).toBeVisible();
-      const otherEditRect = await rectOf(otherEdit);
-      const otherRemoveRect = await rectOf(otherRemove);
-      expect(otherEditRect.right).toBeLessThanOrEqual(tableRect.right + 1);
-      expect(otherRemoveRect.left).toBeGreaterThanOrEqual(tableRect.left - 1);
-      expect(otherRemoveRect.right).toBeLessThanOrEqual(tableRect.right + 1);
-      expect(otherRemoveRect.right).toBeLessThanOrEqual(960);
-
       const tableOverflow = await tableContainer.evaluate(
         (el) => el.scrollWidth > el.clientWidth + 1
       );
       expect(tableOverflow).toBe(false);
+
+      const selfRow = editor.locator(`tr[data-principal="user:${SELF_USER_ID}"]`);
+      const selfLeave = selfRow.locator('sl-button[data-self-leave]');
+      await expect(selfLeave).toBeVisible();
+      expect((await rectOf(selfLeave)).right).toBeLessThanOrEqual(tableRect.right + 1);
+    });
+  });
+
+  test.describe('4-column (.has-source) table threshold (780px) with long names and group Source', () => {
+    test('stacks without clipping or truncating just below 780px (1100px sidebar expanded)', async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 1100, height: 800 });
+      await setupProjectMembersHub(page, {
+        showVisitorsTab: true,
+        longNames: true,
+        includeGroupSource: true,
+      });
+      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+      const editor = page.locator('scion-project-members-editor');
+      await expect(editor).toBeVisible({ timeout: 10_000 });
+      await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+      // Below 780px table width, 4-column table stacks so row actions never clip.
+      await expect(editor.locator('thead')).toBeHidden();
+
+      const tableContainer = editor.locator('.table-container');
+      const tableRect = await rectOf(tableContainer);
+      const tableOverflow = await tableContainer.evaluate(
+        (el) => el.scrollWidth > el.clientWidth + 1
+      );
+      expect(tableOverflow).toBe(false);
+
+      const selfRow = editor.locator(`tr[data-principal="user:${SELF_USER_ID}"]`);
+      const selfLeave = selfRow.locator('sl-button[data-self-leave]');
+      await expect(selfLeave).toBeVisible();
+      expect((await rectOf(selfLeave)).right).toBeLessThanOrEqual(tableRect.right + 1);
+
+      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
+      const otherRemove = otherRow.locator('sl-icon-button[label="Remove member"]');
+      await expect(otherRemove).toBeVisible();
+      expect((await rectOf(otherRemove)).right).toBeLessThanOrEqual(tableRect.right + 1);
+    });
+
+    test('renders desktop table mode matching base just above 780px (1200px sidebar expanded)', async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 1200, height: 800 });
+      await setupProjectMembersHub(page, {
+        showVisitorsTab: true,
+        longNames: true,
+        includeGroupSource: true,
+      });
+      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+      const editor = page.locator('scion-project-members-editor');
+      await expect(editor).toBeVisible({ timeout: 10_000 });
+      await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+      await expect(editor.locator('thead')).toBeVisible();
+      const tableContainer = editor.locator('.table-container');
+      const tableRect = await rectOf(tableContainer);
+      const tableOverflow = await tableContainer.evaluate(
+        (el) => el.scrollWidth > el.clientWidth + 1
+      );
+      expect(tableOverflow).toBe(false);
+
+      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
+      const provenance = otherRow.locator('.provenance-badge.group-derived');
+      await expect(provenance).toBeVisible();
+      // Matches base height (26px) rather than wrapping to 52px when badges are forced nowrap.
+      expect((await rectOf(provenance)).height).toBeLessThanOrEqual(28);
+      expect(
+        (await rectOf(otherRow.locator('sl-icon-button[label="Remove member"]'))).right
+      ).toBeLessThanOrEqual(tableRect.right + 1);
     });
   });
 
@@ -360,25 +413,6 @@ test.describe('Project Settings > Members responsive layout', () => {
         const secondBadge = await rectOf(badges.nth(1));
         expect(Math.abs(secondBadge.top - firstBadge.top)).toBeLessThanOrEqual(2);
       }
-    });
-
-    test('keeps Via group text within 1-2 lines when Source column is shown', async ({ page }) => {
-      await setupProjectMembersHub(page, {
-        showVisitorsTab: true,
-        includeCustomRoles: true,
-        includeGroupSource: true,
-      });
-      await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
-
-      const editor = page.locator('scion-project-members-editor');
-      await expect(editor).toBeVisible({ timeout: 10_000 });
-      await expect(editor.locator('tbody tr')).toHaveCount(2);
-
-      const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
-      const provenance = otherRow.locator('.provenance-badge.group-derived');
-      await expect(provenance).toBeVisible();
-      const provenanceRect = await rectOf(provenance);
-      expect(provenanceRect.height).toBeLessThanOrEqual(32);
     });
   });
 

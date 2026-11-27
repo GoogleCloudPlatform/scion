@@ -825,7 +825,6 @@ export class ScionProjectMembersEditor extends LitElement {
         font-weight: 500;
         background: var(--scion-bg-subtle, #f1f5f9);
         color: var(--scion-text-muted, #64748b);
-        white-space: nowrap;
       }
 
       /* Provenance badge */
@@ -1028,24 +1027,6 @@ export class ScionProjectMembersEditor extends LitElement {
         margin-top: 0.375rem;
       }
 
-      /* Shrink the identity cell only in the intermediate table widths where
-         long names would otherwise expand the table and clip row actions; above
-         these widths the base desktop table layout is untouched. Placed before
-         @container (max-width: 600px) so the stacked layout resets width/max-width. */
-      @container members-table (max-width: 700px) {
-        table:not(.has-source) tbody td:first-child {
-          width: 100%;
-          max-width: 0;
-        }
-      }
-
-      @container members-table (max-width: 810px) {
-        table.has-source tbody td:first-child {
-          width: 35%;
-          max-width: 0;
-        }
-      }
-
       @container (max-width: 600px) {
         .section {
           padding: 1rem;
@@ -1060,18 +1041,25 @@ export class ScionProjectMembersEditor extends LitElement {
         .section-header-actions {
           flex-wrap: wrap;
         }
+      }
 
-        thead {
+      /* Stack table rows whenever .table-container is narrower than the width
+         where the auto-layout table fits long names + roles + actions without
+         clipping (660px for 3-column tables, 780px for 4-column tables with a
+         Source column). Above these thresholds, the base desktop table layout
+         is completely untouched. */
+      @container members-table (max-width: 660px) {
+        table:not(.has-source) thead {
           display: none;
         }
 
-        table,
-        tbody {
+        table:not(.has-source),
+        table:not(.has-source) tbody {
           display: block;
           width: 100%;
         }
 
-        tbody tr {
+        table:not(.has-source) tbody tr {
           display: flex;
           flex-wrap: wrap;
           align-items: center;
@@ -1081,34 +1069,30 @@ export class ScionProjectMembersEditor extends LitElement {
           border-bottom: 1px solid var(--scion-border, #e2e8f0);
         }
 
-        tbody tr:last-child {
+        table:not(.has-source) tbody tr:last-child {
           border-bottom: none;
         }
 
-        tbody tr:hover {
+        table:not(.has-source) tbody tr:hover {
           background: var(--scion-bg-subtle, #f1f5f9);
         }
 
-        tbody td {
+        table:not(.has-source) tbody td {
           display: block;
           padding: 0;
           border-bottom: none;
         }
 
-        tbody tr:hover td {
+        table:not(.has-source) tbody tr:hover td {
           background: transparent;
         }
 
-        tbody td:first-child,
-        table:not(.has-source) tbody td:first-child,
-        table.has-source tbody td:first-child {
+        table:not(.has-source) tbody td:first-child {
           flex: 1 1 100%;
-          width: auto;
-          max-width: none;
           min-width: 0;
         }
 
-        .actions-cell {
+        table:not(.has-source) .actions-cell {
           display: flex;
           align-items: center;
           flex-wrap: wrap;
@@ -1118,7 +1102,66 @@ export class ScionProjectMembersEditor extends LitElement {
           text-align: left;
         }
 
-        .hide-mobile {
+        table:not(.has-source) .hide-mobile {
+          display: none;
+        }
+      }
+
+      @container members-table (max-width: 780px) {
+        table.has-source thead {
+          display: none;
+        }
+
+        table.has-source,
+        table.has-source tbody {
+          display: block;
+          width: 100%;
+        }
+
+        table.has-source tbody tr {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.5rem 0.75rem;
+          padding: 0.75rem;
+          border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        }
+
+        table.has-source tbody tr:last-child {
+          border-bottom: none;
+        }
+
+        table.has-source tbody tr:hover {
+          background: var(--scion-bg-subtle, #f1f5f9);
+        }
+
+        table.has-source tbody td {
+          display: block;
+          padding: 0;
+          border-bottom: none;
+        }
+
+        table.has-source tbody tr:hover td {
+          background: transparent;
+        }
+
+        table.has-source tbody td:first-child {
+          flex: 1 1 100%;
+          min-width: 0;
+        }
+
+        table.has-source .actions-cell {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 0.25rem;
+          margin-left: auto;
+          white-space: normal;
+          text-align: left;
+        }
+
+        table.has-source .hide-mobile {
           display: none;
         }
       }

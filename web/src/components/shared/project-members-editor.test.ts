@@ -2297,43 +2297,40 @@ describe('invited principals', () => {
 });
 
 describe('narrow-container responsive layout style contract (ptone/scion#9571, ptone/scion#9575)', () => {
-  const NARROW = '@container (max-width: 600px)';
-  const TABLE_NARROW_3COL = '@container members-table (max-width: 700px)';
-  const TABLE_NARROW_4COL = '@container members-table (max-width: 810px)';
+  const HEADER_NARROW = '@container (max-width: 600px)';
+  const TABLE_STACK_3COL = '@container members-table (max-width: 660px)';
+  const TABLE_STACK_4COL = '@container members-table (max-width: 780px)';
 
-  it('stacks the section header and wraps header actions via container query without altering desktop', () => {
+  it('stacks the section header and table rows via container queries without altering desktop', () => {
     const rules = elementStyleRules('scion-project-members-editor');
 
     // Container query hosts wrap the layout and table so narrow viewports match.
     expect(rules.get('.members-layout')).toContain('container-type: inline-size');
     expect(rules.get('.table-container')).toContain('container: members-table / inline-size');
 
-    // Wide desktop stays untouched (no forced width percentage on td:first-child).
+    // Desktop table is completely untouched (no forced width/max-width or badge nowrap).
     expect(rules.get('.section-header')).toContain('display: flex');
     expect(rules.get('.section-header')).not.toContain('flex-direction: column');
     expect(rules.get('.actions-cell')).toContain('white-space: nowrap');
     expect(rules.get('tbody td:first-child')).toBeUndefined();
+    expect(rules.get('.role-badge')).not.toContain('white-space: nowrap');
     expect(rules.get('.member-identity')).toContain('min-width: 0');
 
-    // Intermediate table widths shrink the identity cell so long names ellipsize.
-    expect(rules.get(`${TABLE_NARROW_3COL} table:not(.has-source) tbody td:first-child`)).toContain(
-      'max-width: 0'
-    );
-    expect(rules.get(`${TABLE_NARROW_4COL} table.has-source tbody td:first-child`)).toContain(
-      'max-width: 0'
-    );
+    // Narrow layout container stacks the header and wraps actions.
+    expect(rules.get(`${HEADER_NARROW} .section-header`)).toContain('flex-direction: column');
+    expect(rules.get(`${HEADER_NARROW} .section-header-actions`)).toContain('flex-wrap: wrap');
 
-    // Narrow container stacks the header and wraps actions.
-    expect(rules.get(`${NARROW} .section-header`)).toContain('flex-direction: column');
-    expect(rules.get(`${NARROW} .section-header-actions`)).toContain('flex-wrap: wrap');
-
-    // Narrow container wraps table rows so member identity gets full width and actions stay visible.
-    expect(rules.get(`${NARROW} thead`)).toContain('display: none');
-    expect(rules.get(`${NARROW} tbody tr`)).toContain('display: flex');
-    expect(rules.get(`${NARROW} tbody tr`)).toContain('flex-wrap: wrap');
-    expect(rules.get(`${NARROW} tbody td:first-child`)).toContain('flex: 1 1 100%');
-    expect(rules.get(`${NARROW} tbody td:first-child`)).toContain('max-width: none');
-    expect(rules.get(`${NARROW} .actions-cell`)).toContain('flex-wrap: wrap');
-    expect(rules.get(`${NARROW} .actions-cell`)).toContain('white-space: normal');
+    // 3-column and 4-column tables stack at their respective table-container thresholds.
+    for (const [query, tableSel] of [
+      [TABLE_STACK_3COL, 'table:not(.has-source)'],
+      [TABLE_STACK_4COL, 'table.has-source'],
+    ] as const) {
+      expect(rules.get(`${query} ${tableSel} thead`)).toContain('display: none');
+      expect(rules.get(`${query} ${tableSel} tbody tr`)).toContain('display: flex');
+      expect(rules.get(`${query} ${tableSel} tbody tr`)).toContain('flex-wrap: wrap');
+      expect(rules.get(`${query} ${tableSel} tbody td:first-child`)).toContain('flex: 1 1 100%');
+      expect(rules.get(`${query} ${tableSel} .actions-cell`)).toContain('flex-wrap: wrap');
+      expect(rules.get(`${query} ${tableSel} .actions-cell`)).toContain('white-space: normal');
+    }
   });
 });
