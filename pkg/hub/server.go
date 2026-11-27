@@ -7780,6 +7780,10 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	// Resumable upload session expiry and staging cleanup (ptone/scion#8654 §3.7):
+	// runs every minute regardless of hub.large_uploads state so in-flight
+	// sessions still drain if the experiment is turned off.
+	s.scheduler.RegisterRecurringSingleton(uploadSessionSweepJobName, 1, store.LockUploadSessionSweep, s.uploadSessionSweepHandler())
 	// Daily (24 h) report-only scan for orphaned agent directories on mounted
 	// shared NFS project storage (ptone/scion#7932); gated by
 	// hub.runtime_orphan_reconcile.

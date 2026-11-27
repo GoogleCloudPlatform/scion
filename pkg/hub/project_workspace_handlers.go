@@ -327,6 +327,9 @@ func (walkDirSearcher) Search(root *os.Root, query string, limit int) (FileSearc
 		if path == "." || d.IsDir() {
 			return nil
 		}
+		if isUploadPartialName(d.Name()) {
+			return nil
+		}
 		info, infoErr := d.Info()
 		if infoErr != nil {
 			return nil
@@ -926,6 +929,9 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 		}
 
 		if path == "." || d.IsDir() {
+			return nil
+		}
+		if isUploadPartialName(d.Name()) {
 			return nil
 		}
 
@@ -1998,6 +2004,11 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 		filePath := strings.TrimPrefix(subPath, "workspace/files")
 		filePath = strings.TrimPrefix(filePath, "/")
 		s.handleProjectWorkspace(w, r, project, filePath)
+
+	case subPath == "workspace/uploads" || strings.HasPrefix(subPath, "workspace/uploads/"):
+		uploadSubPath := strings.TrimPrefix(subPath, "workspace/uploads")
+		uploadSubPath = strings.TrimPrefix(uploadSubPath, "/")
+		s.handleProjectWorkspaceUploads(w, r, project, uploadSubPath)
 
 	default:
 		// Reached only for a workspace subpath with no handler, e.g.
