@@ -205,7 +205,7 @@ func TestPipeline_SuppressDirectOTelMatrix(t *testing.T) {
 			if tc.wireHubSink {
 				p.SetHubUsageSink(HubUsageSinkConfig{
 					Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
-						return &telemetrycontract.UsageIngestResponse{}, nil
+						return &telemetrycontract.UsageIngestResponse{SuppressDirectOTel: tc.suppressDirectOTel}, nil
 					},
 					RunID:              "run-sup-test",
 					HubID:              "hub-sup-test",
@@ -475,6 +475,10 @@ func TestPipeline_SuppressRevalidatedPerResponse(t *testing.T) {
 		t.Fatalf("Pipeline.Start: %v", err)
 	}
 
+	// Stop the background drainer goroutine before driving hubSink directly so
+	// its startup/shutdown heartbeats cannot race with SendBatch/SendHeartbeat.
+	p.analytics.drainer.Stop(ctx)
+
 	// Initially suppressed (replica A says true).
 	if !p.SuppressDirectOTel() {
 		t.Fatal("expected SuppressDirectOTel=true initially")
@@ -689,25 +693,22 @@ func TestPipeline_SuppressClearedOnRevocationAndSetOnLateActivation(t *testing.T
 		// Start analyticsState in the default (GCP-only + hubProbe) branch directly
 		// with a non-nil *GCPExporter stub so startDrainer takes default:.
 		p.analytics.startDrainer(ctx, &GCPExporter{})
-		// Wait for the drainer's probe to activate the Hub sink and set suppress=true.
+		// Wait for the background drainer loop's initial probe to activate the Hub
+		// sink and set suppress=true (never call RunOnce concurrently with Start).
 		deadline := time.Now().Add(2 * time.Second)
 		for !p.SuppressDirectOTel() && time.Now().Before(deadline) {
-			p.analytics.drainer.RunOnce(ctx)
-			if !p.SuppressDirectOTel() {
-				time.Sleep(5 * time.Millisecond)
-			}
+			time.Sleep(2 * time.Millisecond)
 		}
 		if !p.SuppressDirectOTel() {
 			t.Fatal("expected SuppressDirectOTel=true after late activation")
 		}
-		// Trigger 404 revocation through the drainer's heartbeat -> exercises the
-		// late-activation branch's wired onHubRevoked callback end-to-end.
+		// Stop the drainer goroutine, then run one deterministic RunOnce with 404
+		// revocation enabled -> exercises the late-activation branch's wired
+		// onHubRevoked callback end-to-end without concurrent RunOnce races.
+		p.analytics.drainer.Stop(ctx)
 		revoke.Store(true)
-		deadline = time.Now().Add(2 * time.Second)
-		for p.SuppressDirectOTel() && time.Now().Before(deadline) {
-			time.Sleep(2 * time.Millisecond)
-			p.analytics.drainer.RunOnce(ctx)
-		}
+		time.Sleep(2 * time.Millisecond)
+		p.analytics.drainer.RunOnce(ctx)
 		if p.SuppressDirectOTel() {
 			t.Fatal("expected SuppressDirectOTel=false after revocation on late-activation path")
 		}
