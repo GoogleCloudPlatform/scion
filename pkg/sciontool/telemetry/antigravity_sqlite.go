@@ -136,8 +136,9 @@ type AntigravitySQLiteConfig struct {
 	// PollInterval is the fallback periodic poll interval (default 15s).
 	PollInterval time.Duration
 	// StateSaveInterval coalesces periodic agy-sqlite-state.json writes during
-	// steady-state polling (default 30s). Initial baseline, schema-drift
-	// latching, and Stop() always persist immediately.
+	// steady-state idempotent outbox polling (default 30s). Initial/retry
+	// baseline, schema-drift latching, disabled-withhold flush, non-idempotent
+	// direct-OTel advance commits, and Stop() always persist immediately.
 	StateSaveInterval time.Duration
 	// ShutdownPollTimeout bounds the final synchronous PollOnce executed by
 	// Stop so a slow or blocked SQLite read cannot consume the caller's entire
@@ -501,7 +502,8 @@ func (t *AntigravitySQLiteTailer) loop(ctx context.Context) {
 // unchanged files by (db_mtime, db_size, wal_mtime, wal_size) fingerprint,
 // decoding modified files against a cloned DedupeState, appending canonical
 // usage increments to Analytics, and coalescing state-file persistence at
-// StateSaveInterval (with immediate writes on baseline, drift latch, and Stop).
+// StateSaveInterval (with immediate writes on baseline/retry-baseline, drift
+// latch, disabled-withhold flush, non-idempotent direct-OTel advance, and Stop).
 func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 	return t.pollOnceWithOptions(ctx, false, false)
 }
@@ -808,6 +810,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		// record appends cleanly.
 		var writtenDelta SessionUsage
 		var advanceDelta SessionUsage
+		nonIdempotentTokens := false
 		appendFailed := false
 		retryableOutboxErr := false
 		for _, rec := range res.Records {
@@ -849,6 +852,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 					accumulateSessionUsage(&advanceDelta, rec.Tokens)
 					if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
 						*otelRecorded = true
+						nonIdempotentTokens = true
 					}
 				}
 			}
@@ -880,6 +884,9 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 			Cursor:      res.Cursor,
 		}
 		dirty = true
+		if nonIdempotentTokens || !advanceDelta.IsZero() {
+			immediateSave = true
+		}
 
 		if t.cfg.SessionUsage != nil && !advanceDelta.IsZero() {
 			t.cfg.SessionUsage(advanceDelta)

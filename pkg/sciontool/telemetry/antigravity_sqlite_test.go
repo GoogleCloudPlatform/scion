@@ -29,6 +29,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	otelmetricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/protobuf/encoding/protowire"
 	_ "modernc.org/sqlite"
 )
@@ -3750,6 +3752,71 @@ func TestAntigravitySQLiteTailer_StateSaveCoalescing(t *testing.T) {
 			t.Fatalf("after timed-out Stop cursor = %d, want 1", *st.Files["conv-stop-timeout.db"].Cursor.GenMetadataRowID)
 		}
 	})
+
+	t.Run("retry_baseline_persists_immediately_within_interval", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-retry-base.db")
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+			t.Fatalf("mkdir conversations: %v", err)
+		}
+		// Write invalid (non-SQLite) bytes so initial baseline fails and marks BaselinePending=true.
+		if err := os.WriteFile(dbPath, []byte("not-a-sqlite-db"), 0o600); err != nil {
+			t.Fatalf("write corrupt db: %v", err)
+		}
+
+		outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open outbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		now := time.Date(2026, 11, 27, 18, 50, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         analytics,
+			StateSaveInterval: 5 * time.Minute,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:               func() time.Time { return now },
+		})
+
+		// Baseline at t0: persists BaselinePending=true and sets lastStateSave=t0.
+		if err := tailer.PollOnce(context.Background()); err == nil {
+			t.Fatal("expected baseline error for corrupt DB")
+		}
+		st := readPersistedAgyState(t, home)
+		if !st.Files["conv-retry-base.db"].BaselinePending {
+			t.Fatal("expected BaselinePending=true after initial failed baseline")
+		}
+
+		// Replace with a valid DB containing row 0 and retry at t+5s (within 5m interval).
+		if err := os.Remove(dbPath); err != nil {
+			t.Fatalf("remove corrupt db: %v", err)
+		}
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795754000, testAgyUsage{
+			modelID: 1466, input: 10, output: 5, id11: "retry-base-0",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		now = now.Add(5 * time.Second)
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("retry baseline poll: %v", err)
+		}
+
+		// Resolved retry-baseline must persist immediately (BaselinePending cleared on disk).
+		st = readPersistedAgyState(t, home)
+		if st.Files["conv-retry-base.db"].BaselinePending {
+			t.Fatal("expected BaselinePending=false persisted immediately after retry baseline")
+		}
+		if st.Files["conv-retry-base.db"].Cursor.GenMetadataRowID == nil || *st.Files["conv-retry-base.db"].Cursor.GenMetadataRowID != 0 {
+			t.Fatalf("after retry baseline cursor = %v, want 0", st.Files["conv-retry-base.db"].Cursor.GenMetadataRowID)
+		}
+	})
 }
 
 func TestAntigravitySQLiteTailer_CrashReplayWithinCoalescingWindowZeroDoubleCount(t *testing.T) {
@@ -3919,5 +3986,139 @@ func TestAntigravitySQLiteTailer_CrashReplayWithinCoalescingWindowZeroDoubleCoun
 	st = readPersistedAgyState(t, home)
 	if *st.Files["conv-crash-30s.db"].Cursor.GenMetadataRowID != 4 {
 		t.Fatalf("after tailer2 Stop cursor = %d, want 4", *st.Files["conv-crash-30s.db"].Cursor.GenMetadataRowID)
+	}
+}
+
+func collectOTelUsageTokenSum(t *testing.T, reader *sdkmetric.ManualReader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != telemetrycontract.MetricUsageTokens {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+		}
+	}
+	return total
+}
+
+func TestAntigravitySQLiteTailer_CrashReplayDetachedOTelNoDoubleCount(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-detached-otel-crash.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	// Historical row 0 present before tailer1 starts (baselined, never emitted).
+	genBase := encodeTestGenMeta(1466, "gemini-4-neon", 1795770000, testAgyUsage{
+		modelID: 1466, input: 10, output: 5, id11: "det-otel-base-0",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, genBase, len(genBase)); err != nil {
+		t.Fatalf("insert genBase: %v", err)
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+	analytics.detach()
+
+	reader1 := sdkmetric.NewManualReader()
+	mp1 := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader1))
+	defer func() { _ = mp1.Shutdown(context.Background()) }()
+	counter1, err := mp1.Meter(usageMetricScope).Int64Counter(telemetrycontract.MetricUsageTokens)
+	if err != nil {
+		t.Fatalf("counter1: %v", err)
+	}
+
+	now := time.Date(2026, 11, 27, 19, 10, 0, 0, time.UTC)
+	var session1 SessionUsage
+	tailer1 := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics,
+		OTelExportActive:  func() bool { return true },
+		StateSaveInterval: 5 * time.Minute,
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		Now:               func() time.Time { return now },
+		SessionUsage: func(u SessionUsage) {
+			session1.TokensInput += u.TokensInput
+			session1.TokensOutput += u.TokensOutput
+		},
+	})
+	tailer1.tokens = counter1
+
+	// Baseline at t0: persists cursor=0 immediately.
+	if err := tailer1.PollOnce(context.Background()); err != nil {
+		t.Fatalf("baseline poll: %v", err)
+	}
+
+	// Poll a new row at t+5s (inside the 5m coalescing window) in Analytics-detached +
+	// direct-OTel mode. Tokens leave via OTel without outbox dedupe, so the cursor
+	// must be persisted immediately to avoid double-counting on crash replay.
+	now = now.Add(5 * time.Second)
+	gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795770005, testAgyUsage{
+		modelID: 1466, input: 100, output: 20, id11: "det-otel-call-1",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+		t.Fatalf("insert gen1: %v", err)
+	}
+	if err := tailer1.PollOnce(context.Background()); err != nil {
+		t.Fatalf("tailer1 poll: %v", err)
+	}
+	if got := collectOTelUsageTokenSum(t, reader1); got != 120 {
+		t.Fatalf("tailer1 OTel token sum = %d, want 120 (100 input + 20 output)", got)
+	}
+	if session1.TokensInput != 100 || session1.TokensOutput != 20 {
+		t.Fatalf("tailer1 session = %+v, want input=100 output=20", session1)
+	}
+
+	// Simulate unclean crash (no tailer1.Stop) and restart with a fresh tailer +
+	// fresh cumulative OTel counter at t+10s.
+	now = now.Add(5 * time.Second)
+	reader2 := sdkmetric.NewManualReader()
+	mp2 := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader2))
+	defer func() { _ = mp2.Shutdown(context.Background()) }()
+	counter2, err := mp2.Meter(usageMetricScope).Int64Counter(telemetrycontract.MetricUsageTokens)
+	if err != nil {
+		t.Fatalf("counter2: %v", err)
+	}
+
+	var session2 SessionUsage
+	tailer2 := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics,
+		OTelExportActive:  func() bool { return true },
+		StateSaveInterval: 5 * time.Minute,
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		Now:               func() time.Time { return now },
+		SessionUsage: func(u SessionUsage) {
+			session2.TokensInput += u.TokensInput
+			session2.TokensOutput += u.TokensOutput
+		},
+	})
+	tailer2.tokens = counter2
+
+	if err := tailer2.PollOnce(context.Background()); err != nil {
+		t.Fatalf("tailer2 crash-replay poll: %v", err)
+	}
+	if got := collectOTelUsageTokenSum(t, reader2); got != 0 {
+		t.Fatalf("post-crash tailer2 re-recorded OTel token sum = %d, want 0 (double-count)", got)
+	}
+	if !session2.IsZero() {
+		t.Fatalf("post-crash tailer2 re-recorded session usage = %+v, want zero (double-count)", session2)
 	}
 }
