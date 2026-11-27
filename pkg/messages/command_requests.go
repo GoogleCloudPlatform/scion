@@ -253,6 +253,8 @@ func NormalizeCommandRequest(root string, in *CommandRequestInput) (*CommandRequ
 		add(root+".key", DecisionErrRequired, "key is required")
 	case !ValidCommandRequestKey(key):
 		add(root+".key", DecisionErrInvalid, "key must match [A-Za-z0-9][A-Za-z0-9._-]{0,%d}", MaxCommandRequestKeyLen-1)
+	case strings.HasPrefix(norm, "md-"):
+		add(root+".key", DecisionErrInvalid, "key must not start with reserved prefix 'md-'")
 	}
 
 	desc := strings.TrimSpace(in.Description)
@@ -449,6 +451,16 @@ type CommandRequestOutputResponse struct {
 	OutputStatus string `json:"outputStatus,omitempty"`
 	OutputBytes  *int64 `json:"outputBytes,omitempty"`
 	Output       string `json:"output,omitempty"`
+}
+
+// CreateCommandRequestFromMessageBody is the request body of
+// POST /api/v1/command-requests/from-message (§4.14).
+type CreateCommandRequestFromMessageBody struct {
+	MessageID      string `json:"message_id"`
+	Script         string `json:"script"`
+	CommandSHA256  string `json:"command_sha256"`
+	ShareOutput    *bool  `json:"share_output,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // ApproveCommandRequestResponse is the 202 (or 200 on idempotent replay) response

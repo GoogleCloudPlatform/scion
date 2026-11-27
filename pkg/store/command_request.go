@@ -190,14 +190,40 @@ type ApproveCommandRequestInput struct {
 	Now            time.Time
 }
 
-// ApproveCommandRequestResult is returned by ApproveCommandRequest.
+// ApproveCommandRequestResult is returned by ApproveCommandRequest and
+// CreateAndApproveMarkdownCommandRequest.
 type ApproveCommandRequestResult struct {
 	Request  *CommandRequest
 	Run      *CommandRun
 	Replayed bool
-	// Conflict is non-nil when the CAS failed due to status, expiry, or hash mismatch.
+	// Conflict is non-nil when the CAS failed due to status, expiry, or hash mismatch,
+	// or when an insert-only Markdown Execute hits an existing v1 row.
 	Conflict     *CommandRequest
+	ConflictRun  *CommandRun
 	ConflictCode string
+}
+
+// CreateMarkdownCommandRequestInput is the input to
+// CreateAndApproveMarkdownCommandRequest (§4.14 step 5).
+type CreateMarkdownCommandRequestInput struct {
+	ProjectID      string
+	AgentID        string
+	AgentName      string
+	MessageID      string
+	ConversationID string
+	ChatKey        string
+	Script         string
+	CommandSHA256  string
+	UserID         string
+	UserName       string
+	UserEmail      string
+	IdempotencyKey string
+	ExecAgentID    string
+	ExecProjectID  string
+	ShareOutput    bool
+	LeaseUntil     time.Time
+	Now            time.Time
+	TTL            time.Duration
 }
 
 // CommandRunDispatchInput is the input to TransitionCommandRunToDispatching.
@@ -270,6 +296,15 @@ type CommandRequestStore interface {
 	// approved row, it returns Replayed=true with the existing request and run.
 	// On a CAS miss it returns Conflict and ConflictCode without mutating rows.
 	ApproveCommandRequest(ctx context.Context, in *ApproveCommandRequestInput) (*ApproveCommandRequestResult, error)
+
+	// CreateAndApproveMarkdownCommandRequest atomically inserts a version-1
+	// command_requests row directly in status=approved (surface=markdown_block,
+	// key="md-<message_id>-<sha256[:16]>") and its single queued command_runs
+	// row in one transaction (§4.14 step 5). Insert-only: a second call for the
+	// same (agent_id, message_id, script) returns ConflictCode=already_resolved
+	// with the existing row and run (or Replayed=true if same user + same
+	// IdempotencyKey).
+	CreateAndApproveMarkdownCommandRequest(ctx context.Context, in *CreateMarkdownCommandRequestInput) (*ApproveCommandRequestResult, error)
 
 	// ExpireCommandRequests transitions pending rows with expires_at <= now to
 	// expired and returns the transitioned rows.

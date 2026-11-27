@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   COMMAND_REQUESTS_FLAG,
@@ -38,7 +39,17 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function canonicalHashSync(script: string, workdir: string, timeoutS: number): string {
+  const payload =
+    'scion.command_request.v1\n' +
+    JSON.stringify({ interpreter: 'bash-login', script, timeout_s: timeoutS, workdir });
+  return createHash('sha256').update(payload).digest('hex');
+}
+
 function makeRequest(overrides: Partial<CommandRequestView> = {}): CommandRequestView {
+  const script = overrides.script ?? 'gcloud config list\n';
+  const workdir = overrides.workdir ?? '';
+  const timeoutS = overrides.timeoutS ?? 600;
   return {
     rowId: 'row-cmd-1',
     messageId: 'msg-cmd-1',
@@ -48,12 +59,12 @@ function makeRequest(overrides: Partial<CommandRequestView> = {}): CommandReques
     key: 'deploy-preview',
     version: 1,
     description: 'Deploy PR 42 preview environment',
-    script: 'gcloud config list\n',
-    workdir: '',
+    script,
+    workdir,
     workdirKind: 'home',
-    timeoutS: 600,
+    timeoutS,
     shareOutputRequested: false,
-    commandSha256: 'a'.repeat(64),
+    commandSha256: overrides.commandSha256 ?? canonicalHashSync(script, workdir, timeoutS),
     approverUserId: 'user-1',
     status: 'pending',
     createdAt: '2026-11-26T10:00:00Z',
@@ -308,7 +319,7 @@ describe('<scion-chat-command-request>', () => {
   it('renders escaped script tokens, homoglyph workdir, SHA-256, and container details inside the confirm dialog (R3, O1)', async () => {
     const trickyScript = '\techo "é\u2800\u{E0100}"  \n';
     const homoglyphWorkdir = '/w\u043Erkspace/app';
-    const expectedHash = 'f'.repeat(64);
+    const expectedHash = canonicalHashSync(trickyScript, homoglyphWorkdir, 600);
     const queuedRun: CommandRequestRunView = {
       runId: 'run-r3',
       requestId: 'row-cmd-1',
@@ -505,7 +516,7 @@ describe('<scion-chat-command-request>', () => {
       surface: string;
     };
     expect(body.row_id).toBe('row-cmd-1');
-    expect(body.command_sha256).toBe('a'.repeat(64));
+    expect(body.command_sha256).toBe(canonicalHashSync('gcloud config list\n', '', 600));
     expect(body.surface).toBe('native');
 
     // SSE update: running -> succeeded
@@ -609,5 +620,94 @@ describe('<scion-chat-command-request>', () => {
       '/api/v1/command-requests/row-cmd-1/output',
       expect.objectContaining({ method: 'GET' })
     );
+  });
+
+  it('carry-forward (a): refuses to POST approve when recomputed WebCrypto hash disagrees with commandSha256', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.currentUserId = 'user-1';
+    el.detail = makeDetail({
+      request: makeRequest({
+        script: 'echo real\n',
+        commandSha256: 'f'.repeat(64),
+      }),
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-testid="confirm-approve-btn"]') as HTMLElement).click();
+    await vi.waitFor(() => {
+      const err = el.shadowRoot?.querySelector('[data-testid="confirm-error-banner"]');
+      expect(err?.textContent).toContain('Command hash verification failed');
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('carry-forward (b): approver card re-fetches detail via GET on SSE update so reason/wake show live', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(
+        makeDetail({
+          request: makeRequest({
+            status: 'approved',
+            run: {
+              runId: 'run-live-1',
+              requestId: 'row-cmd-1',
+              status: 'not_started',
+              reason: 'exec_unsupported',
+              wake: 'resume',
+              shareOutput: false,
+              timeoutS: 600,
+              createdAt: '2026-11-26T10:01:00Z',
+            },
+          }),
+        }),
+        200
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.currentUserId = 'user-1';
+    el.detail = makeDetail();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Emit SSE update stripped of reason/wake (as the Hub broadcasts).
+    const { stateManager } = await import('../../../client/state.js');
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', {
+        detail: {
+          kind: 'command_request',
+          messageId: 'msg-cmd-1',
+          threadId: 'dm:agent:agent-1:user:user-1',
+          command_request: makeRequest({
+            status: 'approved',
+            run: {
+              runId: 'run-live-1',
+              requestId: 'row-cmd-1',
+              status: 'not_started',
+              shareOutput: false,
+              timeoutS: 600,
+              createdAt: '2026-11-26T10:01:00Z',
+            },
+          }),
+        },
+      })
+    );
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/command-requests/row-cmd-1',
+        expect.objectContaining({ method: 'GET' })
+      );
+      expect(el.shadowRoot?.textContent).toContain(
+        'Restart your execution container to enable approved commands'
+      );
+    });
   });
 });

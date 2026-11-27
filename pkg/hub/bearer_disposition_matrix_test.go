@@ -395,6 +395,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestCommandRequestOutput_AuthzAndSharing enables the experiment and drives GET with a real CLI session token, real PAT through Handler(), real agent JWT through Handler(), visitor identity, federated identity, non-approver, revoked attach, and deleted container",
 		Pin:    "TestCommandRequestOutput_AuthzAndSharing",
 	},
+	{OperationID: "chat.commandrequest.frommessage", Method: "POST", Pattern: "/api/v1/command-requests/from-message"}: {
+		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestCommandRequests_FromMessage_EndToEnd enables the experiment and drives POST with a real session, real PAT/agent JWT/visitor/federated refusals, non-recipient, and non-addressed group participant",
+		Pin:    "TestCommandRequests_FromMessage_EndToEnd",
+	},
 	{OperationID: "chat.decision.answer", Method: "POST", Pattern: "/api/v1/decisions/{rowId}/answer"}: {
 		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
 		Pin:    "TestDecisionRoutes_TokenAndVisitorForbidden",

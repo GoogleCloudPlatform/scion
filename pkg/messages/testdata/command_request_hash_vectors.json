@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "name": "simple_default_workdir_and_timeout",
+      "script": "echo hello",
+      "workdir": "",
+      "timeout_s": 600,
+      "sha256": "43ee1df2432e2d0f5a247216500afa03710cdccb0e1577b1603a4eb1a373ee5a"
+    },
+    {
+      "name": "trailing_newline_differs_from_no_newline",
+      "script": "echo hello\n",
+      "workdir": "",
+      "timeout_s": 600,
+      "sha256": "89ad6204fc14f3e466b13c63f7f5ec3e54225b3539c9114040593fe16144fc15"
+    },
+    {
+      "name": "html_metacharacters_not_escaped",
+      "script": "echo a && echo b > /tmp/x < /dev/null\n",
+      "workdir": "",
+      "timeout_s": 600,
+      "sha256": "b95b369fea84b78786e0758c237f36dec3b6c1d3e286fb03fd6164b96111147c"
+    },
+    {
+      "name": "multiline_tabs_quotes_backslashes_explicit_workdir",
+      "script": "#!/usr/bin/env bash\nprintf \"a\\tb\\\\c\\n\"\n",
+      "workdir": "/home/scion/repo",
+      "timeout_s": 900,
+      "sha256": "e3c1ce579b2b26a44b0033aae9503ab15dea1ee7a5e520412f14b80e039a7d5c"
+    },
+    {
+      "name": "workspace_workdir_short_timeout",
+      "script": "git status --short",
+      "workdir": "/workspace",
+      "timeout_s": 1,
+      "sha256": "0f9d212928717174bbbc368efa92d3e8b9ff0e6c61ef3efbe25e430bd2d85014"
+    },
+    {
+      "name": "max_timeout_shared_dir",
+      "script": "ls -la /scion-volumes/scratchpad\n",
+      "workdir": "/scion-volumes/scratchpad",
+      "timeout_s": 3600,
+      "sha256": "799800c76e6e328203c7bee73b81fbe42bb3ba83b502e1dd9bea8fab5658d36a"
+    },
+    {
+      "name": "non_ascii_printable_unicode_and_emoji",
+      "script": "echo 'café 日本語 🚀'\n",
+      "workdir": "/tmp/dir-é",
+      "timeout_s": 60,
+      "sha256": "c27f9ab7aea9dfaf8b5a9c188ffca419d3695348edbc23344401361752b1f0ea"
+    },
+    {
+      "name": "line_and_paragraph_separators_escaped_like_go_json",
+      "script": "echo a b c\n",
+      "workdir": "",
+      "timeout_s": 600,
+      "sha256": "2ddeb6be8c828dce189877a0dd463d047ee25e932a46a7e1d8e658a6fc1807bf"
+    }
+  ]
+}

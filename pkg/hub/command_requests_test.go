@@ -860,3 +860,674 @@ func TestCommandRequestGet_MessageIDFallbackAndDetailEnrichment(t *testing.T) {
 	assert.Equal(t, send1.CommandRequest.RowID, detail2.PreviousVersionUnknown.RowID)
 	assert.Equal(t, approveResp.Run.RunID, detail2.PreviousVersionUnknown.RunID)
 }
+
+func TestCommandRequests_FromMessage_EndToEnd(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. 404 while hub.command_requests is off.
+	fOff := newCommandRequestsFixture(t, false)
+	rrOff := fOff.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", fOff.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     api.NewUUID(),
+		Script:        "echo hi\n",
+		CommandSHA256: messages.CommandRequestCanonicalHash("echo hi\n", "", messages.DefaultCommandRequestTimeoutS),
+	})
+	assert.Equal(t, http.StatusNotFound, rrOff.Code)
+
+	// 2. Experiment ON fixture.
+	f := newCommandRequestsFixture(t, true)
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", f.alice.ID)
+	require.NoError(t, err)
+
+	script := "gcloud config list\n"
+	hash := messages.CommandRequestCanonicalHash(script, "", messages.DefaultCommandRequestTimeoutS)
+
+	dmMsg := &store.Message{
+		ID:            api.NewUUID(),
+		ProjectID:     f.project.ID,
+		ThreadID:      dmKey,
+		Sender:        "agent:" + f.agent.Slug,
+		SenderID:      f.agent.ID,
+		Recipient:     "user:" + f.alice.Email,
+		RecipientID:   f.alice.ID,
+		Msg:           "Please run this:\n\n```sh\n" + script + "```\n",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, dmMsg))
+
+	// 3. Non-session callers (agent JWT, real PAT, visitor, federated) -> 403 + refused audit (R3).
+	assertFromMsgRefusedReason := func(t *testing.T, label, wantReason string) {
+		t.Helper()
+		for _, ev := range f.audit.snapshot() {
+			if ev.Kind == msgaction.KindCommandRequest && ev.EventType == MessageActionEventRefused && ev.Reason == wantReason {
+				return
+			}
+		}
+		t.Errorf("%s: expected refused audit event with reason %q, got %+v", label, wantReason, f.audit.snapshot())
+	}
+	fromMsgBody := messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	}
+
+	// 3a. Real agent JWT through Handler().
+	agentJWT, agentCred, err := f.srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   f.agent.ID,
+		ProjectID: f.project.ID,
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh},
+	}, "run-frommsg-r3")
+	require.NoError(t, err)
+	_, err = f.store.SetAgentRunID(ctx, f.agent.ID, "run-frommsg-r3", agentCred)
+	require.NoError(t, err)
+	f.audit.reset()
+	rrAgentJWT := f.doBearerJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", agentJWT, fromMsgBody)
+	assert.Equal(t, http.StatusForbidden, rrAgentJWT.Code, "agent JWT: %s", rrAgentJWT.Body.String())
+	assertFromMsgRefusedReason(t, "agent JWT from-message", ErrCodeUsersOnly)
+
+	// 3b. Real PAT through Handler().
+	patPresented := "scion_pat_cmdreq-frommsg-r3-token"
+	patHash := sha256.Sum256([]byte(patPresented))
+	patExpiry := time.Now().Add(time.Hour)
+	require.NoError(t, f.store.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID:        api.NewUUID(),
+		UserID:    f.alice.ID,
+		Name:      "cmdreq-frommsg-r3-pat",
+		Prefix:    "scion_pat_frm1",
+		KeyHash:   hex.EncodeToString(patHash[:]),
+		ProjectID: f.project.ID,
+		Scopes:    []string{"project:read", "agent:attach"},
+		ExpiresAt: &patExpiry,
+		Created:   time.Now(),
+	}))
+	f.audit.reset()
+	rrPAT := f.doBearerJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", patPresented, fromMsgBody)
+	assert.Equal(t, http.StatusForbidden, rrPAT.Code, "real PAT: %s", rrPAT.Body.String())
+	assertFromMsgRefusedReason(t, "real PAT from-message", "session_required")
+
+	// 3c. Visitor identity (mux + direct handler with visitor_refused audit).
+	visitorIdent := NewVisitorIdentity(api.NewUUID(), "https://issuer.cmdreq.test", "cmdreq-visitor-r3", "v@example.com", "Visitor")
+	visitorBytes, _ := json.Marshal(fromMsgBody)
+	visitorReqMux := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBytes))
+	visitorReqMux = visitorReqMux.WithContext(contextWithCredentialContext(
+		contextWithIdentity(visitorReqMux.Context(), visitorIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+	))
+	visitorReqMux.Header.Set("Content-Type", "application/json")
+	visitorRRMux := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(visitorRRMux, visitorReqMux)
+	assert.Equal(t, http.StatusForbidden, visitorRRMux.Code)
+
+	f.audit.reset()
+	visitorReqDirect := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBytes))
+	visitorReqDirect = visitorReqDirect.WithContext(contextWithCredentialContext(
+		contextWithIdentity(visitorReqDirect.Context(), visitorIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+	))
+	visitorReqDirect.Header.Set("Content-Type", "application/json")
+	visitorRRDirect := httptest.NewRecorder()
+	f.srv.handleCommandRequestRoutes(visitorRRDirect, visitorReqDirect)
+	assert.Equal(t, http.StatusForbidden, visitorRRDirect.Code)
+	assertFromMsgRefusedReason(t, "visitor from-message", "visitor_refused")
+
+	// 3d. Federated identity (403 + session_required audit).
+	fedIdent := NewFederatedUserIdentity("https://issuer.cmdreq.test", "cmdreq-fed-r3", f.alice.Email, "Fed Alice", store.UserRoleMember, nil)
+	f.audit.reset()
+	fedReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBytes))
+	fedReq = fedReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(fedReq.Context(), fedIdent),
+		CredentialContext{Kind: CredentialKindFederation, ID: fedIdent.ID()},
+	))
+	fedReq.Header.Set("Content-Type", "application/json")
+	fedRR := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(fedRR, fedReq)
+	assert.Equal(t, http.StatusForbidden, fedRR.Code)
+	assertFromMsgRefusedReason(t, "federated from-message", "session_required")
+
+	// 3e. Script validation 400 emits a refused audit event (O8).
+	badScript := "echo \u202ehi\n"
+	f.audit.reset()
+	rrBadScript := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        badScript,
+		CommandSHA256: messages.CommandRequestCanonicalHash(badScript, "", messages.DefaultCommandRequestTimeoutS),
+	})
+	assert.Equal(t, http.StatusBadRequest, rrBadScript.Code)
+	assertFromMsgRefusedReason(t, "script validation 400", ErrCodeValidationError)
+
+	// 4. Non-recipient (bob) on alice's DM -> 403 not_approver.
+	rrBob := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.bob, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrBob.Code)
+	assert.Contains(t, rrBob.Body.String(), msgaction.ConflictCmdNotApprover)
+
+	// 5. Edited bytes -> 422 markdown_block_not_found.
+	editedScript := "gcloud config list --all\n"
+	rrEdited := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        editedScript,
+		CommandSHA256: messages.CommandRequestCanonicalHash(editedScript, "", messages.DefaultCommandRequestTimeoutS),
+	})
+	assert.Equal(t, http.StatusUnprocessableEntity, rrEdited.Code)
+	assert.Contains(t, rrEdited.Body.String(), msgaction.ConflictCmdMarkdownBlock)
+
+	// 6. Hash mismatch -> 409 command_hash_mismatch.
+	rrBadHash := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        script,
+		CommandSHA256: strings.Repeat("0", 64),
+	})
+	assert.Equal(t, http.StatusConflict, rrBadHash.Code)
+	assert.Contains(t, rrBadHash.Body.String(), msgaction.ConflictCmdHashMismatch)
+
+	// 7. Human-authored message -> 422 markdown_block_not_found.
+	humanMsg := &store.Message{
+		ID:            api.NewUUID(),
+		ProjectID:     f.project.ID,
+		ThreadID:      dmKey,
+		Sender:        "user:" + f.alice.Email,
+		SenderID:      f.alice.ID,
+		Recipient:     "agent:" + f.agent.Slug,
+		RecipientID:   f.agent.ID,
+		Msg:           "```sh\n" + script + "```\n",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, humanMsg))
+	rrHuman := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     humanMsg.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusUnprocessableEntity, rrHuman.Code)
+	assert.Contains(t, rrHuman.Body.String(), msgaction.ConflictCmdMarkdownBlock)
+
+	// 8. no-execute block, nested quote, indented fence -> 422 markdown_block_not_found.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"no_execute", "```sh no-execute\n" + script + "```\n"},
+		{"nested_quote", "> ```sh\n> " + script + "> ```\n"},
+		{"indented_fence", "  ```sh\n  " + script + "  ```\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &store.Message{
+				ID:            api.NewUUID(),
+				ProjectID:     f.project.ID,
+				ThreadID:      dmKey,
+				Sender:        "agent:" + f.agent.Slug,
+				SenderID:      f.agent.ID,
+				Recipient:     "user:" + f.alice.Email,
+				RecipientID:   f.alice.ID,
+				Msg:           tc.body,
+				Type:          "instruction",
+				DispatchState: store.MessageDispatchDispatched,
+				CreatedAt:     time.Now().UTC(),
+			}
+			require.NoError(t, f.store.CreateMessage(ctx, m))
+			rr := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+				MessageID:     m.ID,
+				Script:        script,
+				CommandSHA256: hash,
+			})
+			assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+			assert.Contains(t, rr.Body.String(), msgaction.ConflictCmdMarkdownBlock)
+		})
+	}
+
+	// 9. Message older than 24 h -> 409 expired.
+	oldMsg := &store.Message{
+		ID:            api.NewUUID(),
+		ProjectID:     f.project.ID,
+		ThreadID:      dmKey,
+		Sender:        "agent:" + f.agent.Slug,
+		SenderID:      f.agent.ID,
+		Recipient:     "user:" + f.alice.Email,
+		RecipientID:   f.alice.ID,
+		Msg:           "```sh\n" + script + "```\n",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now().UTC().Add(-25 * time.Hour),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, oldMsg))
+	rrOld := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     oldMsg.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusConflict, rrOld.Code)
+	assert.Contains(t, rrOld.Body.String(), msgaction.ConflictExpired)
+
+	// 10. Structured command-request message -> 422 markdown_block_not_found.
+	cardMsg := &store.Message{
+		ID:            api.NewUUID(),
+		ProjectID:     f.project.ID,
+		ThreadID:      dmKey,
+		Sender:        "agent:" + f.agent.Slug,
+		SenderID:      f.agent.ID,
+		Recipient:     "user:" + f.alice.Email,
+		RecipientID:   f.alice.ID,
+		Msg:           "```sh\n" + script + "```\n",
+		Type:          messages.TypeCommandRequest,
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, cardMsg))
+	rrCard := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     cardMsg.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusUnprocessableEntity, rrCard.Code)
+
+	// 11. Unconfigured exec container -> 409 exec_container_unconfigured.
+	rrUnconf := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusConflict, rrUnconf.Code)
+	assert.Contains(t, rrUnconf.Body.String(), msgaction.ConflictCmdExecUnconfigured)
+
+	// Configure alice's execution container (ready).
+	_, err = f.store.PutUserExecContainer(ctx, f.alice.ID, f.execAgent.ID)
+	require.NoError(t, err)
+
+	// 12. Happy path DM Execute -> 202 Accepted, v1 approved, surface=markdown_block, run queued.
+	rrOK := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:      dmMsg.ID,
+		Script:         script,
+		CommandSHA256:  hash,
+		IdempotencyKey: "idem-p6-1",
+	})
+	require.Equal(t, http.StatusAccepted, rrOK.Code, rrOK.Body.String())
+	var okResp messages.ApproveCommandRequestResponse
+	require.NoError(t, json.Unmarshal(rrOK.Body.Bytes(), &okResp))
+	assert.Equal(t, messages.MarkdownCommandRequestKey(dmMsg.ID, hash), okResp.Request.Key)
+	assert.Equal(t, 1, okResp.Request.Version)
+	assert.Equal(t, store.CommandRequestStatusApproved, okResp.Request.Status)
+	require.NotNil(t, okResp.Request.Approved)
+	assert.Equal(t, msgaction.CommandRequestSurfaceMarkdownBlock, okResp.Request.Approved.Surface)
+	assert.False(t, okResp.Request.ShareOutputRequested)
+	assert.Equal(t, store.CommandRunStatusQueued, okResp.Run.Status)
+	launchedCount := func() int {
+		f.launchMu.Lock()
+		defer f.launchMu.Unlock()
+		return len(f.launched)
+	}
+
+	assert.Equal(t, 1, launchedCount())
+
+	// 13. Same idempotency_key -> 200 replayed, no second launch.
+	rrReplay := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:      dmMsg.ID,
+		Script:         script,
+		CommandSHA256:  hash,
+		IdempotencyKey: "idem-p6-1",
+	})
+	require.Equal(t, http.StatusOK, rrReplay.Code)
+	assert.Equal(t, 1, launchedCount())
+
+	// 14. Second Execute (different idempotency_key) -> 409 already_resolved with existing run.
+	rrDup := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:      dmMsg.ID,
+		Script:         script,
+		CommandSHA256:  hash,
+		IdempotencyKey: "idem-p6-2",
+	})
+	require.Equal(t, http.StatusConflict, rrDup.Code)
+	assert.Contains(t, rrDup.Body.String(), msgaction.ConflictAlreadyResolved)
+	assert.Contains(t, rrDup.Body.String(), okResp.Run.RunID)
+	assert.Equal(t, 1, launchedCount())
+
+	// 15. Group conversation: unaddressed -> 403; multi-human @-mention -> 403; single human @-mention -> 202.
+	grantProjectAccessOnly(t, f.store, f.bob.ID, f.project.ID)
+	groupProjID := f.project.ID
+	groupConv := &store.Conversation{
+		ID:         api.NewUUID(),
+		ProjectID:  &groupProjID,
+		Kind:       "group",
+		Surface:    "native",
+		DriftState: "active",
+	}
+	require.NoError(t, f.store.CreateConversation(ctx, groupConv))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: groupConv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    f.alice.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: groupConv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    f.bob.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: groupConv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    f.agent.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+
+	groupUnaddressed := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "Anyone can run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupUnaddressed))
+	rrGrpNone := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupUnaddressed.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpNone.Code)
+
+	groupBoth := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice@example.com @bob@example.com please check:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupBoth))
+	rrGrpBoth := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupBoth.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpBoth.Code)
+
+	groupAliceOnly := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice@example.com please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupAliceOnly))
+	// Bob is not the addressed human -> 403.
+	rrGrpBob := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.bob, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupAliceOnly.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpBob.Code)
+	// Alice is the single addressed human -> 202.
+	rrGrpAlice := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupAliceOnly.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusAccepted, rrGrpAlice.Code, rrGrpAlice.Body.String())
+
+	// 16. R2: canonical mention resolution — email local part, display name,
+	// 2-human refusal when 2nd human is mentioned by local part only, unknown
+	// email fail-closed, and ambiguous local part refusal.
+	groupLocalPartBoth := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice @bob please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupLocalPartBoth))
+	rrGrpLocalBoth := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupLocalPartBoth.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpLocalBoth.Code, "R2: 2-human mention via email local parts must refuse")
+
+	groupUnknownEmail := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice@example.com @stranger@other.org please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupUnknownEmail))
+	rrGrpUnknown := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupUnknownEmail.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpUnknown.Code, "R2: unrecognized email mention must fail closed")
+
+	groupLocalPartAliceOnly := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupLocalPartAliceOnly))
+	rrGrpLocalAlice := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupLocalPartAliceOnly.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusAccepted, rrGrpLocalAlice.Code, rrGrpLocalAlice.Body.String())
+
+	// Ambiguous email local part: second user with same local part ("alice@other.example").
+	alice2 := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "alice@other.example",
+		DisplayName: "Alice Two",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, f.store.CreateUser(ctx, alice2))
+	grantProjectAccessOnly(t, f.store, alice2.ID, f.project.ID)
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: groupConv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    alice2.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	groupAmbiguous := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupAmbiguous))
+	rrGrpAmbiguous := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupAmbiguous.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpAmbiguous.Code, "R2/V1: ambiguous @alice local-part mention must refuse alice1")
+	rrGrpAmbiguous2 := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", alice2, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupAmbiguous.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpAmbiguous2.Code, "R2/V1: ambiguous @alice local-part mention must refuse alice2")
+
+	// 17. L1: Non-chat and hub-composed message types (notification, state-change,
+	// input-needed, decision-prompt, secret-request, command-request) must be refused
+	// with 422 command_markdown_block_not_executable + refused audit.
+	for _, disallowedType := range []string{
+		"notification",
+		messages.TypeStateChange,
+		messages.TypeInputNeeded,
+		messages.TypeDecisionPrompt,
+		messages.TypeSecretRequest,
+		messages.TypeCommandRequest,
+	} {
+		nonChatMsg := &store.Message{
+			ID:            api.NewUUID(),
+			ProjectID:     f.project.ID,
+			ThreadID:      dmKey,
+			Sender:        "agent:" + f.agent.Slug,
+			SenderID:      f.agent.ID,
+			Recipient:     "user:" + f.alice.Email,
+			RecipientID:   f.alice.ID,
+			Msg:           "```sh\n" + script + "```\n",
+			Type:          disallowedType,
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now().UTC(),
+		}
+		require.NoError(t, f.store.CreateMessage(ctx, nonChatMsg))
+		f.audit.reset()
+		rrNonChat := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+			MessageID:     nonChatMsg.ID,
+			Script:        script,
+			CommandSHA256: hash,
+		})
+		assert.Equal(t, http.StatusUnprocessableEntity, rrNonChat.Code, "L1: type %q must be refused", disallowedType)
+		assert.Contains(t, rrNonChat.Body.String(), msgaction.ConflictCmdMarkdownBlock)
+		assertFromMsgRefusedReason(t, "L1 disallowed type "+disallowedType, msgaction.ConflictCmdMarkdownBlock)
+	}
+
+	// 18. I1: Cross-site (CSRF) browser POST to /from-message is refused with 403,
+	// and non-JSON browser POST with Origin is refused with 415.
+	csrfPayload, err := json.Marshal(fromMsgBody)
+	require.NoError(t, err)
+	aliceIdent := NewAuthenticatedUser(f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, "web")
+	aliceSessionCtx := func(base context.Context) context.Context {
+		return contextWithCredentialContext(
+			contextWithIdentity(base, aliceIdent),
+			CredentialContext{Kind: CredentialKindInteractive, ID: f.alice.ID},
+		)
+	}
+	csrfReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(csrfPayload))
+	csrfReq = csrfReq.WithContext(aliceSessionCtx(csrfReq.Context()))
+	csrfReq.Header.Set("Content-Type", "application/json")
+	csrfReq.Header.Set("Origin", "https://evil.example")
+	csrfReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	rrCSRF := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rrCSRF, csrfReq)
+	assert.Equal(t, http.StatusForbidden, rrCSRF.Code, "I1: cross-site POST to from-message must be refused")
+
+	nonJSONReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(csrfPayload))
+	nonJSONReq = nonJSONReq.WithContext(aliceSessionCtx(nonJSONReq.Context()))
+	nonJSONReq.Header.Set("Content-Type", "text/plain")
+	nonJSONReq.Header.Set("Origin", "http://example.com")
+	rrNonJSON := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rrNonJSON, nonJSONReq)
+	assert.Equal(t, http.StatusUnsupportedMediaType, rrNonJSON.Code, "I1: non-JSON browser POST to from-message must be refused with 415")
+}
+
+func TestCommandRequests_FromMessage_ConcurrentExecOnce(t *testing.T) {
+	ctx := context.Background()
+	f := newCommandRequestsFixture(t, true)
+	_, err := f.store.PutUserExecContainer(ctx, f.alice.ID, f.execAgent.ID)
+	require.NoError(t, err)
+
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", f.alice.ID)
+	require.NoError(t, err)
+
+	script := "echo concurrent-once\n"
+	hash := messages.CommandRequestCanonicalHash(script, "", messages.DefaultCommandRequestTimeoutS)
+	dmMsg := &store.Message{
+		ID:            api.NewUUID(),
+		ProjectID:     f.project.ID,
+		ThreadID:      dmKey,
+		Sender:        "agent:" + f.agent.Slug,
+		SenderID:      f.agent.ID,
+		Recipient:     "user:" + f.alice.Email,
+		RecipientID:   f.alice.ID,
+		Msg:           "```bash\n" + script + "```\n",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, dmMsg))
+
+	const workers = 4
+	codes := make([]int, workers)
+	bodies := make([]string, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			rr := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+				MessageID:      dmMsg.ID,
+				Script:         script,
+				CommandSHA256:  hash,
+				IdempotencyKey: "conc-" + api.NewUUID(),
+			})
+			codes[idx] = rr.Code
+			bodies[idx] = rr.Body.String()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	accepted := 0
+	conflicts := 0
+	for i, c := range codes {
+		switch c {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusConflict:
+			conflicts++
+			assert.Contains(t, bodies[i], msgaction.ConflictAlreadyResolved)
+		default:
+			t.Fatalf("worker %d unexpected status %d: %s", i, c, bodies[i])
+		}
+	}
+	assert.Equal(t, 1, accepted, "exactly one concurrent Execute must win")
+	assert.Equal(t, workers-1, conflicts, "all losing concurrent Executes must get 409 already_resolved")
+	f.launchMu.Lock()
+	gotLaunched := len(f.launched)
+	f.launchMu.Unlock()
+	assert.Equal(t, 1, gotLaunched, "executor must be launched exactly once")
+}

@@ -89,9 +89,15 @@ import {
 import type { ChatMessageFilter } from '../../../client/chat-routes.js';
 import {
   CHAT_RETENTION_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  commandRequestsEnabled,
   decisionsEnabled,
   isFeatureEnabled,
 } from '../../../utils/feature-flags.js';
+import {
+  fetchCurrentUserExecContainer,
+  type CommandRequestExecContainerView,
+} from '../../../client/command-requests.js';
 import {
   ARTIFACTS_FLAG,
   ARTIFACTS_METADATA_KEY,
@@ -1928,8 +1934,34 @@ export class ScionChatThread extends LitElement {
     `,
   ];
 
+  @state()
+  private currentUserExecContainer: CommandRequestExecContainerView | null = null;
+
+  private _execContainerAbort: AbortController | null = null;
+  private _execContainerLoaded = false;
+
+  private readonly _onExecContainerFlagsChanged = (): void => {
+    if (commandRequestsEnabled() && !this._execContainerLoaded) {
+      this.loadCurrentUserExecContainer();
+    }
+  };
+
+  private loadCurrentUserExecContainer(): void {
+    if (!commandRequestsEnabled() || this._execContainerLoaded) return;
+    this._execContainerLoaded = true;
+    this._execContainerAbort?.abort();
+    const controller = new AbortController();
+    this._execContainerAbort = controller;
+    void fetchCurrentUserExecContainer({ signal: controller.signal }).then((ec) => {
+      if (controller.signal.aborted || !this.isConnected) return;
+      this.currentUserExecContainer = ec;
+    });
+  }
+
   /** Auto-trigger loadHistory when the component first renders in v2 mode. */
   override firstUpdated(): void {
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this._onExecContainerFlagsChanged);
+    this.loadCurrentUserExecContainer();
     if (this.isV2) {
       this.loadHistory();
     }
@@ -2151,6 +2183,10 @@ export class ScionChatThread extends LitElement {
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
     this.cancelArtifactRefresh();
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this._onExecContainerFlagsChanged);
+    this._execContainerAbort?.abort();
+    this._execContainerAbort = null;
+    this._execContainerLoaded = false;
     this._eventBackfill.cancel();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
@@ -8015,6 +8051,11 @@ export class ScionChatThread extends LitElement {
             .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
             .canPublishArtifacts=${this.canPublishArtifacts}
             .currentUserId=${this.currentUserId}
+            ?isDirectConversation=${this.isDM || this.conversationKey.startsWith('dm:')}
+            recipient=${msg.recipient || ''}
+            recipientId=${msg.recipientId || ''}
+            .members=${this.members}
+            .execContainer=${this.currentUserExecContainer}
             .knownUsersByEmail=${this._knownUsersByEmail}
             .knownMentionSlugs=${this._knownMentionSlugs}
             routedTo=${msgRoutedTo}

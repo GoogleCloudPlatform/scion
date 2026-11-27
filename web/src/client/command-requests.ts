@@ -46,8 +46,14 @@ export type CommandRunStatus =
 /** Working directory classification mirroring `messages.CommandWorkdirKind`. */
 export type CommandWorkdirKind = 'home' | 'workspace' | 'shared_dir' | 'explicit';
 
-/** Responder surface recorded on approve and dismiss requests. */
-export type CommandRequestSurface = 'native' | 'standalone_page' | 'cli';
+/** Responder surface recorded on approve, dismiss, and markdown-block requests. */
+export type CommandRequestSurface = 'native' | 'standalone_page' | 'cli' | 'markdown_block';
+
+/** Canonical hash constants mirroring `pkg/messages/command_requests.go` (§4.4). */
+export const COMMAND_REQUEST_HASH_PREFIX = 'scion.command_request.v1\n';
+export const COMMAND_REQUEST_INTERPRETER_BASH_LOGIN = 'bash-login';
+export const MAX_COMMAND_REQUEST_SCRIPT_BYTES = 4096;
+export const DEFAULT_COMMAND_REQUEST_TIMEOUT_S = 600;
 
 /** Execution container states returned in `exec_container`. */
 export type ExecContainerState =
@@ -171,7 +177,7 @@ export interface CommandRequestUpdatedEvent {
   projectId?: string;
 }
 
-/** Structured conflict or validation details returned on HTTP 400/409. */
+/** Structured conflict or validation details returned on HTTP 400/409/422. */
 export interface CommandRequestConflictDetails {
   status?: string;
   field?: string;
@@ -179,6 +185,8 @@ export interface CommandRequestConflictDetails {
   version?: number;
   rowId?: string;
   messageId?: string;
+  request?: CommandRequestView;
+  run?: CommandRequestRunView;
 }
 
 /** Outcome of `GET /api/v1/command-requests/{id}`. */
@@ -558,6 +566,8 @@ export function mapCommandRequestConflictMessage(
       return 'This command request has expired and can no longer be approved.';
     case 'already_resolved':
       return 'This command request has already been approved.';
+    case 'markdown_block_not_found':
+      return 'Ask the agent to send this as a command request.';
     default: {
       if (details?.status === 'replaced') {
         return 'This command request was replaced by a newer version.';
@@ -768,5 +778,207 @@ export async function fetchCommandRequestOutput(
       code: 'network_error',
       message: 'Could not reach the server. Please try again.',
     };
+  }
+}
+
+/**
+ * Computes the canonical SHA-256 hex digest of a command request payload
+ * (§4.4), matching Go's `messages.CommandRequestCanonicalHash` byte-for-byte.
+ *
+ * Verified against Go-generated fixtures in
+ * `pkg/messages/testdata/command_request_hash_vectors.json`.
+ */
+export async function computeCommandRequestCanonicalHash(
+  script: string,
+  workdir: string,
+  timeoutS: number
+): Promise<string> {
+  // Property insertion order matches Go's `canonicalCommandPayload` struct
+  // field order: interpreter, script, timeout_s, workdir. JSON.stringify does
+  // not HTML-escape `<`, `>`, `&` (matching Go's `SetEscapeHTML(false)`).
+  // Escape U+2028/U+2029 as `\u2028`/`\u2029` to match Go's encoding/json.
+  const json = JSON.stringify({
+    interpreter: COMMAND_REQUEST_INTERPRETER_BASH_LOGIN,
+    script,
+    timeout_s: timeoutS,
+    workdir,
+  })
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  const bytes = new TextEncoder().encode(COMMAND_REQUEST_HASH_PREFIX + json);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function isBidiControlCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x202a && cp <= 0x202e) ||
+    (cp >= 0x2066 && cp <= 0x2069) ||
+    cp === 0x200e ||
+    cp === 0x200f ||
+    cp === 0x061c
+  );
+}
+
+const INVISIBLE_OR_NON_ASCII_WS_RE = /[\p{Cf}\p{Zl}\p{Zp}\p{Zs}\p{Default_Ignorable_Code_Point}]/u;
+
+function isInvisibleOrNonASCIIWhitespaceCodePoint(ch: string, cp: number): boolean {
+  if (cp <= 0x7e) return false;
+  if (
+    cp === 0x115f ||
+    cp === 0x1160 ||
+    cp === 0x3164 ||
+    cp === 0xffa0 ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xe0100 && cp <= 0xe01ef) ||
+    (cp >= 0x180b && cp <= 0x180f) ||
+    cp === 0x2800
+  ) {
+    return true;
+  }
+  return INVISIBLE_OR_NON_ASCII_WS_RE.test(ch);
+}
+
+/**
+ * Validates a command script against the §4.5 content rules for presentation
+ * (e.g. disabling the Markdown Execute button with a tooltip reason). The Hub
+ * enforces the authoritative check server-side.
+ *
+ * Returns `null` when valid, or a short user-facing reason when invalid.
+ */
+export function validateCommandRequestScript(script: string): string | null {
+  if (script.length === 0) {
+    return 'Script is empty.';
+  }
+  const byteLength = new TextEncoder().encode(script).length;
+  if (byteLength > MAX_COMMAND_REQUEST_SCRIPT_BYTES) {
+    return `Script is ${byteLength} bytes; the limit is ${MAX_COMMAND_REQUEST_SCRIPT_BYTES} bytes.`;
+  }
+  for (const ch of script) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp === 0) {
+      return 'Script contains a NUL byte.';
+    }
+    if (cp < 0x20 && cp !== 0x0a && cp !== 0x09) {
+      const hex = cp.toString(16).toUpperCase().padStart(4, '0');
+      return `Script contains control character U+${hex}.`;
+    }
+    if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) {
+      const hex = cp.toString(16).toUpperCase().padStart(4, '0');
+      return `Script contains control character U+${hex}.`;
+    }
+    if (isBidiControlCodePoint(cp)) {
+      const hex = cp.toString(16).toUpperCase().padStart(4, '0');
+      return `Script contains bidirectional control character U+${hex}.`;
+    }
+    if (isInvisibleOrNonASCIIWhitespaceCodePoint(ch, cp)) {
+      const hex = cp.toString(16).toUpperCase().padStart(4, '0');
+      return `Script contains invisible or non-ASCII whitespace character U+${hex}.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Creates and approves a v1 command request from a verbatim fenced shell block
+ * in an agent message (`POST /api/v1/command-requests/from-message`, §4.14).
+ */
+export async function createCommandRequestFromMessage(body: {
+  message_id: string;
+  script: string;
+  command_sha256: string;
+  share_output: boolean;
+  idempotency_key: string;
+}): Promise<ApproveCommandRequestResult> {
+  try {
+    const res = await apiFetch('/api/v1/command-requests/from-message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      suppressAccessDeniedToast: true,
+    });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        request: CommandRequestView;
+        run: CommandRequestRunView;
+        replayed?: boolean;
+      };
+      return {
+        ok: true,
+        request: data.request,
+        run: data.run,
+        replayed: Boolean(data.replayed),
+      };
+    }
+    const err = await parseErrorResponse(res, `Failed to execute command block (${res.status})`);
+    return {
+      ok: false,
+      status: res.status,
+      code: err.code,
+      message: err.message,
+      ...(err.details !== undefined ? { details: err.details } : {}),
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 0,
+      code: 'network_error',
+      message: 'Could not reach the server. Please try again.',
+    };
+  }
+}
+
+interface RawUserExecContainerResponse {
+  configured?: boolean;
+  state?: string;
+  reason?: string;
+  agent?: {
+    id?: string;
+    slug?: string;
+    name?: string;
+    projectId?: string;
+    projectName?: string;
+    homePersistent?: boolean | null;
+  };
+}
+
+/**
+ * Fetches the signed-in user's execution container state from
+ * `GET /api/v1/users/me/exec-container` and normalizes it into a
+ * `CommandRequestExecContainerView` for Markdown Execute eligibility and
+ * confirmation dialogs. Returns `null` when unavailable (e.g. experiment off
+ * or network failure).
+ */
+export async function fetchCurrentUserExecContainer(opts?: {
+  signal?: AbortSignal;
+}): Promise<CommandRequestExecContainerView | null> {
+  try {
+    const res = await apiFetch('/api/v1/users/me/exec-container', {
+      method: 'GET',
+      suppressAccessDeniedToast: true,
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as RawUserExecContainerResponse;
+    if (!data.configured) {
+      return { state: 'unconfigured' };
+    }
+    const state = data.state || 'unavailable';
+    const agent = data.agent;
+    return {
+      state,
+      ...(agent?.id ? { agentId: agent.id } : {}),
+      ...(agent?.name || agent?.slug ? { agentName: agent.name || agent.slug } : {}),
+      ...(agent?.projectId ? { projectId: agent.projectId } : {}),
+      ...(agent?.projectName ? { projectName: agent.projectName } : {}),
+      ...(agent?.homePersistent !== undefined ? { homePersistent: agent.homePersistent } : {}),
+      // Suspended containers default to wakeable in presentation when the
+      // exec-container summary does not carry a per-agent canWake boolean;
+      // the Hub enforces lifecycle permission on POST from-message.
+      ...(state === 'suspended' ? { canWake: true } : {}),
+      ...(data.reason ? { reason: data.reason } : {}),
+    };
+  } catch {
+    return null;
   }
 }

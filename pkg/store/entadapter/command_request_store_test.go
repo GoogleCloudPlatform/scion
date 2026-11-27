@@ -720,3 +720,102 @@ func TestCommandRequestStore_GetAndPurgeActionRunOutputs(t *testing.T) {
 		t.Fatalf("scheduled_exec output must remain untouched, got (%+v, %v)", schedRow, err)
 	}
 }
+
+func TestCommandRequestStore_CreateAndApproveMarkdownCommandRequest(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	projectID := uuid.New().String()
+	agentID := uuid.New().String()
+	msgID := uuid.New().String()
+	execAgentID := uuid.New().String()
+	execProjectID := uuid.New().String()
+	script := "gcloud config list\n"
+	hash := messages.CommandRequestCanonicalHash(script, "", messages.DefaultCommandRequestTimeoutS)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	in := &store.CreateMarkdownCommandRequestInput{
+		ProjectID:      projectID,
+		AgentID:        agentID,
+		AgentName:      "dev-agent",
+		MessageID:      msgID,
+		ChatKey:        "dm:agent:" + agentID + ":user:user-alice",
+		Script:         script,
+		CommandSHA256:  hash,
+		UserID:         "user-alice",
+		UserName:       "Alice",
+		UserEmail:      "alice@example.com",
+		IdempotencyKey: "idem-md-1",
+		ExecAgentID:    execAgentID,
+		ExecProjectID:  execProjectID,
+		ShareOutput:    false,
+		LeaseUntil:     now.Add(6 * time.Minute),
+		Now:            now,
+	}
+
+	// First call creates v1 approved row + queued run in one tx.
+	res1, err := cs.CreateAndApproveMarkdownCommandRequest(ctx, in)
+	if err != nil {
+		t.Fatalf("CreateAndApproveMarkdownCommandRequest 1: %v", err)
+	}
+	if res1.Replayed || res1.Conflict != nil {
+		t.Fatalf("expected fresh create, got replayed=%v conflict=%v", res1.Replayed, res1.Conflict)
+	}
+	if res1.Request == nil || res1.Run == nil {
+		t.Fatalf("expected request and run, got %+v", res1)
+	}
+	wantKey := messages.MarkdownCommandRequestKey(msgID, hash)
+	if res1.Request.Key != wantKey || res1.Request.Version != 1 {
+		t.Fatalf("key/version = %q/v%d, want %q/v1", res1.Request.Key, res1.Request.Version, wantKey)
+	}
+	if res1.Request.Status != store.CommandRequestStatusApproved {
+		t.Fatalf("status = %q, want approved", res1.Request.Status)
+	}
+	if res1.Request.Surface != msgaction.CommandRequestSurfaceMarkdownBlock {
+		t.Fatalf("surface = %q, want markdown_block", res1.Request.Surface)
+	}
+	if res1.Request.ShareOutputRequested {
+		t.Fatalf("share_output_requested = true, want false")
+	}
+	if res1.Run.RequestID != res1.Request.ID || res1.Run.Status != store.CommandRunStatusQueued {
+		t.Fatalf("run = %+v, want queued run for %s", res1.Run, res1.Request.ID)
+	}
+
+	// Same user + same idempotency key replays cleanly.
+	replay, err := cs.CreateAndApproveMarkdownCommandRequest(ctx, in)
+	if err != nil {
+		t.Fatalf("CreateAndApproveMarkdownCommandRequest replay: %v", err)
+	}
+	if !replay.Replayed || replay.Request.ID != res1.Request.ID || replay.Run.ID != res1.Run.ID {
+		t.Fatalf("expected idempotent replay of %s/%s, got %+v", res1.Request.ID, res1.Run.ID, replay)
+	}
+
+	// Second click (different idempotency key) -> already_resolved conflict with existing run; never v2.
+	in2 := *in
+	in2.IdempotencyKey = "idem-md-2"
+	dup, err := cs.CreateAndApproveMarkdownCommandRequest(ctx, &in2)
+	if err != nil {
+		t.Fatalf("CreateAndApproveMarkdownCommandRequest dup: %v", err)
+	}
+	if dup.Conflict == nil || dup.ConflictCode != msgaction.ConflictAlreadyResolved {
+		t.Fatalf("expected already_resolved conflict, got %+v", dup)
+	}
+	if dup.Conflict.ID != res1.Request.ID {
+		t.Fatalf("conflict row = %s, want %s", dup.Conflict.ID, res1.Request.ID)
+	}
+	if dup.ConflictRun == nil || dup.ConflictRun.ID != res1.Run.ID {
+		t.Fatalf("conflict run = %+v, want %s", dup.ConflictRun, res1.Run.ID)
+	}
+
+	// ListAgentCommandRequests must still have only 1 row (v1, never v2).
+	listed, err := cs.ListAgentCommandRequests(ctx, &store.ListAgentCommandRequestsOptions{
+		AgentID: agentID,
+		Key:     wantKey,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentCommandRequests: %v", err)
+	}
+	if len(listed.Items) != 1 {
+		t.Fatalf("listed count = %d, want 1", len(listed.Items))
+	}
+}
