@@ -176,6 +176,16 @@ type ResolveOpts struct {
 	// value is read. A secret it rejects is skipped, so a lower-scope secret
 	// with the same key stays in effect. If nil, no such check is made.
 	UserScopeCheck func(secret SecretMeta) bool
+
+	// DropReservedFileTargets, when true (hosted mode), skips non-hub-scope
+	// file secrets whose target resolves to a hub-only reserved file path
+	// (IsReservedFileTarget) before value lookup, merging, and target
+	// deduplication, so a pre-existing non-hub row can neither be delivered
+	// nor shadow/displace the hub-scope scion-telemetry-gcp-credentials secret.
+	// If OnReservedFileTargetSkipped is non-nil, it is called for each skipped
+	// secret metadata record.
+	DropReservedFileTargets     bool
+	OnReservedFileTargetSkipped func(secret SecretMeta)
 }
 
 // ErrValueAccess matches (errors.Is) an error for a value the backend's

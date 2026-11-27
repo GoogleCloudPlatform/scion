@@ -603,6 +603,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 	if rejectSystemOneReservedSecretWrite(w, key) {
 		return
 	}
+	if req.Secret && !s.validateReservedTelemetrySecret(w, scope, key, store.SecretTypeEnvironment, key) {
+		return
+	}
 
 	// allowProgeny is only valid on user-scoped env vars/secrets.
 	// Plain env vars additionally require injection_mode=always;
@@ -1223,6 +1226,38 @@ func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) b
 	return false
 }
 
+// validateReservedTelemetrySecret rejects a non-hub-scope secret in hosted
+// mode (!s.config.Workstation) when either:
+//   - its key is the reserved telemetry credential name
+//     (scion-telemetry-gcp-credentials), of any type (including on_demand); or
+//   - it is a file-type secret whose normalized target resolves
+//     case-insensitively to .scion/telemetry-gcp-credentials.json.
+//
+// In workstation mode the user is the operator, so non-hub secrets are
+// unchanged. On rejection it writes HTTP 400 with error code reserved_target
+// and returns false.
+func (s *Server) validateReservedTelemetrySecret(w http.ResponseWriter, scope, key, secretType, target string) bool {
+	if s.config.Workstation {
+		return true
+	}
+	if !secret.IsReservedNonHubSecret(scope, key, secretType, target) {
+		return true
+	}
+	field := "target"
+	value := target
+	msg := "target path is reserved for hub-scoped telemetry credentials in hosted mode"
+	if secret.IsReservedTelemetryCredentialSecretName(key) {
+		field = "key"
+		value = key
+		msg = "secret name scion-telemetry-gcp-credentials is reserved for hub-scoped telemetry credentials in hosted mode"
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeReservedTarget, msg, map[string]interface{}{
+		"field": field,
+		"value": value,
+	})
+	return false
+}
+
 const retiredVariableSecretTypeMessage = "type \"variable\" was removed; use \"on_demand\" instead"
 
 // validateSecretTypeInput validates a non-empty secret type supplied to a
@@ -1360,6 +1395,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	if !validateEnvSecretTarget(w, secretType, target) {
+		return
+	}
+	if !s.validateReservedTelemetrySecret(w, scope, key, secretType, target) {
 		return
 	}
 
@@ -1565,6 +1603,9 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if !validateEnvSecretTarget(w, effectiveType, effectiveTarget) {
+		return
+	}
+	if !s.validateReservedTelemetrySecret(w, scope, key, effectiveType, effectiveTarget) {
 		return
 	}
 
@@ -1942,6 +1983,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 	} else {
 		if !validateEnvSecretTarget(w, secretType, target) {
+			return
+		}
+		if !s.validateReservedTelemetrySecret(w, scope, key, secretType, target) {
 			return
 		}
 
@@ -2636,6 +2680,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		if rejectSystemOneReservedSecretWrite(w, key) {
 			return
 		}
+		if req.Secret && !s.validateReservedTelemetrySecret(w, scope, key, store.SecretTypeEnvironment, key) {
+			return
+		}
 
 		var createdBy string
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -2982,6 +3029,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if !validateEnvSecretTarget(w, secretType, target) {
+			return
+		}
+		if !s.validateReservedTelemetrySecret(w, scope, key, secretType, target) {
 			return
 		}
 		if secretType == store.SecretTypeFile {

@@ -285,6 +285,22 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].target", i), "key": in.Key, "value": target},
 			}
 		}
+		if !s.config.Workstation && secret.IsReservedNonHubSecret(store.ScopeAgent, in.Key, secretType, target) {
+			field := fmt.Sprintf("secrets[%d].target", i)
+			val := target
+			msg := "target path is reserved for hub-scoped telemetry credentials in hosted mode"
+			if secret.IsReservedTelemetryCredentialSecretName(in.Key) {
+				field = fmt.Sprintf("secrets[%d].key", i)
+				val = in.Key
+				msg = "secret name scion-telemetry-gcp-credentials is reserved for hub-scoped telemetry credentials in hosted mode"
+			}
+			return nil, &secretValidationError{
+				status:  http.StatusBadRequest,
+				code:    ErrCodeReservedTarget,
+				message: msg,
+				details: map[string]interface{}{"field": field, "key": in.Key, "value": val},
+			}
+		}
 		if secretType == store.SecretTypeFile {
 			if strings.Contains(target, "..") {
 				return nil, &secretValidationError{

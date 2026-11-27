@@ -252,6 +252,19 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if sc.scope == store.ScopeHub && !hubRowDeliverable(&s) {
 				continue
 			}
+			// Hosted-mode reserved non-hub secrets (name scion-telemetry-gcp-credentials
+			// of any type, or file secrets targeting .scion/telemetry-gcp-credentials.json)
+			// must be dropped BEFORE non-deliverable shadow recording and merging so an
+			// existing non-hub row (including on_demand) can neither displace nor shadow
+			// the hub-scoped telemetry credential.
+			if opts != nil && opts.DropReservedFileTargets && IsReservedNonHubSecret(sc.scope, s.Key, s.SecretType, s.Target) {
+				if sc.scope != store.ScopeUser || opts.UserScopeCheck == nil || opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
+					if opts.OnReservedFileTargetSkipped != nil {
+						opts.OnReservedFileTargetSkipped(*fromStoreSecretMeta(&s))
+					}
+				}
+				continue
+			}
 			// Non-deliverable, non-internal rows (e.g. on_demand) are never
 			// fetched and shadow lower-precedence candidates matching by name
 			// or effective env target.
@@ -363,6 +376,12 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			// the caller must supply an explicit policy decision before any
 			// progeny value is read.
 			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
+				continue
+			}
+			if opts.DropReservedFileTargets && IsReservedNonHubSecret(s.Scope, s.Key, s.SecretType, s.Target) {
+				if opts.OnReservedFileTargetSkipped != nil {
+					opts.OnReservedFileTargetSkipped(*meta)
+				}
 				continue
 			}
 

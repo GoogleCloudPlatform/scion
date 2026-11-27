@@ -320,7 +320,7 @@ func hasTelemetryGCPCredentials(env map[string]string, secrets []ResolvedSecret)
 		return true
 	}
 	for _, s := range secrets {
-		if s.Name == telemetryGCPCredentialsSecretName && s.Type == store.SecretTypeFile {
+		if s.Name == telemetryGCPCredentialsSecretName && s.Type == store.SecretTypeFile && s.Source == store.ScopeHub {
 			return true
 		}
 	}

@@ -95,6 +95,7 @@ func TestPrepareContainerSecretEnv(t *testing.T) {
 				Type:   "file",
 				Target: "~/.config/gcp/sa.json",
 				Value:  "credentials",
+				Source: "hub",
 			},
 		},
 	}
@@ -381,8 +382,8 @@ func TestExpandTildeTarget(t *testing.T) {
 
 func TestFindGCPTelemetryCredentialPath_Present(t *testing.T) {
 	secrets := []api.ResolvedSecret{
-		{Name: "other-secret", Type: "file", Target: "/etc/other", Value: "data"},
-		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "/etc/gcp/sa.json", Value: "key-data"},
+		{Name: "other-secret", Type: "file", Target: "/etc/other", Value: "data", Source: "project"},
+		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "/etc/gcp/sa.json", Value: "key-data", Source: "hub"},
 	}
 
 	got := findGCPTelemetryCredentialPath(secrets, "/home/scion")
@@ -394,7 +395,7 @@ func TestFindGCPTelemetryCredentialPath_Present(t *testing.T) {
 
 func TestFindGCPTelemetryCredentialPath_Absent(t *testing.T) {
 	secrets := []api.ResolvedSecret{
-		{Name: "other-secret", Type: "file", Target: "/etc/other", Value: "data"},
+		{Name: "other-secret", Type: "file", Target: "/etc/other", Value: "data", Source: "project"},
 	}
 
 	got := findGCPTelemetryCredentialPath(secrets, "/home/scion")
@@ -405,7 +406,7 @@ func TestFindGCPTelemetryCredentialPath_Absent(t *testing.T) {
 
 func TestFindGCPTelemetryCredentialPath_WrongType(t *testing.T) {
 	secrets := []api.ResolvedSecret{
-		{Name: "scion-telemetry-gcp-credentials", Type: "environment", Target: "GCP_CREDS", Value: "key-data"},
+		{Name: "scion-telemetry-gcp-credentials", Type: "environment", Target: "GCP_CREDS", Value: "key-data", Source: "hub"},
 	}
 
 	got := findGCPTelemetryCredentialPath(secrets, "/home/scion")
@@ -416,13 +417,24 @@ func TestFindGCPTelemetryCredentialPath_WrongType(t *testing.T) {
 
 func TestFindGCPTelemetryCredentialPath_TildeExpansion(t *testing.T) {
 	secrets := []api.ResolvedSecret{
-		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data"},
+		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data", Source: "hub"},
 	}
 
 	got := findGCPTelemetryCredentialPath(secrets, "/home/gemini")
 	want := "/home/gemini/.config/gcp/sa.json"
 	if got != want {
 		t.Errorf("findGCPTelemetryCredentialPath() = %q, want %q", got, want)
+	}
+}
+
+func TestFindGCPTelemetryCredentialPath_NonHubSourceIgnored(t *testing.T) {
+	for _, src := range []string{"", "project", "user", "agent", "runtime_broker"} {
+		secrets := []api.ResolvedSecret{
+			{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/evil.json", Value: "key-data", Source: src},
+		}
+		if got := findGCPTelemetryCredentialPath(secrets, "/home/scion"); got != "" {
+			t.Errorf("findGCPTelemetryCredentialPath(source=%q) = %q, want empty string", src, got)
+		}
 	}
 }
 

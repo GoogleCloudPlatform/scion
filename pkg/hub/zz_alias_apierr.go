@@ -39,6 +39,7 @@ const (
 	ErrCodeAgentNotMessageable              = apierr.ErrCodeAgentNotMessageable
 	ErrCodeAgentNotRunning                  = apierr.ErrCodeAgentNotRunning
 	ErrCodeReservedName                     = apierr.ErrCodeReservedName
+	ErrCodeReservedTarget                   = apierr.ErrCodeReservedTarget
 	ErrCodeTaskNotSupported                 = apierr.ErrCodeTaskNotSupported
 	ErrCodeAgentSessionUnavailable          = apierr.ErrCodeAgentSessionUnavailable
 	ErrCodeAgentUpgradeRequired             = apierr.ErrCodeAgentUpgradeRequired

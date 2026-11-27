@@ -75,10 +75,14 @@ const (
 	ErrCodeInvalidRequest     = "invalid_request"
 	ErrCodeInvalidFilterQuery = "invalid_filter_query"
 	ErrCodeValidationError    = "validation_error"
-	ErrCodeUnauthorized       = "unauthorized"
-	ErrCodeForbidden          = "forbidden"
-	ErrCodeNotFound           = "not_found"
-	ErrCodeConflict           = "conflict"
+	// ErrCodeReservedTarget is returned (400) when a non-hub-scope file secret
+	// targets a path reserved for hub-only platform secrets (such as the
+	// telemetry GCP credentials file in hosted mode).
+	ErrCodeReservedTarget = "reserved_target"
+	ErrCodeUnauthorized   = "unauthorized"
+	ErrCodeForbidden      = "forbidden"
+	ErrCodeNotFound       = "not_found"
+	ErrCodeConflict       = "conflict"
 	// ErrCodeAgentExistsResumable is returned (409) when a create/start
 	// request without Resume targets an existing agent in a resumable
 	// resting phase (suspended, stopped, halted, or an active idle-suspend

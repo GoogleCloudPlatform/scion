@@ -28,7 +28,7 @@ import (
 // path findGCPTelemetryCredentialPath itself returns for that secret set.
 func TestBuildBootstrapEnv_GCPTelemetryCredentials_Present(t *testing.T) {
 	secrets := []api.ResolvedSecret{
-		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data"},
+		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data", Source: "hub"},
 	}
 	cfg := RunConfig{
 		UnixUsername:    "scion",
@@ -58,7 +58,7 @@ func TestBuildBootstrapEnv_GCPTelemetryCredentials_Present(t *testing.T) {
 func TestBuildBootstrapEnv_GCPTelemetryCredentials_ContentNeverLeaks(t *testing.T) {
 	const sentinelContent = "FAKE-SENTINEL-gcp-sa-key-content-not-a-real-credential"
 	secrets := []api.ResolvedSecret{
-		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: sentinelContent},
+		{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: sentinelContent, Source: "hub"},
 	}
 	cfg := RunConfig{
 		UnixUsername:    "scion",
@@ -100,7 +100,7 @@ func TestBuildBootstrapEnv_GCPTelemetryCredentials_AbsentWhenNoSecret(t *testing
 // user env) runtimes, where the resolved path is the last, winning, entry.
 func TestBuildBootstrapEnv_GCPTelemetryCredentials_ResolvedPathWinsOverCallerEnv(t *testing.T) {
 	const stale = "/stale/host/path/should-be-overridden.json"
-	fileSecret := api.ResolvedSecret{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data"}
+	fileSecret := api.ResolvedSecret{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data", Source: "hub"}
 
 	tests := []struct {
 		name string

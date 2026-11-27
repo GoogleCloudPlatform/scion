@@ -47,7 +47,7 @@ func TestBuildPod_HomeDir(t *testing.T) {
 					UnixUsername: tc.unixUsername,
 					ResolvedSecrets: []api.ResolvedSecret{
 						{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key-data", Source: "user"},
-						{Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/creds.json", Value: "cred-data", Source: "user"},
+						{Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/creds.json", Value: "cred-data", Source: "hub"},
 					},
 					ResolvedAuth: &api.ResolvedAuth{
 						Method: "api-key",

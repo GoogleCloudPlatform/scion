@@ -488,6 +488,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	// The test-admin scope restriction, evaluated once: the start-time
 	// checks' keep decision and the withholding below use this one result.
 	ta := d.testAdminScopesFor(ctx, agent)
+	restricted, allowedScopes, testAdminRoot := ta.restricted, ta.allowed, ta.root
+	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
 
 	// The start-time owner-path and progeny checks resolveSecrets applies
 	// through the backend's Resolve. Nil without an authorization service.
@@ -528,6 +530,33 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 				if !secret.HubSecretDeliverable(m) {
 					continue
 				}
+			}
+			// Hosted-mode reserved non-hub secrets (name scion-telemetry-gcp-credentials
+			// of any type, or file secrets targeting .scion/telemetry-gcp-credentials.json)
+			// must be dropped BEFORE non-deliverable shadow recording and merging so an
+			// existing non-hub row (including on_demand) can neither displace nor shadow
+			// the hub-scoped telemetry credential.
+			if d.hostedMode && secret.IsReservedNonHubSecret(sc.scope, m.Name, m.SecretType, m.Target) {
+				if !noAuth && !withheld(sc.scope) {
+					warn := true
+					if sc.scope == store.ScopeUser {
+						if startOpts != nil && startOpts.UserScopeCheck != nil && !startOpts.UserScopeCheck(m) {
+							warn = false
+						}
+					} else {
+						allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						if !allowed {
+							warn = false
+						}
+					}
+					if warn {
+						d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, sc.scope)
+					}
+				}
+				continue
 			}
 			// Record non-deliverable, non-internal rows (e.g. on_demand) in
 			// shadowed before the NoAuth candidate filter so an agent-scope
@@ -579,6 +608,12 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			if !check(m) {
 				continue
 			}
+			if d.hostedMode && secret.IsReservedNonHubSecret(m.Scope, m.Name, m.SecretType, m.Target) {
+				if !withheld(m.Scope) {
+					d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, m.Scope)
+				}
+				continue
+			}
 			kept = append(kept, secretDeliveryCandidate{meta: m, progeny: true})
 		}
 	}
@@ -604,16 +639,13 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 		return nil, nil, nil, nil
 	}
 
-	// The test-admin scope restriction is decided before the fetch, so no
+	// The test-admin scope restriction was decided before the fetch, so no
 	// value is read for a scope it withholds. A withheld item is still
 	// placed in precedence below, without a value: as when it was fetched
 	// and dropped afterwards, it outranks a lower-scope item of the same
 	// name or target, and the restriction then drops it. The one
 	// difference is fail-closed: a withheld item whose value could not
 	// have been read still outranks that lower-scope item.
-	restricted, allowedScopes, testAdminRoot := ta.restricted, ta.allowed, ta.root
-	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
-
 	metas := make([]secret.SecretMeta, 0, len(kept))
 	for _, c := range kept {
 		if withheld(c.meta.Scope) {
