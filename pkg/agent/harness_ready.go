@@ -283,7 +283,7 @@ func (m *AgentManager) waitHarnessReadyFor(ctx context.Context, agentID, project
 		}
 		pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 		defer cancel()
-		out, err := m.Runtime.Exec(pctx, target.ContainerID, readinessProbeArgv())
+		out, err := m.Runtime.Exec(runtime.WithResolvedContainerID(pctx), target.ContainerID, readinessProbeArgv())
 		if err != nil {
 			return readinessProbe{Mode: readyModeNoInitRun, Reason: "probe failed: " + err.Error()}, err
 		}

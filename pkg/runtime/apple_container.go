@@ -675,8 +675,10 @@ func (r *AppleContainerRuntime) Sync(ctx context.Context, id string, direction S
 func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	// Resolve slug/name to actual container ID (container names include the
 	// project prefix, e.g. "myproject--agent", so the bare slug won't match).
-	if agents, err := r.List(ctx, nil); err == nil {
-		id = resolveContainerID(agents, id)
+	if !resolvedContainerID(ctx) {
+		if agents, err := r.List(ctx, nil); err == nil {
+			id = resolveContainerID(agents, id)
+		}
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
 	out, err := runCombinedCommand(ctx, r.Command, args...)
@@ -689,8 +691,10 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 // given reader. The -i flag is required for `container exec` to attach
 // stdin, mirroring Docker/Podman's exec semantics. See #1355.
 func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
-	if agents, err := r.List(ctx, nil); err == nil {
-		id = resolveContainerID(agents, id)
+	if !resolvedContainerID(ctx) {
+		if agents, err := r.List(ctx, nil); err == nil {
+			id = resolveContainerID(agents, id)
+		}
 	}
 	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
 	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)

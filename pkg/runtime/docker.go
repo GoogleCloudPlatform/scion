@@ -499,8 +499,10 @@ func (r *DockerRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 func (r *DockerRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	// Resolve slug/name to actual container ID (container names include the
 	// project prefix, e.g. "myproject--agent", so the bare slug won't match).
-	if agents, err := r.List(ctx, nil); err == nil {
-		id = resolveContainerID(agents, id)
+	if !resolvedContainerID(ctx) {
+		if agents, err := r.List(ctx, nil); err == nil {
+			id = resolveContainerID(agents, id)
+		}
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
 	out, err := runCombinedCommand(ctx, r.Command, args...)
@@ -514,8 +516,10 @@ func (r *DockerRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 // without it, data written to stdin never reaches the container even though
 // os/exec has a Stdin set on the outer `docker` process. See #1355.
 func (r *DockerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
-	if agents, err := r.List(ctx, nil); err == nil {
-		id = resolveContainerID(agents, id)
+	if !resolvedContainerID(ctx) {
+		if agents, err := r.List(ctx, nil); err == nil {
+			id = resolveContainerID(agents, id)
+		}
 	}
 	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
 	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
