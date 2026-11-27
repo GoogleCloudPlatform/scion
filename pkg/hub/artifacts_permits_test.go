@@ -161,7 +161,7 @@ func TestLegacyChainsWithholdOnlyOptionalRoleScopes(t *testing.T) {
 	// Reserved rows map to no agent scope, so they add nothing to the
 	// withheld scopes checked below.
 	assert.Equal(t, map[string]bool{
-		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
+		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true, "artifact.request_review": true,
 		"skill.create": true, "skill.update": true,
 		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
 		"agent.log_append": true, "project.register": true,
