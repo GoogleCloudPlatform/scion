@@ -531,6 +531,29 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // transaction, as ProjectDeletionService does (cascadeSecurityState, through
 // deactivateProjectAgentEdges). hack/check-store-delete-callers.sh fails on a
 // caller outside its allowlist.
+// CreateProject creates a new project and prunes any leftover
+// decision_retention override for its UUID in the same transaction so a
+// project created with a previously deleted project's UUID never revives a
+// stale override left from before delete-time pruning existed
+// (ptone/scion#9439). Because ProjectStore.CreateProject runs first, an
+// attempt to create a project with an already-existing live UUID fails with
+// ErrAlreadyExists without touching that live project's override.
+func (c *CompositeStore) CreateProject(ctx context.Context, p *store.Project) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.CreateProject(ctx, p) })
+	}
+	if err := c.ProjectStore.CreateProject(ctx, p); err != nil {
+		return err
+	}
+	uid, err := parseUUID(p.ID)
+	if err != nil {
+		return err
+	}
+	return pruneDecisionRetentionProjectOverrideTx(ctx, c.entTx, c.isPostgres(), uid.String())
+}
+
+// DeleteProject removes a project and all dependent records in a single
+// transaction.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
@@ -619,11 +642,6 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err := deleteProjectDecisions(ctx, c.client, uid, agentIDs); err != nil {
 		return err
 	}
-	// Prune any per-project decision_retention override in the same transaction
-	// so re-creating a project with the same UUID starts clean (ptone/scion#9439).
-	if err := pruneDecisionRetentionProjectOverrideTx(ctx, c.entTx, c.isPostgres(), uid.String()); err != nil {
-		return err
-	}
 	// Secret request rows go with the project (§4.7).
 	if err := deleteProjectSecretRequests(ctx, c.client, uid); err != nil {
 		return err
@@ -637,6 +655,13 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	// Message policies and their decision records carry project_id with no
 	// DB-level FK edge; cascade them explicitly in the same transaction.
 	if err := deleteProjectMessagePolicies(ctx, c.client, uid); err != nil {
+		return err
+	}
+	// Prune any per-project decision_retention override in the same transaction
+	// right before removing the project row (shortening any settings-revision
+	// lock hold) so re-creating a project with the same UUID starts clean
+	// (ptone/scion#9439).
+	if err := pruneDecisionRetentionProjectOverrideTx(ctx, c.entTx, c.isPostgres(), uid.String()); err != nil {
 		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -834,22 +835,25 @@ func (s *DecisionRetentionStore) PruneDecisionRetentionRuns(ctx context.Context,
 
 // pruneDecisionRetentionProjectOverrideTx removes projectID from the stored
 // decision_retention hub_settings section's project_overrides map inside the
-// project-deletion transaction, so re-creating a project with the same UUID
-// starts with defaults instead of reviving a stale override (ptone/scion#9439).
+// caller's transaction (project delete or project create), so re-creating a
+// project with a deleted project's UUID starts with defaults instead of
+// reviving a stale override (ptone/scion#9439).
 //
 // No-op (no write, no revision bump) when the section does not exist, fails to
-// parse (fail closed — never overwrite a malformed document), or does not
-// contain projectID. Preserves all other fields, overrides, and keep_forever
-// holds verbatim.
+// parse (fail closed — logs a warning and leaves the malformed document
+// untouched), or does not contain projectID. Preserves all resolved settings,
+// other projects' overrides, and keep_forever holds.
+//
+// On Postgres, performs a fast unlocked read first and only acquires FOR UPDATE
+// when projectID is present, avoiding lock contention on the common path where
+// a project has no override.
 func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, isPostgres bool, projectID string) error {
 	if tx == nil || projectID == "" {
 		return nil
 	}
-	q := tx.HubSetting.Query().Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName))
-	if isPostgres {
-		q = q.ForUpdate()
-	}
-	existing, err := q.Only(ctx)
+	existing, err := tx.HubSetting.Query().
+		Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName)).
+		Only(ctx)
 	if ent.IsNotFound(err) {
 		return nil
 	}
@@ -858,11 +862,33 @@ func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, is
 	}
 	cfg, err := opsettings.ParseDecisionRetentionDoc(existing.Value)
 	if err != nil {
-		// Fail closed: leave malformed documents untouched rather than rewriting them.
+		slog.Warn("decision retention: malformed section left untouched during project override prune",
+			"project_id", projectID, "error", err)
 		return nil
 	}
 	if _, ok := cfg.ProjectOverrides[projectID]; !ok {
 		return nil
+	}
+	if isPostgres {
+		existing, err = tx.HubSetting.Query().
+			Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName)).
+			ForUpdate().
+			Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("prune decision retention override: lock section: %w", mapError(err))
+		}
+		cfg, err = opsettings.ParseDecisionRetentionDoc(existing.Value)
+		if err != nil {
+			slog.Warn("decision retention: malformed section left untouched during project override prune",
+				"project_id", projectID, "error", err)
+			return nil
+		}
+		if _, ok := cfg.ProjectOverrides[projectID]; !ok {
+			return nil
+		}
 	}
 	delete(cfg.ProjectOverrides, projectID)
 	doc, err := json.Marshal(cfg.Settings())

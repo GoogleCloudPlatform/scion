@@ -18,6 +18,9 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -545,4 +549,86 @@ func TestDecisionRetentionRace_DeterministicPurgeVsRepostVersionLockOrder(t *tes
 	assert.Equal(t, versions-1, out.res.PurgedMessages, "v1..v5 must be purged while freshly replaced v6 is skipped")
 	assert.Equal(t, 1, out.res.SkippedMessages)
 	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
+}
+
+// TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut exercises the Postgres
+// FOR UPDATE serialization between CompositeStore.DeleteProject pruning a
+// project's override and a concurrent CAS UpsertHubSetting on
+// decision_retention (ptone/scion#9439). Either the PUT commits first and the
+// delete prunes pDel from the PUT's committed document (preserving the PUT's
+// other edits), or the delete commits first and the stale-revision PUT returns
+// store.ErrRevisionConflict. Neither may lose the PUT's edits or leave pDel
+// behind.
+func TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut(t *testing.T) {
+	requirePostgres(t)
+	ctx := context.Background()
+	f := newDecisionFixture(t)
+	now := time.Now().UTC()
+
+	pKeep := uuid.NewString()
+	pDel := uuid.NewString()
+	for i, pid := range []string{pKeep, pDel} {
+		require.NoError(t, f.cs.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("race-ov-%d", i), Slug: fmt.Sprintf("race-ov-%d", i), Created: now,
+		}))
+	}
+
+	initialDoc := json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 90,
+		"project_overrides": {
+			%q: {"mode": "keep_forever"},
+			%q: {"mode": "days", "days": 30}
+		}
+	}`, pKeep, pDel))
+	saved, err := f.cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, initialDoc, "admin@test.com", 0, "managed")
+	require.NoError(t, err)
+
+	// Concurrent admin PUT updates retention_days from 90 -> 120 using the pre-delete revision.
+	putDoc := json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 120,
+		"project_overrides": {
+			%q: {"mode": "keep_forever"},
+			%q: {"mode": "days", "days": 30}
+		}
+	}`, pKeep, pDel))
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var delErr, putErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		delErr = f.cs.DeleteProject(ctx, pDel)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, putErr = f.cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, putDoc, "admin@test.com", saved.Revision, "managed")
+	}()
+	close(start)
+	wg.Wait()
+
+	require.NoError(t, delErr, "DeleteProject must succeed without deadlock")
+	row, err := f.cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	cfg, err := opsettings.ParseDecisionRetentionDoc(row.Value)
+	require.NoError(t, err)
+
+	assert.NotContains(t, cfg.ProjectOverrides, pDel, "deleted project override must never survive")
+	require.Contains(t, cfg.ProjectOverrides, pKeep, "keep_forever hold must survive")
+	assert.Equal(t, opsettings.DecisionRetentionOverrideModeKeepForever, cfg.ProjectOverrides[pKeep].Mode)
+
+	if putErr == nil {
+		// PUT committed first, then DeleteProject pruned pDel from the PUT's doc.
+		assert.Equal(t, 120, cfg.RetentionDays, "PUT edit must not be lost when PUT wins the race")
+		assert.Equal(t, saved.Revision+2, row.Revision)
+	} else {
+		// DeleteProject committed first, so stale-revision PUT conflicted cleanly.
+		assert.True(t, errors.Is(putErr, store.ErrRevisionConflict), "expected ErrRevisionConflict, got: %v", putErr)
+		assert.Equal(t, 90, cfg.RetentionDays)
+		assert.Equal(t, saved.Revision+1, row.Revision)
+	}
 }
