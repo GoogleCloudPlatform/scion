@@ -24,9 +24,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/shipper"
 )
@@ -37,7 +39,13 @@ const (
 	trajectoryUploadHTTPTimeout = 2 * time.Minute
 
 	trajectoryMaxErrorBodyBytes = 64 * 1024
+
+	// trajectoryOriginMismatchLogInterval rate-limits warnings when a
+	// Hub-proxied upload path has a scheme or host differing from hubURL.
+	trajectoryOriginMismatchLogInterval = 5 * time.Minute
 )
+
+var lastOriginMismatchLogUnix atomic.Int64
 
 // TrajectoryHTTPError represents a non-2xx HTTP response from the Hub
 // trajectory segment endpoints (or the signed object PUT target).
@@ -190,6 +198,14 @@ func (c *Client) UploadTrajectorySegment(
 		scoped.Timeout = trajectoryUploadHTTPTimeout
 		resp, err = scoped.Do(req)
 	} else {
+		if c.looksHubProxiedPathWithOriginMismatch(inst.URL) {
+			nowUnix := time.Now().Unix()
+			prev := lastOriginMismatchLogUnix.Load()
+			if nowUnix-prev >= int64(trajectoryOriginMismatchLogInterval/time.Second) &&
+				lastOriginMismatchLogUnix.CompareAndSwap(prev, nowUnix) {
+				log.Error("Trajectory upload URL matches Hub-proxied path but scheme/host differs from Hub URL (likely Hub behind a TLS-terminating proxy without server.trusted_proxies); refusing to send agent token off-origin")
+			}
+		}
 		// External signed URL (e.g. GCS): use a clean client with no Hub
 		// agent token, run header, or transport OIDC credentials, and refuse
 		// redirects so signed PUTs cannot be bounced elsewhere.
@@ -231,6 +247,23 @@ func (c *Client) isHubProxiedUploadURL(rawURL string) bool {
 	return strings.EqualFold(hubU.Scheme, targetU.Scheme) &&
 		strings.EqualFold(hubU.Host, targetU.Host) &&
 		strings.HasPrefix(targetU.Path, "/api/v1/agents/")
+}
+
+func (c *Client) looksHubProxiedPathWithOriginMismatch(rawURL string) bool {
+	hubU, err := url.Parse(c.hubURL)
+	if err != nil || hubU.Scheme == "" || hubU.Host == "" {
+		return false
+	}
+	targetU, err := url.Parse(rawURL)
+	if err != nil || targetU.Scheme == "" || targetU.Host == "" {
+		return false
+	}
+	if !strings.HasPrefix(targetU.Path, "/api/v1/agents/") ||
+		!strings.Contains(targetU.Path, "/trajectory/segments/") ||
+		!strings.HasSuffix(targetU.Path, "/content") {
+		return false
+	}
+	return !strings.EqualFold(hubU.Scheme, targetU.Scheme) || !strings.EqualFold(hubU.Host, targetU.Host)
 }
 
 // CommitTrajectorySegment calls POST /api/v1/agents/{id}/trajectory/segments:commit

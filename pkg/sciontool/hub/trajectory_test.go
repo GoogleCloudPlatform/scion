@@ -390,3 +390,45 @@ func TestTrajectoryUploader_ProxiedPutUsesUploadTimeoutNotDefaultClientTimeout(t
 		t.Fatalf("status=%d, want 200", status)
 	}
 }
+
+func TestTrajectoryUploader_ProxiedPathOriginMismatchRefusesTokenOffOrigin(t *testing.T) {
+	seg := testShipperSegment(t)
+
+	var gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get("X-Scion-Agent-Token")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	// Client configured with https://hub.example.com, while upload URL has a
+	// Hub-proxied path on http://127.0.0.1 (different scheme & host, e.g. TLS proxy
+	// without trusted_proxies). Must detect mismatch and NOT send the agent token.
+	client := NewClientWithConfig("https://hub.example.com", "secret-agent-token", "agent-1")
+	uploadURL := srv.URL + telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-mismatch") + "?exp=9999999999&sig=abc"
+
+	if !client.looksHubProxiedPathWithOriginMismatch(uploadURL) {
+		t.Fatalf("expected looksHubProxiedPathWithOriginMismatch to return true for %s", uploadURL)
+	}
+	if client.isHubProxiedUploadURL(uploadURL) {
+		t.Fatalf("expected isHubProxiedUploadURL to return false on origin mismatch")
+	}
+
+	lastOriginMismatchLogUnix.Store(0)
+	_, err := client.UploadTrajectorySegment(context.Background(), telemetrycontract.TrajectorySegmentUploadInstruction{
+		Method: http.MethodPut,
+		URL:    uploadURL,
+		Headers: map[string]string{
+			"Content-Type": "application/gzip",
+		},
+	}, seg.Compressed)
+	if err == nil {
+		t.Fatalf("expected 401 error when token is withheld off-origin")
+	}
+	if gotToken != "" {
+		t.Fatalf("leaked X-Scion-Agent-Token off-origin: %q", gotToken)
+	}
+	if lastOriginMismatchLogUnix.Load() == 0 {
+		t.Fatalf("expected rate-limited mismatch warning timestamp to be recorded")
+	}
+}
