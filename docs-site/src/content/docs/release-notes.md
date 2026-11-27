@@ -15,6 +15,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Triggers & Webhooks Stage 2: agent-bound endpoints, `dispatch_agent`, offline queuing, ordered `actions[]`, and large payloads
+
+Behind the `hub.triggers` [experiment](/scion/reference/experiments/) (alpha, off by default), the Triggers & Webhooks system now includes agent-bound endpoints, `dispatch_agent` and `exec` trigger actions, prefix-classified templating (`scion trigger render`), offline message queuing (`waiting`/`expired`), `hub_token`/`github_v1`/`stripe_v1` ingress modes with routing hints, large payloads up to 1 MiB in Hub-private object storage, ordered `actions[]` (1–8 actions per trigger), the project **Triggers** web page (`/projects/{id}/triggers`), <!-- P7a: verify -->notify-on-failure, <!-- /P7a: verify -->and the `scion-triggers` platform skill. See [Triggers & Webhooks](/scion/hosted/user/triggers/).
+
+- **`--to-self` now binds with lifetime `agent` by default and `--message` is optional:** running `scion trigger webhook create --name <n> --to-self` inside an agent container now binds the endpoint to that agent with lifetime `agent` (deleted with the agent unless `--persistent` is passed) and defaults the trigger message to `Webhook event received.` when `--message` is omitted.
+- **Literal `${` in trigger message text must be escaped as `$${`:** `message` actions now parse `${<path>}` templates. Existing Stage 1 trigger messages containing a literal `${` are refused at fire time until escaped as `$${`.
+- **Downgrade floors raised (`nightly-20261125`, `nightly-20261128`):** Stage 2 raised `pkg/version.DowngradeFloor` to `nightly-20261125` for trigger-owned `exec` runs and to `nightly-20261128` for ordered `actions[]` per trigger (`trigger_fires.action_index` and per-action uniqueness/claims). Hubs running this release refuse downgrades to binaries older than `nightly-20261128`.
+
 ## Secret type `variable` removed; `on_demand` secret type added
 
 The `variable` secret type (which previously staged `~/.scion/secrets.json`) has been removed and replaced by **`on_demand`**, a secret type that is never delivered to agent containers at start, restart, or during harness credential gathering and is fetched explicitly by agents with `scion secret get --value KEY` (and listed by `scion secret list`).

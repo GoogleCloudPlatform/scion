@@ -598,29 +598,54 @@ Event-driven automation gated by the `hub.triggers` experiment (`scion trigger`)
 > **Disambiguation rule:** "Trigger" is overloaded across three Scion concepts. In the event-automation system below, **Trigger** is the canonical project-scoped rule resource (`triggers` table, `scion trigger`). In **Notifications**, always qualify the activity that fires a subscription as a *trigger activity* (or *notification trigger*). In container/harness **Lifecycle Hooks** (such as **Pre-Start Hook** or harness hook events), say *hook point* or *lifecycle hook event*, never bare "trigger".
 
 **Source** (triggers):
-An origin that emits **Events** into a project's trigger inbox, identified by `(source_kind, source_id)`. In Stage 1, a source is a project-owned **Webhook endpoint** (`source_kind: "webhook"`, managed with `scion trigger webhook`, receiving signed `POST /api/v1/hooks/{id}` requests); Stage 3 adds GitHub App repository sources (`source_kind: "github"`). Deleting a webhook endpoint automatically pauses dependent triggers with `status_reason: "source_deleted"`.
+An origin that emits **Events** into a project's trigger inbox, identified by `(source_kind, source_id)`. General webhook sources are project-owned **Webhook endpoints** (`source_kind: "webhook"`, managed with `scion trigger webhook`, receiving `POST /api/v1/hooks/{id}` requests authenticated by HMAC in `scion_v1`, `github_v1`, or `stripe_v1` mode, or by `hub_token`); GitHub App repository sources use `source_kind: "github"` (gated on `hub.github_triggers`). Deleting a webhook endpoint automatically pauses dependent triggers with `status_reason: "source_deleted"`.
 _Avoid_: producer, provider, webhook (when naming the abstract source concept rather than the `webhook` source kind)
-_See also_: Event, Trigger
+_See also_: Bound endpoint, Event, Trigger
+
+**Bound endpoint** (triggers):
+A project-owned **Webhook endpoint** linked to a specific agent (`bound_agent_id`) with a **lifetime** (`bound_lifetime`: `agent` or `persistent`). An `agent`-lifetime endpoint (the default for `scion trigger webhook create --to-self`) is deleted along with its secret and the agent's own triggers when that agent is deleted (including soft delete); a `persistent` endpoint survives deletion and becomes unbound. Binding grants the bound agent read access to the endpoint and its events, but grants no additional authoring authority.
+_Avoid_: agent-owned endpoint (endpoints are always project-owned), agent webhook
+_See also_: Source, Trigger
 
 **Event** (triggers):
-An immutable durable inbox record (`trigger_events`) captured when a **Source** delivers a payload (for example, an HMAC-verified `POST /api/v1/hooks/{id}`). Carries a canonical `type` (such as `webhook.received` or `webhook.<name>`), a `subject`, a `dedup_key` for idempotent delivery, structured `attributes`, allow-listed `headers`, and a bounded JSON `payload`, and is processed asynchronously through the Hub's durable queue (`trigger.event`). Distinct from the internal **Event Bus** (live SSE change feed) and from a one-shot *scheduled event*.
+An immutable durable inbox record (`trigger_events`) captured when a **Source** delivers a payload (for example, an HMAC-verified or `hub_token`-authenticated `POST /api/v1/hooks/{id}`). Carries a canonical `type` (such as `webhook.received` or `webhook.<name>`), a `subject`, a `dedup_key` for idempotent delivery, structured `attributes`, allow-listed `headers`, and a JSON `payload` (stored inline up to 64 KiB, or out of line in Hub-private object storage up to 1 MiB via `payload_ref`), and is processed asynchronously through the Hub's durable queue (`trigger.event`). Distinct from the internal **Event Bus** (live SSE change feed) and from a one-shot *scheduled event*.
 _Avoid_: message (for the inbound event), payload (when referring to the whole envelope/record), webhook call
 _See also_: Source, Trigger, Fire, Event Bus (distinct concept)
 
 **Trigger**:
-A project-scoped automation rule (`triggers`, managed with `scion trigger`) attached to a **Source** that matches incoming **Events** (by `match_types` and optional ordered rules) and executes an **Action** under the authoring principal's recorded authority. A trigger has a status (`active` or `paused`) and may be paused by the Hub with a structured `status_reason` (`creator_deleted`, `target_deleted`, or `source_deleted`). Distinct from a **Notification** *trigger activity* and from a **Pre-Start Hook** / lifecycle hook point.
+A project-scoped automation rule (`triggers`, managed with `scion trigger`) attached to a **Source** that matches incoming **Events** (by `match_types` and an optional ordered list of **Rule elements**) and executes 1–8 ordered **Actions** under the authoring principal's recorded authority. A trigger has a status (`active` or `paused`) and may be paused by the Hub with a structured `status_reason` (`creator_deleted`, `target_deleted`, or `source_deleted`). Distinct from a **Notification** *trigger activity* and from a **Pre-Start Hook** / lifecycle hook point.
 _Avoid_: webhook rule, automation, hook, listener
-_See also_: Source, Event, Action, Fire, Schedule, Notification (distinct — "trigger activity"), Pre-Start Hook (distinct — lifecycle hook point)
+_See also_: Source, Event, Rule element, Action, Fire, Subject claim, Schedule, Notification (distinct — "trigger activity"), Pre-Start Hook (distinct — lifecycle hook point)
+
+**Rule element** (triggers):
+One `{dialect, expr}` entry in a **Trigger**'s ordered `match.rules` (`--where`) list (1–8 elements, evaluated strictly in author order and logically AND'd with short-circuit). A plain `false` is a silent non-match; `Uncertain`, `Failed`, or budget exhaustion records a `skipped` **Fire** with `matched_through` (`n/N`) and `decided_dialect`.
+_Avoid_: filter clause, predicate row
+_See also_: Trigger, Fire
 
 **Action** (triggers / schedules):
-The Hub-executed operation a **Trigger** or **Schedule** performs when it fires, sharing one fire core and recorded-authority check. Built-in action types are `message` (deliver an event envelope to an agent, optionally waking or interrupting it), `dispatch_agent` (headless agent creation from a template), and `exec` (run a command over Conduit). Stage 1 triggers authorize `message` actions; `dispatch_agent` and `exec` are enabled for schedules and reserved for later trigger stages.
+The Hub-executed operation a **Trigger** or **Schedule** performs when it fires, sharing one fire core and recorded-authority check. Built-in action types are `message` (deliver an event envelope to an agent, optionally waking, interrupting, or queuing offline), `dispatch_agent` (headless agent creation from a template with event-context injection), `exec` (run a command over Conduit with `SCION_TRIGGER_CONTEXT`), and `github.comment` (for GitHub App sources). Triggers execute 1–8 ordered actions per matched event with failure isolation; schedules execute one action.
 _Avoid_: handler, job, step, task
 _See also_: Trigger, Fire, Schedule
 
 **Fire** (triggers / schedules):
-One execution attempt of a **Trigger** for a specific **Event** (stored as a `trigger_fires` row, unique per `(event_id, trigger_id)` for idempotency), or one execution of a **Schedule**. Moves from `firing` (with a leased horizon reaped on Hub restart) to a terminal status: `fired`, `skipped` (with a bounded reason such as rule evaluation failure or subject policy), `failed`, or `refused` (standing or authority check failed). Visible via `scion trigger history`.
+One execution attempt of one **Action** of a **Trigger** for a specific **Event** (stored as a `trigger_fires` row, unique per `(event_id, trigger_id, action_index)` for idempotency), or one execution of a **Schedule**. Moves from `firing` (with a leased horizon reaped on Hub restart) or `waiting` (**Waiting fire**) to a terminal status: `fired`, `skipped` (with a bounded reason such as rule evaluation failure, limit breach, or subject busy), `failed`, `refused` (standing, template, or authority check failed), or `expired` (**Expired fire**). Visible via `scion trigger history`.
 _Avoid_: run (for triggers; "run" is used for schedules and agent Run IDs), execution, invocation, delivery
-_See also_: Trigger, Event, Action, Run ID (distinct concept)
+_See also_: Trigger, Event, Action, Waiting fire, Expired fire, Run ID (distinct concept)
+
+**Waiting fire** (triggers):
+A non-terminal **Fire** outcome (`status: "waiting"`) produced by a `message` action configured with `offline: "queue"` when its target agent is temporarily undeliverable (`suspended`, `stopped`, `provisioning`, `starting`, `created`, or `stopping`). Retried via the `trigger.fire_retry` durable queue with exponential backoff and nudged when the target transitions into `running`, re-checking recorded authority and trigger revision on every attempt until `wait_until` (`queueTtlSeconds`, default 24 h, max 48 h).
+_Avoid_: queued event, pending fire
+_See also_: Fire, Expired fire
+
+**Expired fire** (triggers):
+A terminal **Fire** outcome (`status: "expired"`) recorded when a **Waiting fire** reaches its `wait_until` deadline (`offline queue expired`) or is dropped by queue limits (`dropped by queue limits`) before delivery. Counts as a trigger error and triggers failure notifications.
+_Avoid_: timed-out fire, dropped fire
+_See also_: Fire, Waiting fire
+
+**Subject claim** (triggers):
+A durable, atomic per-`(trigger_id, action_index, subject)` lease (`trigger_subject_claims`) acquired by a `dispatch_agent` (or `exec`) trigger with `subject.mode` set to `skip` or `reuse`. Binds to the live dispatched agent (or active exec run) so concurrent events for the same subject are skipped (`subject busy`) or routed to the live agent until that agent is deleted or enters a terminal phase (`stopped`, `error`, or `halted`). Unbound claims abandoned before creation commits become reclaimable after 5 minutes.
+_Avoid_: subject lock, dedup lock
+_See also_: Trigger, Fire
 
 ## Observability
 
