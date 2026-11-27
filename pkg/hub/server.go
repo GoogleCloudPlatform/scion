@@ -6709,8 +6709,13 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		priorIntent, intentAt, claimUntil, err = s.claimIdleSuspend(ctx, agent, idleCond)
 		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
 			s.clearWorkspaceAtStop(ctx, agent)
-			slog.Info("Scheduler: skipping idle auto-suspend; precondition lost before stop",
-				"agent_id", agent.ID, "agent_name", agent.Name)
+			attrs := []any{"agent_id", agent.ID, "agent_name", agent.Name, "hub_now", time.Now().UTC()}
+			var preErr *store.IdleSuspendPreconditionError
+			if errors.As(err, &preErr) {
+				attrs = append(attrs, "predicate", preErr.Predicate)
+				attrs = append(attrs, preErr.Attrs...)
+			}
+			slog.Info("Scheduler: skipping idle auto-suspend; precondition lost before stop", attrs...)
 			return false
 		}
 		if err != nil {

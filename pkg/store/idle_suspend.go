@@ -27,6 +27,23 @@ import (
 // longer eligible to record the idle suspension).
 var ErrIdleSuspendPrecondition = fmt.Errorf("agent no longer eligible for idle suspend: %w", ErrVersionConflict)
 
+// IdleSuspendPreconditionError wraps ErrIdleSuspendPrecondition with the
+// specific predicate that failed during ClaimIdleSuspend and structured
+// key/value attributes (snapshot vs current row values) for diagnostics.
+type IdleSuspendPreconditionError struct {
+	Predicate string // stable snake_case name for log grouping
+	Attrs     []any  // alternating key/value slog pairs (snapshot vs current)
+}
+
+func (e *IdleSuspendPreconditionError) Error() string {
+	if e == nil || e.Predicate == "" {
+		return ErrIdleSuspendPrecondition.Error()
+	}
+	return fmt.Sprintf("%s (%s)", ErrIdleSuspendPrecondition.Error(), e.Predicate)
+}
+
+func (e *IdleSuspendPreconditionError) Unwrap() error { return ErrIdleSuspendPrecondition }
+
 // ErrAgentNeverSuspend is returned by SwapAutoSuspendRunIntent when
 // requireSuspendPolicyAuto is true and the locked agent row has
 // suspend_policy == "never".
