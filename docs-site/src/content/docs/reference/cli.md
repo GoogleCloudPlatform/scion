@@ -1240,7 +1240,7 @@ use `scion harness-config` to inspect them instead.
 would accept but never read, and leaves the file unchanged:
 `hub.token`, `hub.apiKey`, `hub.lastSyncedAt`, `bucket.provider`, `bucket.name`,
 `bucket.prefix`, `hub_connections` and `hub_connections.<name>.<field>` at either layer (Runtime Broker Hub connections live in `~/.scion/hub-credentials/<name>.json`, managed by `scion runtime-broker register`, `join`, and `deregister`), and
-at the project layer, any key whose top-level key project settings do not read
+at the project layer, any key under a top-level key that is not read from project settings
 (for example `server.*`, `use_host_credentials`, and legacy aliases that resolve under
 `server`, such as `hub.brokerId`, `hub.brokerToken` and `hub.brokerNickname`; see
 [Keys read from project settings](/scion/reference/orchestrator-settings/#keys-read-from-project-settings)).
