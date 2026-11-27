@@ -2298,8 +2298,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}()
 
 	var req MessageRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedAgentJSON(w, r, maxSettingsBodySize, &req) {
 		return
 	}
 	messaging.RecordStep(ctx, "request_parsed")
