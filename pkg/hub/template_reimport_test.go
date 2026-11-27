@@ -22,11 +22,13 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
@@ -333,16 +335,16 @@ func TestTemplateReimport_OversizeExtractRefused(t *testing.T) {
 }
 
 // TestTemplateGitHubClient_DefaultIsGuarded checks the server's network-mode
-// selection (hosted -> NetworkVetted, workstation -> NetworkSystem) and that
-// the hosted Doer refuses http, non-allowlisted hosts, and userinfo before
-// making any connection.
+// wiring (hosted -> NetworkVetted, workstation -> NetworkSystem) and that the
+// hosted Doer refuses http, non-allowlisted hosts, userinfo, and denylisted
+// loopback addresses before making any connection.
 func TestTemplateGitHubClient_DefaultIsGuarded(t *testing.T) {
 	hostedSrv := &Server{workstation: false}
 	workstationSrv := &Server{workstation: true}
 	assert.Equal(t, remotefetch.NetworkVetted, hostedSrv.templateReimportNetworkMode(), "hosted Hub must select NetworkVetted")
 	assert.Equal(t, remotefetch.NetworkSystem, workstationSrv.templateReimportNetworkMode(), "workstation Hub must select NetworkSystem")
 
-	doer := githubfetch.NewDoer(githubfetch.DefaultEndpoint(), hostedSrv.templateReimportNetworkMode(), 1<<20, 0, nil)
+	doer := hostedSrv.newTemplateGitHubDoer(githubfetch.DefaultEndpoint(), githubfetch.ImportHostedLimits())
 	_ = hostedSrv.getTemplateGitHubClient(githubfetch.ImportHostedLimits())
 
 	for name, tc := range map[string]struct {
@@ -366,6 +368,36 @@ func TestTemplateGitHubClient_DefaultIsGuarded(t *testing.T) {
 			assert.Equal(t, tc.want, fe.Reason)
 		})
 	}
+
+	t.Run("network mode wiring refuses loopback only on hosted", func(t *testing.T) {
+		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+			t.Setenv(k, "")
+		}
+		loopbackEp := githubfetch.Endpoint{
+			APIBase:  "https://127.0.0.1",
+			RawBase:  "https://127.0.0.1",
+			WebHost:  "127.0.0.1",
+			Codeload: "127.0.0.1",
+		}
+		lim := githubfetch.ImportHostedLimits()
+		lim.RequestTimeout = 2 * time.Second
+
+		hostedDoer := hostedSrv.newTemplateGitHubDoer(loopbackEp, lim)
+		_, err := hostedDoer.Open(context.Background(), githubfetch.Request{URL: "https://127.0.0.1/repos/acme/repo"})
+		var fe *remotefetch.Error
+		require.ErrorAs(t, err, &fe)
+		assert.Equal(t, remotefetch.ReasonDeniedAddress, fe.Reason, "hosted Doer must run in NetworkVetted and refuse loopback with ReasonDeniedAddress")
+
+		workstationDoer := workstationSrv.newTemplateGitHubDoer(loopbackEp, lim)
+		resp, err := workstationDoer.Open(context.Background(), githubfetch.Request{URL: "https://127.0.0.1/repos/acme/repo"})
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		var wfe *remotefetch.Error
+		if errors.As(err, &wfe) {
+			assert.NotEqual(t, remotefetch.ReasonDeniedAddress, wfe.Reason, "workstation Doer must run in NetworkSystem and not refuse loopback with ReasonDeniedAddress")
+		}
+	})
 }
 
 func TestTemplateReimport_NotFoundAndMethod(t *testing.T) {
@@ -967,4 +999,48 @@ func TestTemplateReimport_BarePathSourceURL(t *testing.T) {
 	assert.Equal(t, bareURL, got.SourceURL)
 	assert.Equal(t, sha, got.SourceCommit)
 	assert.Len(t, got.Files, 2)
+}
+
+func TestTemplateReimport_OverrideFolderAtSameCommitDownloads(t *testing.T) {
+	const (
+		commitC = "3333333333333333333333333333333333333333"
+		folderA = "https://github.com/acme/repo/tree/main/templates-a/my-template"
+		folderB = "https://github.com/acme/repo/tree/main/templates-b/my-template"
+	)
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-same-commit-folder-override", "my-template", store.TemplateScopeGlobal, "", folderA)
+
+	fetcher := &fakeReimportGitHub{}
+	fetcher.setCommitBody(commitC, buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commitC},
+		{name: "repo-main/templates-a/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates-a/my-template/README.md", body: "folder-a-content"},
+		{name: "repo-main/templates-b/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates-b/my-template/README.md", body: "folder-b-content"},
+	}))
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	// First import from folder A at commit C.
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	first, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, folderA, first.SourceURL)
+	assert.Equal(t, commitC, first.SourceCommit)
+	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+
+	// Reimport with sourceUrl override pointing to folder B in the same repo at the same commit C:
+	// must NOT take the no-op shortcut; must download tarball and store folder B's content and URL.
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, ReimportTemplateRequest{SourceURL: folderB})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	second, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Len(t, fetcher.recordedTarballURLs(), 2, "override to a different folder at the same commit must download the tarball")
+	assert.Equal(t, folderB, second.SourceURL, "folder B's URL must be stored")
+	assert.Equal(t, commitC, second.SourceCommit)
+	assert.NotEqual(t, first.ContentHash, second.ContentHash, "folder B's content must replace folder A's content")
 }

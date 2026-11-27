@@ -613,6 +613,49 @@ func TestExtractTarGz_SecurityAndIntegrity(t *testing.T) {
 		assertErrorKind(t, err, KindTooLarge)
 	})
 
+	t.Run("MaxTotal enforced across multiple files when tree is nil", func(t *testing.T) {
+		chunk := bytes.Repeat([]byte("a"), 90)
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/t/a.txt", body: chunk},
+			{name: "repo-sha/t/b.txt", body: chunk},
+			{name: "repo-sha/t/c.txt", body: chunk},
+		})
+		lim := Limits{
+			MaxFiles:     10,
+			MaxFileBytes: 100, // each file is under MaxFileBytes
+			MaxTotal:     250, // 3 * 90 = 270 > 250
+			MaxUnpacked:  1 << 20,
+			MaxNameBytes: 256,
+		}
+		dir := t.TempDir()
+		root, _ := os.OpenRoot(dir)
+		defer func() { _ = root.Close() }()
+		_, _, _, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, nil, root, lim)
+		assertErrorKind(t, err, KindTooLarge)
+		if _, statErr := os.Stat(filepath.Join(dir, "c.txt")); !os.IsNotExist(statErr) {
+			t.Errorf("overflowing file c.txt should not be created when pre-write MaxTotal check triggers")
+		}
+	})
+
+	t.Run("MaxFiles enforced during extraction when tree is nil", func(t *testing.T) {
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/t/a.txt", body: []byte("1")},
+			{name: "repo-sha/t/b.txt", body: []byte("2")},
+			{name: "repo-sha/t/c.txt", body: []byte("3")},
+		})
+		lim := Limits{
+			MaxFiles:     2,
+			MaxFileBytes: 1024,
+			MaxTotal:     1024,
+			MaxUnpacked:  1 << 20,
+			MaxNameBytes: 256,
+		}
+		root, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = root.Close() }()
+		_, _, _, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, nil, root, lim)
+		assertErrorKind(t, err, KindTooLarge)
+	})
+
 	t.Run("gzip bomb over MaxUnpacked rejected", func(t *testing.T) {
 		big := bytes.Repeat([]byte{0}, 128*1024)
 		tarData := buildTestTarGz(t, sha, []tarTestEntry{
@@ -708,6 +751,19 @@ func TestListTree_TruncatedAndOversizedFailBeforeDownload(t *testing.T) {
 			wantKind: KindTooLarge,
 		},
 		{
+			name: "total bytes over MaxTotal fails before download",
+			treeResp: map[string]any{
+				"sha": "aaa",
+				"tree": []map[string]any{
+					{"path": "a.txt", "mode": "100644", "type": "blob", "sha": "111", "size": 90},
+					{"path": "b.txt", "mode": "100644", "type": "blob", "sha": "222", "size": 90},
+					{"path": "c.txt", "mode": "100644", "type": "blob", "sha": "333", "size": 90},
+				},
+			},
+			lim:      Limits{MaxFiles: 10, MaxFileBytes: 100, MaxTotal: 250},
+			wantKind: KindTooLarge,
+		},
+		{
 			name: "submodule rejected when PolicyReject",
 			treeResp: map[string]any{
 				"sha": "aaa",
@@ -744,6 +800,57 @@ func TestListTree_TruncatedAndOversizedFailBeforeDownload(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeTree_PathValidationAndDotGitSkip(t *testing.T) {
+	t.Run("unsafe paths rejected", func(t *testing.T) {
+		for _, badPath := range []string{
+			"../escape.txt",
+			"a/../b.txt",
+			`a\b.txt`,
+			"/abs.txt",
+			"a//b.txt",
+			"./a.txt",
+			"",
+			"a/b\x00c",
+		} {
+			t.Run(fmt.Sprintf("%q", badPath), func(t *testing.T) {
+				raw, err := json.Marshal(map[string]any{
+					"sha": "aaa",
+					"tree": []map[string]any{
+						{"path": badPath, "mode": "100644", "type": "blob", "sha": "111", "size": 5},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = decodeTree(bytes.NewReader(raw), "acme/repo", ImportHostedLimits())
+				assertErrorKind(t, err, KindUnsupportedContent)
+			})
+		}
+	})
+
+	t.Run(".git segments are skipped while normal dotfiles are kept", func(t *testing.T) {
+		raw, err := json.Marshal(map[string]any{
+			"sha": "aaa",
+			"tree": []map[string]any{
+				{"path": "a.txt", "mode": "100644", "type": "blob", "sha": "111", "size": 5},
+				{"path": ".gitignore", "mode": "100644", "type": "blob", "sha": "222", "size": 5},
+				{"path": ".git/config", "mode": "100644", "type": "blob", "sha": "333", "size": 5},
+				{"path": "sub/.git/HEAD", "mode": "100644", "type": "blob", "sha": "444", "size": 5},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree, err := decodeTree(bytes.NewReader(raw), "acme/repo", ImportHostedLimits())
+		if err != nil {
+			t.Fatalf("decodeTree: %v", err)
+		}
+		if len(tree.Files) != 2 || tree.Files[0].Path != "a.txt" || tree.Files[1].Path != ".gitignore" {
+			t.Fatalf("tree.Files = %+v, want [a.txt, .gitignore]", tree.Files)
+		}
+	})
 }
 
 func TestErrorClassificationAndNoTokenLeak(t *testing.T) {

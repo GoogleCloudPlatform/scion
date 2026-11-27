@@ -182,19 +182,23 @@ func (s *Server) getTemplateGitHubClient(lim githubfetch.Limits) *githubfetch.Cl
 	if s.templateGitHubClient != nil {
 		return s.templateGitHubClient
 	}
-	network := s.templateReimportNetworkMode()
 	ep := githubfetch.DefaultEndpoint()
-	reqTimeout := lim.RequestTimeout
-	if reqTimeout <= 0 {
-		reqTimeout = lim.Timeout
-	}
-	doer := githubfetch.NewDoer(ep, network, lim.MaxDownload, reqTimeout, s.resourceLog)
+	doer := s.newTemplateGitHubDoer(ep, lim)
 	return githubfetch.New(githubfetch.Options{
 		Endpoint:   ep,
 		Doer:       doer,
 		Cooldown:   s.githubCooldown(),
 		MaxRetries: 1,
 	})
+}
+
+func (s *Server) newTemplateGitHubDoer(ep githubfetch.Endpoint, lim githubfetch.Limits) githubfetch.Doer {
+	network := s.templateReimportNetworkMode()
+	reqTimeout := lim.RequestTimeout
+	if reqTimeout <= 0 {
+		reqTimeout = lim.Timeout
+	}
+	return githubfetch.NewDoer(ep, network, lim.MaxDownload, reqTimeout, s.resourceLog)
 }
 
 // targetTemplatePersistence is the template persistence used by reimport. It
