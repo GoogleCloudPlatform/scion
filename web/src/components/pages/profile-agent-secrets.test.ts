@@ -337,4 +337,329 @@ describe('<scion-page-profile-agent-secrets>', () => {
     const merged = mergeSecretRequestCardFragments(a, b);
     expect(merged.rows.map((r) => `${r.key}:${r.status}`)).toEqual(['A:fulfilled', 'B:fulfilled']);
   });
+
+  it('resets loadingMore and ignores stale page when an SSE refresh supersedes in-flight loadMore', async () => {
+    vi.useFakeTimers();
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+
+    let resolveStaleMore!: (resp: Response) => void;
+    const staleMorePromise = new Promise<Response>((resolve) => {
+      resolveStaleMore = resolve;
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'msg-1' })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'c2',
+        })
+      )
+      .mockReturnValueOnce(staleMorePromise)
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'msg-1-refreshed' })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'c2-fresh',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'msg-2-fresh' })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await vi.advanceTimersByTimeAsync(20);
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+
+    // Start loadMore (held open), then trigger SSE live refresh mid-flight.
+    const moreCall = inner.ctrl.loadMore();
+    expect(inner.ctrl.loadingMore).toBe(true);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', { detail: { data: { kind: 'secret_request' } } })
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    // Resolve the superseded loadMore response late; it must be ignored.
+    resolveStaleMore(
+      jsonResp({
+        counts: { answerable: 2, open: 2 },
+        cards: [makeCard({ messageId: 'msg-stale' })],
+        facets: { agents: [], projects: [] },
+        truncatedProjects: false,
+        capped: false,
+      })
+    );
+    await moreCall;
+    await inner.updateComplete;
+
+    expect(inner.ctrl.loadingMore).toBe(false);
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'msg-1-refreshed',
+    ]);
+
+    // A subsequent loadMore must still work and fetch page 2.
+    await inner.ctrl.loadMore();
+    await inner.updateComplete;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'msg-1-refreshed',
+      'msg-2-fresh',
+    ]);
+  });
+
+  it('resets loadingMore and ignores stale page when a filter change supersedes in-flight loadMore', async () => {
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+
+    let resolveStaleMore!: (resp: Response) => void;
+    const staleMorePromise = new Promise<Response>((resolve) => {
+      resolveStaleMore = resolve;
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'msg-1' })],
+          facets: {
+            agents: [],
+            projects: [{ id: 'proj-2', name: 'Web UI', count: 1 }],
+          },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'c2',
+        })
+      )
+      .mockReturnValueOnce(staleMorePromise)
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'msg-proj2-p1', projectId: 'proj-2' })],
+          facets: {
+            agents: [],
+            projects: [{ id: 'proj-2', name: 'Web UI', count: 1 }],
+          },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'c2-proj2',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'msg-proj2-p2', projectId: 'proj-2' })],
+          facets: {
+            agents: [],
+            projects: [{ id: 'proj-2', name: 'Web UI', count: 1 }],
+          },
+          truncatedProjects: false,
+          capped: false,
+        })
+      );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await flush();
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+
+    const moreCall = inner.ctrl.loadMore();
+    expect(inner.ctrl.loadingMore).toBe(true);
+
+    // Change project filter while loadMore is in flight.
+    inner.ctrl.setProject('proj-2');
+    await flush();
+
+    resolveStaleMore(
+      jsonResp({
+        counts: { answerable: 2, open: 2 },
+        cards: [makeCard({ messageId: 'msg-stale' })],
+        facets: { agents: [], projects: [] },
+        truncatedProjects: false,
+        capped: false,
+      })
+    );
+    await moreCall;
+    await inner.updateComplete;
+
+    expect(inner.ctrl.loadingMore).toBe(false);
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'msg-proj2-p1',
+    ]);
+
+    // Pagination remains functional after the filter change.
+    await inner.ctrl.loadMore();
+    await inner.updateComplete;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'msg-proj2-p1',
+      'msg-proj2-p2',
+    ]);
+  });
+
+  it('preserves multi-page Resolved list on message-action-updated and shows a Refresh affordance', async () => {
+    vi.useFakeTimers();
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+
+    fetchMock
+      // Initial Open load
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 0, open: 0 },
+          cards: [],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      )
+      // Resolved page 1
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 0, open: 0 },
+          cards: [makeCard({ messageId: 'res-1', canRespond: false })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'cur-2',
+        })
+      )
+      // Resolved page 2
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 0, open: 0 },
+          cards: [makeCard({ messageId: 'res-2', canRespond: false })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'cur-3',
+        })
+      )
+      // Resolved page 3
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 0, open: 0 },
+          cards: [makeCard({ messageId: 'res-3', canRespond: false })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      )
+      // Manual refresh after clicking the affordance
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 0, open: 0 },
+          cards: [makeCard({ messageId: 'res-new', canRespond: false })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await vi.advanceTimersByTimeAsync(20);
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+
+    // Load 3 Resolved pages.
+    inner.ctrl.setTab('resolved');
+    await vi.advanceTimersByTimeAsync(20);
+    await inner.ctrl.loadMore();
+    await inner.ctrl.loadMore();
+    await inner.updateComplete;
+
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'res-1',
+      'res-2',
+      'res-3',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    // Fire SSE update: list must NOT collapse and the affordance must appear.
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', { detail: { data: { kind: 'secret_request' } } })
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    await inner.updateComplete;
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'res-1',
+      'res-2',
+      'res-3',
+    ]);
+    const bar = inner.shadowRoot!.querySelector('[data-action-new-activity]');
+    expect(bar).not.toBeNull();
+
+    // Clicking Refresh reloads and clears the affordance.
+    const refreshBtn = inner.shadowRoot!.querySelector<HTMLElement>(
+      '[data-action-new-activity-refresh]'
+    )!;
+    refreshBtn.click();
+    await vi.advanceTimersByTimeAsync(20);
+    await inner.updateComplete;
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(inner.shadowRoot!.querySelector('[data-action-new-activity]')).toBeNull();
+    expect(inner.ctrl.cards.map((c) => (c as SecretRequestCardResponse).messageId)).toEqual([
+      'res-new',
+    ]);
+  });
+
+  it('uses aria-pressed toggle buttons for Open/Resolved and kind-supplied searchPlaceholder', async () => {
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+    fetchMock.mockResolvedValue(
+      jsonResp({
+        counts: { answerable: 0, open: 0 },
+        cards: [],
+        facets: { agents: [], projects: [] },
+        truncatedProjects: false,
+        capped: false,
+      })
+    );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await flush();
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+
+    expect(inner.shadowRoot!.querySelector('[role="tablist"]')).toBeNull();
+    expect(inner.shadowRoot!.querySelector('[role="tab"]')).toBeNull();
+    const openBtn = inner.shadowRoot!.querySelector<HTMLButtonElement>('[data-action-tab="open"]')!;
+    const resolvedBtn = inner.shadowRoot!.querySelector<HTMLButtonElement>(
+      '[data-action-tab="resolved"]'
+    )!;
+    expect(openBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(resolvedBtn.getAttribute('aria-pressed')).toBe('false');
+
+    const searchInput = inner.shadowRoot!.querySelector<HTMLInputElement>('[data-filter-search]')!;
+    expect(searchInput.placeholder).toBe('Filter by key, description, or agent…');
+  });
 });

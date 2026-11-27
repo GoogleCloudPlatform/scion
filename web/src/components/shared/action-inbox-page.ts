@@ -190,6 +190,20 @@ export class ScionActionInboxPage<TCard = unknown> extends LitElement {
         margin-bottom: 1rem;
       }
 
+      .new-activity-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding: 0.55rem 0.85rem;
+        background: var(--scion-surface);
+        border: 1px solid var(--scion-primary);
+        border-radius: var(--scion-radius);
+        font-size: 0.875rem;
+        color: var(--scion-text);
+      }
+
       .card-list {
         display: flex;
         flex-direction: column;
@@ -251,8 +265,7 @@ export class ScionActionInboxPage<TCard = unknown> extends LitElement {
     return html`
       <button
         type="button"
-        role="tab"
-        aria-selected=${active ? 'true' : 'false'}
+        aria-pressed=${active ? 'true' : 'false'}
         class="sub-tab-btn ${active ? 'active' : ''}"
         data-action-tab=${tab}
         @click=${(): void => this.ctrl.setTab(tab)}
@@ -317,7 +330,7 @@ export class ScionActionInboxPage<TCard = unknown> extends LitElement {
             id="action-inbox-search"
             class="filter-input"
             type="search"
-            placeholder="Filter by key, description, or agent…"
+            placeholder=${this.config?.searchPlaceholder ?? 'Filter requests…'}
             data-filter-search
             .value=${this.ctrl.q}
             @input=${(e: Event): void => this.ctrl.setQuery((e.target as HTMLInputElement).value)}
@@ -382,12 +395,27 @@ export class ScionActionInboxPage<TCard = unknown> extends LitElement {
 
       ${renderInboxTabStrip(config.tabId)}
 
-      <div class="sub-tabs" role="tablist" aria-label="Request status">
+      <div class="sub-tabs" role="group" aria-label="Request status">
         ${this.renderTabButton('open', 'Open', this.ctrl.counts.open)}
         ${this.renderTabButton('resolved', 'Resolved')}
       </div>
 
       ${this.renderFilterBar()}
+      ${this.ctrl.hasNewActivity
+        ? html`
+            <div class="new-activity-bar" role="status" data-action-new-activity>
+              <span>New activity available</span>
+              <sl-button
+                size="small"
+                variant="primary"
+                data-action-new-activity-refresh
+                @click=${(): void => this.ctrl.refresh()}
+              >
+                Refresh
+              </sl-button>
+            </div>
+          `
+        : nothing}
       ${this.ctrl.truncatedProjects || this.ctrl.capped
         ? html`
             <sl-alert variant="warning" open class="notice-alert" data-action-truncated>

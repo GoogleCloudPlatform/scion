@@ -53,6 +53,8 @@ export interface ActionInboxKindConfig<TCard> {
   title: string;
   /** Italic descriptor shown under the page heading. */
   descriptor: string;
+  /** Optional placeholder text for the search input (defaults to a neutral prompt). */
+  searchPlaceholder?: string;
   /** Returns whether the kind's feature gate is enabled. */
   isEnabled: () => boolean;
   /** Stable identifier for a card (used for keyed rendering and fragment merging). */
@@ -87,6 +89,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
 
   loading = false;
   loadingMore = false;
+  hasNewActivity = false;
   error: string | null = null;
   errorStatus = 0;
   unavailable404 = false;
@@ -94,6 +97,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
   private connected = false;
   private abortController: AbortController | null = null;
   private requestSeq = 0;
+  private pagesLoaded = 0;
   private liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -104,6 +108,13 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       | undefined;
     const data = raw?.data ?? raw;
     if (data?.kind !== this.config.kind) return;
+    if (this.tab === 'resolved' && this.pagesLoaded > 1) {
+      if (!this.hasNewActivity) {
+        this.hasNewActivity = true;
+        this.host.requestUpdate();
+      }
+      return;
+    }
     this.scheduleLiveRefresh();
   };
 
@@ -320,11 +331,16 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
     const controller = new AbortController();
     this.abortController = controller;
     const seq = ++this.requestSeq;
+    // Clear any in-flight Load more state superseded by this full load.
+    this.loadingMore = false;
+    this.hasNewActivity = false;
 
     if (!opts?.background) {
       this.loading = true;
       this.error = null;
       this.errorStatus = 0;
+      this.host.requestUpdate();
+    } else {
       this.host.requestUpdate();
     }
 
@@ -346,6 +362,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       this.counts = res.counts;
       this.filteredCounts = res.filteredCounts ?? null;
       this.cards = res.cards;
+      this.pagesLoaded = 1;
       this.facets = res.facets;
       this.truncatedProjects = res.truncatedProjects;
       this.capped = res.capped;
@@ -407,6 +424,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       this.counts = res.counts;
       this.filteredCounts = res.filteredCounts ?? this.filteredCounts;
       this.cards = this.mergeIncomingCards(config, this.cards, res.cards);
+      this.pagesLoaded = Math.max(1, this.pagesLoaded) + 1;
       this.truncatedProjects = this.truncatedProjects || res.truncatedProjects;
       this.capped = this.capped || res.capped;
       this.nextCursor = res.nextCursor ?? '';

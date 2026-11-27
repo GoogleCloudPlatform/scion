@@ -83,6 +83,7 @@ export class ScionPageProfileAgentSecrets extends LitElement {
     apiPath: AGENT_SECRETS_API_PATH,
     title: 'Agent Secrets',
     descriptor: 'Secret requests from agents across your projects and DMs',
+    searchPlaceholder: 'Filter by key, description, or agent…',
     isEnabled: (): boolean => agentSecretsEnabled(),
     getCardId: (card): string => card.messageId,
     mergeCard: mergeSecretRequestCardFragments,
