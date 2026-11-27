@@ -711,6 +711,7 @@ export class ScionProjectMembersEditor extends LitElement {
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius-lg, 0.75rem);
         overflow: hidden;
+        container: members-table / inline-size;
       }
 
       .compact .table-container {
@@ -749,14 +750,6 @@ export class ScionProjectMembersEditor extends LitElement {
 
       tr:hover td {
         background: var(--scion-bg-subtle, #f1f5f9);
-      }
-
-      /* Allow the identity column to shrink in table mode so .member-name
-         ellipsizes instead of expanding the table and clipping row actions,
-         without starving the Roles and Source columns on desktop. */
-      tbody td:first-child {
-        width: 35%;
-        max-width: 0;
       }
 
       /* Member identity */
@@ -1035,6 +1028,24 @@ export class ScionProjectMembersEditor extends LitElement {
         margin-top: 0.375rem;
       }
 
+      /* Shrink the identity cell only in the intermediate table widths where
+         long names would otherwise expand the table and clip row actions; above
+         these widths the base desktop table layout is untouched. Placed before
+         @container (max-width: 600px) so the stacked layout resets width/max-width. */
+      @container members-table (max-width: 700px) {
+        table:not(.has-source) tbody td:first-child {
+          width: 100%;
+          max-width: 0;
+        }
+      }
+
+      @container members-table (max-width: 810px) {
+        table.has-source tbody td:first-child {
+          width: 35%;
+          max-width: 0;
+        }
+      }
+
       @container (max-width: 600px) {
         .section {
           padding: 1rem;
@@ -1088,7 +1099,9 @@ export class ScionProjectMembersEditor extends LitElement {
           background: transparent;
         }
 
-        tbody td:first-child {
+        tbody td:first-child,
+        table:not(.has-source) tbody td:first-child,
+        table.has-source tbody td:first-child {
           flex: 1 1 100%;
           width: auto;
           max-width: none;
@@ -2037,7 +2050,7 @@ export class ScionProjectMembersEditor extends LitElement {
     const showSource = hasNonDirectSource(this.groups);
     return html`
       <div class="table-container">
-        <table>
+        <table class=${showSource ? 'has-source' : ''}>
           <thead>
             <tr>
               <th>Member</th>

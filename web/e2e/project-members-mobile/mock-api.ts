@@ -21,12 +21,16 @@ export const SELF_USER_ID = 'user-owner';
 export const OTHER_USER_ID = 'user-member';
 export const LONG_SELF_NAME = 'Maximiliana Bartholomew-Featherstonehaugh';
 export const LONG_OTHER_NAME = 'jonathan.fitzgerald-smith@example-corp.com';
+export const MEDIUM_SELF_NAME = 'Alexandra Montgomery-Clarke';
+export const MEDIUM_OTHER_NAME = 'alexandra.montgomery@example.com';
 
 export interface ProjectMembersMockOptions {
   showVisitorsTab?: boolean;
   longNames?: boolean;
+  mediumNames?: boolean;
   includeCustomRoles?: boolean;
   includeGroupSource?: boolean;
+  sidebarCollapsed?: boolean;
 }
 
 export async function setupProjectMembersHub(
@@ -35,12 +39,19 @@ export async function setupProjectMembersHub(
 ): Promise<void> {
   const showVisitorsTab = opts.showVisitorsTab ?? true;
   const longNames = opts.longNames ?? false;
-  const includeCustomRoles = opts.includeCustomRoles ?? longNames;
+  const mediumNames = opts.mediumNames ?? false;
+  const includeCustomRoles = opts.includeCustomRoles ?? (longNames || mediumNames);
   const includeGroupSource = opts.includeGroupSource ?? false;
+  const sidebarCollapsed = opts.sidebarCollapsed ?? false;
 
   await page.addInitScript(
-    ({ visitorsFlag }) => {
+    ({ visitorsFlag, collapsed }) => {
       window.localStorage.setItem('scion-theme', 'dark');
+      if (collapsed) {
+        window.localStorage.setItem('scion-sidebar-collapsed', 'true');
+      } else {
+        window.localStorage.removeItem('scion-sidebar-collapsed');
+      }
       window.__SCION_FEATURES__ = {
         'federation.project_visitors': visitorsFlag,
       };
@@ -55,7 +66,7 @@ export async function setupProjectMembersHub(
         close(): void {}
       } as unknown as typeof EventSource;
     },
-    { visitorsFlag: showVisitorsTab }
+    { visitorsFlag: showVisitorsTab, collapsed: sidebarCollapsed }
   );
 
   await page.route('**/api/**', (route) => {
@@ -213,20 +224,26 @@ export async function setupProjectMembersHub(
           ]
         : []),
     ];
+    const selfName = longNames ? LONG_SELF_NAME : mediumNames ? MEDIUM_SELF_NAME : 'Preston Holmes';
+    const otherName = longNames
+      ? LONG_OTHER_NAME
+      : mediumNames
+        ? MEDIUM_OTHER_NAME
+        : 'Alice Anderson';
     return route.fulfill({
       json: {
         items: [
           {
             principalType: 'user',
             principalId: SELF_USER_ID,
-            principalDisplayName: longNames ? LONG_SELF_NAME : 'Preston Holmes',
+            principalDisplayName: selfName,
             principalStatus: 'active',
             bindings: selfBindings,
           },
           {
             principalType: 'user',
             principalId: OTHER_USER_ID,
-            principalDisplayName: longNames ? LONG_OTHER_NAME : 'Alice Anderson',
+            principalDisplayName: otherName,
             principalStatus: 'active',
             bindings: otherBindings,
           },

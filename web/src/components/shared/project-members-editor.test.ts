@@ -2298,21 +2298,30 @@ describe('invited principals', () => {
 
 describe('narrow-container responsive layout style contract (ptone/scion#9571, ptone/scion#9575)', () => {
   const NARROW = '@container (max-width: 600px)';
+  const TABLE_NARROW_3COL = '@container members-table (max-width: 700px)';
+  const TABLE_NARROW_4COL = '@container members-table (max-width: 810px)';
 
   it('stacks the section header and wraps header actions via container query without altering desktop', () => {
     const rules = elementStyleRules('scion-project-members-editor');
 
-    // Container query host wraps the layout so narrow sidebar viewports match.
+    // Container query hosts wrap the layout and table so narrow viewports match.
     expect(rules.get('.members-layout')).toContain('container-type: inline-size');
+    expect(rules.get('.table-container')).toContain('container: members-table / inline-size');
 
-    // Desktop stays a horizontal row with non-wrapping actions, and lets the
-    // identity cell shrink so long names ellipsize instead of clipping actions.
+    // Wide desktop stays untouched (no forced width percentage on td:first-child).
     expect(rules.get('.section-header')).toContain('display: flex');
     expect(rules.get('.section-header')).not.toContain('flex-direction: column');
     expect(rules.get('.actions-cell')).toContain('white-space: nowrap');
-    expect(rules.get('tbody td:first-child')).toContain('width: 35%');
-    expect(rules.get('tbody td:first-child')).toContain('max-width: 0');
+    expect(rules.get('tbody td:first-child')).toBeUndefined();
     expect(rules.get('.member-identity')).toContain('min-width: 0');
+
+    // Intermediate table widths shrink the identity cell so long names ellipsize.
+    expect(rules.get(`${TABLE_NARROW_3COL} table:not(.has-source) tbody td:first-child`)).toContain(
+      'max-width: 0'
+    );
+    expect(rules.get(`${TABLE_NARROW_4COL} table.has-source tbody td:first-child`)).toContain(
+      'max-width: 0'
+    );
 
     // Narrow container stacks the header and wraps actions.
     expect(rules.get(`${NARROW} .section-header`)).toContain('flex-direction: column');

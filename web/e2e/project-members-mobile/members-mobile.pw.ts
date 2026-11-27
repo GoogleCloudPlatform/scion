@@ -382,6 +382,77 @@ test.describe('Project Settings > Members responsive layout', () => {
     });
   });
 
+  test.describe('desktop 1280px (sidebar expanded) and 1100px (sidebar collapsed) with group Source', () => {
+    for (const cfg of [
+      { width: 1280, sidebarCollapsed: false, label: '1280px sidebar expanded' },
+      { width: 1100, sidebarCollapsed: true, label: '1100px sidebar collapsed' },
+    ]) {
+      test(`keeps multi-role badges and Via group text on one line at ${cfg.label}`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width: cfg.width, height: 800 });
+        await setupProjectMembersHub(page, {
+          showVisitorsTab: true,
+          includeCustomRoles: true,
+          includeGroupSource: true,
+          sidebarCollapsed: cfg.sidebarCollapsed,
+        });
+        await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+        const editor = page.locator('scion-project-members-editor');
+        await expect(editor).toBeVisible({ timeout: 10_000 });
+        await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+        for (const userId of [SELF_USER_ID, OTHER_USER_ID]) {
+          const row = editor.locator(`tr[data-principal="user:${userId}"]`);
+          const badges = row.locator('.role-badge');
+          await expect(badges).toHaveCount(2);
+          const firstBadge = await rectOf(badges.nth(0));
+          const secondBadge = await rectOf(badges.nth(1));
+          expect(Math.abs(secondBadge.top - firstBadge.top)).toBeLessThanOrEqual(2);
+        }
+
+        const otherRow = editor.locator(`tr[data-principal="user:${OTHER_USER_ID}"]`);
+        const provenance = otherRow.locator('.provenance-badge.group-derived');
+        await expect(provenance).toBeVisible();
+        const provenanceRect = await rectOf(provenance);
+        expect(provenanceRect.height).toBeLessThanOrEqual(20);
+      });
+    }
+  });
+
+  test.describe('desktop medium names (27-char name / 32-char email) without truncation', () => {
+    for (const width of [1100, 1280]) {
+      test(`does not truncate medium names or clip actions at ${width}px`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await setupProjectMembersHub(page, {
+          showVisitorsTab: true,
+          mediumNames: true,
+          includeCustomRoles: true,
+        });
+        await page.goto(`/projects/${PROJECT_ID}/settings`, { waitUntil: 'domcontentloaded' });
+
+        const editor = page.locator('scion-project-members-editor');
+        await expect(editor).toBeVisible({ timeout: 10_000 });
+        await expect(editor.locator('tbody tr')).toHaveCount(2);
+
+        const tableContainer = editor.locator('.table-container');
+        const tableOverflow = await tableContainer.evaluate(
+          (el) => el.scrollWidth > el.clientWidth + 1
+        );
+        expect(tableOverflow).toBe(false);
+
+        for (const userId of [SELF_USER_ID, OTHER_USER_ID]) {
+          const row = editor.locator(`tr[data-principal="user:${userId}"]`);
+          const nameTruncated = await row
+            .locator('.member-name')
+            .evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+          expect(nameTruncated).toBe(false);
+        }
+      });
+    }
+  });
+
   test.describe('desktop 1440px viewport with multi-role and group-derived Source', () => {
     test.use({ viewport: { width: 1440, height: 800 } });
 
