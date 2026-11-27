@@ -1610,13 +1610,13 @@ export class ScionPageProjectSettings extends LitElement {
 
   /** Whether the hub operator has locked telemetry on for all agents. */
   private isTelemetryLockedByHub(): boolean {
-    return this.resolvedSettings['scion.io/telemetry-enabled']?.lockedBy === 'hub';
+    return this.resolvedSettings?.['scion.io/telemetry-enabled']?.lockedBy === 'hub';
   }
 
   /** Whether a stored project telemetry=false is overridden by hub enforcement. */
   private isTelemetryShadowedDisabled(): boolean {
     if (!this.isTelemetryLockedByHub()) return false;
-    const entry = this.resolvedSettings['scion.io/telemetry-enabled'];
+    const entry = this.resolvedSettings?.['scion.io/telemetry-enabled'];
     return entry?.storedValue === false || this.configTelemetryEnabled === false;
   }
 

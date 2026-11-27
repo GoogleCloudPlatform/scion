@@ -311,7 +311,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
-		alreadyStoredFalse := stored.TelemetryEnabled != nil && !*stored.TelemetryEnabled
+		alreadyStoredFalse := stored != nil && stored.TelemetryEnabled != nil && !*stored.TelemetryEnabled
 		if present[projectSettingsFieldTelemetryEnabled] && merged.TelemetryEnabled != nil && !*merged.TelemetryEnabled && !alreadyStoredFalse && s.telemetryEnforced() {
 			writeError(w, http.StatusConflict, ErrCodeTelemetryEnforcedByHub,
 				"telemetry is enforced by the hub operator and cannot be disabled at the project level",
