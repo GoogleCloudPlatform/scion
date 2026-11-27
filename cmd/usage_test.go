@@ -294,10 +294,10 @@ func TestUsageCLI_TableRendering_NullPartialSaturated(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	svc := &stubUsageService{
 		summaryResp: &hubclient.UsageSummaryResponse{
-			Scope:   hubclient.UsageScopeRef{Kind: "project", ID: "proj-1"},
-			Window:  hubclient.UsageWindow{Since: now.AddDate(0, 0, -6), Until: now, Granularity: "day"},
-			GroupBy: []string{"model"},
-			Calls:   42,
+			Scope:      hubclient.UsageScopeRef{Kind: "project", ID: "proj-1"},
+			Window:     hubclient.UsageWindow{Since: now.AddDate(0, 0, -6), Until: now, Granularity: "day"},
+			GroupBy:    []string{"model"},
+			Calls:      42,
 			ErrorCalls: 1,
 			Tokens: hubclient.UsageTokens{
 				Input:          int64Ptr(120000),

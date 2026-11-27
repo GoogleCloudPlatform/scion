@@ -397,11 +397,11 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 	t.Run("stale wins over partial, measured, calls_only, unmeasured", func(t *testing.T) {
 		cov := &store.UsageScopeCoverage{
 			Buckets: []store.UsageCoverageBucket{
-				{HarnessConfig: "claude", IsRunning: true, IsPastGrace: true, AgentCount: 1},                                 // stale (past grace, no receipt)
-				{HarnessConfig: "partial-h", HasUsageData: true, AgentCount: 2},                                              // partial
+				{HarnessConfig: "claude", IsRunning: true, IsPastGrace: true, AgentCount: 1},                                  // stale (past grace, no receipt)
+				{HarnessConfig: "partial-h", HasUsageData: true, AgentCount: 2},                                               // partial
 				{HarnessConfig: "claude", HasMeterHealth: true, LatestFinalState: "open", HasUsageData: false, AgentCount: 3}, // measured (heartbeat-only)
-				{HarnessConfig: "antigravity", HasUsageData: true, AgentCount: 1},                                            // calls_only
-				{HarnessConfig: "hermes", IsRunning: true, IsPastGrace: true, AgentCount: 4},                                 // unmeasured (source:none)
+				{HarnessConfig: "antigravity", HasUsageData: true, AgentCount: 1},                                             // calls_only
+				{HarnessConfig: "hermes", IsRunning: true, IsPastGrace: true, AgentCount: 4},                                  // unmeasured (source:none)
 			},
 		}
 		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 10, now, true, resolver)
