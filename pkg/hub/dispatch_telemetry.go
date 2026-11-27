@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -67,6 +69,88 @@ const envTelemetryEnabled = "SCION_TELEMETRY_ENABLED"
 // ErrCodeTelemetryEnforcedByHub is returned when a caller tries to disable
 // telemetry while the hub operator has enforced telemetry fleet-wide.
 const ErrCodeTelemetryEnforcedByHub = "telemetry_enforced_by_hub"
+
+// configDisablesTelemetry reports whether cfg explicitly disables telemetry
+// via config.telemetry.enabled=false or a non-truthy SCION_TELEMETRY_ENABLED
+// env entry (matching the broker's resolveTelemetryOverride, which treats any
+// value other than "true" or "1" as disabled).
+func configDisablesTelemetry(cfg *api.ScionConfig) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	if cfg.Telemetry != nil && cfg.Telemetry.Enabled != nil && !*cfg.Telemetry.Enabled {
+		return "config.telemetry.enabled", true
+	}
+	if cfg.Env != nil {
+		if v, ok := cfg.Env[envTelemetryEnabled]; ok {
+			trimmed := strings.TrimSpace(v)
+			if trimmed != "true" && trimmed != "1" {
+				return "config.env." + envTelemetryEnabled, true
+			}
+		}
+	}
+	return "", false
+}
+
+// agentHasStoredTelemetryFalse reports whether agent's requester-stored
+// telemetry (CreateInputs.InlineConfig.Telemetry) is already explicitly
+// disabled, so an unchanged PATCH resend is allowed (mirroring project
+// settings PUT I1). Non-requester AppliedConfig.InlineConfig.Telemetry is
+// intentionally ignored so a copied non-requester false cannot be echoed as
+// requester intent while hub enforcement is active.
+func agentHasStoredTelemetryFalse(agent *store.Agent) bool {
+	if agent == nil || agent.AppliedConfig == nil {
+		return false
+	}
+	if t := requesterTelemetry(agent.AppliedConfig); t != nil && t.Enabled != nil && !*t.Enabled {
+		return true
+	}
+	return false
+}
+
+// writeTelemetryEnforcedRefusal writes a 400 telemetry_enforced_by_hub error
+// when a caller tries to disable telemetry on an agent while hub enforcement
+// is active.
+func writeTelemetryEnforcedRefusal(w http.ResponseWriter, field string) {
+	writeError(w, http.StatusBadRequest, ErrCodeTelemetryEnforcedByHub,
+		"telemetry is enforced by the hub operator and cannot be disabled for this agent",
+		map[string]interface{}{"field": field})
+}
+
+// telemetryEnforcementPrecheck refuses dispatch when hub-level telemetry
+// enforcement is active and the target runtime broker does not report the
+// templateTiers capability required to apply TelemetryPolicy.
+func (d *HTTPAgentDispatcher) telemetryEnforcementPrecheck(ctx context.Context, agent *store.Agent) error {
+	if d.telemetryEnforcedProvider == nil || !d.telemetryEnforcedProvider() {
+		return nil
+	}
+	if agent == nil || agent.RuntimeBrokerID == "" || d.store == nil {
+		return nil
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("resolve runtime broker %s for telemetry enforcement check: %w", agent.RuntimeBrokerID, err)
+	}
+	if broker != nil && (broker.Capabilities == nil || !broker.Capabilities.TemplateTiers) {
+		slog.Warn("Dispatch refused: runtime broker lacks templateTiers capability required for enforced telemetry",
+			"agent_id", agent.ID,
+			"broker_id", agent.RuntimeBrokerID,
+			"code", api.LaunchCodeTelemetryEnforcementUnsupported)
+		return &RuntimeTargetRefusal{
+			Code:    api.LaunchCodeTelemetryEnforcementUnsupported,
+			Status:  http.StatusPreconditionFailed,
+			Message: "the runtime broker does not support enforced telemetry; upgrade the broker",
+			Details: map[string]interface{}{
+				"brokerId":   agent.RuntimeBrokerID,
+				"capability": "templateTiers",
+			},
+		}
+	}
+	return nil
+}
 
 // writeTelemetryEnforcementExperimentDisabled writes the 412 experiment_disabled
 // refusal when saving telemetry.enforced=true while experiment

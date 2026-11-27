@@ -70,6 +70,7 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodeAgentPolicyRefused:                   "the broker's agent policy refused this configuration",
 	api.LaunchCodeWorkspaceNotPermitted:                "the agent workspace path is not permitted",
 	api.LaunchCodeLimitCeilingsUnsupported:             "the runtime broker does not support hub agent limit ceilings",
+	api.LaunchCodeTelemetryEnforcementUnsupported:      "the runtime broker does not support enforced telemetry; upgrade the broker",
 	api.BrokerErrCodeSkillResolution:                   "a required skill could not be resolved",
 	api.BrokerErrCodeStorageMigrationRequired:          "the agent's storage settings must be migrated first",
 	api.LaunchCodeImagePullFailed:                      "the agent image could not be pulled",

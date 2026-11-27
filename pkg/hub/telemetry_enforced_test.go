@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -243,11 +244,33 @@ func TestTelemetryEnforced_ProjectSettingsPut(t *testing.T) {
 		json.RawMessage(`{"telemetryEnabled":false}`))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// Experiment on + TelemetryEnforced=true: PUT telemetryEnabled=false returns 409 telemetry_enforced_by_hub.
+	// Experiment on + TelemetryEnforced=true:
+	// (a) Full-object resend of an already-stored false is allowed (I1: does not
+	//     block unrelated saves; stored false stays shadowed at dispatch).
 	srv.mu.Lock()
 	srv.config.TelemetryEnforced = true
 	srv.mu.Unlock()
 
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"telemetryEnabled":false,"defaultTemplate":"other-tpl"}`))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var settings hubclient.ProjectSettings
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &settings))
+	assert.Equal(t, "other-tpl", settings.DefaultTemplate)
+	require.NotNil(t, settings.TelemetryEnabled)
+	assert.False(t, *settings.TelemetryEnabled, "unchanged resend preserves shadowed stored false")
+
+	// (b) Unrelated partial PUT also preserves stored false.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"defaultTemplate":"third-tpl"}`))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// (c) PUT telemetryEnabled=true is accepted.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"telemetryEnabled":true}`))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// (d) Changing from true → false returns 409 telemetry_enforced_by_hub.
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
 		json.RawMessage(`{"telemetryEnabled":false}`))
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
@@ -262,28 +285,18 @@ func TestTelemetryEnforced_ProjectSettingsPut(t *testing.T) {
 	assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
 	assert.Equal(t, projectSettingsFieldTelemetryEnabled, errResp.Error.Details["field"])
 
-	// Unrelated partial PUT still succeeds even though stored project annotation is false.
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
-		json.RawMessage(`{"defaultTemplate":"other-tpl"}`))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var settings hubclient.ProjectSettings
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &settings))
-	assert.Equal(t, "other-tpl", settings.DefaultTemplate)
-	require.NotNil(t, settings.TelemetryEnabled)
-	assert.False(t, *settings.TelemetryEnabled, "unrelated partial PUT preserves stored value")
-
-	// PUT telemetryEnabled=true is accepted.
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
-		json.RawMessage(`{"telemetryEnabled":true}`))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	// PUT telemetryEnabled=null (clear) is accepted.
+	// (e) PUT telemetryEnabled=null (clear) is accepted.
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
 		json.RawMessage(`{"telemetryEnabled":null}`))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var cleared hubclient.ProjectSettings
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cleared))
 	assert.Nil(t, cleared.TelemetryEnabled)
+
+	// (f) Changing from null → false also returns 409 telemetry_enforced_by_hub.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"telemetryEnabled":false}`))
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 }
 
 func TestTelemetryEnforced_DispatchPolicy(t *testing.T) {
@@ -539,4 +552,337 @@ profiles:
 	assert.True(t, *staged.Telemetry.Enabled, "native harness telemetry file must have enabled=true")
 	require.NotNil(t, staged.Telemetry.Cloud)
 	assert.Equal(t, "enforced.example.com:4317", staged.Telemetry.Cloud.Endpoint)
+}
+
+func TestTelemetryEnforced_ResolvedSettings(t *testing.T) {
+	assert.Equal(t, store.AnnotationProjectTelemetryEnabled, projectSettingTelemetryEnabled,
+		"hub projectSettingTelemetryEnabled must match store.AnnotationProjectTelemetryEnabled")
+	srv, s := testServer(t)
+	ctx := t.Context()
+	project := createTestProjectForSettings(t, s)
+
+	getResolved := func() hubclient.ResolvedProjectSettings {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings/resolved", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resolved hubclient.ResolvedProjectSettings
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resolved))
+		return resolved
+	}
+
+	// Experiment off + TelemetryEnforced=true: unlocked, effective=null, storedValue=null.
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
+	res := getResolved()
+	tel := res.Settings[projectSettingTelemetryEnabled]
+	assert.Nil(t, tel.LockedBy)
+	assert.Nil(t, tel.Effective)
+	assert.Nil(t, tel.StoredValue)
+
+	// Experiment on + TelemetryEnforced=true, no project annotation.
+	setTelemetryEnforcementExperiment(t, srv, s, true)
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
+	res = getResolved()
+	tel = res.Settings[projectSettingTelemetryEnabled]
+	require.NotNil(t, tel.LockedBy)
+	assert.Equal(t, "hub", *tel.LockedBy)
+	assert.Equal(t, true, tel.Effective)
+	assert.Nil(t, tel.StoredValue)
+	// Other settings stay unlocked.
+	other := res.Settings[projectSettingDefaultModel]
+	assert.Nil(t, other.LockedBy)
+	assert.Nil(t, other.Effective)
+	assert.Nil(t, other.StoredValue)
+
+	// Stored project telemetry-enabled=false → storedValue=false (shadowed).
+	project.Annotations = map[string]string{projectSettingTelemetryEnabled: "false"}
+	require.NoError(t, s.UpdateProject(ctx, project))
+	res = getResolved()
+	tel = res.Settings[projectSettingTelemetryEnabled]
+	require.NotNil(t, tel.LockedBy)
+	assert.Equal(t, "hub", *tel.LockedBy)
+	assert.Equal(t, true, tel.Effective)
+	assert.Equal(t, false, tel.StoredValue)
+
+	// Stored project telemetry-enabled=true → not shadowed, storedValue=nil.
+	project.Annotations = map[string]string{projectSettingTelemetryEnabled: "true"}
+	require.NoError(t, s.UpdateProject(ctx, project))
+	res = getResolved()
+	tel = res.Settings[projectSettingTelemetryEnabled]
+	require.NotNil(t, tel.LockedBy)
+	assert.Equal(t, "hub", *tel.LockedBy)
+	assert.Equal(t, true, tel.Effective)
+	assert.Nil(t, tel.StoredValue)
+}
+
+func TestTelemetryEnforced_InvalidDBRowWarning(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+	ops := ensureTestOps(t, srv, s)
+
+	// Directly persist an invalid telemetry DB row (enforced=true with enabled=false).
+	_, err := s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{"enabled":false,"enforced":true}`), "test", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var body struct {
+		Telemetry                *opsettings.TelemetrySettings `json:"telemetry"`
+		TelemetryEnforcedWarning string                        `json:"telemetry_enforced_warning"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	if body.Telemetry != nil {
+		assert.False(t, body.Telemetry.Enforced, "invalid row must not report enforced=true")
+	}
+	assert.NotEmpty(t, body.TelemetryEnforcedWarning, "L1: invalid enforced row must surface warning")
+
+	// Valid row clears the warning.
+	_, err = s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{"enabled":true,"enforced":true}`), "test", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+
+	rr = httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	body.Telemetry = nil
+	body.TelemetryEnforcedWarning = ""
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	require.NotNil(t, body.Telemetry)
+	assert.True(t, body.Telemetry.Enforced)
+	assert.Empty(t, body.TelemetryEnforcedWarning)
+}
+
+func TestTelemetryEnforced_CreateAndPatchRefusal(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+	project := createTestProjectForSettings(t, s)
+
+	// Turn on experiment and enforcement.
+	setTelemetryEnforcementExperiment(t, srv, s, true)
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
+
+	t.Run("create with config.telemetry.enabled=false returns 400 telemetry_enforced_by_hub", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents",
+			json.RawMessage(`{"name":"tel-refuse-cfg","config":{"telemetry":{"enabled":false}}}`))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp struct {
+			Error struct {
+				Code    string         `json:"code"`
+				Details map[string]any `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+		assert.Equal(t, "config.telemetry.enabled", errResp.Error.Details["field"])
+	})
+
+	t.Run("create with SCION_TELEMETRY_ENABLED=false or 0 returns 400 telemetry_enforced_by_hub", func(t *testing.T) {
+		for _, val := range []string{"false", "0", ""} {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents",
+				json.RawMessage(`{"name":"tel-refuse-env","config":{"env":{"SCION_TELEMETRY_ENABLED":"`+val+`"}}}`))
+			require.Equal(t, http.StatusBadRequest, rec.Code, "val=%q body=%s", val, rec.Body.String())
+			var errResp struct {
+				Error struct {
+					Code    string         `json:"code"`
+					Details map[string]any `json:"details"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+			assert.Equal(t, "config.env.SCION_TELEMETRY_ENABLED", errResp.Error.Details["field"])
+		}
+	})
+
+	t.Run("PATCH with config.telemetry.enabled=false returns 400 telemetry_enforced_by_hub", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        tid("agent-tel-patch"),
+			Slug:      "agent-tel-patch",
+			Name:      "agent-tel-patch",
+			ProjectID: project.ID,
+			Phase:     "stopped",
+			AppliedConfig: &store.AgentAppliedConfig{
+				InlineConfig: &api.ScionConfig{},
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false}}}`))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+
+		// PATCH with telemetry.enabled=true is allowed.
+		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":true}}}`))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("PATCH resending already-stored telemetry.enabled=false is allowed (O6)", func(t *testing.T) {
+		off := false
+		agent := &store.Agent{
+			ID:        tid("agent-tel-patch-stored-false"),
+			Slug:      "agent-tel-patch-stored-false",
+			Name:      "agent-tel-patch-stored-false",
+			ProjectID: project.ID,
+			Phase:     "stopped",
+			AppliedConfig: &store.AgentAppliedConfig{
+				CreateInputs: &store.AgentCreateInputs{
+					InlineConfig: &api.ScionConfig{
+						Telemetry: &api.TelemetryConfig{Enabled: &off},
+					},
+				},
+				InlineConfig: &api.ScionConfig{
+					Telemetry: &api.TelemetryConfig{Enabled: &off},
+				},
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		// Unchanged resend of already-stored false alongside another edit succeeds.
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false},"max_duration":"30m"}}`))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		// Changing to true, then back to false is refused with 400 telemetry_enforced_by_hub.
+		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":true}}}`))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false}}}`))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+	})
+
+	t.Run("PATCH refuses telemetry.enabled=false when only non-requester InlineConfig has false (L1)", func(t *testing.T) {
+		off := false
+		agent := &store.Agent{
+			ID:        tid("agent-tel-patch-nonrequester-false"),
+			Slug:      "agent-tel-patch-nonrequester-false",
+			Name:      "agent-tel-patch-nonrequester-false",
+			ProjectID: project.ID,
+			Phase:     "stopped",
+			AppliedConfig: &store.AgentAppliedConfig{
+				InlineConfig: &api.ScionConfig{
+					Telemetry: &api.TelemetryConfig{Enabled: &off},
+				},
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false}}}`))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+	})
+}
+
+func TestTelemetryEnforced_OldBrokerRefusal(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	project := createTestProjectForSettings(t, s)
+
+	var brokerCalled bool
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		brokerCalled = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agent":{"id":"a","status":"running"}}`))
+	}))
+	defer brokerSrv.Close()
+
+	oldBroker := &store.RuntimeBroker{
+		ID:       tid("broker-no-tiers"),
+		Name:     "broker-no-tiers",
+		Slug:     "broker-no-tiers",
+		Endpoint: brokerSrv.URL,
+		Status:   store.BrokerStatusOnline,
+		// Capabilities nil or TemplateTiers=false
+		Capabilities: &store.BrokerCapabilities{Sync: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, oldBroker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   oldBroker.ID,
+		BrokerName: oldBroker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("agent-old-broker"),
+		Slug:            "agent-old-broker",
+		Name:            "agent-old-broker",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: oldBroker.ID,
+		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+
+	d := NewHTTPAgentDispatcher(s, true, slog.Default())
+	d.SetTelemetryEnforcedProvider(srv.telemetryEnforced)
+
+	// Experiment off + TelemetryEnforced=true: old broker is NOT refused.
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
+	require.NoError(t, d.telemetryEnforcementPrecheck(ctx, agent))
+
+	// Experiment on + TelemetryEnforced=true: create, start, and restart all
+	// refuse with typed telemetry_enforcement_unsupported and make zero broker calls.
+	setTelemetryEnforcementExperiment(t, srv, s, true)
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"create", func() error { _, err := d.DispatchAgentCreate(ctx, agent); return err }},
+		{"start", func() error { return d.DispatchAgentStart(ctx, agent, "", false) }},
+		{"restart", func() error { return d.DispatchAgentRestart(ctx, agent) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			brokerCalled = false
+			err := tc.call()
+			require.Error(t, err)
+			var refusal *RuntimeTargetRefusal
+			require.True(t, errors.As(err, &refusal), "expected RuntimeTargetRefusal, got %v", err)
+			assert.Equal(t, api.LaunchCodeTelemetryEnforcementUnsupported, refusal.Code)
+			assert.Equal(t, http.StatusPreconditionFailed, refusal.Status)
+			assert.Equal(t, oldBroker.ID, refusal.Details["brokerId"])
+			assert.False(t, brokerCalled, "broker must not be called when refused")
+		})
+	}
+
+	// Upgrading broker to TemplateTiers=true passes precheck.
+	oldBroker.Capabilities.TemplateTiers = true
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, oldBroker))
+	require.NoError(t, d.telemetryEnforcementPrecheck(ctx, agent))
 }

@@ -58,6 +58,13 @@ function stubFetch(): void {
           json: () => Promise.resolve({ error: { message: 'stub: not created' } }),
         } as Response);
       }
+      if (url.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
       let body: unknown = { projects: [], brokers: [], templates: [], harnessConfigs: [] };
       if (url.includes('/settings/public')) {
         body = {};

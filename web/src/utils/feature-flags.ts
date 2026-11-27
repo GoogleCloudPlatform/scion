@@ -545,3 +545,17 @@ export const AGENT_LIMIT_CEILINGS_FLAG = 'agent_policy.limit_ceilings';
 export function agentLimitCeilingsEnabled(): boolean {
   return isFeatureEnabled(AGENT_LIMIT_CEILINGS_FLAG);
 }
+
+/**
+ * Hub-enforced telemetry (agent_policy.telemetry_enforcement, ptone/scion#9370):
+ * shows the Admin Server Config "Enforce telemetry for all agents" toggle
+ * (or a mismatch warning when stored while the experiment is off).
+ * Presentation only: Hub enforces telemetry on create/PATCH/PUT/dispatch only
+ * while the experiment is enabled. Default OFF.
+ */
+export const TELEMETRY_ENFORCEMENT_FLAG = 'agent_policy.telemetry_enforcement';
+
+/** Whether Hub-enforced telemetry admin UI is enabled in this session. */
+export function telemetryEnforcementEnabled(): boolean {
+  return isFeatureEnabled(TELEMETRY_ENFORCEMENT_FLAG);
+}

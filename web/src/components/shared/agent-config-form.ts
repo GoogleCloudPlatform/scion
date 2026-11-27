@@ -800,6 +800,9 @@ export class ScionAgentConfigForm extends LitElement {
   /** Whether the Branch field applies (the project has a git remote, not a shared workspace). */
   @property({ type: Boolean }) branchAvailable = false;
 
+  /** Whether telemetry is enforced by the hub operator (disables opting out). */
+  @property({ type: Boolean }) telemetryLockedByHub = false;
+
   /** The GCP identity picker's state, owned by the page. */
   @property({ attribute: false }) gcpIdentity: GcpIdentityState | null = null;
 
@@ -962,6 +965,7 @@ export class ScionAgentConfigForm extends LitElement {
           break;
         }
         case 'telemetry': {
+          if (this.telemetryLockedByHub) break;
           const v: TelemetryConfig | null =
             d.cleared || d.text === '' ? null : { enabled: d.text === 'true' };
           if (v !== null || !create) out.telemetry = v;
@@ -1827,6 +1831,19 @@ export class ScionAgentConfigForm extends LitElement {
     d: FieldDraft | undefined,
     id: string
   ) {
+    if (f.control === 'telemetry' && this.telemetryLockedByHub) {
+      return html`<div class="row">
+        <sl-select
+          id=${id}
+          size="small"
+          .value=${'true'}
+          help-text="Required by hub operator"
+          disabled
+        >
+          <sl-option value="true">Enabled</sl-option>
+        </sl-select>
+      </div>`;
+    }
     const options =
       f.control === 'choice' || f.control === 'top-choice' ? f.options : TOGGLE_OPTIONS;
     const value = d ? (d.cleared ? '' : d.text) : this.storedText(f);

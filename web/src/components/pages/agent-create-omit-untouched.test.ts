@@ -104,12 +104,19 @@ function stubFetch(): void {
           json: () => Promise.resolve({ error: { message: 'stub: not created' } }),
         } as Response);
       }
+      if (url.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
       let body: unknown = { projects: [], brokers: [], templates: [], harnessConfigs: [] };
       if (url.includes('/settings/public')) {
         body = { telemetryEnabled: hubTelemetry, ...hubExtraSettings };
       } else if (url.includes('/api/v1/projects?')) {
         body = { projects: [{ id: 'p1', name: 'P1' }] };
-      } else if (url.includes('/api/v1/projects/p1/settings')) {
+      } else if (url.endsWith('/api/v1/projects/p1/settings')) {
         const settings: Record<string, unknown> = { ...projectExtraSettings };
         if (projectDefaultMode) settings.defaultGCPIdentityMode = projectDefaultMode;
         if (projectDefaultMode === 'assign') {

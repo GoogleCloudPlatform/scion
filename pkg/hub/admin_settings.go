@@ -145,6 +145,11 @@ type ServerConfigResponse struct {
 	// be applied and is falling back to "member" (ptone/scion#8288).
 	DefaultUserRoleWarning *DefaultUserRoleWarning `json:"default_user_role_warning,omitempty"`
 
+	// TelemetryEnforcedWarning is populated, read-only, when the stored DB
+	// telemetry row has enforced=true but failed validation, so telemetry
+	// enforcement is inactive until the row is corrected.
+	TelemetryEnforcedWarning string `json:"telemetry_enforced_warning,omitempty"`
+
 	// EligibleDefaultRoles lists, read-only, custom system-scope role
 	// definitions eligible for server.auth.default_user_role when the
 	// hub.custom_default_user_role experiment is enabled (ptone/scion#8288).

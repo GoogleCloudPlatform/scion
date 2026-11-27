@@ -132,6 +132,21 @@ type ResolvedProjectSetting struct {
 	// agent_policy.limit_ceilings experiment is enabled and a ceiling is
 	// configured; null otherwise.
 	Ceiling any `json:"ceiling"`
+
+	// LockedBy reports the layer that locks this setting ("hub" when enforced
+	// by the hub operator), or null when the setting is not locked.
+	LockedBy *string `json:"lockedBy"`
+
+	// Effective is the enforced effective value when LockedBy is non-null
+	// (e.g. true when telemetry is locked by the hub operator), and null for
+	// all unlocked settings (this endpoint still does not resolve precedence
+	// for unlocked settings).
+	Effective any `json:"effective"`
+
+	// StoredValue holds the shadowed project value (e.g. false when the project
+	// had telemetryEnabled=false stored before hub enforcement was enabled), or
+	// null when unlocked or no shadowed project value exists.
+	StoredValue any `json:"storedValue"`
 }
 
 // ResolvedProjectSettings is the GET .../settings/resolved response body.
@@ -440,6 +455,14 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 
 		entry.HubDefault, entry.HubValue = s.hubDefaultFor(desc, agentDefaults, agentDefaultsReadable)
 		entry.Ceiling = limitCeilingForSetting(key, ceilings)
+		if key == projectSettingTelemetryEnabled && s.telemetryEnforced() {
+			lockedBy := "hub"
+			entry.LockedBy = &lockedBy
+			entry.Effective = true
+			if pol := projectTelemetryPolicy(project); pol != nil && !*pol {
+				entry.StoredValue = false
+			}
+		}
 		settings[key] = entry
 	}
 

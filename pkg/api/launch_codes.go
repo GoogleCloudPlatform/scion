@@ -112,6 +112,10 @@ const (
 	// configured, but the target runtime broker does not advertise the
 	// limitCeilings capability.
 	LaunchCodeLimitCeilingsUnsupported = "limit_ceilings_unsupported"
+	// LaunchCodeTelemetryEnforcementUnsupported: the hub enforces telemetry
+	// fleet-wide, but the target runtime broker does not report the
+	// templateTiers capability required to apply TelemetryPolicy.
+	LaunchCodeTelemetryEnforcementUnsupported = "telemetry_enforcement_unsupported"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull, or a failed local

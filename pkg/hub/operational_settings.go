@@ -139,9 +139,10 @@ type Layer1Snapshot struct {
 	HasMaintenanceRow bool
 
 	// Telemetry
-	TelemetryEnabled  *bool
-	TelemetryEnforced bool
-	TelemetryConfig   *config.V1TelemetryConfig
+	TelemetryEnabled         *bool
+	TelemetryEnforced        bool
+	TelemetryEnforcedInvalid bool
+	TelemetryConfig          *config.V1TelemetryConfig
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
@@ -750,8 +751,17 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		var ts opsettings.TelemetrySettings
 		if err := json.Unmarshal(rawTel, &ts); err != nil {
 			slog.Error("operational settings: cannot decode telemetry DB row for enforced flag", "error", err)
+			var probe struct {
+				Enforced bool `json:"enforced"`
+			}
+			if json.Unmarshal(rawTel, &probe) == nil && probe.Enforced {
+				snap.TelemetryEnforcedInvalid = true
+			}
 		} else if resolved, err := ts.Resolve(); err != nil {
 			slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
+			if ts.Enforced {
+				snap.TelemetryEnforcedInvalid = true
+			}
 		} else {
 			snap.TelemetryEnforced = resolved.Enforced
 		}

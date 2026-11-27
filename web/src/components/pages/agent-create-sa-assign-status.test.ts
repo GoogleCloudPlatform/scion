@@ -118,7 +118,14 @@ function stubFetch(
         Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
       if (raw.includes('/api/v1/projects?')) return ok({ projects: [{ id: 'p1', name: 'P1' }] });
       if (raw.includes('/api/v1/runtime-brokers')) return ok({ brokers: [broker] });
-      if (raw.includes('/api/v1/projects/p1/settings')) {
+      if (raw.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
+      if (raw.endsWith('/api/v1/projects/p1/settings')) {
         return ok({
           defaultGCPIdentityMode: 'assign',
           defaultGCPIdentityServiceAccountID: 'sa-a',

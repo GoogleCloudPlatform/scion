@@ -165,7 +165,14 @@ function stubFetchForKubernetesProjectDefault(
             }),
         } as Response);
       }
-      if (url.includes('/api/v1/projects/p1/settings')) {
+      if (url.endsWith('/settings/resolved')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({}),
+        } as Response);
+      }
+      if (url.endsWith('/api/v1/projects/p1/settings')) {
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -669,7 +676,14 @@ describe('Create Agent: GCP identity on Kubernetes targets (Block offered)', () 
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = requestUrl(input);
-        if (url.includes('/api/v1/projects/p2/settings')) {
+        if (url.endsWith('/settings/resolved')) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            json: () => Promise.resolve({}),
+          } as Response);
+        }
+        if (url.endsWith('/api/v1/projects/p2/settings')) {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -731,7 +745,14 @@ describe('Create Agent: GCP identity on Kubernetes targets (Block offered)', () 
             json: () => Promise.resolve({ error: { message: 'stub: not actually created' } }),
           } as Response);
         }
-        if (url.includes('/api/v1/projects/p2/settings')) {
+        if (url.endsWith('/settings/resolved')) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            json: () => Promise.resolve({}),
+          } as Response);
+        }
+        if (url.endsWith('/api/v1/projects/p2/settings')) {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -989,6 +1010,13 @@ describe('Create Agent: GCP identity defaults do not race', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = requestUrl(input);
+        if (url.endsWith('/settings/resolved')) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            json: () => Promise.resolve({}),
+          } as Response);
+        }
         for (const [fragment, route] of Object.entries(routes)) {
           if (url.includes(fragment)) {
             if (route && typeof route === 'object' && 'promise' in route) {
@@ -1105,7 +1133,14 @@ describe('Create Agent: GCP identity defaults do not race', () => {
             ? firstAAccounts.promise
             : ok({ items: [makeServiceAccount('sa-a2')] });
         }
-        if (url.includes('/projects/pA/settings')) {
+        if (url.endsWith('/settings/resolved')) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            json: () => Promise.resolve({}),
+          } as Response);
+        }
+        if (url.endsWith('/projects/pA/settings')) {
           return ok({ defaultGCPIdentityMode: 'passthrough' });
         }
         return ok({ items: [] });
