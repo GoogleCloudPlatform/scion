@@ -267,22 +267,26 @@ func int64Ptr(v int64) *int64 {
 	return &v
 }
 
-// Rebaseline moves every discovered artifact's baseline, raw_committed_offset,
-// and parsed_offset to the byte immediately after the last '\n' at or before
-// EOF under the exclusive state lock, clears any pending segments, and records
-// reason on state.json.
+// Rebaseline moves every discovered artifact's raw_committed_offset and
+// parsed_offset to current EOF under the exclusive state lock (via
+// startGenerationLocked), preserves the write-once initial baseline_offset /
+// baseline_guard_*, records rebaseline_offset / rebaseline_guard_*, clears any
+// pending segments, and records reason on state.json. If EOF falls mid-line
+// (the preceding byte is not '\n'), skip_to_next_newline is set so the next
+// round skips past the remainder of that partial line without shipping it.
 //
-// When the current generation already has committed or pending bytes past its
-// start (RawCommittedOffset > GenerationStartOffset, or Pending != nil) and
-// the new offset differs from RawCommittedOffset, Generation is incremented
-// with LastGenerationReason = GenReasonRebaseline so no generation ever
-// contains a byte hole.
+// Whenever the current generation is not provably empty (has committed bytes
+// or a pending segment) and the artifact's position changes or lands mid-line,
+// startGenerationLocked increments Generation with
+// LastGenerationReason = GenReasonRebaseline so no generation ever contains
+// a byte hole.
 //
 // Call this when the Hub refuses capture (404 or 403 capture_disabled /
 // capture_metadata_only) before backing off, so no backlog accumulates while
-// capture is disabled. It also persists RefusedPendingRebaseline=true so the
-// first accepted probe after backoff (or across a restart) rebaselines past
-// anything written during the backoff window before shipping new bytes.
+// capture is disabled. It also persists RefusedPendingRebaseline=true (in
+// addition to shipArtifactLocked persisting it on refusal as defense in depth)
+// so the first accepted probe after backoff (or across a restart) rebaselines
+// past anything written during the backoff window before shipping new bytes.
 func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -437,7 +441,7 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 		entry.Inode = fid.Ino
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
-		setBaselineOnceLocked(entry, offset, guardHash, guardLen)
+		setBaselineOnceLocked(entry, true, offset, guardHash, guardLen)
 		entry.RebaselineOffset = offset
 		entry.RebaselineGuardHash = guardHash
 		entry.RebaselineGuardLen = guardLen
@@ -582,14 +586,18 @@ func commitSegmentLocked(entry *ArtifactState, byteStart, byteEnd int64, guardHa
 }
 
 // setBaselineOnceLocked records an artifact's immutable initial run baseline
-// (Structural Rule 2). Once BaselineOffset or BaselineGuardLen has been set,
-// subsequent calls are a no-op regardless of NeedsBaseline, so pre-baseline
-// history is never overwritten by a later rebaseline or lazy baseline.
-func setBaselineOnceLocked(entry *ArtifactState, offset int64, guardHash string, guardLen int) {
-	entry.Baseline = true
-	if entry.BaselineOffset > 0 || entry.BaselineGuardLen > 0 {
+// (Structural Rule 2). Once BaselineSet is true (or BaselineOffset /
+// BaselineGuardLen is non-zero in legacy state), subsequent calls are a no-op
+// regardless of NeedsBaseline, so pre-baseline history is never overwritten by
+// a later rebaseline or lazy baseline.
+func setBaselineOnceLocked(entry *ArtifactState, isBaseline bool, offset int64, guardHash string, guardLen int) {
+	if isBaseline {
+		entry.Baseline = true
+	}
+	if entry.BaselineSet || entry.BaselineOffset > 0 || entry.BaselineGuardLen > 0 {
 		return
 	}
+	entry.BaselineSet = true
 	entry.BaselineOffset = offset
 	entry.BaselineGuardHash = guardHash
 	entry.BaselineGuardLen = guardLen
@@ -726,7 +734,6 @@ func (s *Shipper) initBaselineLocked(existing *State) (*State, []RefusedPath, []
 			st.Artifacts[art.NativeRelativePath] = &ArtifactState{
 				NativeRelativePath: art.NativeRelativePath,
 				ArtifactKind:       art.Kind,
-				Generation:         0,
 				Baseline:           true,
 				NeedsBaseline:      true,
 				OriginHubID:        st.OriginHubID,
@@ -779,7 +786,7 @@ func (s *Shipper) baselineArtifact(resolvedHome string, art DiscoveredArtifact, 
 		UpdatedAt:          &now,
 	}
 	startGenerationLocked(entry, offset, guardHash, guardLen, "", false)
-	setBaselineOnceLocked(entry, offset, guardHash, guardLen)
+	setBaselineOnceLocked(entry, true, offset, guardHash, guardLen)
 	return entry, nil
 }
 
@@ -1018,7 +1025,6 @@ func (s *Shipper) shipArtifactLocked(
 		entry = &ArtifactState{
 			NativeRelativePath: art.NativeRelativePath,
 			ArtifactKind:       art.Kind,
-			Generation:         0,
 			Baseline:           true,
 			NeedsBaseline:      true,
 			OriginHubID:        st.OriginHubID,
@@ -1058,6 +1064,7 @@ func (s *Shipper) shipArtifactLocked(
 			UpdatedAt:          &now,
 		}
 		startGenerationLocked(entry, 0, "", 0, "", false)
+		setBaselineOnceLocked(entry, false, 0, "", 0)
 		st.Artifacts[art.NativeRelativePath] = entry
 	} else {
 		if entry.NativeRelativePath == "" {
@@ -1113,7 +1120,7 @@ func (s *Shipper) shipArtifactLocked(
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
 		startGenerationLocked(entry, offset, guardHash, guardLen, GenReasonRebaseline, false)
-		setBaselineOnceLocked(entry, offset, guardHash, guardLen)
+		setBaselineOnceLocked(entry, true, offset, guardHash, guardLen)
 		entry.RebaselineOffset = offset
 		entry.RebaselineGuardHash = guardHash
 		entry.RebaselineGuardLen = guardLen
@@ -1446,6 +1453,14 @@ func (s *Shipper) shipArtifactLocked(
 			return false, nil
 
 		case OutcomeCaptureUnavailable:
+			// Persist RefusedPendingRebaseline under the lock already held so
+			// even if a subsequent Rebaseline call fails (e.g. cancelled ctx
+			// during PreStop or lock timeout), the next round still probes and
+			// drops refusal-window bytes before shipping.
+			st.RefusedPendingRebaseline = true
+			if err := SaveState(s.cfg.HomeDir, st); err != nil {
+				return true, err
+			}
 			res.CaptureUnavailable = true
 			return true, nil
 
@@ -1456,6 +1471,10 @@ func (s *Shipper) shipArtifactLocked(
 			}
 			if msg == "" {
 				msg = "capture_policy_refused"
+			}
+			st.RefusedPendingRebaseline = true
+			if err := SaveState(s.cfg.HomeDir, st); err != nil {
+				return true, err
 			}
 			res.PolicyRefused = true
 			res.PolicyRefusedReason = msg

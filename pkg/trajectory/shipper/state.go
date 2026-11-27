@@ -137,6 +137,7 @@ type ArtifactState struct {
 	GuardLen              int             `json:"guard_len,omitempty"`
 	Pending               *PendingSegment `json:"pending,omitempty"`
 	Baseline              bool            `json:"baseline"`
+	BaselineSet           bool            `json:"baseline_set,omitempty"`
 	BaselineOffset        int64           `json:"baseline_offset,omitempty"`
 	BaselineGuardHash     string          `json:"baseline_guard_hash,omitempty"`
 	BaselineGuardLen      int             `json:"baseline_guard_len,omitempty"`
@@ -253,6 +254,7 @@ var knownArtifactStateFields = map[string]struct{}{
 	"guard_len":               {},
 	"pending":                 {},
 	"baseline":                {},
+	"baseline_set":            {},
 	"baseline_offset":         {},
 	"baseline_guard_hash":     {},
 	"baseline_guard_len":      {},

@@ -155,11 +155,12 @@
 //     generation is provably empty (no commits, no pending, and
 //     GenerationStartOffset == RawCommittedOffset), sets GenerationStartOffset,
 //     RawCommittedOffset, and ParsedOffset together, and clears Pending.
-//  2. The run baseline is write-once: BaselineOffset and BaselineGuard* are
-//     recorded at most once per artifact via setBaselineOnceLocked (initial
-//     baseline, or first lazy baseline when none exists) and are never
-//     overwritten regardless of NeedsBaseline. Refusal-window positions live
-//     separately in RebaselineOffset and RebaselineGuard*.
+//  2. The run baseline is write-once: BaselineSet, BaselineOffset, and
+//     BaselineGuard* are recorded at most once per artifact via
+//     setBaselineOnceLocked (initial baseline, first untracked creation, or
+//     first lazy baseline when none exists) and are never overwritten
+//     regardless of NeedsBaseline. Refusal-window positions live separately in
+//     RebaselineOffset and RebaselineGuard*.
 //
 // # Policy Refusal Rebaselining
 //

@@ -29,9 +29,14 @@ import (
 //
 //  1. Generations are append-only:
 //     - RawCommittedOffset may only be written in commitSegmentLocked or startGenerationLocked.
-//     - GenerationStartOffset may only be written in startGenerationLocked.
+//     - GenerationStartOffset and Generation may only be written in startGenerationLocked.
 //  2. The run baseline is write-once:
-//     - BaselineOffset, BaselineGuardHash, and BaselineGuardLen may only be written in setBaselineOnceLocked.
+//     - BaselineSet, BaselineOffset, BaselineGuardHash, and BaselineGuardLen
+//     may only be written in setBaselineOnceLocked.
+//
+// The check inspects assignments (=, +=, ...), IncDecStmt (++, --), keyed
+// composite literals, address-of (&x.Field) escapes on guarded fields, and
+// whole-struct dereference assignments (*x = ...) outside UnmarshalJSON.
 func TestStructuralOwnershipRules(t *testing.T) {
 	allowedWriters := map[string]map[string]bool{
 		"RawCommittedOffset": {
@@ -40,6 +45,12 @@ func TestStructuralOwnershipRules(t *testing.T) {
 		},
 		"GenerationStartOffset": {
 			"startGenerationLocked": true,
+		},
+		"Generation": {
+			"startGenerationLocked": true,
+		},
+		"BaselineSet": {
+			"setBaselineOnceLocked": true,
 		},
 		"BaselineOffset": {
 			"setBaselineOnceLocked": true,
@@ -76,20 +87,54 @@ func TestStructuralOwnershipRules(t *testing.T) {
 				continue
 			}
 			fnName := fn.Name.Name
+			nonArtifactPtrs := collectNonArtifactStatePtrs(fn)
+
+			checkSelector := func(sel *ast.SelectorExpr, kind string) {
+				if allowed, guarded := allowedWriters[sel.Sel.Name]; guarded && !allowed[fnName] {
+					pos := fset.Position(sel.Pos())
+					t.Errorf("%s: forbidden %s on %s inside %s (structural ownership rule)", pos, kind, sel.Sel.Name, fnName)
+				}
+			}
+
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch node := n.(type) {
 				case *ast.AssignStmt:
 					for _, lhs := range node.Lhs {
-						sel, ok := lhs.(*ast.SelectorExpr)
-						if !ok {
-							continue
+						switch target := lhs.(type) {
+						case *ast.SelectorExpr:
+							checkSelector(target, "assignment")
+						case *ast.StarExpr:
+							// Flag whole-struct deref assignments (*e = *o) outside UnmarshalJSON,
+							// allowing only identifiers explicitly typed as non-ArtifactState pointers
+							// (e.g. *int64, *[]RefusedPath).
+							if fnName == "UnmarshalJSON" {
+								break
+							}
+							ident, isIdent := target.X.(*ast.Ident)
+							if !isIdent || !nonArtifactPtrs[ident.Name] {
+								pos := fset.Position(target.Pos())
+								t.Errorf("%s: forbidden pointer-dereference assignment inside %s (may overwrite ArtifactState outside designated writers)", pos, fnName)
+							}
 						}
-						if allowed, guarded := allowedWriters[sel.Sel.Name]; guarded && !allowed[fnName] {
-							pos := fset.Position(sel.Pos())
-							t.Errorf("%s: forbidden assignment to %s inside %s (structural ownership rule)", pos, sel.Sel.Name, fnName)
+					}
+				case *ast.IncDecStmt:
+					if sel, ok := node.X.(*ast.SelectorExpr); ok {
+						checkSelector(sel, "inc/dec")
+					}
+				case *ast.UnaryExpr:
+					if node.Op == token.AND {
+						if sel, ok := node.X.(*ast.SelectorExpr); ok {
+							checkSelector(sel, "address-of (&)")
 						}
 					}
 				case *ast.CompositeLit:
+					// Only inspect ArtifactState composite literals (other structs such as
+					// Segment, SegmentParams, and ArtifactKey legitimately carry a
+					// read-only Generation field).
+					litIdent, isIdent := node.Type.(*ast.Ident)
+					if !isIdent || litIdent.Name != "ArtifactState" {
+						break
+					}
 					for _, elt := range node.Elts {
 						kv, ok := elt.(*ast.KeyValueExpr)
 						if !ok {
@@ -112,4 +157,32 @@ func TestStructuralOwnershipRules(t *testing.T) {
 	if filesChecked == 0 {
 		t.Fatal("expected to check at least one non-test .go file")
 	}
+}
+
+// collectNonArtifactStatePtrs returns the names of receivers and parameters of
+// fn whose explicit type is a pointer to something other than ArtifactState.
+func collectNonArtifactStatePtrs(fn *ast.FuncDecl) map[string]bool {
+	out := make(map[string]bool)
+	recordList := func(fl *ast.FieldList) {
+		if fl == nil {
+			return
+		}
+		for _, field := range fl.List {
+			star, ok := field.Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "ArtifactState" {
+				continue
+			}
+			for _, name := range field.Names {
+				out[name.Name] = true
+			}
+		}
+	}
+	recordList(fn.Recv)
+	if fn.Type != nil {
+		recordList(fn.Type.Params)
+	}
+	return out
 }

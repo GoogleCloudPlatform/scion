@@ -53,9 +53,10 @@ type smCommittedSeg struct {
 }
 
 type smFakeHub struct {
-	mode      smHubMode
-	committed map[string]map[int]map[int64]smCommittedSeg // path -> gen -> byteStart -> seg
-	onShip    func()                                      // optional hook invoked after Hub records commit (for mid-round crash snapshot)
+	mode          smHubMode
+	committed     map[string]map[int]map[int64]smCommittedSeg // path -> gen -> byteStart -> seg
+	onShip        func()                                      // optional hook invoked after Hub records commit (for mid-round crash snapshot)
+	probeAccepted bool                                        // set when Probe returns an accepting outcome (not 404/403/retryable)
 }
 
 func newSMFakeHub() *smFakeHub {
@@ -83,20 +84,25 @@ func (h *smFakeHub) Probe(_ context.Context, seg Segment) (ShipResult, error) {
 	case smModeRetryable:
 		return ShipResult{Outcome: OutcomeRetryable, Message: "transient"}, errors.New("transient")
 	case smModeConflict:
+		h.probeAccepted = true
 		return ShipResult{Outcome: OutcomeConflict, Message: "segment_conflict"}, errors.New("conflict")
 	case smModeRejected:
+		h.probeAccepted = true
 		return ShipResult{Outcome: OutcomeRejected, Message: "invalid_segment"}, errors.New("rejected")
 	case smModeRunCap:
+		h.probeAccepted = true
 		return ShipResult{Outcome: OutcomeRunCapExceeded, Message: "run_cap_exceeded"}, nil
 	default:
 		// Check real identity conflict on existing committed segments.
 		if byGen, ok := h.committed[seg.NativeRelativePath]; ok {
 			if byStart, ok := byGen[seg.Generation]; ok {
 				if prev, exists := byStart[seg.ByteStart]; exists && (prev.RawSHA256 != seg.RawSHA256 || prev.ByteEnd != seg.ByteEnd) {
+					h.probeAccepted = true
 					return ShipResult{Outcome: OutcomeConflict, Message: "segment_conflict"}, errors.New("conflict")
 				}
 			}
 		}
+		h.probeAccepted = true
 		return ShipResult{Outcome: OutcomeCommitted, SegmentID: "probe-ok"}, nil
 	}
 }
@@ -268,15 +274,23 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 	}
 
 	var history []string
-	// Track client-observed refusal ONLY: bytes are tagged REFUSED_TAG_ only
-	// when the client has actually observed a refusal (after a round returned
-	// CaptureUnavailable/PolicyRefused or after an explicit Rebaseline, which
-	// persists RefusedPendingRebaseline=true) until a probe-accept clears
-	// RefusedPendingRebaseline. Never inspect hub.mode directly — the client
-	// cannot know about a Hub mode flip that no round observed.
+	// Track client-observed refusal independently of the shipper's own
+	// RefusedPendingRebaseline flag (so M6 — failing to persist the flag —
+	// is caught directly by the state-machine oracle). The refusal window
+	// opens when a round returns CaptureUnavailable/PolicyRefused or after an
+	// explicit Rebaseline, and closes when a Probe returns an accepting outcome.
+	clientRefusalActive := false
 	isRefusalActive := func() bool {
-		st, ok, err := LoadState(home)
-		return err == nil && ok && st.RefusedPendingRebaseline
+		return clientRefusalActive
+	}
+	updateRefusalAfterRound := func(res *RoundResult) {
+		if hub.probeAccepted {
+			clientRefusalActive = false
+			hub.probeAccepted = false
+		}
+		if res.CaptureUnavailable || res.PolicyRefused {
+			clientRefusalActive = true
+		}
 	}
 
 	for step := 0; step < numSteps; step++ {
@@ -399,10 +413,12 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 			if final {
 				reason = ReasonPreStop
 			}
+			hub.probeAccepted = false
 			res, err := s.RunRound(ctx, RoundOptions{Reason: reason, Final: final})
 			if err != nil {
 				t.Fatalf("step %d RunRound: %v\nhistory:\n%s", step, err, strings.Join(history, "\n"))
 			}
+			updateRefusalAfterRound(res)
 			history = append(history, fmt.Sprintf("step=%d round(final=%v, shipped=%d, unavail=%v, policy=%v)",
 				step, final, res.SegmentsShipped, res.CaptureUnavailable, res.PolicyRefused))
 			if res.CaptureUnavailable {
@@ -421,10 +437,12 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 			if _, err := s.Rebaseline(ctx, "capture_disabled"); err != nil {
 				t.Fatalf("step %d explicit Rebaseline: %v", step, err)
 			}
+			clientRefusalActive = true
 			history = append(history, fmt.Sprintf("step=%d explicit_rebaseline", step))
 
 		case 10: // Simulate mid-round kill -9 after Hub commit (while Pending is on disk) + ResumeCatchup
 			var midCrashSnap []byte
+			hub.probeAccepted = false
 			hub.onShip = func() {
 				if len(midCrashSnap) == 0 {
 					if snap, err := os.ReadFile(StatePath(home)); err == nil {
@@ -437,6 +455,7 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 			if err != nil {
 				t.Fatalf("step %d mid-crash RunRound: %v\nhistory:\n%s", step, err, strings.Join(history, "\n"))
 			}
+			updateRefusalAfterRound(res)
 			if len(midCrashSnap) > 0 {
 				// Restore the in-flight Pending state snapshot as if killed
 				// right after the Hub committed but before SaveState cleared Pending.
@@ -444,10 +463,12 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 					t.Fatalf("step %d restore mid-crash snapshot: %v", step, err)
 				}
 				s = newShipper()
+				hub.probeAccepted = false
 				cres, cerr := s.ResumeCatchup(ctx)
 				if cerr != nil {
 					t.Fatalf("step %d crash ResumeCatchup: %v", step, cerr)
 				}
+				updateRefusalAfterRound(cres)
 				history = append(history, fmt.Sprintf("step=%d mid_crash_replay(shipped=%d)", step, cres.SegmentsShipped))
 				if cres.CaptureUnavailable {
 					_, _ = s.Rebaseline(ctx, "capture_unavailable")
@@ -468,10 +489,12 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 				runSeq++
 			}
 			s = newShipper()
+			hub.probeAccepted = false
 			res, err := s.ResumeCatchup(ctx)
 			if err != nil {
 				t.Fatalf("step %d restart ResumeCatchup: %v", step, err)
 			}
+			updateRefusalAfterRound(res)
 			history = append(history, fmt.Sprintf("step=%d restart(run=%d, shipped=%d)", step, runSeq, res.SegmentsShipped))
 			if res.CaptureUnavailable {
 				_, _ = s.Rebaseline(ctx, "capture_unavailable")
@@ -542,17 +565,27 @@ func assertStateMachineInvariants(
 			lastEnd := segs[len(segs)-1].ByteEnd
 			gotBytes := reassembled.Bytes()
 
-			// Invariant (2): reassembled generation equals a contiguous byte range
-			// [firstStart:lastEnd] of some recorded version of the file.
+			// Invariant (2) & (6): reassembled generation equals a contiguous
+			// byte range [firstStart:lastEnd] of some recorded version of the
+			// file, AND the first committed segment of every generation begins
+			// at a line boundary (offset 0 or immediately after '\n').
 			matchedVersion := false
+			matchedLineAligned := false
 			for _, v := range art.versions {
 				if int64(len(v)) >= lastEnd && bytes.Equal(v[firstStart:lastEnd], gotBytes) {
 					matchedVersion = true
-					break
+					if firstStart == 0 || v[firstStart-1] == '\n' {
+						matchedLineAligned = true
+						break
+					}
 				}
 			}
 			if !matchedVersion {
 				t.Fatalf("seed=%d step=%d INVARIANT 2 VIOLATION (%s gen %d [%d,%d)): reassembled bytes %q match no recorded version\nhistory:\n%s",
+					seed, step, rel, gen, firstStart, lastEnd, string(gotBytes), strings.Join(history, "\n"))
+			}
+			if !matchedLineAligned {
+				t.Fatalf("seed=%d step=%d INVARIANT 6 VIOLATION (%s gen %d [%d,%d)): generation started mid-line (not at 0 or after '\\n'): %q\nhistory:\n%s",
 					seed, step, rel, gen, firstStart, lastEnd, string(gotBytes), strings.Join(history, "\n"))
 			}
 

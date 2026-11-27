@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type countingRetryableUploader struct {
@@ -1465,5 +1466,379 @@ func TestRebaselineOffsetPreservedOnConflictAndPrefixPreservingInodeReplace(t *t
 				}
 			}
 		})
+	}
+}
+
+// TestRefusalPersistsPendingRebaselineEvenIfRebaselineFails pins O7-1:
+// shipArtifactLocked persists st.RefusedPendingRebaseline under the lock it
+// already holds on 404/403, so even if the follow-up Rebaseline fails (e.g.
+// cancelled context during PreStop), the next round still probes and drops
+// refusal-window bytes before shipping.
+func TestRefusalPersistsPendingRebaselineEvenIfRebaselineFails(t *testing.T) {
+	for _, outcome := range []ShipOutcome{OutcomeCaptureUnavailable, OutcomePolicyRefused} {
+		t.Run(string(outcome), func(t *testing.T) {
+			ctx := context.Background()
+			home := t.TempDir()
+			dir := filepath.Join(home, ".claude", "projects", "-workspace")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rel := ".claude/projects/-workspace/art-o7-1.jsonl"
+			p := filepath.Join(home, filepath.FromSlash(rel))
+			if err := os.WriteFile(p, []byte("{\"init\":0}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			refusing := true
+			probeCalls := 0
+			var shippedPayloads []string
+			up := &probeAndShipUploader{
+				probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+					probeCalls++
+					if refusing {
+						return ShipResult{Outcome: outcome, Message: "refused"}, nil
+					}
+					return ShipResult{Outcome: OutcomeCommitted, SegmentID: "probe-ok"}, nil
+				},
+				shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+					if refusing {
+						return ShipResult{Outcome: outcome, Message: "refused"}, nil
+					}
+					gz, err := gzip.NewReader(bytes.NewReader(seg.Compressed))
+					if err != nil {
+						return ShipResult{}, err
+					}
+					raw, err := io.ReadAll(gz)
+					_ = gz.Close()
+					if err != nil {
+						return ShipResult{}, err
+					}
+					shippedPayloads = append(shippedPayloads, string(raw))
+					return ShipResult{Outcome: OutcomeCommitted, SegmentID: "ok"}, nil
+				},
+			}
+
+			s, err := New(Config{HomeDir: home, RunID: "run-o7-1", Uploader: up})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Baseline(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			appendStr := func(data string) {
+				f, oerr := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+				if oerr != nil {
+					t.Fatal(oerr)
+				}
+				_, _ = f.WriteString(data)
+				_ = f.Close()
+			}
+
+			// 1. Append refusal-window line; RunRound observes 404/403 and persists
+			// RefusedPendingRebaseline=true under the lock.
+			appendStr("{\"window\":\"REFUSED_WINDOW_1\"}\n")
+			r1, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic})
+			if err != nil {
+				t.Fatalf("round1: %v", err)
+			}
+			if outcome == OutcomeCaptureUnavailable && !r1.CaptureUnavailable {
+				t.Fatalf("expected CaptureUnavailable=true, got %+v", r1)
+			}
+			if outcome == OutcomePolicyRefused && !r1.PolicyRefused {
+				t.Fatalf("expected PolicyRefused=true, got %+v", r1)
+			}
+
+			// 2. Follow-up Rebaseline fails with cancelled context.
+			cancelCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			if _, err := s.Rebaseline(cancelCtx, "refused"); !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected context.Canceled from Rebaseline, got %v", err)
+			}
+
+			// 3. Hub accepts again; append another window line and run a round.
+			// It must probe and drop all refusal-window bytes without shipping them.
+			refusing = false
+			appendStr("{\"window\":\"REFUSED_WINDOW_2\"}\n")
+			r2, err := s.RunRound(ctx, RoundOptions{Reason: ReasonResumeCatchup})
+			if err != nil {
+				t.Fatalf("round2: %v", err)
+			}
+			if probeCalls != 1 {
+				t.Fatalf("expected 1 probe call after failed Rebaseline, got %d", probeCalls)
+			}
+			if r2.SegmentsShipped != 0 || len(shippedPayloads) != 0 {
+				t.Fatalf("expected 0 window bytes shipped, got res=%+v payloads=%v", r2, shippedPayloads)
+			}
+
+			// 4. Subsequent post-acceptance line ships cleanly.
+			afterLine := "{\"after\":true}\n"
+			appendStr(afterLine)
+			r3, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic})
+			if err != nil || r3.SegmentsShipped != 1 {
+				t.Fatalf("round3: res=%+v err=%v", r3, err)
+			}
+			if len(shippedPayloads) != 1 || shippedPayloads[0] != afterLine {
+				t.Fatalf("expected only %q to ship, got %v", afterLine, shippedPayloads)
+			}
+		})
+	}
+}
+
+// TestSkipToNextNewlineEdgeCases pins O7-2 mutants M11 (bump restarting at a
+// mid-line RebaselineOffset sets skip), M12 (lazy baseline sets skip), and
+// M18 (hold back even on Final=true until '\n' arrives).
+func TestSkipToNextNewlineEdgeCases(t *testing.T) {
+	t.Run("M11_bump_restarting_at_midline_RebaselineOffset_sets_skip", func(t *testing.T) {
+		ctx := context.Background()
+		home := t.TempDir()
+		dir := filepath.Join(home, ".claude", "projects", "-workspace")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel := ".claude/projects/-workspace/m11.jsonl"
+		p := filepath.Join(home, filepath.FromSlash(rel))
+		initLine := "{\"init\":0}\n"
+		if err := os.WriteFile(p, []byte(initLine), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var shippedPayloads []string
+		returnConflictOnce := false
+		up := uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+			if returnConflictOnce {
+				returnConflictOnce = false
+				return ShipResult{Outcome: OutcomeConflict, Message: "conflict"}, errors.New("conflict")
+			}
+			gz, err := gzip.NewReader(bytes.NewReader(seg.Compressed))
+			if err != nil {
+				return ShipResult{}, err
+			}
+			raw, err := io.ReadAll(gz)
+			_ = gz.Close()
+			if err != nil {
+				return ShipResult{}, err
+			}
+			shippedPayloads = append(shippedPayloads, string(raw))
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "ok"}, nil
+		})
+
+		s, err := New(Config{HomeDir: home, RunID: "run-m11", Uploader: up})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Baseline(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		appendStr := func(data string) {
+			f, oerr := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+			if oerr != nil {
+				t.Fatal(oerr)
+			}
+			_, _ = f.WriteString(data)
+			_ = f.Close()
+		}
+
+		// Rebaseline mid-line so RebaselineOffset points mid-line.
+		refusedPartial := "{\"refused_mid"
+		appendStr(refusedPartial)
+		if _, err := s.Rebaseline(ctx, "capture_disabled"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Finish the refused partial line, append ok1, and hit a 409 conflict
+		// BEFORE the skip finishes (or trigger a conflict right after), so
+		// bumpGenerationLocked restarts at the mid-line RebaselineOffset!
+		// Using a non-Prober uploader, RunRound skips past partialRest and then
+		// attempts to ship ok1; returning 409 on ok1 bumps generation and
+		// restarts at RebaselineOffset (mid-line) if RebaselineOffset is still
+		// mid-line, OR force a mid-line RebaselineOffset bump via conflict on
+		// a prefix-preserving inode replace before skip advances RebaselineOffset.
+		partialRest := "_tail\"}\n"
+		ok1 := "{\"ok\":1}\n"
+		tmp := p + ".swap"
+		if err := os.WriteFile(tmp, []byte(initLine+refusedPartial+partialRest+ok1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, p); err != nil {
+			t.Fatal(err)
+		}
+		// Inode changed while RebaselineOffset is mid-line -> bumpGenerationLocked
+		// restarts at RebaselineOffset and MUST set SkipToNextNewline=true so
+		// partialRest is skipped and only ok1 ships!
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || r.SegmentsShipped != 1 {
+			t.Fatalf("round after mid-line RebaselineOffset bump: res=%+v err=%v", r, err)
+		}
+		if len(shippedPayloads) != 1 || shippedPayloads[0] != ok1 {
+			t.Fatalf("expected only %q (no refused partial tail), got %v", ok1, shippedPayloads)
+		}
+	})
+
+	t.Run("M12_lazy_baseline_midline_sets_skip", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 000 does not block root reads")
+		}
+		ctx := context.Background()
+		home := t.TempDir()
+		dir := filepath.Join(home, ".claude", "projects", "-workspace")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel := ".claude/projects/-workspace/m12.jsonl"
+		p := filepath.Join(home, filepath.FromSlash(rel))
+		if err := os.WriteFile(p, []byte("{\"init\":0}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var shippedPayloads []string
+		up := uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+			gz, err := gzip.NewReader(bytes.NewReader(seg.Compressed))
+			if err != nil {
+				return ShipResult{}, err
+			}
+			raw, err := io.ReadAll(gz)
+			_ = gz.Close()
+			if err != nil {
+				return ShipResult{}, err
+			}
+			shippedPayloads = append(shippedPayloads, string(raw))
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "ok"}, nil
+		})
+
+		s, err := New(Config{HomeDir: home, RunID: "run-m12", Uploader: up})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Baseline(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		// Make unreadable during Rebaseline so NeedsBaseline=true.
+		if err := os.Chmod(p, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+		if _, err := s.Rebaseline(ctx, "capture_disabled"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Make readable, append a mid-line partial, and complete lazy baseline.
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("{\"lazy_partial")
+		_ = f.Close()
+
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || r.SegmentsShipped != 0 {
+			t.Fatalf("lazy baseline round: res=%+v err=%v", r, err)
+		}
+
+		// Finish the partial line and append a complete line; only the complete line must ship.
+		nextLine := "{\"after_lazy\":1}\n"
+		f2, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f2.WriteString("_tail\"}\n" + nextLine)
+		_ = f2.Close()
+
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || r.SegmentsShipped != 1 {
+			t.Fatalf("post-lazy round: res=%+v err=%v", r, err)
+		}
+		if len(shippedPayloads) != 1 || shippedPayloads[0] != nextLine {
+			t.Fatalf("expected only %q (lazy partial tail skipped), got %v", nextLine, shippedPayloads)
+		}
+	})
+
+	t.Run("M18_skip_holds_back_on_Final_until_newline", func(t *testing.T) {
+		ctx := context.Background()
+		home := t.TempDir()
+		dir := filepath.Join(home, ".claude", "projects", "-workspace")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel := ".claude/projects/-workspace/m18.jsonl"
+		p := filepath.Join(home, filepath.FromSlash(rel))
+		if err := os.WriteFile(p, []byte("{\"init\":0}\n{\"refused_part"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var shippedPayloads []string
+		up := uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+			gz, err := gzip.NewReader(bytes.NewReader(seg.Compressed))
+			if err != nil {
+				return ShipResult{}, err
+			}
+			raw, err := io.ReadAll(gz)
+			_ = gz.Close()
+			if err != nil {
+				return ShipResult{}, err
+			}
+			shippedPayloads = append(shippedPayloads, string(raw))
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "ok"}, nil
+		})
+
+		s, err := New(Config{HomeDir: home, RunID: "run-m18", Uploader: up})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Rebaseline(ctx, "capture_disabled"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Append more of the partial line WITHOUT a newline, then run Final=true.
+		// Must hold back (0 segments shipped) and keep SkipToNextNewline=true.
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("_more_no_nl")
+		_ = f.Close()
+
+		rFinal, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPreStop, Final: true})
+		if err != nil {
+			t.Fatalf("Final round: %v", err)
+		}
+		if rFinal.SegmentsShipped != 0 || len(shippedPayloads) != 0 {
+			t.Fatalf("expected Final=true to hold back unterminated refused partial line, got res=%+v payloads=%v", rFinal, shippedPayloads)
+		}
+		st, ok, err := LoadState(home)
+		if err != nil || !ok || !st.Artifacts[rel].SkipToNextNewline {
+			t.Fatalf("expected SkipToNextNewline to remain true, got ok=%v err=%v entry=%+v", ok, err, st.Artifacts[rel])
+		}
+	})
+}
+
+// TestCommitSegmentLockedRejectsNonContiguousStart pins N7-3 (mutant M16):
+// commitSegmentLocked must reject mismatched byteStart or non-positive length.
+func TestCommitSegmentLockedRejectsNonContiguousStart(t *testing.T) {
+	entry := &ArtifactState{NativeRelativePath: "a.jsonl"}
+	startGenerationLocked(entry, 10, "h10", 10, "", false)
+
+	now := time.Now().UTC()
+	// Mismatched byteStart (gap).
+	if err := commitSegmentLocked(entry, 20, 30, "h30", 10, now); err == nil {
+		t.Fatal("expected error for non-contiguous byteStart=20 at RawCommittedOffset=10")
+	}
+	if entry.RawCommittedOffset != 10 {
+		t.Fatalf("expected RawCommittedOffset unchanged at 10, got %d", entry.RawCommittedOffset)
+	}
+
+	// Non-positive length (byteEnd <= byteStart).
+	if err := commitSegmentLocked(entry, 10, 10, "h10", 10, now); err == nil {
+		t.Fatal("expected error for empty segment [10,10)")
+	}
+
+	// Contiguous advance succeeds.
+	if err := commitSegmentLocked(entry, 10, 25, "h25", 15, now); err != nil {
+		t.Fatalf("expected contiguous commit [10,25) to succeed, got %v", err)
+	}
+	if entry.RawCommittedOffset != 25 {
+		t.Fatalf("expected RawCommittedOffset=25, got %d", entry.RawCommittedOffset)
 	}
 }
