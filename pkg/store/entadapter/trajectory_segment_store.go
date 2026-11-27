@@ -309,6 +309,8 @@ func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, se
 			trajectorysegment.RawSha256EQ(expect.RawSHA256),
 			trajectorysegment.CompressedSizeEQ(expect.CompressedSize),
 			trajectorysegment.CompressedSha256EQ(expect.CompressedSHA256),
+			trajectorysegment.IncompleteTailEQ(expect.IncompleteTail),
+			trajectorysegment.SessionIDEQ(expect.SessionID),
 		).
 		SetStatus(telemetrycontract.TrajectorySegmentStatusCommitted).
 		SetManifestPath(manifestPath).
@@ -327,7 +329,9 @@ func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, se
 			if row.ByteEnd == expect.ByteEnd &&
 				row.RawSHA256 == expect.RawSHA256 &&
 				row.CompressedSize == expect.CompressedSize &&
-				row.CompressedSHA256 == expect.CompressedSHA256 {
+				row.CompressedSHA256 == expect.CompressedSHA256 &&
+				row.IncompleteTail == expect.IncompleteTail &&
+				row.SessionID == expect.SessionID {
 				return row, nil
 			}
 			return nil, store.ErrTrajectorySegmentConflict
@@ -341,13 +345,14 @@ func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, se
 }
 
 // SumTrajectoryRunRawBytes implements store.TrajectorySegmentStore using a
-// single SQL SUM(byte_end - byte_start) aggregate over committed and unexpired
-// pending segments.
-func (s *TrajectorySegmentStore) SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string, now time.Time) (int64, error) {
+// single SQL SUM(byte_end - byte_start) aggregate over all committed and
+// pending segments (including expired pending rows) so orphaned uncommitted
+// uploads cannot bypass the per-run storage cap. Re-prepares of the same
+// identity reuse the existing row and exclude it via excludeID.
+func (s *TrajectorySegmentStore) SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string) (int64, error) {
 	if agentID == "" || runID == "" {
 		return 0, nil
 	}
-	now = now.UTC().Truncate(time.Microsecond)
 
 	drv := s.client.Driver()
 	sb := entsql.Dialect(drv.Dialect()).
@@ -356,12 +361,9 @@ func (s *TrajectorySegmentStore) SumTrajectoryRunRawBytes(ctx context.Context, a
 		Where(entsql.And(
 			entsql.EQ(trajectorysegment.FieldAgentID, agentID),
 			entsql.EQ(trajectorysegment.FieldRunID, runID),
-			entsql.Or(
-				entsql.EQ(trajectorysegment.FieldStatus, telemetrycontract.TrajectorySegmentStatusCommitted),
-				entsql.And(
-					entsql.EQ(trajectorysegment.FieldStatus, telemetrycontract.TrajectorySegmentStatusPending),
-					entsql.GTE(trajectorysegment.FieldPrepareExpiresAt, now),
-				),
+			entsql.In(trajectorysegment.FieldStatus,
+				telemetrycontract.TrajectorySegmentStatusCommitted,
+				telemetrycontract.TrajectorySegmentStatusPending,
 			),
 		))
 	if excludeID != "" {

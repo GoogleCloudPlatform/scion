@@ -31,12 +31,14 @@ var ErrTrajectorySegmentModified = errors.New("trajectory segment modified befor
 
 // TrajectorySegmentCommitExpectation binds CommitTrajectorySegment to the
 // exact verified snapshot so a concurrent pending refresh cannot cause a row
-// to be committed with unverified hashes or byte range.
+// to be committed with unverified hashes, byte range, or manifest metadata.
 type TrajectorySegmentCommitExpectation struct {
 	ByteEnd          int64
 	RawSHA256        string
 	CompressedSize   int64
 	CompressedSHA256 string
+	IncompleteTail   bool
+	SessionID        string
 }
 
 // TrajectorySegmentIdentity is the unique natural key of a raw trajectory
@@ -110,7 +112,11 @@ type TrajectorySegmentStore interface {
 	CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time, expect TrajectorySegmentCommitExpectation) (*TrajectorySegment, error)
 
 	// SumTrajectoryRunRawBytes returns the total raw bytes (byte_end - byte_start)
-	// across committed segments (and non-expired pending segments at now) for
-	// (agentID, runID), excluding excludeID if non-empty.
-	SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string, now time.Time) (int64, error)
+	// across all committed and pending segments (regardless of prepare_expires_at)
+	// for (agentID, runID), excluding excludeID if non-empty. Counting expired
+	// pending rows bounds orphaned uncommitted object storage per run until a
+	// retention sweep reclaims them; re-preparing the same identity reuses the
+	// existing row and passes its ID as excludeID so retries and probes do not
+	// double-count.
+	SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string) (int64, error)
 }

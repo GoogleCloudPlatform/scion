@@ -80,19 +80,37 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusPending, reprepared.Status)
 	assert.Equal(t, laterExp, reprepared.PrepareExpiresAt)
 
-	// Per-run raw byte sum includes non-expired pending segment, excluding self when excludeID is passed.
-	sumAll, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "", now)
+	// Per-run raw byte sum includes pending segment (regardless of expiry),
+	// excluding self when excludeID is passed so re-prepares/probes reuse the
+	// row without double-counting.
+	sumAll, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1024), sumAll)
 
-	sumExcludingSelf, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", prepared.ID, now)
+	sumExcludingSelf, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", prepared.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), sumExcludingSelf)
 
-	// Expired pending segment is not counted in run raw bytes.
-	sumAfterExpiry, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "", laterExp.Add(time.Minute))
+	// Expired pending segment STILL counts toward run raw bytes to bound
+	// orphaned uncommitted object storage per run.
+	expiredPending := *base
+	expiredPending.ID = ""
+	expiredPending.ByteStart = 1024
+	expiredPending.ByteEnd = 2048
+	expiredPending.ObjectPath = "hub-1/trajectories/v1/raw/project=proj-1/agent=agent-1/run=run-1/claude/.claude/projects/-workspace/sess-1.jsonl/g0-0000000000001024.seg.gz"
+	expiredPending.PrepareExpiresAt = now.Add(-time.Hour)
+	expiredRow, err := cs.PrepareTrajectorySegment(ctx, &expiredPending)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), sumAfterExpiry)
+
+	sumWithExpired, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2048), sumWithExpired)
+
+	// Excluding the expired row itself during a re-prepare of that identity
+	// does not double-count it.
+	sumExcludingExpired, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", expiredRow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1024), sumExcludingExpired)
 
 	// Commit transitions pending -> committed with manifest_path and committed_at.
 	manifestPath := base.ObjectPath + ".manifest.json"
@@ -102,6 +120,8 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 		RawSHA256:        base.RawSHA256,
 		CompressedSize:   base.CompressedSize,
 		CompressedSHA256: base.CompressedSHA256,
+		IncompleteTail:   base.IncompleteTail,
+		SessionID:        base.SessionID,
 	}
 	committed, err := cs.CommitTrajectorySegment(ctx, prepared.ID, manifestPath, commitTime, expectA)
 	require.NoError(t, err)
@@ -134,10 +154,10 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	_, err = cs.PrepareTrajectorySegment(ctx, &conflict)
 	require.ErrorIs(t, err, store.ErrTrajectorySegmentConflict)
 
-	// Committed segment is always counted in run raw bytes even past prepare_expires_at.
-	sumCommitted, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "", laterExp.Add(time.Hour))
+	// Committed segment + expired pending segment are both counted in run raw bytes.
+	sumCommitted, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "")
 	require.NoError(t, err)
-	assert.Equal(t, int64(1024), sumCommitted)
+	assert.Equal(t, int64(2048), sumCommitted)
 
 	// Bumping generation creates a distinct segment identity.
 	gen1 := *base
@@ -166,6 +186,8 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 		RawSHA256:        gen1.RawSHA256,
 		CompressedSize:   gen1.CompressedSize,
 		CompressedSHA256: gen1.CompressedSHA256,
+		IncompleteTail:   gen1.IncompleteTail,
+		SessionID:        gen1.SessionID,
 	})
 	require.ErrorIs(t, err, store.ErrTrajectorySegmentModified)
 
@@ -173,4 +195,54 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusPending, stillPending.Status)
 	assert.Equal(t, gen1Refresh.RawSHA256, stillPending.RawSHA256)
+
+	// N1 TOCTOU guard: refreshing only incomplete_tail or session_id on a pending
+	// row must also cause Commit with the prior expectation to fail with
+	// ErrTrajectorySegmentModified so the DB row and manifest never disagree.
+	gen2 := *base
+	gen2.Generation = 2
+	gen2.IncompleteTail = false
+	gen2.SessionID = "sess-before"
+	gen2.ObjectPath = "hub-1/trajectories/v1/raw/project=proj-1/agent=agent-1/run=run-1/claude/.claude/projects/-workspace/sess-1.jsonl/g2-0000000000000000.seg.gz"
+	preparedGen2, err := cs.PrepareTrajectorySegment(ctx, &gen2)
+	require.NoError(t, err)
+
+	// Flip incomplete_tail only.
+	gen2TailFlip := gen2
+	gen2TailFlip.ID = ""
+	gen2TailFlip.IncompleteTail = true
+	_, err = cs.PrepareTrajectorySegment(ctx, &gen2TailFlip)
+	require.NoError(t, err)
+
+	_, err = cs.CommitTrajectorySegment(ctx, preparedGen2.ID, gen2.ObjectPath+".manifest.json", now.Add(4*time.Minute), store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          gen2.ByteEnd,
+		RawSHA256:        gen2.RawSHA256,
+		CompressedSize:   gen2.CompressedSize,
+		CompressedSHA256: gen2.CompressedSHA256,
+		IncompleteTail:   false,
+		SessionID:        "sess-before",
+	})
+	require.ErrorIs(t, err, store.ErrTrajectorySegmentModified)
+
+	// Change session_id only.
+	gen2SessFlip := gen2TailFlip
+	gen2SessFlip.SessionID = "sess-after"
+	_, err = cs.PrepareTrajectorySegment(ctx, &gen2SessFlip)
+	require.NoError(t, err)
+
+	_, err = cs.CommitTrajectorySegment(ctx, preparedGen2.ID, gen2.ObjectPath+".manifest.json", now.Add(4*time.Minute), store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          gen2.ByteEnd,
+		RawSHA256:        gen2.RawSHA256,
+		CompressedSize:   gen2.CompressedSize,
+		CompressedSHA256: gen2.CompressedSHA256,
+		IncompleteTail:   true,
+		SessionID:        "sess-before",
+	})
+	require.ErrorIs(t, err, store.ErrTrajectorySegmentModified)
+
+	stillPendingGen2, err := cs.GetTrajectorySegment(ctx, preparedGen2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusPending, stillPendingGen2.Status)
+	assert.True(t, stillPendingGen2.IncompleteTail)
+	assert.Equal(t, "sess-after", stillPendingGen2.SessionID)
 }

@@ -25,13 +25,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -53,6 +57,15 @@ const (
 	trajectoryUploadURLMaxClockSkew = time.Minute
 
 	trajectoryContentTypeGzip = "application/gzip"
+
+	// trajectoryMetadataFieldMaxLen bounds client-supplied provenance/metadata
+	// fields (session_id, origin_hub_id) persisted into the DB row and manifest.
+	trajectoryMetadataFieldMaxLen = 256
+)
+
+var (
+	errTrajectoryUploadSizeMismatch = errors.New("uploaded size does not match expected compressed_size")
+	errTrajectoryUploadHashMismatch = errors.New("uploaded compressed_sha256 does not match prepared segment")
 )
 
 func (s *Server) maxTrajectorySegmentRawBytes() int64 {
@@ -347,6 +360,13 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 	originHubID := strings.TrimSpace(req.OriginHubID)
 	if originHubID == "" {
 		originHubID = hubID
+	} else if originHubID != hubID {
+		// P5 wave 1 has no relocation records (P6). Reject any client-supplied
+		// origin_hub_id other than this Hub's ID so Hub-authored manifests
+		// never carry unverified foreign provenance.
+		writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
+			"origin_hub_id must be empty or match this Hub's ID", nil)
+		return
 	}
 
 	// Check existing segment first so idempotent replays of already-committed
@@ -382,10 +402,15 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 	if existing != nil {
 		excludeID = existing.ID
 	}
-	// Enforce per-run raw byte cap. Note: this check-then-insert accounting is
-	// not serialized per run in wave 1, so concurrent prepares for the same run
-	// can overshoot maxTrajectoryRunRawBytes by up to concurrency * maxSegmentRawBytes.
-	usedRunRaw, err := s.store.SumTrajectoryRunRawBytes(ctx, attr.AgentID, attr.RunID, excludeID, now)
+	// Enforce per-run raw byte cap across all committed and pending rows
+	// (including expired pending rows) to bound orphaned uncommitted object
+	// storage per run until a retention sweep reclaims them. Re-prepares of
+	// the same identity (e.g. retries or shipper capture probes) reuse the
+	// existing row and pass its ID as excludeID so they do not double-count.
+	// Note: this check-then-insert accounting is not serialized per run in
+	// wave 1, so concurrent prepares for the same run can overshoot
+	// maxTrajectoryRunRawBytes by up to concurrency * maxSegmentRawBytes.
+	usedRunRaw, err := s.store.SumTrajectoryRunRawBytes(ctx, attr.AgentID, attr.RunID, excludeID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -487,10 +512,31 @@ func validateTrajectoryPrepareRequest(req *telemetrycontract.TrajectorySegmentPr
 	if !isValidHexSHA256(req.CompressedSHA256) {
 		return fmt.Errorf("compressed_sha256 must be a 64-character lowercase hex digest")
 	}
-	if strings.ContainsRune(req.SessionID, 0) || strings.ContainsRune(req.OriginHubID, 0) {
-		return fmt.Errorf("fields must not contain NUL bytes")
+	if len(req.SessionID) > trajectoryMetadataFieldMaxLen {
+		return fmt.Errorf("session_id exceeds maximum length of %d bytes", trajectoryMetadataFieldMaxLen)
+	}
+	if !isPrintableTrajectoryField(req.SessionID) {
+		return fmt.Errorf("session_id must contain only printable UTF-8 characters")
+	}
+	if len(req.OriginHubID) > trajectoryMetadataFieldMaxLen {
+		return fmt.Errorf("origin_hub_id exceeds maximum length of %d bytes", trajectoryMetadataFieldMaxLen)
+	}
+	if !isPrintableTrajectoryField(req.OriginHubID) {
+		return fmt.Errorf("origin_hub_id must contain only printable UTF-8 characters")
 	}
 	return nil
+}
+
+func isPrintableTrajectoryField(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // buildTrajectoryUploadInstruction produces either a GCS V4 no-overwrite signed
@@ -545,7 +591,7 @@ func (s *Server) buildTrajectoryUploadInstruction(
 	if err != nil {
 		return nil, err
 	}
-	uploadURL := s.requestBaseURL(r) + telemetrycontract.TrajectorySegmentContentAgentPath(seg.AgentID, seg.ID) + "?" + sigQuery
+	uploadURL := s.trajectoryProxyBaseURL(r) + telemetrycontract.TrajectorySegmentContentAgentPath(seg.AgentID, seg.ID) + "?" + sigQuery
 	return &telemetrycontract.TrajectorySegmentUploadInstruction{
 		Method: http.MethodPut,
 		URL:    uploadURL,
@@ -554,6 +600,47 @@ func (s *Server) buildTrajectoryUploadInstruction(
 		},
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// trajectoryProxyBaseURL returns the base URL for Hub-proxied trajectory
+// segment PUTs so the upload URL's scheme and host match the agent's
+// configured SCION_HUB_ENDPOINT even behind a TLS-terminating proxy without
+// server.trusted_proxies. Precedence matches agent dispatch:
+//  1. server.hub.agent_endpoint (s.config.AgentEndpoint), if configured.
+//  2. HubEndpointFor(HubEndpointForAgents), unless it is a loopback URL and
+//     the request arrived on a non-loopback host (e.g. Docker container-bridge
+//     rewrite to host.docker.internal), in which case s.requestBaseURL(r) is
+//     used so the container's origin still matches.
+//  3. s.requestBaseURL(r) fallback (e.g. unconfigured test servers).
+func (s *Server) trajectoryProxyBaseURL(r *http.Request) string {
+	if ep := strings.TrimRight(strings.TrimSpace(s.config.AgentEndpoint), "/"); ep != "" {
+		return ep
+	}
+	if ep := strings.TrimRight(strings.TrimSpace(s.HubEndpointFor(HubEndpointForAgents)), "/"); ep != "" {
+		if u, err := url.Parse(ep); err == nil && u.Scheme != "" && u.Host != "" {
+			if !isLoopbackTrajectoryHost(u.Hostname()) || r.Host == "" || isLoopbackTrajectoryHost(trajectoryRequestHostOnly(r.Host)) {
+				return ep
+			}
+		}
+	}
+	return s.requestBaseURL(r)
+}
+
+func trajectoryRequestHostOnly(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return strings.Trim(hostport, "[]")
+}
+
+func isLoopbackTrajectoryHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // handleAgentTrajectorySegmentContent serves
@@ -613,35 +700,33 @@ func (s *Server) handleAgentTrajectorySegmentContent(w http.ResponseWriter, r *h
 		return
 	}
 
-	// Read bounded by seg.CompressedSize + 1 so we detect oversized payloads
-	// without buffering unbounded memory.
-	payload, err := io.ReadAll(io.LimitReader(r.Body, seg.CompressedSize+1))
-	if err != nil {
-		BadRequest(w, "Failed to read upload body")
-		return
-	}
-	if int64(len(payload)) != seg.CompressedSize {
-		writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
-			fmt.Sprintf("uploaded size %d does not match expected compressed_size %d", len(payload), seg.CompressedSize), nil)
-		return
-	}
-	// Verify compressed_sha256 against the HMAC-bound value before attempting
-	// the create-only write so corrupt same-length bytes never occupy the
-	// immutable object path and block a valid retry.
-	payloadSum := sha256.Sum256(payload)
-	if hex.EncodeToString(payloadSum[:]) != seg.CompressedSHA256 {
-		writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
-			"uploaded compressed_sha256 does not match prepared segment", nil)
-		return
-	}
-
+	// Stream the upload body directly into storage while hashing and enforcing
+	// the exact compressed_size and compressed_sha256 bound to the HMAC.
+	// On size or hash mismatch, trajectoryVerifyingReader returns an error
+	// before EOF so neither LocalStorage (temp file unlinked) nor GCSStorage
+	// (CloseWithError + cancel) finalizes corrupt bytes at the immutable path.
+	vr := newTrajectoryVerifyingReader(r.Body, seg.CompressedSize, seg.CompressedSHA256)
 	zero := int64(0)
-	_, err = stor.Upload(ctx, seg.ObjectPath, bytes.NewReader(payload), storage.UploadOptions{
+	_, err = stor.Upload(ctx, seg.ObjectPath, vr, storage.UploadOptions{
 		ContentType:       trajectoryContentTypeGzip,
 		IfGenerationMatch: &zero,
 	})
 	if err == nil {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if errors.Is(err, errTrajectoryUploadSizeMismatch) {
+		writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
+			fmt.Sprintf("uploaded size %d does not match expected compressed_size %d", vr.bytesRead, seg.CompressedSize), nil)
+		return
+	}
+	if errors.Is(err, errTrajectoryUploadHashMismatch) {
+		writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
+			"uploaded compressed_sha256 does not match prepared segment", nil)
+		return
+	}
+	if vr.readErr != nil {
+		BadRequest(w, "Failed to read upload body")
 		return
 	}
 	if !errors.Is(err, storage.ErrPreconditionFailed) {
@@ -651,8 +736,28 @@ func (s *Server) handleAgentTrajectorySegmentContent(w http.ResponseWriter, r *h
 		return
 	}
 
+	// If the storage backend returned 412 before the stream reached EOF (e.g.
+	// GCS mid-stream chunk rejection), finish verifying the client body so we
+	// never return 200 for a corrupt or wrong-sized upload.
+	if !vr.verified {
+		if _, drainErr := io.Copy(io.Discard, vr); drainErr != nil {
+			if errors.Is(drainErr, errTrajectoryUploadSizeMismatch) {
+				writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
+					fmt.Sprintf("uploaded size %d does not match expected compressed_size %d", vr.bytesRead, seg.CompressedSize), nil)
+				return
+			}
+			if errors.Is(drainErr, errTrajectoryUploadHashMismatch) {
+				writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
+					"uploaded compressed_sha256 does not match prepared segment", nil)
+				return
+			}
+			BadRequest(w, "Failed to read upload body")
+			return
+		}
+	}
+
 	// Object already exists: identical bytes -> 200, different bytes -> 412.
-	identical, cmpErr := storageObjectMatchesBytes(ctx, stor, seg.ObjectPath, payload)
+	identical, cmpErr := storageObjectMatchesHash(ctx, stor, seg.ObjectPath, seg.CompressedSize, seg.CompressedSHA256)
 	if cmpErr != nil {
 		slog.ErrorContext(ctx, "trajectory segment upload: failed to compare existing object",
 			"agent_id", id, "segment_id", seg.ID, "error", cmpErr)
@@ -667,22 +772,77 @@ func (s *Server) handleAgentTrajectorySegmentContent(w http.ResponseWriter, r *h
 		"trajectory segment object already exists with different bytes", nil)
 }
 
-func storageObjectMatchesBytes(ctx context.Context, stor storage.Storage, objectPath string, want []byte) (bool, error) {
+type trajectoryVerifyingReader struct {
+	r            io.Reader
+	hash         hash.Hash
+	expectedSize int64
+	expectedHash string
+	bytesRead    int64
+	verified     bool
+	readErr      error
+}
+
+func newTrajectoryVerifyingReader(body io.Reader, expectedSize int64, expectedSHA256 string) *trajectoryVerifyingReader {
+	return &trajectoryVerifyingReader{
+		r:            io.LimitReader(body, expectedSize+1),
+		hash:         sha256.New(),
+		expectedSize: expectedSize,
+		expectedHash: expectedSHA256,
+	}
+}
+
+func (v *trajectoryVerifyingReader) Read(p []byte) (int, error) {
+	n, err := v.r.Read(p)
+	if n > 0 {
+		v.bytesRead += int64(n)
+		if v.bytesRead > v.expectedSize {
+			return 0, errTrajectoryUploadSizeMismatch
+		}
+		_, _ = v.hash.Write(p[:n])
+	}
+	if err == io.EOF {
+		if v.bytesRead != v.expectedSize {
+			return 0, errTrajectoryUploadSizeMismatch
+		}
+		if hex.EncodeToString(v.hash.Sum(nil)) != v.expectedHash {
+			return 0, errTrajectoryUploadHashMismatch
+		}
+		v.verified = true
+		return n, io.EOF
+	}
+	if err != nil {
+		v.readErr = err
+		return n, err
+	}
+	return n, nil
+}
+
+type trajectoryCountingReader struct {
+	r io.Reader
+	n *int64
+}
+
+func (c *trajectoryCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	*c.n += int64(n)
+	return n, err
+}
+
+func storageObjectMatchesHash(ctx context.Context, stor storage.Storage, objectPath string, expectedSize int64, expectedSHA256 string) (bool, error) {
 	rc, _, err := stor.Download(ctx, objectPath)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = rc.Close() }()
-	existing, err := io.ReadAll(io.LimitReader(rc, int64(len(want))+1))
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(rc, expectedSize+1))
 	if err != nil {
 		return false, err
 	}
-	if len(existing) != len(want) {
+	if n != expectedSize {
 		return false, nil
 	}
-	wantSum := sha256.Sum256(want)
-	gotSum := sha256.Sum256(existing)
-	return bytes.Equal(wantSum[:], gotSum[:]), nil
+	return hex.EncodeToString(h.Sum(nil)) == expectedSHA256, nil
 }
 
 // handleAgentTrajectorySegmentsCommit serves
@@ -827,6 +987,8 @@ func (s *Server) handleAgentTrajectorySegmentsCommit(w http.ResponseWriter, r *h
 		RawSHA256:        seg.RawSHA256,
 		CompressedSize:   seg.CompressedSize,
 		CompressedSHA256: seg.CompressedSHA256,
+		IncompleteTail:   seg.IncompleteTail,
+		SessionID:        seg.SessionID,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrTrajectorySegmentConflict) {
@@ -871,19 +1033,14 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 	}
 	defer func() { _ = rc.Close() }()
 
-	compBytes, err := io.ReadAll(io.LimitReader(rc, seg.CompressedSize+1))
-	if err != nil {
-		return fmt.Errorf("failed to read segment object: %w", err)
-	}
-	if int64(len(compBytes)) != seg.CompressedSize {
-		return fmt.Errorf("segment object byte length %d does not match expected %d", len(compBytes), seg.CompressedSize)
-	}
-	compSum := sha256.Sum256(compBytes)
-	if hex.EncodeToString(compSum[:]) != seg.CompressedSHA256 {
-		return fmt.Errorf("compressed_sha256 mismatch")
+	compHash := sha256.New()
+	var compLen int64
+	compReader := &trajectoryCountingReader{
+		r: io.TeeReader(io.LimitReader(rc, seg.CompressedSize+1), compHash),
+		n: &compLen,
 	}
 
-	gz, err := gzip.NewReader(bytes.NewReader(compBytes))
+	gz, err := gzip.NewReader(compReader)
 	if err != nil {
 		return fmt.Errorf("invalid gzip content: %w", err)
 	}
@@ -900,6 +1057,17 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 	}
 	if err := gz.Close(); err != nil {
 		return fmt.Errorf("corrupt gzip trailer: %w", err)
+	}
+	// Drain any remaining compressed bytes (up to the +1 limit) so compLen and
+	// compHash cover the entire stored object without buffering it in memory.
+	if _, err := io.Copy(io.Discard, compReader); err != nil {
+		return fmt.Errorf("failed to read segment object: %w", err)
+	}
+	if compLen != seg.CompressedSize {
+		return fmt.Errorf("segment object byte length %d does not match expected %d", compLen, seg.CompressedSize)
+	}
+	if hex.EncodeToString(compHash.Sum(nil)) != seg.CompressedSHA256 {
+		return fmt.Errorf("compressed_sha256 mismatch")
 	}
 	if hex.EncodeToString(rawHash.Sum(nil)) != seg.RawSHA256 {
 		return fmt.Errorf("raw_sha256 mismatch")
@@ -976,6 +1144,8 @@ func verifyExistingTrajectoryManifest(ctx context.Context, stor storage.Storage,
 		m.RawSHA256 != seg.RawSHA256 ||
 		m.CompressedSize != seg.CompressedSize ||
 		m.CompressedSHA256 != seg.CompressedSHA256 ||
+		m.IncompleteTail != seg.IncompleteTail ||
+		m.SessionID != seg.SessionID ||
 		m.ObjectPath != seg.ObjectPath {
 		return time.Time{}, fmt.Errorf("existing manifest identity or hashes do not match segment")
 	}
