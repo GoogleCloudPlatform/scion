@@ -1070,25 +1070,43 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 // (ptone/scion#4596, decision D2), so a client that refetches the rail on
 // the event already sees the new last_message_id.
 func (p *MessageBrokerProxy) afterUserMessagePersisted(ctx context.Context, storeMsg *store.Message) {
+	stampUserMessageWatermarks(ctx, p.webChatStore, storeMsg, p.log)
+}
+
+// stampUserMessageWatermarks updates the webchat topic or DM watermarks
+// (last_message_id and last_activity_at) for a stored user message before its
+// SSE event is published. Shared by MessageBrokerProxy.afterUserMessagePersisted,
+// handleAgentOutboundMessage's storeOutboundRow (deliveryUserDirect and the
+// !persisting broker fallback), and NotificationDispatcher.createInboxMessage
+// so unread badges and rail state update even when the message broker is
+// disabled (ptone/scion#9641).
+func stampUserMessageWatermarks(ctx context.Context, wcs WebChatStore, storeMsg *store.Message, log *slog.Logger) {
+	if wcs == nil || storeMsg == nil {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped
 	// last_activity_at, but it runs before the ID exists — without this the
 	// unread indicator (last_message_id != last_read_message_id) never fires
 	// for agent replies.
-	if p.webChatStore != nil && storeMsg.ThreadID != "" {
+	if storeMsg.ThreadID != "" {
 		switch {
 		case strings.HasPrefix(storeMsg.ThreadID, "dm:"):
-			registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
-			if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-				p.log.Error("Failed to stamp DM watermark",
+			registerDMParticipants(ctx, wcs, storeMsg.ThreadID)
+			if err := wcs.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				log.Error("Failed to stamp DM watermark",
 					"thread_id", storeMsg.ThreadID, "error", err)
 			}
 		case !strings.HasPrefix(storeMsg.ThreadID, "agent:"):
 			// Space topic. Same reasoning as DMs: the topic's unread dot is
 			// driven by last_message_id, and the spoke stamped only the
 			// activity timestamp.
-			if err := p.webChatStore.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-				p.log.Error("Failed to stamp topic watermark",
+			if err := wcs.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				log.Error("Failed to stamp topic watermark",
 					"thread_id", storeMsg.ThreadID, "error", err)
 			}
 		}
@@ -1104,7 +1122,7 @@ func (p *MessageBrokerProxy) afterUserMessagePersisted(ctx context.Context, stor
 	// space thread, the routed copy also has SenderID + RecipientID set, but
 	// it is NOT a DM — touching DM activity for it would create phantom
 	// unread indicators for conversations that don't exist.
-	if p.webChatStore != nil && storeMsg.SenderID != "" && storeMsg.RecipientID != "" &&
+	if storeMsg.SenderID != "" && storeMsg.RecipientID != "" &&
 		!strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
 		storeMsg.Type != messages.TypeMention {
 		senderKind, sOK := messages.PrincipalKindFromAddress(storeMsg.Sender)
@@ -1112,9 +1130,9 @@ func (p *MessageBrokerProxy) afterUserMessagePersisted(ctx context.Context, stor
 		if sOK && rOK {
 			dmKey, err := messages.DMConversationKey(senderKind, storeMsg.SenderID, recipientKind, storeMsg.RecipientID)
 			if err == nil {
-				registerDMParticipants(ctx, p.webChatStore, dmKey)
-				if touchErr := p.webChatStore.TouchDMActivity(ctx, dmKey, storeMsg.ID); touchErr != nil {
-					p.log.Error("Failed to stamp cross-channel DM watermark",
+				registerDMParticipants(ctx, wcs, dmKey)
+				if touchErr := wcs.TouchDMActivity(ctx, dmKey, storeMsg.ID); touchErr != nil {
+					log.Error("Failed to stamp cross-channel DM watermark",
 						"dm_key", dmKey, "thread_id", storeMsg.ThreadID, "error", touchErr)
 				}
 			}
