@@ -872,14 +872,14 @@ func TestListReviewRequestsPublisherAndSelfView(t *testing.T) {
 	}
 
 	// Bob saves a draft; Eve (unsolicited reviewer with review grant) also saves a draft.
-	_, err := st.PutReviewDraft(context.Background(), ReviewDraft{
+	_, _, err := st.PutReviewDraft(context.Background(), ReviewDraft{
 		ArtifactID: artID, PrincipalKind: PrincipalKindUser, PrincipalRef: "bob",
 		BaseSeq: 1, EntryPath: "doc.md", Body: "SECRET BOB DRAFT CONTENT",
 	}, 0, time.Now().UTC(), MaxDraftsPerPrincipal)
 	if err != nil {
 		t.Fatalf("PutReviewDraft bob: %v", err)
 	}
-	_, err = st.PutReviewDraft(context.Background(), ReviewDraft{
+	_, _, err = st.PutReviewDraft(context.Background(), ReviewDraft{
 		ArtifactID: artID, PrincipalKind: PrincipalKindUser, PrincipalRef: "eve",
 		BaseSeq: 1, EntryPath: "doc.md", Body: "SECRET EVE DRAFT CONTENT",
 	}, 0, time.Now().UTC(), MaxDraftsPerPrincipal)

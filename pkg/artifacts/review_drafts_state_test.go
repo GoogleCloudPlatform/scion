@@ -104,6 +104,10 @@ func (h *draftStateTestHost) ResolveRecipient(_ context.Context, kind, ref strin
 	return h.resolveMap[PrincipalRef(kind, ref)], nil
 }
 
+func (h *draftStateTestHost) IsInteractiveSession(_ context.Context) bool {
+	return true
+}
+
 func (h *draftStateTestHost) MayNotifyReviewer(_ context.Context, userID string) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -117,6 +121,10 @@ func (h *draftStateTestHost) NotifyReviewRequest(_ context.Context, _ ReviewRequ
 func (h *draftStateTestHost) NotifyRequestDismissed(_ context.Context, _ ReviewRequestDismissNotice) error {
 	return nil
 }
+
+func (h *draftStateTestHost) RequestClosed(_ context.Context, _, _ string) {}
+
+var _ ReviewRequestNotifier = (*draftStateTestHost)(nil)
 
 func doDraftReq(svc *Service, p principal, method, target string, body []byte) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))

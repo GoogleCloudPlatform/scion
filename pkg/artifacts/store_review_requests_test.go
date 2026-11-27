@@ -425,7 +425,7 @@ func TestFinalizeVersionFulfilsRequestCarryForwardAndDeletesDraft(t *testing.T) 
 		}
 
 		for _, rev := range []string{"rev-1", "rev-2"} {
-			if _, err := st.PutReviewDraft(ctx, ReviewDraft{
+			if _, _, err := st.PutReviewDraft(ctx, ReviewDraft{
 				ArtifactID: a.ID, PrincipalKind: PrincipalKindUser, PrincipalRef: rev,
 				BaseSeq: 1, EntryPath: "doc.md", Body: "draft by " + rev,
 			}, 0, t0, MaxDraftsPerPrincipal); err != nil {
