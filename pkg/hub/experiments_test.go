@@ -53,7 +53,6 @@ func TestExperimentRegistry_ZeroValueServerFallsBackToDefault(t *testing.T) {
 	}
 	// ptone/scion#2217: a zero-value &Server{} (no New()) must resolve every
 	// compiled experiment to its default without panicking.
-	// TestExperimentRegistry_ZeroValueServerFallsBackToDefault
 	for _, exp := range experiments.Default().All() {
 		if got := srv.experimentEnabled(exp.Name); got != exp.Default {
 			t.Errorf("zero-value Server: %s = %v, want its default %v", exp.Name, got, exp.Default)

@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
@@ -364,9 +365,11 @@ func TestConduitDeploymentDefault(t *testing.T) {
 }
 
 // TestConduitDeploymentDefault_NotResolvedBeforeSetter verifies (f): nothing
-// in the pre-setter startup sequence (hub.New, initOperationalSettings,
-// newCommandBus) resolves hub.conduit before SetConduitDeploymentDefault runs,
-// and the guard panics if anything does resolve it early.
+// in the real hub startup sequence (hub.New, initHubServer, and
+// startHubCommandBusAndConduit's newCommandBus → SetCommandBus →
+// configureConduitDeploymentDefault → startConduit) resolves hub.conduit
+// before SetConduitDeploymentDefault runs, and the guard panics if anything
+// resolves it early.
 func TestConduitDeploymentDefault_NotResolvedBeforeSetter(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	captureStdLog(t)
@@ -375,20 +378,22 @@ func TestConduitDeploymentDefault_NotResolvedBeforeSetter(t *testing.T) {
 	// Prove the guard itself fires on an early resolution.
 	t.Run("guard panics on early resolution", func(t *testing.T) {
 		st := newTestStore(t)
-		srv, err := hub.New(hub.ServerConfig{}, st)
+		srv, err := hub.New(hub.ServerConfig{ConduitEarlyResolveGuardForTest: true}, st)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-		srv.SetConduitEarlyResolveGuardForTest(true)
 		assert.PanicsWithValue(t, "hub.conduit resolved before SetConduitDeploymentDefault", func() {
 			_ = srv.ConduitEnabled()
 		})
 	})
 
-	// Run the pre-setter startup sequence in hosted HA with the guard armed.
-	t.Run("pre-setter startup sequence does not resolve hub.conduit", func(t *testing.T) {
+	// Drive the real initHubServer + startHubCommandBusAndConduit in hosted HA
+	// mode with the early-resolve guard armed before hub.New runs.
+	t.Run("real hosted-HA startup sequence does not resolve hub.conduit before setter", func(t *testing.T) {
 		resetServerFlags()
 		hostedMode, enableHub = true, true
 		t.Setenv("K_SERVICE", "")
+		t.Setenv("SCION_SERVER_SESSION_SECRET", "")
+		t.Setenv("SESSION_SECRET", "")
 
 		home := t.TempDir()
 		t.Setenv("HOME", home)
@@ -396,30 +401,55 @@ func TestConduitDeploymentDefault_NotResolvedBeforeSetter(t *testing.T) {
 		require.NoError(t, os.MkdirAll(globalDir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o600))
 
-		orig := startPostgresCommandBus
-		t.Cleanup(func() { startPostgresCommandBus = orig })
+		origHubNew := hubNewFn
+		t.Cleanup(func() { hubNewFn = origHubNew })
+		hubNewCalled := false
+		hubNewFn = func(sc hub.ServerConfig, s store.Store) (*hub.Server, error) {
+			hubNewCalled = true
+			sc.ConduitEarlyResolveGuardForTest = true
+			return hub.New(sc, s)
+		}
+
+		origBus := startPostgresCommandBus
+		t.Cleanup(func() { startPostgresCommandBus = origBus })
+		busCalled := false
 		startPostgresCommandBus = func(context.Context, string, func(string) bool, func(context.Context, string), *slog.Logger) (hub.CommandBus, error) {
+			busCalled = true
 			return nil, errors.New("listen refused")
 		}
 
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		t.Cleanup(func() { cancel(); wg.Wait() })
+
 		st := newTestStore(t)
-		srv, err := hub.New(hub.ServerConfig{}, st)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = srv.Shutdown(ctx) })
-		srv.SetConduitEarlyResolveGuardForTest(true)
-
-		cfg := &config.GlobalConfig{}
+		cfg := config.DefaultGlobalConfig()
 		cfg.Database.Driver = "postgres"
+		cfg.Auth.Enabled = false
+		endpoints := hub.HubEndpoints{
+			Operator: "https://hub.example.com",
+			Public:   "https://hub.example.com",
+		}
 
-		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
-		bus, err := newCommandBus(ctx, cfg, srv)
+		pluginMgr := scionplugin.NewManager(slog.Default())
+		t.Cleanup(pluginMgr.Shutdown)
+		srv, err := initHubServer(
+			ctx, &cfg, st, nil, endpoints,
+			"", nil, false, "",
+			slog.Default(), slog.Default(), slog.Default(),
+			globalDir, pluginMgr, nil,
+		)
 		require.NoError(t, err)
-		srv.SetCommandBus(bus)
+		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+		require.True(t, hubNewCalled, "hubNewFn seam must have armed the guard before hub.New")
 
-		// Now run the setter; subsequent resolution must succeed without panicking.
-		_, isNoop := bus.(hub.NoopCommandBus)
-		configureConduitDeploymentDefault(cfg, srv, "https://hub.example.com", !isNoop)
+		require.NoError(t, startHubCommandBusAndConduit(
+			ctx, newTestShutdown(cancel), &cfg, srv,
+			endpoints.For(hub.HubEndpointForConduitCheck),
+			hub.ShutdownHooks{}, &wg, make(chan error, 1),
+		))
+		require.True(t, busCalled, "newCommandBus must have exercised the Postgres failure branch")
+
 		assert.NotPanics(t, func() {
 			assert.False(t, srv.ConduitEnabled())
 		})

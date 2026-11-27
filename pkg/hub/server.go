@@ -224,6 +224,10 @@ type ServerConfig struct {
 	// opened only on a route this node can renew (design §3.5). Only used
 	// behind the hub.conduit experiment.
 	ConduitTargetStreamDeadlines string
+	// ConduitEarlyResolveGuardForTest, when true (tests only), arms the
+	// early-resolve guard from the start of New so any hub.conduit resolution
+	// before SetConduitDeploymentDefault panics.
+	ConduitEarlyResolveGuardForTest bool
 	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
 	// response headers on the conduit port proxy, the WebSocket handshake
 	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
@@ -3568,6 +3572,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		templateLog:       logging.Subsystem("hub.templates"),
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
+	}
+	if cfg.ConduitEarlyResolveGuardForTest {
+		srv.conduitGuardEarlyResolve.Store(true)
 	}
 	srv.conversationFeed = eventfeed.NewFeed(s, &feedWaker{events: srv.getEventPublisher})
 	if setter, ok := s.(interface {
