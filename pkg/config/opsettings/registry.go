@@ -200,6 +200,7 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.retention", "telemetry.retention.usage_events_days", "telemetry.retention.hourly_rollups_days",
 				"telemetry.retention.daily_rollups_days", "telemetry.retention.scope_counters_days",
+				"telemetry.retention.budget_state_days",
 				"telemetry.retention.meter_health_days", "telemetry.retention.sweep_interval", "telemetry.retention.batch_size",
 				"telemetry.resource",
 			},
