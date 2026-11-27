@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -742,11 +743,11 @@ func buildScopedUsageResponse(
 // DB round trips. Note: capability reflects the current active harness-config
 // revision, not a per-run snapshot.
 type usageCapabilityResolver struct {
-	project map[harnessRefKey]*usageLiveCapability
-	global  map[string]*usageLiveCapability
+	project map[harnessRefKey]*api.HarnessUsageCapabilities
+	global  map[string]*api.HarnessUsageCapabilities
 }
 
-func (r *usageCapabilityResolver) resolve(projectID, harnessConfig, harness string) *usageLiveCapability {
+func (r *usageCapabilityResolver) resolve(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
 	if r == nil {
 		return nil
 	}
@@ -780,8 +781,8 @@ func (s *Server) loadActiveUsageCapabilities(ctx context.Context, projectID stri
 		return nil
 	}
 	res := &usageCapabilityResolver{
-		project: make(map[harnessRefKey]*usageLiveCapability),
-		global:  make(map[string]*usageLiveCapability),
+		project: make(map[harnessRefKey]*api.HarnessUsageCapabilities),
+		global:  make(map[string]*api.HarnessUsageCapabilities),
 	}
 	addAll := func(filter store.HarnessConfigFilter) {
 		list, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: 500, SkipTotalCount: true})
@@ -883,7 +884,7 @@ func deriveScopeCoverageSummary(
 				DBNow:             dbNow,
 				AgentPhase:        phase,
 				WindowIncludesNow: &windowIncludesNow,
-				UsageLive:         usageCap,
+				Usage:             usageCap,
 			})
 			switch s {
 			case MeasurementStatusStale:

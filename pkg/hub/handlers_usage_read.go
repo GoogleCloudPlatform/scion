@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -407,7 +408,7 @@ func buildAgentUsageResponse(
 	meterRows []*store.MeterHealth,
 	currentRunSources store.RunUsageSourceSummary,
 	runStartedAt time.Time,
-	usageCap *usageLiveCapability,
+	usageCap *api.HarnessUsageCapabilities,
 ) AgentUsageResponse {
 	type modelKey struct {
 		model       string
@@ -596,7 +597,7 @@ func buildAgentUsageResponse(
 		DBNow:              dbNow,
 		AgentPhase:         agent.Phase,
 		WindowIncludesNow:  &windowIncludesNow,
-		UsageLive:          usageCap,
+		Usage:              usageCap,
 	})
 
 	return AgentUsageResponse{
@@ -720,16 +721,6 @@ func resolveNullableTokens(
 	return out
 }
 
-// usageLiveCapability mirrors api.HarnessUsageLiveCapabilities (usage.yaml
-// usage.live) for measurement_status derivation. Replaced directly by
-// *api.HarnessUsageCapabilities once the stacked base includes 824ad35c.
-type usageLiveCapability struct {
-	Source                  string
-	TokenTypes              []string
-	NotApplicableTokenTypes []string
-	CountsFailedCalls       bool
-}
-
 type usageCapabilityKind int
 
 const (
@@ -751,21 +742,21 @@ var summableTokenTypes = []string{
 	telemetrycontract.TokenTypeCacheWrite,
 }
 
-func classifyUsageLiveCapability(cap *usageLiveCapability) usageCapabilityKind {
-	if cap == nil || strings.TrimSpace(cap.Source) == "" {
+func classifyUsageLiveCapability(u *api.HarnessUsageCapabilities) usageCapabilityKind {
+	if u == nil || strings.TrimSpace(string(u.Live.Source)) == "" {
 		return usageCapUnknown
 	}
-	if strings.EqualFold(strings.TrimSpace(cap.Source), "none") {
+	if u.Live.Source == api.UsageLiveSourceNone {
 		return usageCapUnmeasured
 	}
-	if len(cap.TokenTypes) == 0 {
+	if len(u.Live.TokenTypes) == 0 {
 		return usageCapCallsOnly
 	}
-	covered := make(map[string]bool, len(cap.TokenTypes)+len(cap.NotApplicableTokenTypes))
-	for _, tt := range cap.TokenTypes {
+	covered := make(map[string]bool, len(u.Live.TokenTypes)+len(u.Live.NotApplicableTokenTypes))
+	for _, tt := range u.Live.TokenTypes {
 		covered[strings.TrimSpace(tt)] = true
 	}
-	for _, tt := range cap.NotApplicableTokenTypes {
+	for _, tt := range u.Live.NotApplicableTokenTypes {
 		covered[strings.TrimSpace(tt)] = true
 	}
 	for _, req := range summableTokenTypes {
@@ -785,7 +776,7 @@ func classifyUsageLiveCapability(cap *usageLiveCapability) usageCapabilityKind {
 // Note: capability comes from the current harness-config revision rather than
 // a per-run snapshot. Returns nil (unknown capability, preserving P1 behavior)
 // when no matching harness-config with usage.yaml is found.
-func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.Agent, currentRA *store.RunAttribution) *usageLiveCapability {
+func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.Agent, currentRA *store.RunAttribution) *api.HarnessUsageCapabilities {
 	if s == nil || s.store == nil || agent == nil {
 		return nil
 	}
@@ -801,7 +792,7 @@ func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.A
 		harnessName = strings.TrimSpace(agent.AppliedConfig.Harness)
 	}
 
-	tryLookup := func(slug, scope, scopeID string) *usageLiveCapability {
+	tryLookup := func(slug, scope, scopeID string) *api.HarnessUsageCapabilities {
 		if slug == "" {
 			return nil
 		}
@@ -831,11 +822,13 @@ func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.A
 	return nil
 }
 
-// usageCapabilityFromHarnessConfig extracts usage.live capability from a
-// stored HarnessConfig. Wired to hc.Config.Usage once the stacked base
-// includes pkg/api/harness_usage.go (824ad35c).
-func usageCapabilityFromHarnessConfig(_ *store.HarnessConfig) *usageLiveCapability {
-	return nil
+// usageCapabilityFromHarnessConfig extracts the parsed usage.yaml capability
+// from a stored HarnessConfig, or nil if absent/unknown.
+func usageCapabilityFromHarnessConfig(hc *store.HarnessConfig) *api.HarnessUsageCapabilities {
+	if hc == nil || hc.Config == nil {
+		return nil
+	}
+	return hc.Config.Usage
 }
 
 // measurementStatusInput holds the run-scoped inputs to deriveMeasurementStatus.
@@ -859,9 +852,9 @@ type measurementStatusInput struct {
 	// windows strictly before DBNow do not flag agents as stale. Nil defaults
 	// to true.
 	WindowIncludesNow *bool
-	// UsageLive is the current harness-config revision's usage.yaml live
-	// capability. Nil means unknown capability (preserves P1 behavior).
-	UsageLive *usageLiveCapability
+	// Usage is the current harness-config revision's usage.yaml capability.
+	// Nil means unknown capability (preserves P1 behavior).
+	Usage *api.HarnessUsageCapabilities
 }
 
 // deriveMeasurementStatus computes the Track 1 measurement_status for an
@@ -881,7 +874,7 @@ type measurementStatusInput struct {
 //   - otherwise maps capability: calls_only -> "calls_only", partial ->
 //     "partial", full or unknown -> "measured".
 func deriveMeasurementStatus(in measurementStatusInput) string {
-	capKind := classifyUsageLiveCapability(in.UsageLive)
+	capKind := classifyUsageLiveCapability(in.Usage)
 	if capKind == usageCapUnmeasured {
 		return MeasurementStatusUnmeasured
 	}
