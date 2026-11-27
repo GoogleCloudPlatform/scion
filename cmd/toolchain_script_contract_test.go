@@ -431,3 +431,257 @@ step_playwright_ffmpeg`)
 		}
 	})
 }
+
+// TestToolchainPinnedKubectlAndGolangciLint verifies optional version+SHA256
+// pinning for step_kubectl and step_golangci_lint:
+//   - exact pins work for amd64 and arm64, verify SHA256 before extraction and
+//     installation, and override an already-present binary;
+//   - partial pins, floating/malformed versions, SHA256 mismatches, download
+//     errors, extraction errors, and unsupported architectures fail closed
+//     without invoking install;
+//   - when all pin env vars are unset, the legacy skip-if-present and floating
+//     install paths remain unchanged.
+func TestToolchainPinnedKubectlAndGolangciLint(t *testing.T) {
+	e := newToolchainEnv(t)
+
+	// Build a real tar.gz fixture for golangci-lint and a dummy kubectl binary
+	// so sha256sum and tar run unmodified against real inputs.
+	fixtureDir := t.TempDir()
+	kubectlFixture := filepath.Join(fixtureDir, "kubectl")
+	if err := os.WriteFile(kubectlFixture, []byte("pinned kubectl\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		dir := filepath.Join(fixtureDir, "golangci-lint-1.2.3-linux-"+arch)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "golangci-lint"), []byte("pinned lint "+arch+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lintFixture := filepath.Join(fixtureDir, "lint.tar.gz")
+	tarCmd := exec.Command("tar", "-czf", lintFixture, "-C", fixtureDir,
+		"golangci-lint-1.2.3-linux-amd64", "golangci-lint-1.2.3-linux-arm64")
+	if out, err := tarCmd.CombinedOutput(); err != nil {
+		t.Fatalf("create lint fixture tar.gz: %v\n%s", err, out)
+	}
+
+	shaOf := func(p string) string {
+		t.Helper()
+		out, err := exec.Command("sha256sum", p).CombinedOutput()
+		if err != nil {
+			t.Fatalf("sha256sum %s: %v\n%s", p, err, out)
+		}
+		return strings.Fields(string(out))[0]
+	}
+	kubectlSHA := shaOf(kubectlFixture)
+	lintSHA := shaOf(lintFixture)
+
+	t.Run("exact pins succeed for amd64 and arm64 even when tool is already present", func(t *testing.T) {
+		e.fake(e.bin, "kubectl", `echo "existing kubectl"`)
+		e.fake(e.bin, "golangci-lint", `echo "existing golangci-lint"`)
+
+		for _, arch := range []string{"amd64", "arm64"} {
+			t.Run(arch, func(t *testing.T) {
+				snippet := `
+deb_arch() { printf '%s\n' "` + arch + `"; }
+curl() {
+  local url="$2" dest="$4"
+  echo "CURL $url"
+  case "$url" in
+  */kubectl) cp "` + kubectlFixture + `" "$dest" ;;
+  */golangci-lint-*.tar.gz) cp "` + lintFixture + `" "$dest" ;;
+  *) echo "unexpected URL: $url" >&2; return 1 ;;
+  esac
+}
+install() {
+  test -s "$7"
+  echo "INSTALL $8"
+}
+KUBECTL_VERSION=1.2.3
+KUBECTL_SHA256_AMD64=` + kubectlSHA + `
+KUBECTL_SHA256_ARM64=` + kubectlSHA + `
+GOLANGCI_LINT_VERSION=1.2.3
+GOLANGCI_LINT_SHA256_AMD64=` + lintSHA + `
+GOLANGCI_LINT_SHA256_ARM64=` + lintSHA + `
+step_kubectl
+step_golangci_lint
+`
+				out, code := e.run(systemPath, snippet)
+				expectOutput(t, "pinned "+arch, out, code, 0,
+					"CURL https://dl.k8s.io/release/v1.2.3/bin/linux/"+arch+"/kubectl",
+					"INSTALL /usr/local/bin/kubectl",
+					"CURL https://github.com/golangci/golangci-lint/releases/download/v1.2.3/golangci-lint-1.2.3-linux-"+arch+".tar.gz",
+					"INSTALL /usr/local/bin/golangci-lint",
+				)
+			})
+		}
+	})
+
+	t.Run("fail closed on partial, malformed, mismatched, download, extraction, and arch errors", func(t *testing.T) {
+		zeroSHA := strings.Repeat("0", 64)
+		cases := []struct {
+			name    string
+			tool    string
+			arch    string
+			env     string
+			curlErr bool
+			badTar  bool
+			wantMsg string
+		}{
+			{
+				name:    "kubectl partial (missing version)",
+				tool:    "step_kubectl",
+				arch:    "amd64",
+				env:     "KUBECTL_SHA256_AMD64=" + kubectlSHA,
+				wantMsg: "FAIL: pinned kubectl requires a concrete version and architecture SHA256",
+			},
+			{
+				name:    "kubectl partial (missing arch sha)",
+				tool:    "step_kubectl",
+				arch:    "arm64",
+				env:     "KUBECTL_VERSION=1.2.3\nKUBECTL_SHA256_AMD64=" + kubectlSHA,
+				wantMsg: "FAIL: pinned kubectl requires a concrete version and architecture SHA256",
+			},
+			{
+				name:    "kubectl floating version",
+				tool:    "step_kubectl",
+				arch:    "amd64",
+				env:     "KUBECTL_VERSION=latest\nKUBECTL_SHA256_AMD64=" + kubectlSHA,
+				wantMsg: "FAIL: pinned kubectl requires a concrete version and architecture SHA256",
+			},
+			{
+				name:    "kubectl sha256 mismatch",
+				tool:    "step_kubectl",
+				arch:    "amd64",
+				env:     "KUBECTL_VERSION=1.2.3\nKUBECTL_SHA256_AMD64=" + zeroSHA,
+				wantMsg: "FAIL: download or SHA256 verification failed for pinned kubectl 1.2.3",
+			},
+			{
+				name:    "kubectl download error",
+				tool:    "step_kubectl",
+				arch:    "amd64",
+				env:     "KUBECTL_VERSION=1.2.3\nKUBECTL_SHA256_AMD64=" + kubectlSHA,
+				curlErr: true,
+				wantMsg: "FAIL: download or SHA256 verification failed for pinned kubectl 1.2.3",
+			},
+			{
+				name:    "kubectl unsupported arch",
+				tool:    "step_kubectl",
+				arch:    "s390x",
+				env:     "KUBECTL_VERSION=1.2.3\nKUBECTL_SHA256_AMD64=" + kubectlSHA,
+				wantMsg: "FAIL: unsupported architecture for pinned kubectl",
+			},
+			{
+				name:    "golangci-lint partial (missing version)",
+				tool:    "step_golangci_lint",
+				arch:    "amd64",
+				env:     "GOLANGCI_LINT_SHA256_AMD64=" + lintSHA,
+				wantMsg: "FAIL: pinned golangci-lint requires a concrete version and architecture SHA256",
+			},
+			{
+				name:    "golangci-lint floating version",
+				tool:    "step_golangci_lint",
+				arch:    "amd64",
+				env:     "GOLANGCI_LINT_VERSION=latest\nGOLANGCI_LINT_SHA256_AMD64=" + lintSHA,
+				wantMsg: "FAIL: pinned golangci-lint requires a concrete version and architecture SHA256",
+			},
+			{
+				name:    "golangci-lint sha256 mismatch",
+				tool:    "step_golangci_lint",
+				arch:    "amd64",
+				env:     "GOLANGCI_LINT_VERSION=1.2.3\nGOLANGCI_LINT_SHA256_AMD64=" + zeroSHA,
+				wantMsg: "FAIL: download or SHA256 verification failed for pinned golangci-lint 1.2.3",
+			},
+			{
+				name:    "golangci-lint extraction failure",
+				tool:    "step_golangci_lint",
+				arch:    "amd64",
+				env:     "GOLANGCI_LINT_VERSION=1.2.3\nGOLANGCI_LINT_SHA256_AMD64=" + kubectlSHA,
+				badTar:  true,
+				wantMsg: "FAIL: extracting pinned golangci-lint 1.2.3",
+			},
+			{
+				name:    "golangci-lint unsupported arch",
+				tool:    "step_golangci_lint",
+				arch:    "s390x",
+				env:     "GOLANGCI_LINT_VERSION=1.2.3\nGOLANGCI_LINT_SHA256_AMD64=" + lintSHA,
+				wantMsg: "FAIL: unsupported architecture for pinned golangci-lint",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				curlBody := `cp "` + lintFixture + `" "$4"`
+				if tc.curlErr {
+					curlBody = `return 9`
+				} else if tc.tool == "step_kubectl" || tc.badTar {
+					curlBody = `cp "` + kubectlFixture + `" "$4"`
+				}
+				snippet := `
+deb_arch() { printf '%s\n' "` + tc.arch + `"; }
+curl() { ` + curlBody + `; }
+install() { echo "UNEXPECTED-INSTALL $*"; }
+` + tc.env + `
+` + tc.tool + `
+`
+				out, code := e.run(systemPath, snippet)
+				expectOutput(t, tc.name, out, code, 1, tc.wantMsg)
+				if strings.Contains(out, "UNEXPECTED-INSTALL") {
+					t.Errorf("%s: install was called on failure; output:\n%s", tc.name, out)
+				}
+			})
+		}
+	})
+
+	t.Run("unpinned skips when already present", func(t *testing.T) {
+		e2 := newToolchainEnv(t)
+		e2.fake(e2.bin, "kubectl", `echo "existing"`)
+		e2.fake(e2.bin, "golangci-lint", `echo "existing"`)
+
+		out, code := e2.run(systemPath, `
+unset KUBECTL_VERSION KUBECTL_SHA256_AMD64 KUBECTL_SHA256_ARM64
+unset GOLANGCI_LINT_VERSION GOLANGCI_LINT_SHA256_AMD64 GOLANGCI_LINT_SHA256_ARM64
+curl() { echo "UNEXPECTED-CURL $*"; exit 1; }
+step_kubectl
+step_golangci_lint
+`)
+		expectOutput(t, "unpinned skip", out, code, 0,
+			"skip: kubectl already present",
+			"skip: golangci-lint already present",
+		)
+	})
+
+	t.Run("unpinned uses original stable/latest install paths when absent", func(t *testing.T) {
+		e2 := newToolchainEnv(t)
+		out, code := e2.run(systemPath, `
+unset KUBECTL_VERSION KUBECTL_SHA256_AMD64 KUBECTL_SHA256_ARM64
+unset GOLANGCI_LINT_VERSION GOLANGCI_LINT_SHA256_AMD64 GOLANGCI_LINT_SHA256_ARM64
+command() {
+  if [ "${1:-}" = -v ] && { [ "${2:-}" = kubectl ] || [ "${2:-}" = golangci-lint ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+deb_arch() { echo arm64; }
+curl() {
+  case "$*" in
+  *stable.txt*) echo v1.32.0 ;;
+  *HEAD/install.sh*) echo "fixture-installer" ;;
+  *) echo "LEGACY-CURL $*" ;;
+  esac
+}
+install() { echo "LEGACY-INSTALL $*"; }
+rm() { :; }
+sh() { echo "LEGACY-SH $*"; cat >/dev/null; }
+step_kubectl
+step_golangci_lint
+`)
+		expectOutput(t, "unpinned install", out, code, 0,
+			"LEGACY-CURL -fsSLo /tmp/kubectl https://dl.k8s.io/release/v1.32.0/bin/linux/arm64/kubectl",
+			"LEGACY-INSTALL -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl",
+			"LEGACY-SH -s -- -b /usr/local/bin",
+		)
+	})
+}
