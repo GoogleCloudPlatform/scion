@@ -52,9 +52,9 @@ import (
 
 // --- Local helpers for #2801 broker HA rows ---
 
-// conduitHA2801DoHTTP executes an authenticated owner HTTP request directly
-// against node.Server.Handler() and returns the recorder.
-func conduitHA2801DoHTTP(t *testing.T, node *conduitHANode, user *AuthenticatedUser, method, path string, body any) *httptest.ResponseRecorder {
+// conduitHA2801BuildHTTPReq builds an authenticated owner *http.Request on the
+// test goroutine so request/token setup never calls require from a child goroutine.
+func conduitHA2801BuildHTTPReq(t *testing.T, node *conduitHANode, user *AuthenticatedUser, method, path string, body any) *http.Request {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -67,9 +67,22 @@ func conduitHA2801DoHTTP(t *testing.T, node *conduitHANode, user *AuthenticatedU
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
+	return req
+}
+
+// conduitHA2801ServeHTTP executes a pre-built HTTP request against
+// node.Server.Handler(). Safe to call from a non-test goroutine.
+func conduitHA2801ServeHTTP(node *conduitHANode, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	node.Server.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// conduitHA2801DoHTTP executes an authenticated owner HTTP request directly
+// against node.Server.Handler() on the test goroutine and returns the recorder.
+func conduitHA2801DoHTTP(t *testing.T, node *conduitHANode, user *AuthenticatedUser, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return conduitHA2801ServeHTTP(node, conduitHA2801BuildHTTPReq(t, node, user, method, path, body))
 }
 
 // conduitHA2801BrokerSession is a raw broker conduit session dialed directly
@@ -138,12 +151,12 @@ func conduitHA2801DialBroker(
 	}, nil
 }
 
-// conduitHA2801WaitLocal waits until sessionID is registered locally on node's
-// relay and visible in Postgres.
-func conduitHA2801WaitLocal(t *testing.T, node *conduitHANode, brokerID, sessionID string) conduit.LocalSession {
-	t.Helper()
+// conduitHA2801WaitLocalErr waits until sessionID is registered locally on
+// node's relay and visible in Postgres without calling require (safe from
+// non-test goroutines such as internal HTTP hooks).
+func conduitHA2801WaitLocalErr(node *conduitHANode, brokerID, sessionID string) (conduit.LocalSession, error) {
 	var local conduit.LocalSession
-	require.NoError(t, pollUntil(10*time.Second, func() error {
+	err := pollUntil(10*time.Second, func() error {
 		ls, _, ok := node.Relay().Local(context.Background(), sessionID)
 		if !ok {
 			return fmt.Errorf("session %s not yet local on %s", sessionID, node.InstanceID)
@@ -159,7 +172,16 @@ func conduitHA2801WaitLocal(t *testing.T, node *conduitHANode, brokerID, session
 			}
 		}
 		return fmt.Errorf("session %s not yet visible in Postgres", sessionID)
-	}))
+	})
+	return local, err
+}
+
+// conduitHA2801WaitLocal waits until sessionID is registered locally on node's
+// relay and visible in Postgres.
+func conduitHA2801WaitLocal(t *testing.T, node *conduitHANode, brokerID, sessionID string) conduit.LocalSession {
+	t.Helper()
+	local, err := conduitHA2801WaitLocalErr(node, brokerID, sessionID)
+	require.NoError(t, err)
 	return local
 }
 
@@ -363,10 +385,14 @@ func conduitHA2801BrokerIncarnationMetricReader(t *testing.T, s *Server) func(na
 
 // --- #2801 H Rows ---
 
-// TestConduitHA_2801_C2_BrokerPathCrossNode validates ptone/scion#2801
-// checkbox:
+// TestConduitHA_2801_C2_BrokerPathCrossNode validates the harness (H) row for
+// ptone/scion#2801 checkbox:
 //
 //	[ ] C2 (broker path cross-node), C12 (brokers), with evidence in acceptance.md
+//
+// Scope: exercises C2 broker RPC routing across two hub nodes backed by
+// Postgres. C12 (brokers), the real load-balancer L row, and acceptance.md
+// evidence remain live verification (Phase 8).
 //
 // The fake broker holds its conduit session on Hub B while broker RPCs
 // (GET /logs and POST /exec) land on Hub A. Hub A resolves the broker to a
@@ -509,11 +535,12 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 		require.NoError(t, err)
 		conduitHA2801WaitLocal(t, env.HubB, env.BrokerID, sB.SessionID)
 
+		execReq := conduitHA2801BuildHTTPReq(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
+			"command": []string{"touch", "non-idempotent"},
+		})
 		recCh := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
-			recCh <- conduitHA2801DoHTTP(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
-				"command": []string{"touch", "non-idempotent"},
-			})
+			recCh <- conduitHA2801ServeHTTP(env.HubA, execReq)
 		}()
 
 		var activeSessionID string
@@ -576,15 +603,17 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 		counter := newConduitHA2801ReqCounter()
 		var attempts, successes atomic.Int64
 		firstEntered := make(chan string, 1)
+		var retrySessionID atomic.Value
 		holdFirst := make(chan struct{})
 		t.Cleanup(func() { close(holdFirst) })
 
 		handler := conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
 			envReq := envelope.RPCToRequest(req)
 			counter.Inc(envReq.RequestID)
+			sessHdr := req.GetHeaders()[conduit.BrokerRPCSessionHeader]
 			n := attempts.Add(1)
 			if n == 1 {
-				firstEntered <- req.GetHeaders()[conduit.BrokerRPCSessionHeader]
+				firstEntered <- sessHdr
 				select {
 				case <-holdFirst:
 				case <-ctx.Done():
@@ -595,6 +624,7 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 					[]byte(`{"logs":"dropped-first-attempt"}`),
 				))
 			}
+			retrySessionID.Store(sessHdr)
 			successes.Add(1)
 			return envelope.ResponseToRPC(wsprotocol.NewResponseEnvelope(
 				envReq.RequestID, http.StatusOK,
@@ -611,9 +641,10 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 		require.NoError(t, err)
 		conduitHA2801WaitLocal(t, env.HubB, env.BrokerID, sB.SessionID)
 
+		logsReq := conduitHA2801BuildHTTPReq(t, env.HubA, env.Owner, http.MethodGet, "/api/v1/agents/"+env.Agent.ID+"/logs?tail=5", nil)
 		recCh := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
-			recCh <- conduitHA2801DoHTTP(t, env.HubA, env.Owner, http.MethodGet, "/api/v1/agents/"+env.Agent.ID+"/logs?tail=5", nil)
+			recCh <- conduitHA2801ServeHTTP(env.HubA, logsReq)
 		}()
 
 		var firstSessionID string
@@ -642,6 +673,9 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "retried-second-attempt")
 		assert.Equal(t, int64(2), attempts.Load(), "idempotent request must see 2 attempts")
 		assert.Equal(t, int64(1), successes.Load(), "idempotent request must see 1 success")
+		gotRetrySess, _ := retrySessionID.Load().(string)
+		assert.NotEmpty(t, gotRetrySess, "retry must carry BrokerRPCSessionHeader")
+		assert.NotEqual(t, firstSessionID, gotRetrySess, "idempotent retry must execute on the other session")
 		reqIDs := counter.UniqueReqIDs()
 		require.Len(t, reqIDs, 1, "both attempts must carry the same request_id")
 		assert.Equal(t, 2, counter.Count(reqIDs[0]), "per-request-id handling count must be 2")
@@ -727,14 +761,18 @@ func TestConduitHA_2801_C20_AmbiguousAndRetrySemantics(t *testing.T) {
 	})
 }
 
-// TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode validates ptone/scion#2801
-// checkbox:
+// TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode validates the harness (H)
+// logic for ptone/scion#2801 checkbox:
 //
 //	[ ] Required live row: a broker session draining after its own GoAway on a
 //	    node other than the one handling the request. In-flight requests on it
 //	    complete within drain_deadline, new requests re-resolve to the
 //	    replacement session on the same relay, and the owner relay's session
 //	    stale-route answer is exercised end to end across nodes
+//
+// Scope: exercises the cross-node GoAway drain and stale-route re-resolution
+// logic on the 2-node Postgres harness; the required live (L) record and
+// acceptance.md evidence remain live verification (Phase 8).
 //
 // Subtest 1 runs the full cross-node GoAway drain:
 //   - Broker session s1 is on Hub B; in-flight exec RPC 1 lands on Hub A.
@@ -799,11 +837,12 @@ func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
 		hubBLocalS1 := conduitHA2801WaitLocal(t, env.HubB, env.BrokerID, s1.SessionID)
 
 		// Start in-flight RPC 1 on Hub A -> routes cross-node to s1 on Hub B.
+		rpc1Req := conduitHA2801BuildHTTPReq(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
+			"command": []string{"sleep", "in-flight"},
+		})
 		rpc1Done := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
-			rpc1Done <- conduitHA2801DoHTTP(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
-				"command": []string{"sleep", "in-flight"},
-			})
+			rpc1Done <- conduitHA2801ServeHTTP(env.HubA, rpc1Req)
 		}()
 		select {
 		case <-inFlightEntered:
@@ -822,18 +861,27 @@ func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
 		// When Hub B's internal listener answers 409 X-Conduit-Stale-Reason: draining
 		// for s1, dial replacement session s2 on the SAME relay (Hub B) before
 		// returning the response to Hub A so Hub A's immediate re-resolution
-		// deterministically finds s2 on Hub B.
+		// deterministically finds s2 on Hub B. Never call require inside this
+		// HTTP handler goroutine: record any error and assert on the test goroutine.
 		var sawDrainingStale atomic.Bool
 		var s2SessionID atomic.Value
+		dialErrCh := make(chan error, 1)
 		var dialOnce sync.Once
 		env.HubB.SetOnInternalRPC(func(sessionID string, status int, staleReason string) {
 			if sessionID == s1.SessionID && status == http.StatusConflict && staleReason == string(registry.ReasonDraining) {
 				sawDrainingStale.Store(true)
 				dialOnce.Do(func() {
 					s2, derr := conduitHA2801DialBroker(t, env.HubB, env.BrokerID, env.BrokerSecret, incarnation, "", s2Handler)
-					require.NoError(t, derr)
-					conduitHA2801WaitLocal(t, env.HubB, env.BrokerID, s2.SessionID)
+					if derr != nil {
+						dialErrCh <- fmt.Errorf("dial replacement s2: %w", derr)
+						return
+					}
+					if _, werr := conduitHA2801WaitLocalErr(env.HubB, env.BrokerID, s2.SessionID); werr != nil {
+						dialErrCh <- fmt.Errorf("wait replacement s2 local: %w", werr)
+						return
+					}
 					s2SessionID.Store(s2.SessionID)
+					dialErrCh <- nil
 				})
 			}
 		})
@@ -846,6 +894,12 @@ func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
 		rec2 := conduitHA2801DoHTTP(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
 			"command": []string{"echo", "after-goaway"},
 		})
+		select {
+		case derr := <-dialErrCh:
+			require.NoError(t, derr)
+		default:
+			t.Fatal("replacement session s2 dial hook did not run")
+		}
 		require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
 		assert.Contains(t, rec2.Body.String(), "new-req-on-s2-same-relay")
 		assert.True(t, sawDrainingStale.Load(), "Hub B owner relay must have emitted 409 X-Conduit-Stale-Reason: draining")
@@ -904,11 +958,12 @@ func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
 		require.NoError(t, err)
 		conduitHA2801WaitLocal(t, env.HubB, env.BrokerID, s1.SessionID)
 
+		rpcReq := conduitHA2801BuildHTTPReq(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
+			"command": []string{"sleep", "past-deadline"},
+		})
 		rpcDone := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
-			rpcDone <- conduitHA2801DoHTTP(t, env.HubA, env.Owner, http.MethodPost, "/api/v1/agents/"+env.Agent.ID+"/exec", map[string]any{
-				"command": []string{"sleep", "past-deadline"},
-			})
+			rpcDone <- conduitHA2801ServeHTTP(env.HubA, rpcReq)
 		}()
 		select {
 		case <-entered:
@@ -931,14 +986,19 @@ func TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode(t *testing.T) {
 	})
 }
 
-// TestConduitHA_2801_C17_BrokerIncarnation validates ptone/scion#2801
-// checkbox:
+// TestConduitHA_2801_C17_BrokerIncarnation validates the harness (H) rows for
+// ptone/scion#2801 checkbox:
 //
 //	[ ] C17 (T6) broker sub-cases: a broker restart that connects to a
 //	    different relay makes the old process's sessions non-current and
 //	    nothing routes to them; a Hello without an incarnation is refused; an
 //	    incarnation flap is logged (broker_incarnation_flap); plus the
 //	    shared-broker sub-case carried over from Phase 1
+//
+// Scope: exercises all four broker sub-cases on the 2-node Postgres harness
+// (with shared_broker_exec_scope_mismatch_refused covering the exec_scope
+// admission fence for a shared broker credential). Live testbed runs and
+// acceptance.md evidence remain live verification (Phase 8).
 func TestConduitHA_2801_C17_BrokerIncarnation(t *testing.T) {
 	requirePG(t)
 	t.Run("restart_onto_different_relay_makes_old_sessions_non_current", func(t *testing.T) {

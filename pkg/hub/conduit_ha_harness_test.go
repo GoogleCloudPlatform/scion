@@ -329,15 +329,22 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 	// RequireHA's registry.SelfCheck probe succeeds against it.
 	internalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
+		var rpcSessionID string
+		var capW *conduitHAStatusCaptureWriter
+		rw := w
 		switch {
 		case p == relay.InternalPathPrefix+"self":
 			node.internalSelfProbes.Add(1)
-			srv.ConduitInternalHandler().ServeHTTP(w, r)
 		case strings.HasPrefix(p, relay.InternalPathPrefix+"sessions/") && strings.HasSuffix(p, "/rpc"):
 			node.internalRPCHops.Add(1)
-			sessionID := strings.TrimSuffix(strings.TrimPrefix(p, relay.InternalPathPrefix+"sessions/"), "/rpc")
-			capW := &conduitHAStatusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
-			srv.ConduitInternalHandler().ServeHTTP(capW, r)
+			rpcSessionID = strings.TrimSuffix(strings.TrimPrefix(p, relay.InternalPathPrefix+"sessions/"), "/rpc")
+			capW = &conduitHAStatusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+			rw = capW
+		case strings.HasPrefix(p, relay.InternalPathPrefix+"sessions/") && strings.HasSuffix(p, "/stream"):
+			node.internalStreamHops.Add(1)
+		}
+		srv.ConduitInternalHandler().ServeHTTP(rw, r)
+		if capW != nil {
 			staleReason := capW.Header().Get(relay.HeaderStaleReason)
 			node.internalHookMu.Lock()
 			if staleReason != "" {
@@ -346,13 +353,8 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 			hook := node.onInternalRPC
 			node.internalHookMu.Unlock()
 			if hook != nil {
-				hook(sessionID, capW.status, staleReason)
+				hook(rpcSessionID, capW.status, staleReason)
 			}
-		case strings.HasPrefix(p, relay.InternalPathPrefix+"sessions/") && strings.HasSuffix(p, "/stream"):
-			node.internalStreamHops.Add(1)
-			srv.ConduitInternalHandler().ServeHTTP(w, r)
-		default:
-			srv.ConduitInternalHandler().ServeHTTP(w, r)
 		}
 	})
 	node.Internal = httptest.NewServer(internalHandler)
