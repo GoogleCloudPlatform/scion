@@ -1,9 +1,15 @@
 # Live Track 1 usage metering capability for grok-build.
-# Not yet live-metered in Track 1.
+# Native OTLP logs (grok_code.api_request / grok_code.api_error); output includes reasoning,
+# terminal failures only (internal retries not observable); cache_write unverified live (verified on grok 1.0.92).
 schema_version: 1
 usage:
   live:
-    source: none
-    token_types: []
+    source: native
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
     not_applicable_token_types: []
-    counts_failed_calls: false
+    counts_failed_calls: true

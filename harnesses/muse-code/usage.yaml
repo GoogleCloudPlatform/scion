@@ -1,9 +1,15 @@
 # Live Track 1 usage metering capability for muse-code.
-# Not yet live-metered in Track 1.
+# PostLLMCall hook with turn-cumulative usage normalized to per-request deltas;
+# semantics verified on muse 1.4.25.
 schema_version: 1
 usage:
   live:
-    source: none
-    token_types: []
+    source: hooks
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
     not_applicable_token_types: []
-    counts_failed_calls: false
+    counts_failed_calls: true
