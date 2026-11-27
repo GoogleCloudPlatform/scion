@@ -516,6 +516,78 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 		assert.Equal(t, 1, unmeasured)
 		assert.Equal(t, 0, stale)
 	})
+
+	t.Run("legacy_client per-agent and aggregate semantics", func(t *testing.T) {
+		// Per-agent: legacy-only with no meter_health stays legacy_client
+		// across full, source:none, unknown, and running-past-grace cases.
+		assert.Equal(t, MeasurementStatusLegacyClient, deriveMeasurementStatus(measurementStatusInput{
+			Usage:              globalCaps["claude"],
+			AgentPhase:         string(state.PhaseRunning),
+			RunStartedAt:       now.Add(-5 * time.Minute),
+			HasRunUsageEvents:  true,
+			HasLegacyUsageOnly: true,
+			DBNow:              now,
+		}))
+		assert.Equal(t, MeasurementStatusLegacyClient, deriveMeasurementStatus(measurementStatusInput{
+			Usage:              globalCaps["hermes"],
+			HasRunUsageEvents:  true,
+			HasLegacyUsageOnly: true,
+			DBNow:              now,
+		}))
+		// With Track 1 meter_health present, Track 1 derivation wins (not legacy_client).
+		assert.Equal(t, MeasurementStatusMeasured, deriveMeasurementStatus(measurementStatusInput{
+			Usage:              globalCaps["claude"],
+			MeterHealth:        []*store.MeterHealth{{FinalState: store.MeterHealthFinalStateOpen, LastReceiptAt: now}},
+			HasRunUsageEvents:  true,
+			HasLegacyUsageOnly: true,
+			DBNow:              now,
+		}))
+
+		// Aggregate: all legacy_client (+ unmeasured) -> legacy_client (never measured).
+		covLegacyOnly := &store.UsageScopeCoverage{
+			Buckets: []store.UsageCoverageBucket{
+				{HarnessConfig: "claude", HasUsageData: true, HasLegacyOnly: true, AgentCount: 2},
+				{HarnessConfig: "hermes", AgentCount: 1},
+			},
+		}
+		status, unmeasured, stale := deriveScopeCoverageSummary(covLegacyOnly, 10, now, true, resolveHosted)
+		assert.Equal(t, MeasurementStatusLegacyClient, status)
+		assert.Equal(t, 1, unmeasured)
+		assert.Equal(t, 0, stale)
+
+		// Aggregate: measured + legacy_client -> partial (never measured).
+		covMixedMeasured := &store.UsageScopeCoverage{
+			Buckets: []store.UsageCoverageBucket{
+				{HarnessConfig: "claude", HasMeterHealth: true, LatestFinalState: store.MeterHealthFinalStateOpen, HasUsageData: true, AgentCount: 1},
+				{HarnessConfig: "claude", HasUsageData: true, HasLegacyOnly: true, AgentCount: 1},
+			},
+		}
+		status, unmeasured, stale = deriveScopeCoverageSummary(covMixedMeasured, 10, now, true, resolveHosted)
+		assert.Equal(t, MeasurementStatusPartial, status)
+		assert.Equal(t, 0, unmeasured)
+		assert.Equal(t, 0, stale)
+
+		// Aggregate: calls_only + legacy_client -> partial.
+		covMixedCallsOnly := &store.UsageScopeCoverage{
+			Buckets: []store.UsageCoverageBucket{
+				{HarnessConfig: "antigravity", HasMeterHealth: true, LatestFinalState: store.MeterHealthFinalStateOpen, HasUsageData: true, AgentCount: 1},
+				{HarnessConfig: "claude", HasUsageData: true, HasLegacyOnly: true, AgentCount: 1},
+			},
+		}
+		status, _, _ = deriveScopeCoverageSummary(covMixedCallsOnly, 10, now, true, resolveHosted)
+		assert.Equal(t, MeasurementStatusPartial, status)
+
+		// Aggregate: stale + legacy_client -> stale.
+		covStaleLegacy := &store.UsageScopeCoverage{
+			Buckets: []store.UsageCoverageBucket{
+				{HarnessConfig: "claude", IsRunning: true, IsPastGrace: true, AgentCount: 1},
+				{HarnessConfig: "claude", HasUsageData: true, HasLegacyOnly: true, AgentCount: 1},
+			},
+		}
+		status, _, stale = deriveScopeCoverageSummary(covStaleLegacy, 10, now, true, resolveHosted)
+		assert.Equal(t, MeasurementStatusStale, status)
+		assert.Equal(t, 1, stale)
+	})
 }
 
 type usageCapErrorStubStore struct {

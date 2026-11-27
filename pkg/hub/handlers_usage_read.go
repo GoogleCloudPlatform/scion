@@ -899,10 +899,6 @@ func usageCapabilityFromHarnessConfig(hc *store.HarnessConfig) *api.HarnessUsage
 // measurementStatusInput holds the run-scoped inputs to deriveMeasurementStatus.
 // Kept in a single struct + single function so both per-agent and scoped
 // aggregate reads share one authoritative derivation.
-//
-// Seam for sibling PR-D (legacy session-metrics converter): legacy_client
-// detection plugs into this struct and deriveMeasurementStatus without
-// changing call sites.
 type measurementStatusInput struct {
 	MeterHealth        []*store.MeterHealth
 	HasRunUsageEvents  bool
@@ -939,11 +935,6 @@ type measurementStatusInput struct {
 //   - otherwise maps capability: calls_only -> "calls_only", partial ->
 //     "partial", full or unknown -> "measured".
 func deriveMeasurementStatus(in measurementStatusInput) string {
-	capKind := classifyUsageLiveCapability(in.Usage)
-	if capKind == usageCapUnmeasured {
-		return MeasurementStatusUnmeasured
-	}
-
 	var latest *store.MeterHealth
 	for _, mh := range in.MeterHealth {
 		if mh == nil {
@@ -952,6 +943,15 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 		if latest == nil || mh.LastReceiptAt.After(latest.LastReceiptAt) {
 			latest = mh
 		}
+	}
+
+	if in.HasRunUsageEvents && in.HasLegacyUsageOnly && latest == nil {
+		return MeasurementStatusLegacyClient
+	}
+
+	capKind := classifyUsageLiveCapability(in.Usage)
+	if capKind == usageCapUnmeasured {
+		return MeasurementStatusUnmeasured
 	}
 
 	windowIncludesNow := true
@@ -983,8 +983,6 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 		if latest == nil || capKind == usageCapUnknown {
 			return MeasurementStatusUnmeasured
 		}
-	} else if in.HasLegacyUsageOnly && latest == nil {
-		return MeasurementStatusLegacyClient
 	}
 
 	if latest != nil && latest.SchemaDriftDetected && (capKind == usageCapFull || capKind == usageCapPartial) {

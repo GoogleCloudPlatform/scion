@@ -739,8 +739,9 @@ func buildScopedUsageResponse(
 
 // deriveScopeCoverageSummary maps each SQL-grouped coverage bucket through the
 // single deriveMeasurementStatus function in Go (O1c) and computes aggregate
-// status using precedence stale > partial > measured > calls_only > unmeasured
-// (with measured + calls_only mixed scopes reading partial), along with
+// status using precedence stale > partial > measured > calls_only >
+// legacy_client > unmeasured (with mixed measured/calls_only/legacy_client
+// scopes reading partial so legacy_client never reads as measured), along with
 // unmeasured_agents and stale_agents counts. The totalEvents fallback applies
 // ONLY when zero agent buckets were classified (e.g., historical rollups from
 // deleted agents no longer in scope).
@@ -752,9 +753,10 @@ func deriveScopeCoverageSummary(
 	resolveCap usageCapabilityLookup,
 ) (status string, unmeasuredAgents, staleAgents int) {
 	var (
-		partialAgents   int
-		measuredAgents  int
-		callsOnlyAgents int
+		partialAgents      int
+		measuredAgents     int
+		callsOnlyAgents    int
+		legacyClientAgents int
 	)
 	staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
 	if cov != nil {
@@ -789,13 +791,14 @@ func deriveScopeCoverageSummary(
 				usageCap = resolveCap(b.CapabilityProjectID, b.HarnessConfig)
 			}
 			s := deriveMeasurementStatus(measurementStatusInput{
-				MeterHealth:       mhRows,
-				HasRunUsageEvents: b.HasUsageData,
-				RunStartedAt:      runStartedAt,
-				DBNow:             dbNow,
-				AgentPhase:        phase,
-				WindowIncludesNow: &windowIncludesNow,
-				Usage:             usageCap,
+				MeterHealth:        mhRows,
+				HasRunUsageEvents:  b.HasUsageData,
+				HasLegacyUsageOnly: b.HasLegacyOnly,
+				RunStartedAt:       runStartedAt,
+				DBNow:              dbNow,
+				AgentPhase:         phase,
+				WindowIncludesNow:  &windowIncludesNow,
+				Usage:              usageCap,
 			})
 			switch s {
 			case MeasurementStatusStale:
@@ -806,22 +809,30 @@ func deriveScopeCoverageSummary(
 				measuredAgents += b.AgentCount
 			case MeasurementStatusCallsOnly:
 				callsOnlyAgents += b.AgentCount
+			case MeasurementStatusLegacyClient:
+				legacyClientAgents += b.AgentCount
 			default:
 				unmeasuredAgents += b.AgentCount
 			}
 		}
 	}
 
-	totalClassified := staleAgents + partialAgents + measuredAgents + callsOnlyAgents + unmeasuredAgents
+	totalClassified := staleAgents + partialAgents + measuredAgents + callsOnlyAgents + legacyClientAgents + unmeasuredAgents
 	switch {
 	case staleAgents > 0:
 		status = MeasurementStatusStale
-	case partialAgents > 0 || (measuredAgents > 0 && callsOnlyAgents > 0):
+	case partialAgents > 0:
+		status = MeasurementStatusPartial
+	case measuredAgents > 0 && (callsOnlyAgents > 0 || legacyClientAgents > 0):
 		status = MeasurementStatusPartial
 	case measuredAgents > 0:
 		status = MeasurementStatusMeasured
+	case callsOnlyAgents > 0 && legacyClientAgents > 0:
+		status = MeasurementStatusPartial
 	case callsOnlyAgents > 0:
 		status = MeasurementStatusCallsOnly
+	case legacyClientAgents > 0:
+		status = MeasurementStatusLegacyClient
 	case totalClassified == 0 && totalEvents > 0:
 		status = MeasurementStatusMeasured
 	default:

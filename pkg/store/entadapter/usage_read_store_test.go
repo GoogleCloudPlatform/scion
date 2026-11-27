@@ -1727,4 +1727,60 @@ func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
 	assert.True(t, covRestarted.Buckets[0].IsPastGrace)
 	assert.False(t, covRestarted.Buckets[0].HasMeterHealth)
 	assert.False(t, covRestarted.Buckets[0].HasUsageData, "prior-run rollups must not set HasUsageData when current run has no events")
+	assert.False(t, covRestarted.Buckets[0].HasLegacyOnly)
+
+	// 6. Legacy-only current run sets HasUsageData=true and HasLegacyOnly=true;
+	// adding a Track 1 event clears HasLegacyOnly while keeping HasUsageData=true.
+	agLegacy := seedAgent(projGlobal, "ag-legacy-only", "run-legacy-1", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-legacy-1",
+		ProjectID:     projGlobal,
+		AgentID:       agLegacy.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evLegacy := makeStoreUsageEvent("hub-cov", "ev-legacy-1", "run-legacy-1", projGlobal, agLegacy.ID, &user1, 1, now.Add(-5*time.Minute), 100, 50, 0, 0)
+	evLegacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agLegacy.ID,
+		Events:  []*store.UsageEvent{evLegacy},
+	})
+	require.NoError(t, err)
+
+	covLegacy, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agLegacy.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covLegacy.Buckets, 1)
+	assert.True(t, covLegacy.Buckets[0].HasUsageData)
+	assert.True(t, covLegacy.Buckets[0].HasLegacyOnly, "legacy-only current run must set HasLegacyOnly=true")
+
+	evTrack1 := makeStoreUsageEvent("hub-cov", "ev-track1-1", "run-legacy-1", projGlobal, agLegacy.ID, &user1, 2, now.Add(-4*time.Minute), 20, 10, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agLegacy.ID,
+		Events:  []*store.UsageEvent{evTrack1},
+	})
+	require.NoError(t, err)
+
+	covMixed, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agLegacy.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covMixed.Buckets, 1)
+	assert.True(t, covMixed.Buckets[0].HasUsageData)
+	assert.False(t, covMixed.Buckets[0].HasLegacyOnly, "mixed Track 1 + legacy run must set HasLegacyOnly=false")
 }
