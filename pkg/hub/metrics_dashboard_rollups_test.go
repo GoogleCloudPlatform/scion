@@ -564,7 +564,7 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 	rec := doGET("/api/v1/metrics/?view=summary&period=7")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
-	recProjSum := doGET("/api/v1/projects/" + proj.ID + "/metrics/summary")
+	recProjSum := doGET("/api/v1/projects/" + proj.ID + "/metrics-summary")
 	require.Equal(t, http.StatusOK, recProjSum.Code)
 	var avail map[string]any
 	require.NoError(t, json.Unmarshal(recProjSum.Body.Bytes(), &avail))
@@ -599,7 +599,7 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 		assert.Empty(t, body["telemetryHint"], "hub_rollups must not attach GCP telemetryHint")
 	}
 
-	recProjSum = doGET("/api/v1/projects/" + proj.ID + "/metrics/summary")
+	recProjSum = doGET("/api/v1/projects/" + proj.ID + "/metrics-summary")
 	require.Equal(t, http.StatusOK, recProjSum.Code, recProjSum.Body.String())
 	var psRollup ProjectMetricsSummary
 	require.NoError(t, json.Unmarshal(recProjSum.Body.Bytes(), &psRollup))
