@@ -88,7 +88,7 @@ func TestEvaluate_LateSuccessCharacterisation(t *testing.T) {
 		return eng, comp
 	}
 
-	t.Run("caller_canceled_during_eval_nil_err_currently_succeeds", func(t *testing.T) {
+	t.Run("caller_canceled_during_eval_nil_err_discarded_as_canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		d := &lateSuccessFakeDialect{
 			name:        "late_cancel",
@@ -98,14 +98,16 @@ func TestEvaluate_LateSuccessCharacterisation(t *testing.T) {
 		eng, comp := newEngineWith(t, d)
 
 		dec, err := eng.Evaluate(ctx, comp, ruleengine.Input{}, ruleengine.Budget{})
-		// Pre-fix baseline: Engine.Evaluate only checks ctx.Err() when err != nil,
-		// so a nil-error decision returned after caller cancel currently slips through.
-		if err != nil || !dec.Bool {
-			t.Fatalf("pre-fix baseline expected (true, nil), got (%+v, %v)", dec, err)
+		if dec != (ruleengine.Decision{}) {
+			t.Fatalf("expected zero Decision on late success after cancel, got %+v", dec)
+		}
+		var failedErr *ruleengine.FailedError
+		if !errors.As(err, &failedErr) || failedErr.Reason != celengine.ReasonCanceled {
+			t.Fatalf("late cancel err = %T (%v), want *FailedError{Reason: canceled}", err, err)
 		}
 	})
 
-	t.Run("per_call_timeout_exceeded_nil_err_currently_succeeds", func(t *testing.T) {
+	t.Run("per_call_timeout_exceeded_nil_err_discarded_as_timeout", func(t *testing.T) {
 		d := &lateSuccessFakeDialect{
 			name:        "late_timeout",
 			maxEvalTime: 25 * time.Millisecond,
@@ -114,13 +116,16 @@ func TestEvaluate_LateSuccessCharacterisation(t *testing.T) {
 		eng, comp := newEngineWith(t, d)
 
 		dec, err := eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{})
-		// Pre-fix baseline: Engine.Evaluate does not check evalCtx / elapsed on err == nil.
-		if err != nil || !dec.Bool {
-			t.Fatalf("pre-fix baseline expected (true, nil), got (%+v, %v)", dec, err)
+		if dec != (ruleengine.Decision{}) {
+			t.Fatalf("expected zero Decision on late success after per-call timeout, got %+v", dec)
+		}
+		var failedErr *ruleengine.FailedError
+		if !errors.As(err, &failedErr) || failedErr.Reason != celengine.ReasonTimeout {
+			t.Fatalf("late per-call timeout err = %T (%v), want *FailedError{Reason: timeout}", err, err)
 		}
 	})
 
-	t.Run("tracker_timeout_exceeded_nil_err_currently_succeeds", func(t *testing.T) {
+	t.Run("tracker_timeout_exceeded_nil_err_discarded_as_budget", func(t *testing.T) {
 		d := &lateSuccessFakeDialect{
 			name:        "late_tracker",
 			maxEvalTime: time.Second,
@@ -130,12 +135,46 @@ func TestEvaluate_LateSuccessCharacterisation(t *testing.T) {
 		tracker := ruleengine.NewBudgetTracker(25 * time.Millisecond)
 
 		dec, err := eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
-		// Pre-fix baseline: Engine.Evaluate charges the tracker but still returns (true, nil).
-		if err != nil || !dec.Bool {
-			t.Fatalf("pre-fix baseline expected (true, nil), got (%+v, %v)", dec, err)
+		if dec != (ruleengine.Decision{}) {
+			t.Fatalf("expected zero Decision on late success after tracker timeout, got %+v", dec)
+		}
+		if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+			t.Fatalf("late tracker timeout err = %v, want ErrBudgetExhausted", err)
 		}
 		if !tracker.Exhausted() {
 			t.Fatalf("expected tracker to be exhausted after 60ms charge on 25ms limit")
+		}
+	})
+
+	t.Run("grouped_late_success_discarded_for_all_members_by_cause", func(t *testing.T) {
+		d := &lateSuccessFakeDialect{
+			name:        "late_grp",
+			maxEvalTime: 25 * time.Millisecond,
+			delay:       60 * time.Millisecond,
+		}
+		eng, comp := newEngineWith(t, d)
+		dom := ruleengine.Domain{Ctx: context.Background()}
+		in := ruleengine.Input{AdmittedInputKey: "late-grp"}
+		r1, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: comp, GroupKey: "g"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("r1: %v", err)
+		}
+		r2, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: comp, GroupKey: "g"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("r2: %v", err)
+		}
+		_, p1, _, _ := r1.Next()
+		_, p2, _, _ := r2.Next()
+		if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
+			t.Fatalf("EvaluateGroup: %v", err)
+		}
+		_, _ = r1.Resume()
+		_, _ = r2.Resume()
+		res1, _ := r1.Result()
+		res2, _ := r2.Result()
+		if res1.Deciding.Class != ruleengine.StepClassFailed || res1.Deciding.Reason != celengine.ReasonTimeout ||
+			res2.Deciding.Class != ruleengine.StepClassFailed || res2.Deciding.Reason != celengine.ReasonTimeout {
+			t.Fatalf("grouped late success not discarded as failed/timeout: r1=%+v r2=%+v", res1.Deciding, res2.Deciding)
 		}
 	})
 

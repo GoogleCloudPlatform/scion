@@ -679,6 +679,37 @@ func (e *Engine) evaluateCore(ctx context.Context, c Compiled, input Input, budg
 		}
 		return Decision{}, elapsed, err
 	}
+
+	// Post-return late-success classification by bounding cause (§3.4, acceptance 5):
+	// discard any nil-error decision arriving after caller cancellation or the
+	// dispatch-time bound, classifying by the cause that bounded the evaluation
+	// while preserving EngineDeadlineMargin skew tolerance for in-time results.
+	if callerErr := ctx.Err(); callerErr != nil {
+		return Decision{}, elapsed, &FailedError{
+			Reason: celengine.ReasonCanceled,
+			Cause:  callerErr,
+		}
+	}
+	if evalTimeout > 0 {
+		cause := context.Cause(evalCtx)
+		if boundFromTracker {
+			if errors.Is(cause, errTrackerTimeout) || elapsed > evalTimeout+EngineDeadlineMargin(evalTimeout) {
+				budget.Tracker.Exhaust()
+				if cause == nil {
+					cause = errTrackerTimeout
+				}
+				return Decision{}, elapsed, fmt.Errorf("%w: %w", ErrBudgetExhausted, cause)
+			}
+		} else if errors.Is(cause, errDialectEvalTimeout) || elapsed > evalTimeout+EngineDeadlineMargin(evalTimeout) {
+			if cause == nil {
+				cause = errDialectEvalTimeout
+			}
+			return Decision{}, elapsed, &FailedError{
+				Reason: celengine.ReasonTimeout,
+				Cause:  errors.Join(&celengine.EvalError{Reason: celengine.ReasonTimeout}, cause),
+			}
+		}
+	}
 	return dec, elapsed, nil
 }
 
