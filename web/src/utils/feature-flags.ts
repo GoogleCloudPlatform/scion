@@ -576,12 +576,12 @@ export function neverSuspendEnabled(): boolean {
 
 /**
  * Agents list column picker (web.agents_column_picker, ptone/scion#9577):
- * shows the Columns visibility picker on the hub-wide agents list table,
- * persisted per browser in localStorage. Presentation only. Default OFF.
+ * shows the Columns visibility picker on the hub-wide and project agents list
+ * tables, persisted per browser in localStorage. Presentation only. Default OFF.
  */
 export const AGENTS_COLUMN_PICKER_FLAG = 'web.agents_column_picker';
 
-/** Whether the hub-wide agents list column picker is enabled in this session. */
+/** Whether the agents list column picker is enabled in this session. */
 export function agentsColumnPickerEnabled(): boolean {
   return isFeatureEnabled(AGENTS_COLUMN_PICKER_FLAG);
 }

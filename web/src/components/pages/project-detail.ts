@@ -167,11 +167,22 @@ import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/proje
 import {
   AGENT_BADGES_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
+  agentsColumnPickerEnabled,
   decisionsEnabled,
   isFeatureEnabled,
   triggersEnabled,
   usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
+import {
+  PROJECT_AGENT_COLUMNS,
+  defaultVisibleProjectAgentColumns,
+  loadVisibleProjectAgentColumns,
+  saveVisibleProjectAgentColumns,
+  toggleProjectAgentColumn,
+  type ProjectAgentColumnDef,
+  type ProjectAgentColumnId,
+} from '../../shared/agent-columns.js';
+import { renderColumnPicker } from '../shared/column-picker.js';
 import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
 import '../shared/measurement-status-badge.js';
@@ -507,6 +518,12 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private pagerPageSize: AgentPagerPageSize = 25;
 
+  /** Visible columns for the project agents table, lazily loaded under `scion-columns-project-agents` when enabled. */
+  @state()
+  private visibleColumns: Set<ProjectAgentColumnId> = defaultVisibleProjectAgentColumns();
+
+  private visibleColumnsLoaded = false;
+
   /** Forces a re-render when `agentWindow` changes outside of a `@state` setter (pagination, live updates, resync). */
   @state()
   private windowTick = 0;
@@ -591,6 +608,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnFeatureFlagsChanged = (): void => {
     this.triggersEnabled = triggersEnabled();
+    this.requestUpdate();
     const nextUsage = usageLedgerEnabled();
     if (nextUsage !== this.usageLedgerEnabled) {
       this.usageLedgerEnabled = nextUsage;
@@ -2873,6 +2891,34 @@ export class ScionPageProjectDetail extends LitElement {
     return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
   }
 
+  private ensureVisibleColumnsLoaded(): Set<ProjectAgentColumnId> {
+    if (!this.visibleColumnsLoaded) {
+      this.visibleColumnsLoaded = true;
+      this.visibleColumns = loadVisibleProjectAgentColumns();
+    }
+    return this.visibleColumns;
+  }
+
+  private onToggleColumn(id: ProjectAgentColumnId): void {
+    this.visibleColumns = toggleProjectAgentColumn(this.ensureVisibleColumnsLoaded(), id);
+    saveVisibleProjectAgentColumns(this.visibleColumns);
+  }
+
+  private resetVisibleColumns(): void {
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = defaultVisibleProjectAgentColumns();
+    saveVisibleProjectAgentColumns(this.visibleColumns);
+  }
+
+  private renderColumnPicker(): TemplateResult {
+    return renderColumnPicker({
+      columns: PROJECT_AGENT_COLUMNS,
+      visible: this.ensureVisibleColumnsLoaded(),
+      onToggle: (id) => this.onToggleColumn(id),
+      onReset: () => this.resetVisibleColumns(),
+    });
+  }
+
   private renderFilterBar() {
     const activePhase = getActiveSingleKeyValue(
       this.filterQueryText,
@@ -2959,6 +3005,9 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-menu>
               </sl-dropdown>
             `
+          : nothing}
+        ${this.viewMode === 'list' && agentsColumnPickerEnabled()
+          ? this.renderColumnPicker()
           : nothing}
       </div>
     `;
@@ -4178,35 +4227,54 @@ export class ScionPageProjectDetail extends LitElement {
     this.backgroundRefresh('chip');
   }
 
-  private renderAgentTableHead() {
+  private renderAgentTableHead(activeColumns: readonly ProjectAgentColumnDef[]) {
     return html`
       <thead>
         <tr>
+          ${activeColumns.map((col) => this.renderAgentTableHeaderCell(col))}
+        </tr>
+      </thead>
+    `;
+  }
+
+  private renderAgentTableHeaderCell(col: ProjectAgentColumnDef): TemplateResult {
+    switch (col.id) {
+      case 'name':
+        return html`
           <th
             class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
             @click=${() => this.toggleSort('name')}
           >
             Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
           </th>
-          <th class="hide-mobile">Template</th>
-          <th class="hide-mobile">Broker</th>
+        `;
+      case 'template':
+        return html`<th class="hide-mobile">Template</th>`;
+      case 'broker':
+        return html`<th class="hide-mobile">Broker</th>`;
+      case 'status':
+        return html`
           <th
             class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
             @click=${() => this.toggleSort('status')}
           >
             Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
           </th>
+        `;
+      case 'updated':
+        return html`
           <th
             class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
             @click=${() => this.toggleSort('updated')}
           >
             Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
           </th>
-          <th class="hide-mobile">Task</th>
-          <th style="text-align: right">Actions</th>
-        </tr>
-      </thead>
-    `;
+        `;
+      case 'task':
+        return html`<th class="hide-mobile">Task</th>`;
+      case 'actions':
+        return html`<th style="text-align: right">Actions</th>`;
+    }
   }
 
   /** The list view: the window's page `items` and the pager, in every state. */
@@ -4214,15 +4282,21 @@ export class ScionPageProjectDetail extends LitElement {
     const items = this.agentWindow.items;
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
+    const columnPickerOn = agentsColumnPickerEnabled();
+    const visibleColumns = columnPickerOn ? this.ensureVisibleColumnsLoaded() : null;
+    const activeColumns = visibleColumns
+      ? PROJECT_AGENT_COLUMNS.filter((col) => visibleColumns.has(col.id))
+      : PROJECT_AGENT_COLUMNS;
+    const activeColumnIds = new Set(activeColumns.map((col) => col.id));
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${items.length === 0
           ? this.renderNoAgentRows()
           : html`
               <table>
-                ${this.renderAgentTableHead()}
+                ${this.renderAgentTableHead(activeColumns)}
                 <tbody>
-                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn))}
+                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn, activeColumnIds))}
                 </tbody>
               </table>
             `}
@@ -4282,7 +4356,11 @@ export class ScionPageProjectDetail extends LitElement {
     this.onAgentViewStateChanged();
   }
 
-  private renderAgentRow(agent: Agent, badgesOn: boolean) {
+  private renderAgentRow(
+    agent: Agent,
+    badgesOn: boolean,
+    visibleColumns: ReadonlySet<ProjectAgentColumnId>
+  ) {
     const isLoading = this.actionLoading[agent.id] || false;
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
@@ -4296,39 +4374,60 @@ export class ScionPageProjectDetail extends LitElement {
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
-        <td class="hide-mobile">${agent.template}</td>
-        <td class="hide-mobile">
-          ${agent.runtimeBrokerId
-            ? html`<a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                <sl-icon name="hdd-rack"></sl-icon>
-                ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-              </a>`
-            : '\u2014'}
-        </td>
-        <td>
-          ${agentStatusBadge(agent, { size: 'small' })}
-          ${neverSuspendBadge(agent, { compact: true })}
-          <scion-deletion-badge
-            .deletion=${this.deletingView(agent)}
-            size="small"
-          ></scion-deletion-badge>
-          <scion-authority-badge .authority=${agent.authority} size="small"></scion-authority-badge>
-          ${this.renderDeletionBanner(agent, true)}
-        </td>
-        <td class="hide-mobile">
-          ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
-          agent.updated ||
-          agent.updatedAt
-            ? this.formatRelativeTime(
-                (agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')
-                  ? agent.lastActivityEvent
-                  : agent.updated || agent.updatedAt)!
-              )
-            : '\u2014'}
-        </td>
-        <td class="hide-mobile">
-          <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
-        </td>
+        ${visibleColumns.has('template')
+          ? html`<td class="hide-mobile">${agent.template}</td>`
+          : nothing}
+        ${visibleColumns.has('broker')
+          ? html`
+              <td class="hide-mobile">
+                ${agent.runtimeBrokerId
+                  ? html`<a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                      <sl-icon name="hdd-rack"></sl-icon>
+                      ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                    </a>`
+                  : '\u2014'}
+              </td>
+            `
+          : nothing}
+        ${visibleColumns.has('status')
+          ? html`
+              <td>
+                ${agentStatusBadge(agent, { size: 'small' })}
+                ${neverSuspendBadge(agent, { compact: true })}
+                <scion-deletion-badge
+                  .deletion=${this.deletingView(agent)}
+                  size="small"
+                ></scion-deletion-badge>
+                <scion-authority-badge
+                  .authority=${agent.authority}
+                  size="small"
+                ></scion-authority-badge>
+                ${this.renderDeletionBanner(agent, true)}
+              </td>
+            `
+          : nothing}
+        ${visibleColumns.has('updated')
+          ? html`
+              <td class="hide-mobile">
+                ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
+                agent.updated ||
+                agent.updatedAt
+                  ? this.formatRelativeTime(
+                      (agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')
+                        ? agent.lastActivityEvent
+                        : agent.updated || agent.updatedAt)!
+                    )
+                  : '\u2014'}
+              </td>
+            `
+          : nothing}
+        ${visibleColumns.has('task')
+          ? html`
+              <td class="hide-mobile">
+                <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
+              </td>
+            `
+          : nothing}
         <td class="actions-cell">
           <span class="table-actions">
             ${can(agent._capabilities, 'attach')

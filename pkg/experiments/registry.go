@@ -388,9 +388,9 @@ const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 // presentation-only: the hub is unaffected whether or not it is on.
 const TerminalKeyBar = "web.terminal_key_bar"
 
-// AgentsColumnPicker gates the column visibility picker on the hub-wide agents
-// list table (ptone/scion#9577). It is web-only and presentation-only: the hub
-// is unaffected whether or not it is on.
+// AgentsColumnPicker gates the column visibility picker on the hub-wide and
+// project agents list tables (ptone/scion#9577). It is web-only and
+// presentation-only: the hub is unaffected whether or not it is on.
 const AgentsColumnPicker = "web.agents_column_picker"
 
 // SecretRotation gates opt-in Hub server keyring configuration
@@ -1204,7 +1204,7 @@ var compiled = []Experiment{
 	{
 		Name:        AgentsColumnPicker,
 		Title:       "Agents list column picker",
-		Description: "Adds a column visibility picker to the hub-wide agents list table so users can show or hide non-pinned columns, persisted per browser in localStorage. Web only; the hub is unaffected.",
+		Description: "Adds a column visibility picker to the hub-wide and project agents list tables so users can show or hide non-pinned columns, persisted per browser in localStorage. Web only; the hub is unaffected.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,

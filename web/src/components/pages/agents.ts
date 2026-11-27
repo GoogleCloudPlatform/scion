@@ -45,15 +45,14 @@ import {
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import {
   AGENT_COLUMNS,
-  TOGGLEABLE_AGENT_COLUMNS,
   defaultVisibleAgentColumns,
-  isDefaultVisibleAgentColumns,
   loadVisibleAgentColumns,
   saveVisibleAgentColumns,
   toggleAgentColumn,
   type AgentColumnDef,
   type AgentColumnId,
 } from '../../shared/agent-columns.js';
+import { renderColumnPicker } from '../shared/column-picker.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { getMessageModeDisplay } from '../../shared/message-mode.js';
 import {
@@ -296,9 +295,11 @@ export class ScionPageAgents extends LitElement {
   @state()
   private sortDir: SortDir = 'desc';
 
-  /** Visible columns for the hub-wide agents table, persisted under `scion-columns-agents`. */
+  /** Visible columns for the hub-wide agents table, lazily loaded under `scion-columns-agents` when enabled. */
   @state()
   private visibleColumns: Set<AgentColumnId> = defaultVisibleAgentColumns();
+
+  private visibleColumnsLoaded = false;
 
   @state()
   private quickMessageAgentId = '';
@@ -790,7 +791,6 @@ export class ScionPageAgents extends LitElement {
     if (AGENT_PAGER_PAGE_SIZES.includes(storedPageSize as AgentPagerPageSize)) {
       this.pagerPageSize = storedPageSize as AgentPagerPageSize;
     }
-    this.visibleColumns = loadVisibleAgentColumns();
     // Sync the window with the persisted view state before the first load.
     this.agentWindow.setViewState(this.windowViewState());
 
@@ -1588,69 +1588,32 @@ export class ScionPageAgents extends LitElement {
     return this.sortField === field ? (this.sortDir === 'asc' ? '▲' : '▼') : '▲';
   }
 
+  private ensureVisibleColumnsLoaded(): Set<AgentColumnId> {
+    if (!this.visibleColumnsLoaded) {
+      this.visibleColumnsLoaded = true;
+      this.visibleColumns = loadVisibleAgentColumns();
+    }
+    return this.visibleColumns;
+  }
+
   private onToggleColumn(id: AgentColumnId): void {
-    this.visibleColumns = toggleAgentColumn(this.visibleColumns, id);
+    this.visibleColumns = toggleAgentColumn(this.ensureVisibleColumnsLoaded(), id);
     saveVisibleAgentColumns(this.visibleColumns);
   }
 
   private resetVisibleColumns(): void {
+    this.visibleColumnsLoaded = true;
     this.visibleColumns = defaultVisibleAgentColumns();
     saveVisibleAgentColumns(this.visibleColumns);
   }
 
   private renderColumnPicker(): TemplateResult {
-    const visibleToggleableCount = TOGGLEABLE_AGENT_COLUMNS.filter((col) =>
-      this.visibleColumns.has(col.id)
-    ).length;
-    const isDefault = isDefaultVisibleAgentColumns(this.visibleColumns);
-
-    return html`
-      <sl-dropdown class="columns-picker" placement="bottom-end" stay-open-on-select hoist>
-        <sl-button slot="trigger" size="small" outline caret data-testid="columns-picker-trigger">
-          <sl-icon slot="prefix" name="layout-three-columns"></sl-icon>
-          Columns${isDefault
-            ? ''
-            : ` (${visibleToggleableCount}/${TOGGLEABLE_AGENT_COLUMNS.length})`}
-        </sl-button>
-        <sl-menu
-          aria-label="Visible columns"
-          @sl-select=${(e: CustomEvent<{ item: { value: string } }>) => {
-            const value = e.detail.item.value;
-            if (value === '__reset__') {
-              this.resetVisibleColumns();
-            } else {
-              this.onToggleColumn(value as AgentColumnId);
-            }
-          }}
-        >
-          <sl-menu-item
-            type="checkbox"
-            value="name"
-            checked
-            disabled
-            data-testid="column-toggle-name"
-          >
-            Name
-          </sl-menu-item>
-          ${TOGGLEABLE_AGENT_COLUMNS.map(
-            (col) => html`
-              <sl-menu-item
-                type="checkbox"
-                value=${col.id}
-                ?checked=${this.visibleColumns.has(col.id)}
-                data-testid="column-toggle-${col.id}"
-              >
-                ${col.label}
-              </sl-menu-item>
-            `
-          )}
-          <sl-divider></sl-divider>
-          <sl-menu-item value="__reset__" ?disabled=${isDefault} data-testid="column-toggle-reset">
-            Reset to defaults
-          </sl-menu-item>
-        </sl-menu>
-      </sl-dropdown>
-    `;
+    return renderColumnPicker({
+      columns: AGENT_COLUMNS,
+      visible: this.ensureVisibleColumnsLoaded(),
+      onToggle: (id) => this.onToggleColumn(id),
+      onReset: () => this.resetVisibleColumns(),
+    });
   }
 
   override render() {
@@ -2437,8 +2400,9 @@ export class ScionPageAgents extends LitElement {
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const neverSuspendOn = neverSuspendEnabled();
     const columnPickerOn = agentsColumnPickerEnabled();
-    const activeColumns = columnPickerOn
-      ? AGENT_COLUMNS.filter((col) => this.visibleColumns.has(col.id))
+    const visibleColumns = columnPickerOn ? this.ensureVisibleColumnsLoaded() : null;
+    const activeColumns = visibleColumns
+      ? AGENT_COLUMNS.filter((col) => visibleColumns.has(col.id))
       : AGENT_COLUMNS;
     return html`
       <div class="resource-table-container">

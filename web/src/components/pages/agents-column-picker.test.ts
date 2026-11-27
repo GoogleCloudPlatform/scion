@@ -140,13 +140,15 @@ describe('Hub-wide agents list column picker (scion-page-agents)', () => {
     return el;
   }
 
-  it('hides the picker and renders all columns when web.agents_column_picker is off', async () => {
+  it('hides the picker, never reads scion-columns-agents, and renders all columns when web.agents_column_picker is off', async () => {
     localStorage.setItem(
       AGENT_COLUMNS_STORAGE_KEY,
       JSON.stringify({ hidden: ['template', 'task'] })
     );
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem');
     const el = await mountAgentsPage();
 
+    expect(getItemSpy.mock.calls.some(([key]) => key === AGENT_COLUMNS_STORAGE_KEY)).toBe(false);
     expect(el.shadowRoot?.querySelector('[data-testid="columns-picker-trigger"]')).toBeNull();
     expect(headerLabels(el)).toEqual([
       'Name',
@@ -159,9 +161,17 @@ describe('Hub-wide agents list column picker (scion-page-agents)', () => {
       'Actions',
     ]);
     expect(el.shadowRoot!.querySelectorAll('table tbody tr td').length).toBe(8);
+
+    // Late flag enable hydrates persisted hidden columns on demand
+    setFeatureFlag(AGENTS_COLUMN_PICKER_FLAG, true);
+    await el.updateComplete;
+    expect(getItemSpy.mock.calls.some(([key]) => key === AGENT_COLUMNS_STORAGE_KEY)).toBe(true);
+    expect(el.shadowRoot?.querySelector('[data-testid="columns-picker-trigger"]')).not.toBeNull();
+    expect(headerLabels(el)).toEqual(['Name', 'Project', 'Status', 'Traits', 'Updated', 'Actions']);
+    getItemSpy.mockRestore();
   });
 
-  it('renders the picker in list view when enabled and defaults to all columns visible', async () => {
+  it('renders the picker in list view when enabled with both Name and Actions pinned and disabled', async () => {
     setFeatureFlag(AGENTS_COLUMN_PICKER_FLAG, true);
     const el = await mountAgentsPage();
 
@@ -182,6 +192,9 @@ describe('Hub-wide agents list column picker (scion-page-agents)', () => {
     const nameToggle = el.shadowRoot?.querySelector('[data-testid="column-toggle-name"]');
     expect(nameToggle?.hasAttribute('disabled')).toBe(true);
     expect(nameToggle?.hasAttribute('checked')).toBe(true);
+    const actionsToggle = el.shadowRoot?.querySelector('[data-testid="column-toggle-actions"]');
+    expect(actionsToggle?.hasAttribute('disabled')).toBe(true);
+    expect(actionsToggle?.hasAttribute('checked')).toBe(true);
   });
 
   it('hides toggled columns from header and body, persists to localStorage, and resets', async () => {

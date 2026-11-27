@@ -19,13 +19,22 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   AGENT_COLUMNS,
   AGENT_COLUMNS_STORAGE_KEY,
+  PROJECT_AGENT_COLUMNS,
+  PROJECT_AGENT_COLUMNS_STORAGE_KEY,
   TOGGLEABLE_AGENT_COLUMNS,
+  TOGGLEABLE_PROJECT_AGENT_COLUMNS,
   defaultVisibleAgentColumns,
+  defaultVisibleProjectAgentColumns,
   isDefaultVisibleAgentColumns,
+  isDefaultVisibleProjectAgentColumns,
   loadVisibleAgentColumns,
+  loadVisibleProjectAgentColumns,
   parseVisibleAgentColumns,
+  parseVisibleProjectAgentColumns,
   saveVisibleAgentColumns,
+  saveVisibleProjectAgentColumns,
   toggleAgentColumn,
+  toggleProjectAgentColumn,
 } from './agent-columns.js';
 
 describe('agent-columns persistence and helpers', () => {
@@ -115,5 +124,56 @@ describe('agent-columns persistence and helpers', () => {
     expect(withUnknown.has('name')).toBe(true);
     expect(withUnknown.has('project')).toBe(true);
     expect(withUnknown.size).toBe(AGENT_COLUMNS.length - 1);
+  });
+});
+
+describe('project-agent-columns persistence and helpers', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('defaults to all project agents columns visible with name and actions pinned', () => {
+    const visible = defaultVisibleProjectAgentColumns();
+    for (const col of PROJECT_AGENT_COLUMNS) {
+      expect(visible.has(col.id)).toBe(true);
+    }
+    expect(TOGGLEABLE_PROJECT_AGENT_COLUMNS.map((c) => c.id)).toEqual([
+      'template',
+      'broker',
+      'status',
+      'updated',
+      'task',
+    ]);
+    expect(isDefaultVisibleProjectAgentColumns(visible)).toBe(true);
+  });
+
+  it('persists under scion-columns-project-agents independently of scion-columns-agents', () => {
+    const projVisible = toggleProjectAgentColumn(
+      toggleProjectAgentColumn(defaultVisibleProjectAgentColumns(), 'broker'),
+      'task'
+    );
+    saveVisibleProjectAgentColumns(projVisible);
+
+    expect(localStorage.getItem(PROJECT_AGENT_COLUMNS_STORAGE_KEY)).toBe(
+      JSON.stringify({ hidden: ['broker', 'task'] })
+    );
+    expect(localStorage.getItem(AGENT_COLUMNS_STORAGE_KEY)).toBeNull();
+
+    const restored = loadVisibleProjectAgentColumns();
+    expect(restored.has('broker')).toBe(false);
+    expect(restored.has('task')).toBe(false);
+    expect(restored.has('name')).toBe(true);
+    expect(restored.has('actions')).toBe(true);
+    expect(isDefaultVisibleProjectAgentColumns(restored)).toBe(false);
+  });
+
+  it('never hides pinned columns and ignores unknown or hub-only keys', () => {
+    const parsed = parseVisibleProjectAgentColumns(
+      JSON.stringify({ hidden: ['name', 'actions', 'project', 'traits', 'broker'] })
+    );
+    expect(parsed.has('name')).toBe(true);
+    expect(parsed.has('actions')).toBe(true);
+    expect(parsed.has('broker')).toBe(false);
+    expect(parsed.size).toBe(PROJECT_AGENT_COLUMNS.length - 1);
   });
 });
