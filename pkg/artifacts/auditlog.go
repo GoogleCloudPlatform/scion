@@ -366,6 +366,12 @@ func routeTemplate(r *http.Request) string {
 		return base + "/" + reviewSessionsSegment + "/{sid}"
 	case sub[0] == reviewDraftSegment && len(sub) == 1:
 		return base + "/" + reviewDraftSegment
+	case sub[0] == reviewRequestsSegment && len(sub) == 1:
+		return base + "/" + reviewRequestsSegment
+	case sub[0] == reviewRequestsSegment && len(sub) == 3 && sub[2] == "withdraw":
+		return base + "/" + reviewRequestsSegment + "/{rid}/withdraw"
+	case sub[0] == reviewRequestSegment && len(sub) == 2 && sub[1] == "dismiss":
+		return base + "/" + reviewRequestSegment + "/dismiss"
 	case sub[0] == transferSegment && len(sub) == 1:
 		return base + "/" + transferSegment
 	case sub[0] == transferTargetsSegment && len(sub) == 1:

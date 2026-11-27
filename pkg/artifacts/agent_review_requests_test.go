@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -973,5 +974,523 @@ func TestWithdrawCleanupOnlyDeletesReviewPermissionBoundedGrant(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected non-review grant %s to survive withdraw cleanup, grants=%+v", grantID, gs)
+	}
+}
+
+func findPrincipalGrant(t *testing.T, st Store, artifactID, subjectRef string) *Grant {
+	t.Helper()
+	gs, err := st.ListGrants(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	for i := range gs {
+		if gs[i].SubjectKind == SubjectPrincipal && gs[i].SubjectRef == subjectRef {
+			return &gs[i]
+		}
+	}
+	return nil
+}
+
+func countEventsOfAction(t *testing.T, st Store, artifactID, action string) int {
+	t.Helper()
+	evs, err := st.ListEvents(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	n := 0
+	for _, ev := range evs {
+		if ev.Action == action {
+			n++
+		}
+	}
+	return n
+}
+
+// TestBoundedGrantCleanupOnDismissAndCapReclaim covers acceptance 1 and §4.4:
+//   - bounded request -> dismiss deletes the still-role-gated bounded grant,
+//     writes EventGrantRemoved and the grant_removed decision log, and frees
+//     the cap slot so an 11th distinct reviewer succeeds;
+//   - a reviewer who has lost read access can still dismiss and their bounded
+//     grant is still deleted.
+func TestBoundedGrantCleanupOnDismissAndCapReclaim(t *testing.T) {
+	t.Run("dismiss deletes bounded grant, logs event and decision, and frees cap slot", func(t *testing.T) {
+		svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+		capture := &logCapture{}
+		logger := slog.New(slog.NewJSONHandler(capture, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		svc.SetLogger(func() *slog.Logger { return logger })
+
+		reviewers := make([]string, 0, 11)
+		for i := 1; i <= 11; i++ {
+			uid := fmt.Sprintf("dim-u-%02d", i)
+			h.resolveMap[uid] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+			h.allow(principal{PrincipalKindUser, uid, ""}, "proj-1", PermissionRead)
+			reviewers = append(reviewers, "user:"+uid)
+		}
+
+		// Fill all 10 bounded grant slots.
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: reviewers[:10]})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("batch 1..10 = %d %s", rec.Code, rec.Body.String())
+		}
+		// Confirm 11th is refused before dismiss.
+		rec = doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: reviewers[10:]})
+		var beforeResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &beforeResp)
+		if len(beforeResp.Requests) != 1 || beforeResp.Requests[0].Code != CodeTooManyGrants {
+			t.Fatalf("11th before dismiss = %+v, want refused(%s)", beforeResp.Requests, CodeTooManyGrants)
+		}
+		_, _ = capture.take(t)
+
+		// First reviewer dismisses -> bounded grant deleted, event + decision log written.
+		dRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
+			PrincipalKindUser, "dim-u-01", "", DismissReviewRequestBody{Note: "no time"})
+		if dRec.Code != http.StatusOK {
+			t.Fatalf("dismiss = %d %s, want 200", dRec.Code, dRec.Body.String())
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:dim-u-01"); g != nil {
+			t.Fatalf("expected bounded grant for dim-u-01 to be deleted on dismiss, still found %+v", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 1 {
+			t.Errorf("EventGrantRemoved count = %d, want 1", n)
+		}
+		entries, _ := capture.take(t)
+		var sawRemoved bool
+		for _, e := range entries {
+			if e[logKeyAction] == logActionGrantRemoved {
+				sawRemoved = true
+				checkEntry(t, "dismiss grant_removed", e, "INFO", map[string]any{
+					logKeyAction:      logActionGrantRemoved,
+					logKeyOutcome:     logOutcomeAllowed,
+					logKeyArtifactID:  agentArtID,
+					logKeyAuthority:   AuthorityReviewer,
+					logKeySubjectKind: SubjectPrincipal,
+					logKeySubjectRef:  "user:dim-u-01",
+					logKeyPermission:  GrantReview,
+					logKeyRoute:       "POST /api/v1/artifacts/{id}/review-request/dismiss",
+				})
+			}
+		}
+		if !sawRemoved {
+			t.Errorf("expected grant_removed decision log entry on dismiss, got %+v", entries)
+		}
+
+		// 11th distinct reviewer now succeeds!
+		rec = doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: reviewers[10:]})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("11th after dismiss = %d %s", rec.Code, rec.Body.String())
+		}
+		var afterResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &afterResp)
+		if len(afterResp.Requests) != 1 || afterResp.Requests[0].Outcome != ReviewRequestOutcomeCreated || afterResp.Requests[0].Access != ReviewRequestAccessBounded {
+			t.Fatalf("11th after dismiss = %+v, want created(bounded)", afterResp.Requests)
+		}
+	})
+
+	t.Run("dismiss after reviewer lost read still works and deletes bounded grant", func(t *testing.T) {
+		svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g == nil {
+			t.Fatalf("expected bounded grant for bob")
+		}
+
+		// Bob loses proj-1 read role (Authorize returns false, Permits remains true for session user).
+		delete(h.perms[PrincipalRef(PrincipalKindUser, "bob")]["proj-1"], PermissionRead)
+
+		dRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
+			PrincipalKindUser, "bob", "", DismissReviewRequestBody{Note: "no longer on project"})
+		if dRec.Code != http.StatusOK {
+			t.Fatalf("dismiss after lost read = %d %s, want 200", dRec.Code, dRec.Body.String())
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g != nil {
+			t.Fatalf("expected bounded grant for bob to be deleted even after lost read, still found %+v", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 1 {
+			t.Errorf("EventGrantRemoved count = %d, want 1", n)
+		}
+	})
+}
+
+// TestBoundedGrantCleanupOnExpire covers acceptance 2 and 7:
+//   - TTL expiry deletes a still-role-gated bounded grant, writes EventGrantRemoved
+//     and the grant_removed decision log, and frees the cap slot;
+//   - lost-access expiry deletes a still-role-gated bounded grant and logs it;
+//   - a reaper lookup error never closes a request and never deletes its grant.
+func TestBoundedGrantCleanupOnExpire(t *testing.T) {
+	t.Run("TTL expiry deletes bounded grant and logs event and decision", func(t *testing.T) {
+		svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+		svc.nowFn = func() time.Time { return t0 }
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g == nil {
+			t.Fatalf("expected bounded grant for bob")
+		}
+
+		capture := &logCapture{}
+		logger := slog.New(slog.NewJSONHandler(capture, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		res, err := ReapReviewRequests(ctx, st, h, t0.Add(ReviewRequestTTL+time.Hour), 50, logger)
+		if err != nil {
+			t.Fatalf("ReapReviewRequests: %v", err)
+		}
+		if res.Expired != 1 {
+			t.Fatalf("res.Expired = %d, want 1", res.Expired)
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g != nil {
+			t.Fatalf("expected bounded grant for bob to be deleted on TTL expire, still found %+v", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 1 {
+			t.Errorf("EventGrantRemoved count = %d, want 1", n)
+		}
+		entries, _ := capture.take(t)
+		var sawRemoved bool
+		for _, e := range entries {
+			if e[logKeyAction] == logActionGrantRemoved {
+				sawRemoved = true
+				checkEntry(t, "ttl expire grant_removed", e, "INFO", map[string]any{
+					logKeyAction:        logActionGrantRemoved,
+					logKeyOutcome:       logOutcomeAllowed,
+					logKeyArtifactID:    agentArtID,
+					logKeyProjectID:     "proj-1",
+					logKeyPrincipalKind: ActorKindSystem,
+					logKeyPrincipalID:   reconcilerActor.Ref,
+					logKeyAuthority:     AuthorityReconciler,
+					logKeySubjectKind:   SubjectPrincipal,
+					logKeySubjectRef:    "user:bob",
+					logKeyPermission:    GrantReview,
+				})
+			}
+		}
+		if !sawRemoved {
+			t.Errorf("expected grant_removed decision log entry on TTL expire, got %+v", entries)
+		}
+	})
+
+	t.Run("lost-access expiry deletes bounded grant and logs event and decision", func(t *testing.T) {
+		svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+		svc.nowFn = func() time.Time { return t0 }
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g == nil {
+			t.Fatalf("expected bounded grant for bob")
+		}
+
+		// Bob loses proj-1 role so principalCanReview becomes false (bounded grant is role-gated).
+		h.resolveMap["bob"] = &staticRecipientSubject{scopes: map[string]bool{}}
+
+		capture := &logCapture{}
+		logger := slog.New(slog.NewJSONHandler(capture, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		res, err := ReapReviewRequests(ctx, st, h, t0.Add(time.Hour), 50, logger)
+		if err != nil {
+			t.Fatalf("ReapReviewRequests: %v", err)
+		}
+		if res.Expired != 1 {
+			t.Fatalf("res.Expired = %d, want 1", res.Expired)
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g != nil {
+			t.Fatalf("expected bounded grant for bob to be deleted on lost-access expire, still found %+v", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 1 {
+			t.Errorf("EventGrantRemoved count = %d, want 1", n)
+		}
+		entries, _ := capture.take(t)
+		var sawRemoved bool
+		for _, e := range entries {
+			if e[logKeyAction] == logActionGrantRemoved {
+				sawRemoved = true
+				checkEntry(t, "lost-access expire grant_removed", e, "INFO", map[string]any{
+					logKeyAction:        logActionGrantRemoved,
+					logKeyOutcome:       logOutcomeAllowed,
+					logKeyArtifactID:    agentArtID,
+					logKeyProjectID:     "proj-1",
+					logKeyPrincipalKind: ActorKindSystem,
+					logKeyPrincipalID:   reconcilerActor.Ref,
+					logKeyAuthority:     AuthorityReconciler,
+					logKeySubjectKind:   SubjectPrincipal,
+					logKeySubjectRef:    "user:bob",
+					logKeyPermission:    GrantReview,
+				})
+			}
+		}
+		if !sawRemoved {
+			t.Errorf("expected grant_removed decision log entry on lost-access expire, got %+v", entries)
+		}
+	})
+
+	t.Run("reaper lookup error never closes request and never deletes bounded grant", func(t *testing.T) {
+		svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+		svc.nowFn = func() time.Time { return t0 }
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+		var createResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
+		reqID := createResp.Requests[0].Request.ID
+
+		// Inject a transient ResolveRecipient error.
+		h.resolveErr = errors.New("transient directory error")
+		res, err := ReapReviewRequests(ctx, st, h, t0.Add(time.Hour), 50, nil)
+		if err == nil {
+			t.Fatalf("expected error from ReapReviewRequests on lookup fault")
+		}
+		if res.Expired != 0 || res.Errors != 1 {
+			t.Fatalf("res = %+v, want Expired=0 Errors=1", res)
+		}
+		rr, err := st.GetReviewRequest(ctx, agentArtID, reqID)
+		if err != nil || rr.State != ReviewRequestStateOpen {
+			t.Fatalf("request after lookup error = %+v, %v; want open", rr, err)
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g == nil || g.CreatedByRef != BoundedReviewCreator {
+			t.Fatalf("bounded grant after lookup error = %+v, want still present", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 0 {
+			t.Errorf("EventGrantRemoved count = %d, want 0", n)
+		}
+	})
+}
+
+// TestBoundedGrantStaysOnFulfilAndLostDismissRace covers acceptance 3 and 5:
+//   - finalizing a kind: review version fulfils the request and keeps the
+//     bounded grant intact;
+//   - a dismiss that loses the CAS race to a fulfil returns 409 and keeps the
+//     bounded grant intact.
+func TestBoundedGrantStaysOnFulfilAndLostDismissRace(t *testing.T) {
+	t.Run("fulfil keeps bounded grant", func(t *testing.T) {
+		svc, _, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		t0 := time.Now().UTC().Truncate(time.Microsecond)
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+		var createResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
+		reqID := createResp.Requests[0].Request.ID
+
+		// Bob finalizes a kind: review version -> fulfils request.
+		v2 := &Version{
+			ID: "v2-fulfil-" + agentArtID, ArtifactID: agentArtID, Kind: VersionKindReview,
+			EntryPath: "plan.md", CreatedByKind: PrincipalKindUser, CreatedByRef: "bob",
+			CreatedAt: t0.Add(time.Minute), State: VersionStatePending,
+		}
+		if err := st.CreateVersion(ctx, v2, []File{{VersionID: v2.ID, Path: "plan.md", Size: 13, SHA256: "aaaa", MediaType: "text/markdown", Pending: false}}, 10); err != nil {
+			t.Fatalf("CreateVersion: %v", err)
+		}
+		claim, err := st.ClaimFinalize(ctx, agentArtID, v2.Seq, t0)
+		if err != nil {
+			t.Fatalf("ClaimFinalize: %v", err)
+		}
+		if _, effects, err := st.FinalizeVersionWithEffects(ctx, agentArtID, v2.Seq, claim, nil, 1); err != nil || effects.FulfilledRequestID != reqID {
+			t.Fatalf("FinalizeVersionWithEffects = %+v, %v; want fulfilled %s", effects, err, reqID)
+		}
+
+		rr, err := st.GetReviewRequest(ctx, agentArtID, reqID)
+		if err != nil || rr.State != ReviewRequestStateFulfilled {
+			t.Fatalf("request = %+v, %v; want fulfilled", rr, err)
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g == nil || g.CreatedByRef != BoundedReviewCreator {
+			t.Fatalf("bounded grant after fulfil = %+v, want still present", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 0 {
+			t.Errorf("EventGrantRemoved count = %d, want 0", n)
+		}
+	})
+
+	t.Run("dismiss losing CAS race to fulfil returns 409 and keeps bounded grant", func(t *testing.T) {
+		svc, _, st, agentArtID, _ := newAgentReviewFixture(t)
+		ctx := context.Background()
+		t0 := time.Now().UTC().Truncate(time.Microsecond)
+
+		rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+			PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+		var createResp CreateReviewRequestsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
+		reqID := createResp.Requests[0].Request.ID
+
+		v2 := &Version{
+			ID: "v2-race-bounded-" + agentArtID, ArtifactID: agentArtID, Kind: VersionKindReview,
+			EntryPath: "plan.md", CreatedByKind: PrincipalKindUser, CreatedByRef: "bob",
+			CreatedAt: t0.Add(time.Minute), State: VersionStatePending,
+		}
+		if err := st.CreateVersion(ctx, v2, []File{{VersionID: v2.ID, Path: "plan.md", Size: 13, SHA256: "bbbb", MediaType: "text/markdown", Pending: false}}, 10); err != nil {
+			t.Fatalf("CreateVersion: %v", err)
+		}
+		claim, err := st.ClaimFinalize(ctx, agentArtID, v2.Seq, t0)
+		if err != nil {
+			t.Fatalf("ClaimFinalize: %v", err)
+		}
+
+		reviewRequestDismissHook = func(hctx context.Context) {
+			if _, _, ferr := st.FinalizeVersionWithEffects(hctx, agentArtID, v2.Seq, claim, nil, 1); ferr != nil {
+				t.Errorf("hook FinalizeVersionWithEffects: %v", ferr)
+			}
+		}
+		t.Cleanup(func() { reviewRequestDismissHook = nil })
+
+		dRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
+			PrincipalKindUser, "bob", "", DismissReviewRequestBody{Note: "too late"})
+		if dRec.Code != http.StatusConflict {
+			t.Fatalf("losing dismiss = %d %s, want 409", dRec.Code, dRec.Body.String())
+		}
+		rr, err := st.GetReviewRequest(ctx, agentArtID, reqID)
+		if err != nil || rr.State != ReviewRequestStateFulfilled {
+			t.Fatalf("request after race = %+v, %v; want fulfilled", rr, err)
+		}
+		if g := findPrincipalGrant(t, st, agentArtID, "user:bob"); g == nil || g.CreatedByRef != BoundedReviewCreator {
+			t.Fatalf("bounded grant after lost dismiss race = %+v, want still present", g)
+		}
+		if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 0 {
+			t.Errorf("EventGrantRemoved count = %d, want 0", n)
+		}
+	})
+}
+
+// TestHumanTakeoverOfBoundedGrantSurvivesDismissAndExpire covers acceptance 4:
+// a human taking over a bounded grant (same-level review share OR level change
+// to write) survives both dismiss and expire, with no grant_removed event or
+// decision log.
+func TestHumanTakeoverOfBoundedGrantSurvivesDismissAndExpire(t *testing.T) {
+	for _, perm := range []string{GrantReview, GrantWrite} {
+		for _, closeVia := range []string{"dismiss", "expire_ttl"} {
+			t.Run(perm+"_"+closeVia, func(t *testing.T) {
+				svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+				ctx := context.Background()
+				t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+				svc.nowFn = func() time.Time { return t0 }
+				capture := &logCapture{}
+				logger := slog.New(slog.NewJSONHandler(capture, &slog.HandlerOptions{Level: slog.LevelInfo}))
+				svc.SetLogger(func() *slog.Logger { return logger })
+
+				rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+					PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+				if rec.Code != http.StatusOK {
+					t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+				}
+
+				// Human admin (Alice) takes over Bob's bounded grant.
+				put, err := st.PutGrant(ctx, &Grant{
+					ID: "takeover-" + perm, ArtifactID: agentArtID, SubjectKind: SubjectPrincipal,
+					SubjectRef: "user:bob", Permission: perm, CreatedByRef: "user:alice", CreatedAt: t0.Add(time.Minute),
+				}, MaxGrantsPerArtifact, false, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+				if err != nil || put != GrantPutChanged {
+					t.Fatalf("human PutGrant(%s) = %v, %v; want GrantPutChanged, nil", perm, put, err)
+				}
+				_, _ = capture.take(t)
+
+				if closeVia == "dismiss" {
+					dRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
+						PrincipalKindUser, "bob", "", DismissReviewRequestBody{Note: "passing"})
+					if dRec.Code != http.StatusOK {
+						t.Fatalf("dismiss = %d %s, want 200", dRec.Code, dRec.Body.String())
+					}
+				} else {
+					res, err := ReapReviewRequests(ctx, st, h, t0.Add(ReviewRequestTTL+time.Hour), 50, logger)
+					if err != nil || res.Expired != 1 {
+						t.Fatalf("ReapReviewRequests = %+v, %v; want Expired=1", res, err)
+					}
+				}
+
+				g := findPrincipalGrant(t, st, agentArtID, "user:bob")
+				if g == nil || g.Permission != perm || g.CreatedByRef != "user:alice" {
+					t.Fatalf("grant after %s = %+v, want permission=%s created_by_ref=user:alice", closeVia, g, perm)
+				}
+				if n := countEventsOfAction(t, st, agentArtID, EventGrantRemoved); n != 0 {
+					t.Errorf("EventGrantRemoved count = %d, want 0", n)
+				}
+				entries, _ := capture.take(t)
+				for _, e := range entries {
+					if e[logKeyAction] == logActionGrantRemoved {
+						t.Errorf("unexpected grant_removed decision log for human-owned grant: %+v", e)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestExistingAndRaisedRequestsNeverDeleteGrantOnDismissOrExpire covers
+// acceptance 6: dismiss and expire on `existing` and `raised` requests never
+// delete any grant.
+func TestExistingAndRaisedRequestsNeverDeleteGrantOnDismissOrExpire(t *testing.T) {
+	for _, mode := range []string{ReviewRequestAccessExisting, ReviewRequestAccessRaised} {
+		for _, closeVia := range []string{"dismiss", "expire_ttl"} {
+			t.Run(mode+"_"+closeVia, func(t *testing.T) {
+				svc, h, st, _, userArtID := newAgentReviewFixture(t)
+				ctx := context.Background()
+				t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+				svc.nowFn = func() time.Time { return t0 }
+				h.visibleUsers = map[string]bool{"bob": true}
+
+				if mode == ReviewRequestAccessExisting {
+					_, err := st.PutGrant(ctx, &Grant{
+						ID: "existing-bob", ArtifactID: userArtID, SubjectKind: SubjectPrincipal,
+						SubjectRef: "user:bob", Permission: GrantReview, CreatedByRef: "user:alice", CreatedAt: t0,
+					}, MaxGrantsPerArtifact, false, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+					if err != nil {
+						t.Fatalf("PutGrant existing: %v", err)
+					}
+				}
+
+				rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+userArtID+"/review-requests",
+					PrincipalKindUser, "alice", "", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+				if rec.Code != http.StatusOK {
+					t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+				}
+				var createResp CreateReviewRequestsResponse
+				_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
+				if len(createResp.Requests) != 1 || createResp.Requests[0].Access != mode {
+					t.Fatalf("create = %+v, want access=%s", createResp.Requests, mode)
+				}
+
+				if closeVia == "dismiss" {
+					dRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+userArtID+"/review-request/dismiss",
+						PrincipalKindUser, "bob", "", DismissReviewRequestBody{Note: "no"})
+					if dRec.Code != http.StatusOK {
+						t.Fatalf("dismiss = %d %s, want 200", dRec.Code, dRec.Body.String())
+					}
+				} else {
+					res, err := ReapReviewRequests(ctx, st, h, t0.Add(ReviewRequestTTL+time.Hour), 50, nil)
+					if err != nil || res.Expired != 1 {
+						t.Fatalf("ReapReviewRequests = %+v, %v; want Expired=1", res, err)
+					}
+				}
+
+				g := findPrincipalGrant(t, st, userArtID, "user:bob")
+				if g == nil || g.Permission != GrantReview || g.CreatedByRef != "user:alice" {
+					t.Fatalf("grant after %s (%s) = %+v, want review grant created_by_ref=user:alice", closeVia, mode, g)
+				}
+				if n := countEventsOfAction(t, st, userArtID, EventGrantRemoved); n != 0 {
+					t.Errorf("EventGrantRemoved count = %d, want 0", n)
+				}
+			})
+		}
 	}
 }
