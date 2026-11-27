@@ -22,7 +22,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -603,4 +605,208 @@ func TestWorkspaceUploads_LinkedRemoteProjectReturns409(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", proj.ID),
 		UploadStartRequest{Name: "a.bin", Path: "a.bin", Size: 8})
 	assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestWorkspaceUploads_TransientFinalizeFailureSurvivesSweepAndRetries verifies
+// R1: a transient finalize failure leaves the row in finalizing with a released
+// lease, a sweep at now+2m keeps the row and partial intact, a subsequent
+// complete succeeds with the expected SHA-256, and a genuinely stuck finalizing
+// row is marked failed after 1h.
+func TestWorkspaceUploads_TransientFinalizeFailureSurvivesSweepAndRetries(t *testing.T) {
+	srv, st := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	project, wsPath := createTestHubManagedProject(t, srv, "Uploads Transient Finalize")
+
+	payload := []byte("transient-finalize-recovery-payload")
+	wantSum := sha256.Sum256(payload)
+	wantHex := hex.EncodeToString(wantSum[:])
+
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "ok.bin", Path: "ok.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", payload).Code)
+
+	// Move partial aside briefly to trigger a transient finalize error (errUploadPartialMissing).
+	partialPath := filepath.Join(wsPath, uploadPartialName(started.ID))
+	backupPath := filepath.Join(t.TempDir(), "partial.bak")
+	require.NoError(t, os.Rename(partialPath, backupPath))
+
+	failRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusInternalServerError, failRec.Code)
+
+	// Restore partial and run sweeper at now + 2m: must NOT fail or delete partial.
+	require.NoError(t, os.Rename(backupPath, partialPath))
+	srv.sweepUploadSessions(context.Background(), time.Now().UTC().Add(2*time.Minute))
+
+	sess, err := st.GetUploadSession(context.Background(), started.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UploadStateFinalizing, sess.State)
+	_, err = os.Stat(partialPath)
+	require.NoError(t, err, "partial must remain intact after sweep at now+2m")
+
+	// Retry complete succeeds with exact SHA-256.
+	okRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusOK, okRec.Code, "body: %s", okRec.Body.String())
+	gotBytes, err := os.ReadFile(filepath.Join(wsPath, "ok.bin"))
+	require.NoError(t, err)
+	gotSum := sha256.Sum256(gotBytes)
+	assert.Equal(t, wantHex, hex.EncodeToString(gotSum[:]))
+
+	// Genuinely stuck finalizing row IS failed by sweeper past 1h.
+	s2Rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "stuck.bin", Path: "stuck.bin", Size: 5, Overwrite: true})
+	require.Equal(t, http.StatusCreated, s2Rec.Code)
+	var s2 UploadStartResponse
+	require.NoError(t, json.Unmarshal(s2Rec.Body.Bytes(), &s2))
+	u2 := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, s2.ID)
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u2+"?offset=0", []byte("12345")).Code)
+	_, err = st.ClaimUploadLease(context.Background(), s2.ID, store.UploadStateUploading, 5, "tok-stuck", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, st.TransitionUploadSession(context.Background(), s2.ID, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateFinalizing, "tok-stuck", nil))
+	require.NoError(t, st.ReleaseUploadLease(context.Background(), s2.ID, "tok-stuck"))
+
+	srv.sweepUploadSessions(context.Background(), time.Now().UTC().Add(65*time.Minute))
+	stuckSess, err := st.GetUploadSession(context.Background(), s2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UploadStateFailed, stuckSess.State)
+}
+
+type slowChunkReader struct {
+	data  []byte
+	pos   int
+	delay time.Duration
+}
+
+func (r *slowChunkReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	n := copy(p, r.data[r.pos:r.pos+1])
+	r.pos += n
+	return n, nil
+}
+
+// TestWorkspaceUploads_SlowChunkPastWriteTimeoutSucceeds verifies O1: a chunk
+// trickled past the listener's WriteTimeout still receives 200 OK because the
+// chunk handler extends the connection write deadline alongside the read deadline.
+func TestWorkspaceUploads_SlowChunkPastWriteTimeoutSucceeds(t *testing.T) {
+	srv, _ := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	srv.config.WriteTimeout = 150 * time.Millisecond
+	project, _ := createTestHubManagedProject(t, srv, "Uploads Slow Chunk")
+
+	ts := httptest.NewUnstartedServer(srv.Handler())
+	ts.Config.WriteTimeout = 150 * time.Millisecond
+	ts.Start()
+	defer ts.Close()
+
+	payload := []byte("slow-chunk") // 10 bytes * 30ms = 300ms > 150ms WriteTimeout
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "slow.bin", Path: "slow.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+
+	chunkURL := fmt.Sprintf("%s/api/v1/projects/%s/workspace/uploads/%s?offset=0", ts.URL, project.ID, started.ID)
+	req, err := http.NewRequest(http.MethodPut, chunkURL, &slowChunkReader{data: payload, delay: 30 * time.Millisecond})
+	require.NoError(t, err)
+	req.ContentLength = int64(len(payload))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestWorkspaceUploads_ExpiredSessionRefusedBeforeSweep verifies O2: an
+// uploading session whose idle_expires_at or hard_expires_at has passed is
+// refused at chunk/complete with 409 upload_invalid_state (state=expired) even
+// before the sweeper runs.
+func TestWorkspaceUploads_ExpiredSessionRefusedBeforeSweep(t *testing.T) {
+	srv, st := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	project, _ := createTestHubManagedProject(t, srv, "Uploads Expired API")
+
+	// Seed an already-expired session directly in uploading state.
+	past := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	sess := &store.UploadSession{
+		ID:             "upl_o2_api_expired",
+		HubID:          srv.uploadHubID(),
+		OwnerKind:      "user",
+		OwnerID:        DevUserID,
+		TargetKind:     store.UploadTargetWorkspace,
+		ScopeProjectID: project.ID,
+		DestPath:       "exp.bin",
+		Overwrite:      true,
+		FileName:       "exp.bin",
+		MediaType:      "application/octet-stream",
+		DeclaredSize:   10,
+		StagingRef:     uploadPartialName("upl_o2_api_expired"),
+		IdleExpiresAt:  past,
+		HardExpiresAt:  past,
+	}
+	require.NoError(t, st.CreateUploadSession(context.Background(), sess, store.UploadQuota{}))
+
+	chunkRec := doChunkPut(t, srv, "",
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s?offset=0", project.ID, sess.ID),
+		[]byte("0123456789"))
+	require.Equal(t, http.StatusConflict, chunkRec.Code, "body: %s", chunkRec.Body.String())
+	errObj := decodeUploadAPIError(t, chunkRec)
+	assert.Equal(t, errCodeUploadInvalidState, errObj.Code)
+	assert.Equal(t, string(store.UploadStateExpired), errObj.Details["state"])
+}
+
+type uploadCommitFaultStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	failOnce atomic.Bool
+}
+
+func (w *uploadCommitFaultStore) CommitUploadChunk(ctx context.Context, id, token string, upd store.UploadChunkCommit) error {
+	if w.fault.Active() && w.failOnce.CompareAndSwap(true, false) {
+		return errors.New("injected transient commit error")
+	}
+	return w.Store.CommitUploadChunk(ctx, id, token, upd)
+}
+
+// TestWorkspaceUploads_CommitFailureReleasesLease verifies O3: when
+// CommitUploadChunk fails with a non-ErrLeaseLost error, the handler releases
+// the lease so the next retry immediately succeeds instead of stalling with
+// 409 upload_busy for the full lease TTL.
+func TestWorkspaceUploads_CommitFailureReleasesLease(t *testing.T) {
+	srv, _, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *uploadCommitFaultStore {
+		return &uploadCommitFaultStore{Store: inner, fault: f}
+	})
+	setLargeUploadsExperiment(t, srv, true)
+	project, _ := createTestHubManagedProject(t, srv, "Uploads Commit Fault")
+
+	payload := []byte("retry-after-commit-err")
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "f.bin", Path: "f.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+	// Upload chunk 1 cleanly, then inject a one-shot commit fault on chunk 2.
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", payload[:10]).Code)
+
+	wrapped.failOnce.Store(true)
+	fault.Arm()
+	failRec := doChunkPut(t, srv, "", u+"?offset=10", payload[10:])
+	require.Equal(t, http.StatusInternalServerError, failRec.Code)
+
+	// Lease must have been released: immediate retry at offset 10 succeeds (not 409 upload_busy).
+	okRec := doChunkPut(t, srv, "", u+"?offset=10", payload[10:])
+	require.Equal(t, http.StatusOK, okRec.Code, "body: %s", okRec.Body.String())
 }

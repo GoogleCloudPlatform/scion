@@ -41,6 +41,7 @@ import (
 // §3.10, §3.11). Defined as package variables so tests can shorten them.
 var (
 	uploadChunkDeadline   = 5 * time.Minute
+	uploadLeaseMargin     = 30 * time.Second
 	uploadLeaseTTL        = 5*time.Minute + 30*time.Second
 	uploadFinalizeBudget  = 5 * time.Minute
 	uploadQuotaRetryAfter = 60 * time.Second
@@ -128,6 +129,13 @@ func effectiveUploadExpiry(idle, hard time.Time) time.Time {
 		return hard
 	}
 	return idle
+}
+
+func effectiveUploadStateString(sess *store.UploadSession, now time.Time) string {
+	if sess.State == store.UploadStateUploading && (!sess.IdleExpiresAt.After(now) || !sess.HardExpiresAt.After(now)) {
+		return string(store.UploadStateExpired)
+	}
+	return string(sess.State)
 }
 
 func newUploadRandomHex(nBytes int) (string, error) {
@@ -470,7 +478,7 @@ func (s *Server) handleUploadChunk(
 			cur, gerr := s.store.GetUploadSession(ctx, sid)
 			stateStr := ""
 			if gerr == nil && cur != nil {
-				stateStr = string(cur.State)
+				stateStr = effectiveUploadStateString(cur, uploadNowFn())
 			}
 			writeError(w, http.StatusConflict, errCodeUploadInvalidState,
 				"Upload session is no longer uploading",
@@ -484,10 +492,11 @@ func (s *Server) handleUploadChunk(
 		return
 	}
 
-	// Extend per-request read deadline without changing global server timeouts (§3.10).
+	// Extend per-request read and write deadlines without changing global server timeouts (§3.10).
 	if rcErr := http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadChunkDeadline)); rcErr != nil {
 		slog.DebugContext(ctx, "upload chunk: SetReadDeadline not applied", "error", rcErr)
 	}
+	extendWriteDeadline(ctx, w, s.config.WriteTimeout, uploadChunkDeadline+uploadLeaseMargin)
 	chunkCtx, cancel := context.WithTimeout(ctx, uploadChunkDeadline)
 	defer cancel()
 
@@ -539,7 +548,7 @@ func (s *Server) handleUploadChunk(
 	}
 
 	now := uploadNowFn()
-	newIdle := now.Add(cfg.SessionIdleTTL)
+	newIdle := effectiveUploadExpiry(now.Add(cfg.SessionIdleTTL), claimed.HardExpiresAt)
 	commit := store.UploadChunkCommit{
 		Received:      offset + n,
 		HashState:     newHashState,
@@ -555,7 +564,10 @@ func (s *Server) handleUploadChunk(
 		commit.Parts = parts
 	}
 
-	if err := s.store.CommitUploadChunk(ctx, sid, token, commit); err != nil {
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = s.store.CommitUploadChunk(commitCtx, sid, token, commit)
+	commitCancel()
+	if err != nil {
 		if errors.Is(err, store.ErrLeaseLost) {
 			writeError(w, http.StatusConflict, errCodeUploadBusy,
 				"Upload lease lost during chunk commit; retry", nil)
@@ -565,6 +577,9 @@ func (s *Server) handleUploadChunk(
 			NotFound(w, "Upload session")
 			return
 		}
+		relCtx, relCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.store.ReleaseUploadLease(relCtx, sid, token)
+		relCancel()
 		slog.ErrorContext(ctx, "failed to commit upload chunk", "session_id", sid, "error", err)
 		InternalError(w)
 		return
@@ -750,9 +765,10 @@ func (s *Server) writeCompleteClaimError(ctx context.Context, w http.ResponseWri
 				writeJSON(w, http.StatusAccepted, map[string]string{"state": string(store.UploadStateFinalizing)})
 				return
 			default:
+				stateStr := effectiveUploadStateString(cur, uploadNowFn())
 				writeError(w, http.StatusConflict, errCodeUploadInvalidState,
-					fmt.Sprintf("Upload session is in state %s", cur.State),
-					map[string]interface{}{"state": string(cur.State)})
+					fmt.Sprintf("Upload session is in state %s", stateStr),
+					map[string]interface{}{"state": stateStr})
 				return
 			}
 		}
