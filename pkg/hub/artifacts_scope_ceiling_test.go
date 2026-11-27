@@ -300,10 +300,10 @@ func TestPreArtifactAgentParentChildHasNoArtifactAccess(t *testing.T) {
 	// Both create responses warn that the non-demoted ceiling-optional scopes
 	// were left out (ptone/scion#4569); project:skill:write is demoted to Hub
 	// debug logging (ptone/scion#9452).
-	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview)
 	childRec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "artifact-child"})
 	child, childEdge := f.createdAgent(t, childRec, "artifact-child")
-	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview)
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.read")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.create")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.update")
@@ -402,7 +402,7 @@ func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
 	f := newMintFixture(t, "drop-warn")
 	capped := f.agent(t, "drop-warn-capped", AgentRoleBaseline, state.PhaseStopped)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, capped.ID, preArtifactReadCeiling(), provSession)
-	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview}})
 
 	for name, dispatch := range map[string]func(context.Context) error{
 		"create": func(ctx context.Context) error {

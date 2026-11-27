@@ -441,7 +441,7 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	assert.True(t, agentNoticeFound, "expected Bob to receive review request notice from agent rr-agent")
 
 	// Bob dismisses -> running agent receives a SystemCategoryArtifactReview system message.
-	disp := newWakeRecordingDispatcher()
+	disp := &recordingDispatcher{}
 	srv.SetDispatcher(disp)
 	dismissAgentRec := doAsUser(bob, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
 		artifacts.DismissReviewRequestBody{Note: "Needs benchmark numbers"})
@@ -449,9 +449,11 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	var dismissAgentResp artifacts.DismissReviewRequestResponse
 	require.NoError(t, json.Unmarshal(dismissAgentRec.Body.Bytes(), &dismissAgentResp))
 	assert.True(t, dismissAgentResp.AuthorNotified)
-	require.Len(t, disp.getMessageCalls(), 1)
-	assert.Contains(t, disp.getMessageCalls()[0].Message, `dismissed your review request on "Agent Report"`)
-	assert.Contains(t, disp.getMessageCalls()[0].Message, "Needs benchmark numbers")
+	calls := disp.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Contains(t, calls[0].StructuredMessage.Msg, `dismissed your review request on "Agent Report"`)
+	assert.Contains(t, calls[0].StructuredMessage.Msg, "Needs benchmark numbers")
 
 	// 6. FeatureEnabled fails closed.
 	h := newArtifactHost(srv)
