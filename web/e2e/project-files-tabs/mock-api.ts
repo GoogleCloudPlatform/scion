@@ -59,6 +59,15 @@ function fileListResponse(paths: string[]): unknown {
  * attempts). Returns live counters for the two shared-dir listing endpoints.
  */
 export async function installApiMocks(page: Page): Promise<MockCounts> {
+  // This suite exercises the legacy Shoelace <sl-tab-group> Files layout
+  // (hub.artifacts off); pin the flag explicitly since hub.artifacts now
+  // defaults on.
+  await page.addInitScript(() => {
+    (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+      'hub.artifacts': false,
+    };
+  });
+
   const counts: MockCounts = {
     workspaceListings: 0,
     sharedDirListings: { [SHARED_DIR_A]: 0, [SHARED_DIR_B]: 0 },

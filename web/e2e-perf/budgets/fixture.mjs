@@ -178,7 +178,10 @@ export function buildFixture() {
           'hub.agent_edit_held': false,
           'hub.agent_secrets': false,
           'hub.artifact_archive': false,
-          'hub.artifacts': true,
+          // Pinned off for the frozen perf-budget fixture so the project page
+          // mounts <scion-file-browser> and matches perfBudgetWebRequests and
+          // the recorded DOM baselines.
+          'hub.artifacts': false,
           'hub.artifacts_open_review_check': false,
           'hub.artifacts_review_drafts': false,
           'hub.artifacts_review_requests': false,
