@@ -76,6 +76,7 @@ Each limit has three states: left out (or `null`), which inherits the value from
   - **Docker, Podman, Apple Container, Cloud Run Sandbox:** container/sandbox label `scion.io/run-deadline`.
   - **Kubernetes:** pod annotation `scion.io/run-deadline` and `spec.activeDeadlineSeconds` set to the same `max_duration + 12m` budget (because image pull, init containers, and in-container clone all count against a pod's active deadline; kubelet enforces it even if the broker is down).
   - **Cloud Run Instances:** instance annotation `scion.io/run-deadline` (Cloud Run Instances has no native hard run-duration timeout, so enforcement relies on the broker sweep).
+  - **Substrate:** stored in the broker's in-memory agent record labels (`scion.io/run-deadline`), so enforcement covers the run while the broker process is alive and does not survive a broker restart.
 - A 60-second broker sweep stops any running agent whose stamped deadline has passed and reports `activity=limits_exceeded` with reason `max_duration_backstop`. Because the deadline is stored on the runtime object rather than broker memory, enforcement survives broker restarts. Turning `agent_policy.duration_backstop` off stops stamping new launches; already-stamped runs continue to be enforced by the sweeper until they exit.
 
 ### Environment variables (`env`)

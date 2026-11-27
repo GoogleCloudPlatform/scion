@@ -168,7 +168,7 @@ func backstopReportKey(runtimeName, containerID, runID string) string {
 // container keys observed and false if List failed.
 func (sw *durationBackstopSweeper) sweepRuntime(ctx context.Context, rt scionrt.Runtime, now time.Time) (map[string]bool, bool) {
 	listCtx, cancel := context.WithTimeout(ctx, durationBackstopCallTimeout)
-	agents, err := rt.List(listCtx, nil)
+	agents, err := rt.List(listCtx, map[string]string{"scion.agent": "true"})
 	cancel()
 	if err != nil {
 		sw.log.Warn("duration backstop sweep: could not list agents; retrying on next sweep",

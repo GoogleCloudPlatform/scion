@@ -266,3 +266,79 @@ func TestCloudRunRuntime_RunDeadlineAnnotationAndList(t *testing.T) {
 		t.Errorf("AgentInfo.Annotations[%s] = %q, want %q", api.LabelRunDeadline, got, deadline.Format(time.RFC3339))
 	}
 }
+
+func TestSubstrateRuntime_RunDeadlineLabel(t *testing.T) {
+	deadline := time.Date(2026, 11, 26, 22, 0, 0, 0, time.UTC)
+	callerLabels := map[string]string{
+		"scion.name":   "sub-agent",
+		api.LabelRunID: "run-sub-1",
+	}
+
+	got := substrateRecordLabels(RunConfig{
+		Name:        "sub-agent",
+		RunDeadline: deadline,
+		Labels:      callerLabels,
+	})
+	if got[api.LabelRunDeadline] != deadline.Format(time.RFC3339) {
+		t.Fatalf("substrateRecordLabels[%s] = %q, want %q", api.LabelRunDeadline, got[api.LabelRunDeadline], deadline.Format(time.RFC3339))
+	}
+	if _, mutated := callerLabels[api.LabelRunDeadline]; mutated {
+		t.Errorf("substrateRecordLabels must not mutate caller cfg.Labels")
+	}
+
+	// Zero deadline must leave label unset.
+	gotZero := substrateRecordLabels(RunConfig{
+		Name:   "sub-agent",
+		Labels: callerLabels,
+	})
+	if _, ok := gotZero[api.LabelRunDeadline]; ok {
+		t.Errorf("unexpected %s label when RunDeadline is zero", api.LabelRunDeadline)
+	}
+}
+
+func TestParseDockerListLabels_DuplicateRunDeadlineFailsClosed(t *testing.T) {
+	earlier := "2026-11-26T18:00:00Z"
+	later := "2099-01-01T00:00:00Z"
+	expired := "1970-01-01T00:00:00Z"
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "single deadline preserved",
+			raw:  "scion.agent=true," + api.LabelRunDeadline + "=" + earlier,
+			want: earlier,
+		},
+		{
+			name: "real earlier deadline followed by spoofed future deadline keeps earlier",
+			raw:  api.LabelRunDeadline + "=" + earlier + ",other=x," + api.LabelRunDeadline + "=" + later,
+			want: earlier,
+		},
+		{
+			name: "spoofed future deadline followed by real earlier deadline keeps earlier",
+			raw:  "other=x," + api.LabelRunDeadline + "=" + later + "," + api.LabelRunDeadline + "=" + earlier,
+			want: earlier,
+		},
+		{
+			name: "real deadline followed by unparsable duplicate fails closed to expired",
+			raw:  api.LabelRunDeadline + "=" + earlier + "," + api.LabelRunDeadline + "=not-a-timestamp",
+			want: expired,
+		},
+		{
+			name: "unparsable duplicate followed by real deadline fails closed to expired",
+			raw:  api.LabelRunDeadline + "=not-a-timestamp," + api.LabelRunDeadline + "=" + earlier,
+			want: expired,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseDockerListLabels(tc.raw)
+			if got[api.LabelRunDeadline] != tc.want {
+				t.Errorf("parseDockerListLabels(%q)[%s] = %q, want %q", tc.raw, api.LabelRunDeadline, got[api.LabelRunDeadline], tc.want)
+			}
+		})
+	}
+}

@@ -274,13 +274,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 			continue
 		}
 
-		labels := make(map[string]string)
-		for _, pair := range strings.Split(d.Labels, ",") {
-			parts := strings.SplitN(pair, "=", 2)
-			if len(parts) == 2 {
-				labels[parts[0]] = parts[1]
-			}
-		}
+		labels := parseDockerListLabels(d.Labels)
 
 		// Filter by labels if requested
 		match := LabelsMatchFilter(labels, labelFilter)
@@ -552,4 +546,42 @@ func (r *DockerRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// parseDockerListLabels parses Docker's comma-separated `k=v,k=v` label
+// string from `docker ps --format {{json .Labels}}`. Because Docker formats
+// labels from an unordered map and a comma inside another label's value can
+// inject a duplicate `scion.io/run-deadline` entry, duplicate run-deadline
+// keys fail closed: keep the earliest parseable RFC3339 timestamp, and treat
+// any unparsable duplicate as immediately expired.
+func parseDockerListLabels(raw string) map[string]string {
+	labels := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k, v := parts[0], parts[1]
+		if k == api.LabelRunDeadline {
+			if prev, exists := labels[k]; exists {
+				labels[k] = mergeDockerRunDeadline(prev, v)
+				continue
+			}
+		}
+		labels[k] = v
+	}
+	return labels
+}
+
+func mergeDockerRunDeadline(prev, next string) string {
+	const expiredSentinel = "1970-01-01T00:00:00Z"
+	tPrev, errPrev := time.Parse(time.RFC3339, strings.TrimSpace(prev))
+	tNext, errNext := time.Parse(time.RFC3339, strings.TrimSpace(next))
+	if errPrev != nil || errNext != nil {
+		return expiredSentinel
+	}
+	if tNext.Before(tPrev) {
+		return tNext.UTC().Format(time.RFC3339)
+	}
+	return tPrev.UTC().Format(time.RFC3339)
 }

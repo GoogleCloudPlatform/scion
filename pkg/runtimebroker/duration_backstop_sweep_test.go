@@ -29,18 +29,25 @@ import (
 
 type backstopFakeRuntime struct {
 	scionrt.Runtime
-	name    string
-	mu      sync.Mutex
-	agents  []api.AgentInfo
-	listErr error
-	listFn  func(ctx context.Context) ([]api.AgentInfo, error)
-	stopErr error
-	stopped []scionrt.RunRef
+	name       string
+	mu         sync.Mutex
+	agents     []api.AgentInfo
+	listErr    error
+	listFn     func(ctx context.Context) ([]api.AgentInfo, error)
+	lastFilter map[string]string
+	stopErr    error
+	stopped    []scionrt.RunRef
 }
 
 func (f *backstopFakeRuntime) Name() string { return f.name }
 
-func (f *backstopFakeRuntime) List(ctx context.Context, _ map[string]string) ([]api.AgentInfo, error) {
+func (f *backstopFakeRuntime) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	f.mu.Lock()
+	f.lastFilter = make(map[string]string, len(filter))
+	for k, v := range filter {
+		f.lastFilter[k] = v
+	}
+	f.mu.Unlock()
 	if f.listFn != nil {
 		return f.listFn(ctx)
 	}
@@ -156,6 +163,12 @@ func TestDurationBackstopSweeper_StopsExpiredAndReportsLimitsExceeded(t *testing
 	}
 	if len(reported) != 2 {
 		t.Fatalf("reported count = %d, want 2: %+v", len(reported), reported)
+	}
+	if dockerRT.lastFilter["scion.agent"] != "true" || len(dockerRT.lastFilter) != 1 {
+		t.Errorf("docker List filter = %v, want map[scion.agent:true]", dockerRT.lastFilter)
+	}
+	if k8sRT.lastFilter["scion.agent"] != "true" || len(k8sRT.lastFilter) != 1 {
+		t.Errorf("k8s List filter = %v, want map[scion.agent:true]", k8sRT.lastFilter)
 	}
 }
 

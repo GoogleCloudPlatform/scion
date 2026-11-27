@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -584,15 +585,16 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		projectPath = projectkeys.ProjectPathFromLabels(cfg.Labels)
 	}
 
+	recordLabels := substrateRecordLabels(cfg)
 	substrateAgentStateMu.Lock()
 	substrateControlTokens[id] = controlToken
 	substrateExecSecrets[id] = substrateSecretCandidates(cfg)
 	substrateAgentRecords[actorUID] = &substrateAgentRecord{
-		Labels: cfg.Labels,
+		Labels: recordLabels,
 		// scion.harness_config is the same label key
 		// CloudRunSandboxRuntime.Run populates HarnessConfig from — see
 		// labelValue and its use in cloudrun_sandbox_runtime.go.
-		HarnessConfig: labelValue(cfg.Labels, "scion.harness_config"),
+		HarnessConfig: labelValue(recordLabels, "scion.harness_config"),
 		Template:      cfg.Template,
 		Project:       cfg.Project,
 		ProjectID:     cfg.ProjectID,
@@ -603,6 +605,22 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 	// Step 9.
 	return id, nil
+}
+
+// substrateRecordLabels returns the labels recorded for a Substrate actor.
+// When cfg.RunDeadline is set, it clones cfg.Labels and stamps
+// api.LabelRunDeadline so the broker's duration backstop sweeper covers
+// Substrate runs while the broker process lives (without mutating cfg.Labels).
+func substrateRecordLabels(cfg RunConfig) map[string]string {
+	if cfg.RunDeadline.IsZero() {
+		return cfg.Labels
+	}
+	labels := maps.Clone(cfg.Labels)
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[api.LabelRunDeadline] = cfg.RunDeadline.UTC().Format(time.RFC3339)
+	return labels
 }
 
 // bootstrapNonce is the single call site for the bootstrap request's bearer
