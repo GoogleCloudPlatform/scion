@@ -89,6 +89,47 @@ const (
 	AnalyticsDisabledNoGCPExporter     = "no_gcp_exporter"
 )
 
+// Hub analytics sink states (HealthHubAnalytics.State).
+const (
+	HubAnalyticsStateActive   = "active"
+	HubAnalyticsStateDegraded = "degraded"
+	HubAnalyticsStateRevoked  = "revoked"
+)
+
+// HealthHubAnalytics reports the health of the Scion Hub usage ingest sink
+// (analytics-outbox-hub) so operators can inspect Hub metering health from
+// telemetry.health and local diagnostics without querying the Hub. Omitted
+// from HealthEvent when the Hub sink is not configured.
+type HealthHubAnalytics struct {
+	// State is "active", "degraded" (backing off / outbox unavailable), or
+	// "revoked" (Hub returned 404).
+	State string `json:"state"`
+	// LastDrainAt is the RFC3339 timestamp of the last successful non-empty
+	// batch drain to the Hub, omitted when no batch has drained yet.
+	LastDrainAt string `json:"last_drain_at,omitempty"`
+
+	// In-process counters from the Hub outbox and drainer.
+	Delivered      int64 `json:"delivered"`
+	SendFailures   int64 `json:"send_failures"`
+	DeadLetters    int64 `json:"dead_letters"`
+	RetryBackoffMs int64 `json:"retry_backoff_ms"`
+
+	// StatsFailed is true when on-disk Hub outbox reads failed or the Hub
+	// outbox could not be opened; on-disk backlog and persisted totals below
+	// are then omitted (unknown, never placeholders).
+	StatsFailed bool `json:"stats_failed"`
+
+	// On-disk backlog and persisted dead-letter/loss counters (omitted when
+	// StatsFailed is true).
+	PendingBytes           *int64 `json:"pending_bytes,omitempty"`
+	RetainedBytes          *int64 `json:"retained_bytes,omitempty"`
+	OldestPendingFileAgeMs *int64 `json:"oldest_pending_file_age_ms,omitempty"`
+	Held                   *bool  `json:"held,omitempty"`
+	DeadLettersTotal       *int64 `json:"dead_letters_total,omitempty"`
+	OverflowTotal          *int64 `json:"overflow_total,omitempty"`
+	AppendFailedTotal      *int64 `json:"append_failed_total,omitempty"`
+}
+
 // Final flush outcomes (trigger final only): whether every queue drained.
 // Not a statement that the run was loss-free (see LossIndicated).
 const (
@@ -332,6 +373,11 @@ type HealthEvent struct {
 	// FinalFlushOutcome says whether the queues drained, not whether the
 	// run was loss-free.
 	FinalFlushOutcome string `json:"final_flush_outcome,omitempty"`
+
+	// HubAnalytics reports the Scion Hub usage ingest sink's health, backlog,
+	// dead letters, and last successful drain. Omitted when the Hub sink is
+	// not configured.
+	HubAnalytics *HealthHubAnalytics `json:"hub_analytics,omitempty"`
 }
 
 var validCapabilities = map[string]bool{
@@ -370,8 +416,12 @@ func (e *HealthEvent) Validate() error {
 			stats := e.AnalyticsStatsFailed != nil && *e.AnalyticsStatsFailed
 			pending := e.AnalyticsPendingBytes != nil && *e.AnalyticsPendingBytes > 0 ||
 				e.AnalyticsHeld != nil && *e.AnalyticsHeld
+			hubPending := e.HubAnalytics != nil && e.HubAnalytics.State != HubAnalyticsStateRevoked &&
+				(e.HubAnalytics.StatsFailed ||
+					(e.HubAnalytics.PendingBytes != nil && *e.HubAnalytics.PendingBytes > 0) ||
+					(e.HubAnalytics.Held != nil && *e.HubAnalytics.Held))
 			residual := e.FinalResidualRecords != nil && *e.FinalResidualRecords > 0
-			if stats || pending || residual || e.QueueRecords > 0 {
+			if stats || pending || hubPending || residual || e.QueueRecords > 0 {
 				errs = append(errs, errors.New("final_flush_outcome drained contradicts stats_failed, pending bytes, a held outbox, residual records or queued records"))
 			}
 		}
@@ -489,6 +539,7 @@ func (e *HealthEvent) Validate() error {
 		errs = append(errs, errors.New("enabled analytics requires the analytics_* counters"))
 	}
 	errs = append(errs, e.outboxSubjectErrors()...)
+	errs = append(errs, e.hubAnalyticsErrors()...)
 	if err := e.checkNonNegative(); err != nil {
 		errs = append(errs, err)
 	}
@@ -496,6 +547,66 @@ func (e *HealthEvent) Validate() error {
 		return fmt.Errorf("telemetrycontract: invalid health event %s: %w", e.EventID, errors.Join(errs...))
 	}
 	return nil
+}
+
+func (e *HealthEvent) hubAnalyticsErrors() []error {
+	ha := e.HubAnalytics
+	if ha == nil {
+		return nil
+	}
+	var errs []error
+	switch ha.State {
+	case HubAnalyticsStateActive, HubAnalyticsStateDegraded, HubAnalyticsStateRevoked:
+	default:
+		errs = append(errs, fmt.Errorf("hub_analytics.state %q is not known", ha.State))
+	}
+	if ha.LastDrainAt != "" {
+		if _, err := ParseTS(ha.LastDrainAt); err != nil {
+			errs = append(errs, fmt.Errorf("hub_analytics.last_drain_at: %w", err))
+		}
+	}
+	for k, v := range map[string]int64{
+		"hub_analytics.delivered":        ha.Delivered,
+		"hub_analytics.send_failures":    ha.SendFailures,
+		"hub_analytics.dead_letters":     ha.DeadLetters,
+		"hub_analytics.retry_backoff_ms": ha.RetryBackoffMs,
+	} {
+		if v < 0 {
+			errs = append(errs, fmt.Errorf("%s = %d is negative", k, v))
+		}
+	}
+	disk := map[string]*int64{
+		"hub_analytics.pending_bytes":       ha.PendingBytes,
+		"hub_analytics.retained_bytes":      ha.RetainedBytes,
+		"hub_analytics.dead_letters_total":  ha.DeadLettersTotal,
+		"hub_analytics.overflow_total":      ha.OverflowTotal,
+		"hub_analytics.append_failed_total": ha.AppendFailedTotal,
+	}
+	for k, p := range disk {
+		if p != nil && *p < 0 {
+			errs = append(errs, fmt.Errorf("%s = %d is negative", k, *p))
+		}
+	}
+	if ha.OldestPendingFileAgeMs != nil && *ha.OldestPendingFileAgeMs < 0 {
+		errs = append(errs, fmt.Errorf("hub_analytics.oldest_pending_file_age_ms = %d is negative", *ha.OldestPendingFileAgeMs))
+	}
+	if ha.RetainedBytes != nil && ha.PendingBytes != nil && *ha.RetainedBytes < *ha.PendingBytes {
+		errs = append(errs, errors.New("hub_analytics.retained_bytes includes pending bytes and cannot be smaller"))
+	}
+	if !groupComplete(disk) {
+		errs = append(errs, errors.New("hub_analytics on-disk fields are reported as a complete group or not at all"))
+	}
+	diskSet := ha.PendingBytes != nil || ha.Held != nil
+	if ha.StatsFailed {
+		if diskSet || ha.OldestPendingFileAgeMs != nil {
+			errs = append(errs, errors.New("with hub_analytics.stats_failed on-disk fields must be omitted (unknown), never placeholders"))
+		}
+	} else {
+		if ha.PendingBytes == nil || ha.Held == nil {
+			errs = append(errs, errors.New("hub_analytics on-disk fields (pending_bytes, retained_bytes, held, totals) are required unless stats_failed"))
+		}
+	}
+	return errs
 }
 
 // outboxSubjectErrors checks the outbox-subject group: complete or absent,

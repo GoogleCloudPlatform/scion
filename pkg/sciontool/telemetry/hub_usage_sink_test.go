@@ -935,6 +935,7 @@ func TestPipeline_HubSinkEnablesOutboxWithoutGCPExporter(t *testing.T) {
 	}
 
 	// Verify hook helper also enables when EnvUsageHubIngest=1 without GCP exporter.
+	t.Setenv(EnvUsageHubIngest, "")
 	if AnalyticsEnabledForHooks(cfg) {
 		t.Error("AnalyticsEnabledForHooks should be false when SCION_USAGE_HUB_INGEST is unset and no GCP exporter")
 	}

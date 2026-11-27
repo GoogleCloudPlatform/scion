@@ -16,6 +16,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -948,5 +949,75 @@ func TestPipeline_NativeMeteringOnlyCombinedWithSuppressDirectOTel(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+// TestPipeline_LateActivationInitialSuppressWithoutHeartbeatEcho verifies that
+// analyticsState.startDrainer's late-activation callback applies
+// cfg.SuppressDirectOTel immediately upon probe activation without relying on a
+// subsequent heartbeat response echoing SuppressDirectOTel=true. If the initial
+// applySuppress(cfg.SuppressDirectOTel) call in analytics_drainer.go is removed,
+// this test fails because the first heartbeat returns a transient error and
+// never invokes OnSuppressChanged.
+func TestPipeline_LateActivationInitialSuppressWithoutHeartbeatEcho(t *testing.T) {
+	p := NewWithConfig(&Config{
+		Enabled:      true,
+		CloudEnabled: false,
+		GRPCPort:     0,
+		HTTPPort:     0,
+	})
+	home := t.TempDir()
+	p.SetAnalyticsOutbox(home, -1, -1)
+	p.SetHubIDResolver(func(context.Context) (string, error) { return "hub-late-init", nil })
+	p.SetHubUsageProbeInterval(time.Millisecond)
+
+	var postCalls atomic.Int32
+	p.SetHubUsageProbe(func(context.Context) (*HubUsageSinkConfig, error) {
+		return &HubUsageSinkConfig{
+			Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				postCalls.Add(1)
+				// Transient error: SendHeartbeat must NOT invoke OnSuppressChanged,
+				// so only the initial applySuppress(cfg.SuppressDirectOTel) in
+				// onHubActivated can flip suppression to true.
+				return nil, errors.New("transient 503 during initial heartbeat")
+			},
+			RunID:              "run-late-init",
+			HubID:              "hub-late-init",
+			SuppressDirectOTel: true,
+			DrainInterval:      time.Hour,
+			HeartbeatInterval:  time.Millisecond,
+		}, nil
+	})
+
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Pipeline.Start: %v", err)
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = p.Stop(stopCtx)
+	}()
+
+	if p.SuppressDirectOTel() {
+		t.Fatal("expected SuppressDirectOTel=false before late activation")
+	}
+
+	// Start analyticsState in the default (GCP-only + hubProbe) branch directly
+	// with a non-nil *GCPExporter stub so startDrainer takes default:.
+	p.analytics.startDrainer(ctx, &GCPExporter{})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for postCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if postCalls.Load() == 0 {
+		t.Fatal("expected late-activated Hub sink to attempt initial heartbeat")
+	}
+	if !p.SuppressDirectOTel() {
+		t.Fatal("expected SuppressDirectOTel=true from initial late-activation apply even when first heartbeat failed")
+	}
+	if !isHubOutboxSuppressDir(HubAnalyticsOutboxDirFor(home)) {
+		t.Fatal("expected suppress.hub marker on disk from initial late-activation apply")
 	}
 }

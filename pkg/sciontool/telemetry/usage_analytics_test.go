@@ -548,6 +548,7 @@ func TestUsageAnalyticsCopilotIntervals(t *testing.T) {
 // (the pipeline without a GCP exporter) writes nothing.
 func TestUsageAnalyticsDisabledWritesNothing(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
+	t.Setenv(EnvUsageHubIngest, "")
 	d := bareUsageDeriver(claudeUsageRule{})
 	feed(d, loadClaudeUsageFixture(t))
 	if d.Diagnostics().Derived == 0 {

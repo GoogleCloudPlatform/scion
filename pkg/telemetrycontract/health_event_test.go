@@ -325,3 +325,139 @@ func TestHealthOutboxSubjectOmittedOnStatsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHealthEvent_HubAnalyticsValidation(t *testing.T) {
+	validHub := func() *HealthHubAnalytics {
+		return &HealthHubAnalytics{
+			State:             HubAnalyticsStateActive,
+			LastDrainAt:       "2026-10-22T06:00:00Z",
+			Delivered:         4,
+			SendFailures:      1,
+			DeadLetters:       0,
+			RetryBackoffMs:    0,
+			StatsFailed:       false,
+			PendingBytes:      i64(0),
+			RetainedBytes:     i64(0),
+			Held:              boolp(false),
+			DeadLettersTotal:  i64(0),
+			OverflowTotal:     i64(0),
+			AppendFailedTotal: i64(0),
+		}
+	}
+
+	// Absence of hub_analytics must keep JSON free of the key and validate cleanly.
+	base := validHealth()
+	rawBytes, err := Marshal(base)
+	if err != nil {
+		t.Fatalf("Marshal without hub_analytics: %v", err)
+	}
+	if strings.Contains(string(rawBytes), "hub_analytics") {
+		t.Fatalf("expected hub_analytics omitted when nil, got %s", rawBytes)
+	}
+
+	// Valid states and stats_failed shapes.
+	validCases := map[string]func(*HealthEvent){
+		"active with last_drain_at": func(e *HealthEvent) { e.HubAnalytics = validHub() },
+		"degraded with backlog": func(e *HealthEvent) {
+			ha := validHub()
+			ha.State = HubAnalyticsStateDegraded
+			ha.RetryBackoffMs = 2000
+			ha.PendingBytes = i64(512)
+			ha.RetainedBytes = i64(1024)
+			ha.OldestPendingFileAgeMs = i64(1500)
+			e.HubAnalytics = ha
+		},
+		"revoked final drained with pending": func(e *HealthEvent) {
+			ha := validHub()
+			ha.State = HubAnalyticsStateRevoked
+			ha.PendingBytes = i64(128)
+			ha.RetainedBytes = i64(128)
+			e.HubAnalytics = ha
+			e.Trigger = HealthTriggerFinal
+			e.FinalFlushOutcome = FinalFlushDrained
+			e.FinalResidualRecords = i64(0)
+		},
+		"stats_failed omits disk fields": func(e *HealthEvent) {
+			e.HubAnalytics = &HealthHubAnalytics{
+				State:       HubAnalyticsStateDegraded,
+				StatsFailed: true,
+			}
+		},
+	}
+	for name, mutate := range validCases {
+		ev := validHealth()
+		mutate(ev)
+		line, err := Marshal(ev)
+		if err != nil {
+			t.Errorf("%s: Marshal failed: %v", name, err)
+			continue
+		}
+		var back HealthEvent
+		if err := Unmarshal(line, &back); err != nil {
+			t.Errorf("%s: Unmarshal failed: %v", name, err)
+		}
+	}
+
+	// Invalid cases.
+	invalidCases := map[string]struct {
+		mutate func(*HealthEvent)
+		want   string
+	}{
+		"unknown state": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.State = "paused"
+			e.HubAnalytics = ha
+		}, "hub_analytics.state"},
+		"invalid last_drain_at": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.LastDrainAt = "not-a-timestamp"
+			e.HubAnalytics = ha
+		}, "hub_analytics.last_drain_at"},
+		"negative dead_letters": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.DeadLetters = -1
+			e.HubAnalytics = ha
+		}, "hub_analytics.dead_letters"},
+		"negative pending_bytes": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.PendingBytes = i64(-1)
+			e.HubAnalytics = ha
+		}, "hub_analytics.pending_bytes"},
+		"retained smaller than pending": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.PendingBytes = i64(200)
+			ha.RetainedBytes = i64(100)
+			e.HubAnalytics = ha
+		}, "retained_bytes"},
+		"partial disk group": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.DeadLettersTotal = nil
+			e.HubAnalytics = ha
+		}, "complete group"},
+		"disk fields present on stats_failed": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.StatsFailed = true
+			e.HubAnalytics = ha
+		}, "stats_failed"},
+		"disk fields missing when not stats_failed": {func(e *HealthEvent) {
+			e.HubAnalytics = &HealthHubAnalytics{State: HubAnalyticsStateActive}
+		}, "required unless stats_failed"},
+		"final drained contradicts active hub pending": {func(e *HealthEvent) {
+			ha := validHub()
+			ha.PendingBytes = i64(64)
+			ha.RetainedBytes = i64(64)
+			e.HubAnalytics = ha
+			e.Trigger = HealthTriggerFinal
+			e.FinalFlushOutcome = FinalFlushDrained
+			e.FinalResidualRecords = i64(0)
+		}, "contradicts"},
+	}
+	for name, tc := range invalidCases {
+		ev := validHealth()
+		tc.mutate(ev)
+		err := ev.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want containing %q", name, err, tc.want)
+		}
+	}
+}
