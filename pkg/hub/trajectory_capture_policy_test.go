@@ -461,12 +461,12 @@ func TestTrajectoryCapturePolicy_PrepareEnforcement(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 }
 
-type failingGetProjectStore struct {
+type trajectoryFailingGetProjectStore struct {
 	store.Store
 	fault *storeFaultSwitch
 }
 
-func (f *failingGetProjectStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+func (f *trajectoryFailingGetProjectStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
 	if f.fault.Active() {
 		return nil, errors.New("injected GetProject failure")
 	}
@@ -474,8 +474,8 @@ func (f *failingGetProjectStore) GetProject(ctx context.Context, id string) (*st
 }
 
 func TestTrajectoryCapturePolicy_AgentGetOmitsOnGetProjectError(t *testing.T) {
-	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failingGetProjectStore {
-		return &failingGetProjectStore{Store: inner, fault: f}
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *trajectoryFailingGetProjectStore {
+		return &trajectoryFailingGetProjectStore{Store: inner, fault: f}
 	})
 	setTrajectoryCaptureExperiment(t, srv, s, true)
 	ctx := t.Context()
