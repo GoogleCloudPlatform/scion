@@ -13,23 +13,19 @@
 // limitations under the License.
 
 /**
- * Starred messages, phase 1 (web.chat_starred_messages), end to end against
- * the real hub started by global-setup, with mock content only.
+ * Starred messages, end to end against the real hub started by global-setup,
+ * with mock content only.
  *
  * A user stars a project-thread message outside the latest history page,
  * reloads, opens its entry from the conversation header and lands on it,
  * then unstars it. A second tab reconciles through the SSE invalidation,
  * and a second user (a project member) has no star.
- *
- * State hygiene: the spec turns the experiment on through the admin API,
- * asserts it had no stored override first, and always resets it to null.
  */
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { createSession } from './harness/auth.js';
 import { getE2EEnv } from './harness/env.js';
 
-const EXPERIMENT = 'web.chat_starred_messages';
 // More than one history page (HISTORY_PAGE_SIZE is 50 in chat-thread.ts), so the target is outside
 // the latest page and the jump has to load it.
 const FILLER_COUNT = 60;
@@ -71,17 +67,6 @@ async function api(
     body: parsed,
     retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null,
   };
-}
-
-async function setExperiment(token: string, value: boolean | null): Promise<void> {
-  const cur = await api(token, 'GET', '/api/v1/admin/experiments');
-  expect(cur.status).toBe(200);
-  const revision = (cur.body as { revision: number }).revision;
-  const res = await api(token, 'PUT', '/api/v1/admin/experiments', {
-    overrides: { [EXPERIMENT]: value },
-    expected_revision: revision,
-  });
-  expect(res.status, JSON.stringify(res.body)).toBe(200);
 }
 
 /** The message row: the id is on the <scion-chat-message> element itself. */
@@ -224,13 +209,6 @@ test.describe('Starred messages', () => {
   test.beforeAll(async () => {
     // Seeding pauses for the hub's send rate limit (below), about a minute per run.
     test.setTimeout(240_000);
-    const before = await api(env.devToken, 'GET', '/api/v1/admin/experiments');
-    const entry = (
-      before.body as { experiments: Array<{ name: string; override: boolean | null }> }
-    ).experiments.find((e) => e.name === EXPERIMENT);
-    expect(entry, 'the experiment is registered').toBeTruthy();
-    expect(entry?.override ?? null, 'no leftover override').toBeNull();
-    await setExperiment(env.devToken, true);
 
     const project = await api(env.devToken, 'POST', '/api/v1/projects', {
       name: `stars-e2e-${Date.now()}`,
@@ -295,10 +273,6 @@ test.describe('Starred messages', () => {
       principalId: 'stars-member@e2e.test',
     });
     expect([200, 201]).toContain(added.status);
-  });
-
-  test.afterAll(async () => {
-    await setExperiment(env.devToken, null);
   });
 
   test.use({ storageState: env.adminStorageState });
@@ -455,24 +429,6 @@ test.describe('Starred messages', () => {
 
     const del = await api(env.devToken, 'DELETE', `/api/v1/chat/stars/${dmTargetId}`);
     expect(del.status).toBe(204);
-  });
-
-  test('flag off: routes answer 404 and the UI shows no star surfaces', async ({ page }) => {
-    await setExperiment(env.devToken, false);
-    try {
-      const res = await api(env.devToken, 'GET', `/api/v1/chat/stars?conversationKey=${topicId}`);
-      expect(res.status).toBe(404);
-      await page.goto(`/chat/space/${projectId}/thread/${topicId}`, {
-        waitUntil: 'domcontentloaded',
-      });
-      await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 20_000 });
-      await expect(page.locator('scion-chat-starred-list')).toHaveCount(0);
-      await page.locator('scion-chat-message').last().click({ button: 'right' });
-      await expect(menuItem(page, 'Copy link to msg')).toBeVisible();
-      await expect(menuItem(page, 'Star message')).toHaveCount(0);
-    } finally {
-      await setExperiment(env.devToken, true);
-    }
   });
 
   test('starred-only center: only the starred message, jump to it in full context, Back restores', async ({

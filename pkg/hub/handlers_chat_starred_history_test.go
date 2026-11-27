@@ -82,25 +82,7 @@ func TestChatStarredHistory_GateAndValidation(t *testing.T) {
 	plain := f.threadMsg(t, f.topicA, f.projA, "plain", time.Now())
 	f.starAs(t, f.admin, msg, f.topicA)
 
-	// Off: the filter is a 404 whatever its value; it never falls back to
-	// unfiltered history.
-	setStarsExperiment(t, f.srv, false, true)
-	for _, p := range []string{
-		starredHistoryPath(f.topicA),
-		chatConversationPath(f.topicA, "messages") + "?starred=false",
-		chatConversationPath(f.topicA, "messages") + "?starred=",
-		// The semicolon-separated form is the starred variant too.
-		chatConversationPath(f.topicA, "messages") + "?x=1;starred=true",
-		chatConversationPath(f.topicA, "messages") + "?starred=true;x=1",
-	} {
-		rec := f.session(t, f.admin, http.MethodGet, p, nil)
-		assert.Equal(t, http.StatusNotFound, rec.Code, p)
-		assert.NotContains(t, rec.Body.String(), plain, p)
-		assert.NotContains(t, rec.Body.String(), "messages\"", p)
-	}
 	// Ordinary history is unaffected.
-	assert.Equal(t, []string{plain, msg}, historyIDs(decodeHistory(t, f.session(t, f.admin, http.MethodGet, chatConversationPath(f.topicA, "messages"), nil))))
-	setStarsExperiment(t, f.srv, true, true)
 	assert.Equal(t, []string{plain, msg}, historyIDs(decodeHistory(t, f.session(t, f.admin, http.MethodGet, chatConversationPath(f.topicA, "messages"), nil))))
 
 	base := chatConversationPath(f.topicA, "messages")

@@ -46,11 +46,7 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set([
-  'web.native_chat',
-  'web.agent_edit',
-  'web.chat_starred_messages',
-]);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
 
 /**
  * The window event sent after the flag bag changes (server flags applied, or

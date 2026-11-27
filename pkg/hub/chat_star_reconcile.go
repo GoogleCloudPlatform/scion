@@ -26,14 +26,13 @@ import (
 // chat-star-reconcile). It drives the same store scanner as the periodic
 // upkeep (PurgeMessageStarCandidates) over the whole table until a full
 // sweep finds nothing to repair or purge. An operator runs it to completion
-// before enabling web.chat_starred_messages again after running an older
-// binary, whose DM promotions do not update the stored conversation of a
-// star.
+// after running an older binary, whose DM promotions do not update the
+// stored conversation of a star.
 //
-// It is safe to run with the experiment on or off and on several replicas
-// at once, alongside their upkeep passes: each batch repairs and purges in
-// its own transaction, a repair writes the current target (repeating it
-// changes nothing) and a purge of an already deleted row deletes nothing.
+// It is safe to run on several replicas at once, alongside their upkeep
+// passes: each batch repairs and purges in its own transaction, a repair
+// writes the current target (repeating it changes nothing) and a purge of
+// an already deleted row deletes nothing.
 
 const (
 	// messageStarReconcileBatch bounds how many associations one batch

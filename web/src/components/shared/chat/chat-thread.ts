@@ -84,7 +84,6 @@ import {
   conversationSupportsStars,
   fetchStarDetail,
   isStarrableMessageId,
-  starredMessagesEnabled,
   VisibleReconciler,
   type StarItem,
 } from '../../../client/chat-stars.js';
@@ -770,7 +769,7 @@ export class ScionChatThread extends LitElement {
 
   /** Whether starred messages are offered in this conversation. */
   private get starsActive(): boolean {
-    return this.isV2 && conversationSupportsStars(this.conversationKey) && starredMessagesEnabled();
+    return this.isV2 && conversationSupportsStars(this.conversationKey);
   }
 
   /**
@@ -1048,7 +1047,7 @@ export class ScionChatThread extends LitElement {
   /** Keyboard focus around the popup message menu. */
   private readonly _menuFocus = new MenuFocus();
 
-  // ---- Starred messages (web.chat_starred_messages) ----
+  // ---- Starred messages ----
 
   /** Star state of this conversation's loaded messages (in memory only). */
   private readonly stars = ((): ChatStarsController => {

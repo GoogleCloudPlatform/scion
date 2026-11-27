@@ -64,8 +64,19 @@ vi.mock('../../../client/main.js', async () => ({
   },
 }));
 
+// Starred messages are always on; answer star routes outside the shared
+// apiFetch mock so the debounced /api/v1/chat/stars/state fetch never
+// consumes a mockResolvedValueOnce queued for another call. Starred-message
+// behavior is covered by chat-thread-stars.test.ts and its siblings.
 vi.mock('../../../client/api.js', () => ({
-  apiFetch: (...args: unknown[]) => apiFetch(...args) as unknown,
+  apiFetch: (...args: unknown[]) =>
+    String(args[0]).startsWith('/api/v1/chat/stars')
+      ? Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ starredMessageIds: [] }),
+        })
+      : (apiFetch(...args) as unknown),
   extractApiError: (res: unknown, fallback: string) => extractApiErrorMock(res, fallback),
 }));
 
@@ -128,20 +139,6 @@ function emitChatMessage(data: Record<string, unknown>): void {
 function historyCalls(): number {
   return apiFetch.mock.calls.filter((c) => String(c[0]).includes('/messages?')).length;
 }
-
-// Starred messages are on by default (DEFAULT_ON_FLAGS). This file tests the
-// thread without them: pin the experiment off, so the star-state request that
-// a history load schedules (a 50 ms debounce through the mocked apiFetch)
-// can never take a response a test queued for another call. The star paths
-// are tested in chat-thread-stars.test.ts and its siblings.
-beforeEach(() => {
-  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-    'web.chat_starred_messages': false,
-  };
-});
-afterEach(() => {
-  delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
-});
 
 describe('scion-chat-thread route-to-agent indicator', () => {
   beforeEach(() => {

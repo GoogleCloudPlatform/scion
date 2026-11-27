@@ -13,9 +13,8 @@
 // limitations under the License.
 
 /**
- * The starred-only center (`?messages=starred`, web.chat_starred_messages),
- * with mock data and a mocked hub that serves the starred=true history
- * variant the way the hub does:
+ * The starred-only center (`?messages=starred`), with mock data and a mocked
+ * hub that serves the starred=true history variant the way the hub does:
  *
  * - only starred messages, each standalone, with the banner in place of the
  *   composer; the legacy route's slug canonicalization and a reload keep
@@ -89,12 +88,6 @@ async function setupMocks(pw: Page): Promise<HubState> {
     aroundCalls: [],
   };
   await setupChatMobileMocks(pw);
-  await pw.addInitScript(() => {
-    window.__SCION_FEATURES__ = {
-      ...(window.__SCION_FEATURES__ ?? {}),
-      'web.chat_starred_messages': true,
-    };
-  });
   await pw.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: USER_ID, email: 'fixture@example.test' } })
   );

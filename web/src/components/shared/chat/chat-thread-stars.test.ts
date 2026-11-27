@@ -15,10 +15,9 @@
  */
 
 /**
- * Starred messages in <scion-chat-thread> (web.chat_starred_messages):
- * the message menu's Star/Unstar toggle (pending, error with retry,
- * announcement), the private indicator, the per-page state fetch and the
- * SSE invalidation. Flag off keeps the prior menu exactly.
+ * Starred messages in <scion-chat-thread>: the message menu's Star/Unstar
+ * toggle (pending, error with retry, announcement), the private indicator,
+ * the per-page state fetch and the SSE invalidation.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -145,12 +144,6 @@ function starAction(el: ScionChatThread, id: string): MenuActionLike | undefined
   return (el as unknown as Internals).messageMenuActions(message(id)).find((a) => a.id === 'star');
 }
 
-function setFlag(on: boolean): void {
-  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-    'web.chat_starred_messages': on,
-  };
-}
-
 describe('scion-chat-thread starred messages', () => {
   beforeEach(() => {
     apiFetch.mockReset();
@@ -159,20 +152,9 @@ describe('scion-chat-thread starred messages', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
-    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
-  });
-
-  it('flag off: no star action and no state request (prior menu exactly)', async () => {
-    setFlag(false);
-    routeHub({});
-    const el = await mount();
-    await new Promise((r) => setTimeout(r, 80));
-    expect(stateCalls()).toEqual([]);
-    expect(starAction(el, M1)).toBeUndefined();
   });
 
   it('fetches the state of a loaded page once and marks starred messages', async () => {
-    setFlag(true);
     routeHub({ starred: [M2] });
     const el = await mount();
     await vi.waitFor(() => expect(stateCalls().length).toBe(1));
@@ -191,7 +173,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('is disabled with a loading label until the state is known', async () => {
-    setFlag(true);
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     apiFetch.mockImplementation(async (url: string) => {
@@ -209,7 +190,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('stars with a pending state, then announces politely', async () => {
-    setFlag(true);
     let resolvePut!: (r: Response) => void;
     routeHub({
       put: () => new Promise<Response>((r) => (resolvePut = r)),
@@ -241,7 +221,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('restores the prior state and offers a retry when unstarring fails', async () => {
-    setFlag(true);
     let failures = 1;
     routeHub({
       starred: [M1],
@@ -270,7 +249,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('refetches state on the SSE invalidation', async () => {
-    setFlag(true);
     const starred: string[] = [];
     apiFetch.mockImplementation((url: string) => {
       if (url.includes('/messages?')) return Promise.resolve(json({ messages: [message(M1)] }));
@@ -289,7 +267,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('re-announces the same text for a second star', async () => {
-    setFlag(true);
     routeHub({});
     const el = await mount();
     await vi.waitFor(() => expect(starAction(el, M2)?.disabled).toBeFalsy());
@@ -310,7 +287,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('offers no star action for an unsent local row', async () => {
-    setFlag(true);
     routeHub({});
     const el = await mount();
     await vi.waitFor(() => expect(starAction(el, M1)?.disabled).toBeFalsy());
@@ -330,7 +306,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('sends no state request for a live message, which starts unstarred', async () => {
-    setFlag(true);
     routeHub({ starred: [M1] });
     const el = await mount();
     await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
@@ -364,7 +339,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('a failure Retry does nothing after the conversation changed', async () => {
-    setFlag(true);
     routeHub({
       starred: [M1],
       del: () => json({ error: { message: 'boom' } }, 500),
@@ -386,7 +360,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('fetches state for the window of an around jump', async () => {
-    setFlag(true);
     const M8 = '00000000-0000-4000-8000-000000000008';
     const M9 = '00000000-0000-4000-8000-000000000009';
     apiFetch.mockImplementation((url: string) => {
@@ -413,7 +386,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('fetches state only for the new messages of a catch-up backfill', async () => {
-    setFlag(true);
     const M3 = '00000000-0000-4000-8000-000000000003';
     let page = [message(M1), message(M2)];
     apiFetch.mockImplementation((url: string) => {
@@ -435,7 +407,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('offers the star action in a DM and stars under the DM key', async () => {
-    setFlag(true);
     const key = 'dm:agent:a1:user:user-me';
     routeHub({ starred: [M2] });
     const el = await mount(key);
@@ -454,7 +425,6 @@ describe('scion-chat-thread starred messages', () => {
   });
 
   it('a deleted message loses its star indicator at once, from any surface', async () => {
-    setFlag(true);
     routeHub({ starred: [M1] });
     const el = await mount();
     await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));

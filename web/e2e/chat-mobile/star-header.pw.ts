@@ -14,8 +14,7 @@
 
 /**
  * The conversation header's starred-message list and the keyboard path to
- * the message menu (web.chat_starred_messages), with mock data and a
- * mocked hub:
+ * the message menu, with mock data and a mocked hub:
  *
  * - the header star stays visible and inside the viewport on narrow
  *   screens;

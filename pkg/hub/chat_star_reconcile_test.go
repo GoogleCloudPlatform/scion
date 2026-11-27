@@ -211,67 +211,58 @@ func TestReconcileMessageStars_CancelledAndInvalid(t *testing.T) {
 }
 
 // TestChatStarReconcileOperation runs the maintenance operation through the
-// operations endpoint, with the experiment off and on: the run completes,
-// logs its counts, repairs a moved star (save time kept), purges a deleted
-// owner's star and keeps an inactive owner's star.
+// operations endpoint: the run completes, logs its counts, repairs a moved
+// star (save time kept), purges a deleted owner's star and keeps an
+// inactive owner's star.
 func TestChatStarReconcileOperation(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		name := "experiment off"
-		if enabled {
-			name = "experiment on"
-		}
-		t.Run(name, func(t *testing.T) {
-			f := newStarFixture(t, true)
-			setStarsExperiment(t, f.srv, enabled, true)
-			ctx := context.Background()
+	f := newStarFixture(t, true)
+	ctx := context.Background()
 
-			kept := f.threadMsg(t, f.topicA, f.projA, "kept", time.Now())
-			moved := f.threadMsg(t, f.topicA, f.projA, "moved", time.Now())
-			at := time.Now().UTC().Add(-time.Hour).Truncate(starTimePrecision)
-			insert := func(user, msg, key, project string) {
-				t.Helper()
-				_, err := f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
-					user, msg, key, project, sqliteStarTime(at))
-				require.NoError(t, err)
-			}
-			insert(f.member, kept, f.topicA, f.projA)
-			insert(f.member, moved, "dm:agent:"+uuid.NewString()+":user:"+f.member, "")
-			insert(uuid.NewString(), kept, f.topicA, f.projA) // owner deleted
-			member, err := f.s.GetUser(ctx, f.member)
-			require.NoError(t, err)
-			member.Status = store.UserStatusSuspended
-			require.NoError(t, f.s.UpdateUser(ctx, member))
-
-			rr := postOperationRun(t, f.srv, entadapter.ChatStarReconcileKey, "")
-			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-			var resp struct {
-				RunID string `json:"runId"`
-			}
-			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-			require.NotEmpty(t, resp.RunID)
-			run := waitForRunStatus(t, f.s, resp.RunID, func(r *store.MaintenanceOperationRun) bool {
-				return r.Status != store.MaintenanceStatusRunning
-			})
-			require.Equal(t, store.MaintenanceStatusCompleted, run.Status, "log: %s result: %s", run.Log, run.Result)
-			assert.Contains(t, run.Log, "Sweep 1: examined 3, repaired 1, purged 1")
-			assert.Contains(t, run.Log, "Sweep 2: examined 2, repaired 0, purged 0")
-			assert.Contains(t, run.Log, "Total: sweeps 2, examined 5, repaired 1, purged 1")
-			assert.Contains(t, run.Log, "Complete: no star needs repair or purge")
-
-			got, err := f.stars.GetMessageStar(ctx, f.member, moved)
-			require.NoError(t, err)
-			require.NotNil(t, got)
-			assert.Equal(t, f.topicA, got.ConversationKey)
-			assert.Equal(t, f.projA, got.ProjectID)
-			assert.True(t, got.StarredAt.Equal(at), "save time kept")
-			got, err = f.stars.GetMessageStar(ctx, f.member, kept)
-			require.NoError(t, err)
-			assert.NotNil(t, got, "an inactive owner's star is kept")
-			n := 0
-			require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM webchat_message_star`).Scan(&n))
-			assert.Equal(t, 2, n, "the deleted owner's star is purged")
-		})
+	kept := f.threadMsg(t, f.topicA, f.projA, "kept", time.Now())
+	moved := f.threadMsg(t, f.topicA, f.projA, "moved", time.Now())
+	at := time.Now().UTC().Add(-time.Hour).Truncate(starTimePrecision)
+	insert := func(user, msg, key, project string) {
+		t.Helper()
+		_, err := f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
+			user, msg, key, project, sqliteStarTime(at))
+		require.NoError(t, err)
 	}
+	insert(f.member, kept, f.topicA, f.projA)
+	insert(f.member, moved, "dm:agent:"+uuid.NewString()+":user:"+f.member, "")
+	insert(uuid.NewString(), kept, f.topicA, f.projA) // owner deleted
+	member, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+	member.Status = store.UserStatusSuspended
+	require.NoError(t, f.s.UpdateUser(ctx, member))
+
+	rr := postOperationRun(t, f.srv, entadapter.ChatStarReconcileKey, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp struct {
+		RunID string `json:"runId"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.RunID)
+	run := waitForRunStatus(t, f.s, resp.RunID, func(r *store.MaintenanceOperationRun) bool {
+		return r.Status != store.MaintenanceStatusRunning
+	})
+	require.Equal(t, store.MaintenanceStatusCompleted, run.Status, "log: %s result: %s", run.Log, run.Result)
+	assert.Contains(t, run.Log, "Sweep 1: examined 3, repaired 1, purged 1")
+	assert.Contains(t, run.Log, "Sweep 2: examined 2, repaired 0, purged 0")
+	assert.Contains(t, run.Log, "Total: sweeps 2, examined 5, repaired 1, purged 1")
+	assert.Contains(t, run.Log, "Complete: no star needs repair or purge")
+
+	got, err := f.stars.GetMessageStar(ctx, f.member, moved)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, f.topicA, got.ConversationKey)
+	assert.Equal(t, f.projA, got.ProjectID)
+	assert.True(t, got.StarredAt.Equal(at), "save time kept")
+	got, err = f.stars.GetMessageStar(ctx, f.member, kept)
+	require.NoError(t, err)
+	assert.NotNil(t, got, "an inactive owner's star is kept")
+	n := 0
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM webchat_message_star`).Scan(&n))
+	assert.Equal(t, 2, n, "the deleted owner's star is purged")
 }
 
 // TestChatStarReconcileOperation_Registration: the operation is seeded as a

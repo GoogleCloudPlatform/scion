@@ -15,9 +15,9 @@
  */
 
 /**
- * Starred messages in native chat (web.chat_starred_messages): the hub API
- * for the signed-in user's private stars, and the in-memory controller the
- * chat thread and the conversation header share.
+ * Starred messages in native chat: the hub API for the signed-in user's
+ * private stars, and the in-memory controller the chat thread and the
+ * conversation header share.
  *
  * REST is authoritative. The hub's `user.<id>.chat.stars` SSE event is a
  * content-free invalidation (`chat-stars-updated`): it only makes the
@@ -25,15 +25,6 @@
  */
 
 import { apiFetch, extractApiError } from './api.js';
-import { isFeatureEnabled } from '../utils/feature-flags.js';
-
-/** The experiment gating starred messages (web and hub). */
-export const CHAT_STARRED_MESSAGES_EXPERIMENT = 'web.chat_starred_messages';
-
-/** Whether starred messages are offered in this browser session. */
-export function starredMessagesEnabled(): boolean {
-  return isFeatureEnabled(CHAT_STARRED_MESSAGES_EXPERIMENT);
-}
 
 /**
  * Whether a conversation supports stars: project threads, agent DMs and

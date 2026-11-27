@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * A mocked hub for the Starred rail (web.chat_starred_messages): it serves
+ * A mocked hub for the Starred rail: it serves
  * GET /api/v1/chat/starred-conversations from its own star state (sorted
  * and paged as the hub does), the starred-only history and the star routes,
  * with mock data only. Used by star-rail.pw.ts.
@@ -140,12 +140,6 @@ export async function setupStarRail(
 ): Promise<StarRailHub> {
   const hub: StarRailHub = { conversations, sortMode, starredCalls: [] };
   await setupChatMobileMocks(pw);
-  await pw.addInitScript(() => {
-    window.__SCION_FEATURES__ = {
-      ...(window.__SCION_FEATURES__ ?? {}),
-      'web.chat_starred_messages': true,
-    };
-  });
   await pw.route('**/api/v1/chat/user-prefs', (route) => {
     if (route.request().method() === 'PUT') {
       void route.fulfill({ json: {} });

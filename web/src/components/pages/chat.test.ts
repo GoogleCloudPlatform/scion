@@ -3927,26 +3927,20 @@ describe('conversation header More menu', () => {
       'export-print',
       'export-clipboard',
     ]);
-    // The mobile row trades the density toggle for the back button. The
-    // starred messages button counts while its experiment is on (the default).
+    // The mobile row trades the density toggle for the back button.
     expect(page.fullHeaderActionCount(conv)).toBe(10);
     // Density does nothing in the mobile layout; the desktop menu offers it.
     page.isMobileLayout = false;
     expect(page.headerMoreActions(conv).map((a: { id: string }) => a.id)).toContain('density');
     expect(page.fullHeaderActionCount(conv)).toBe(10);
     (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-      'web.chat_starred_messages': false,
+      'web.decisions': true,
     };
     try {
-      expect(page.fullHeaderActionCount(conv)).toBe(9);
-      (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-        'web.chat_starred_messages': false,
-        'web.decisions': true,
-      };
       // Agent DM counts +1 when web.decisions is on.
-      expect(page.fullHeaderActionCount(conv)).toBe(10);
+      expect(page.fullHeaderActionCount(conv)).toBe(11);
       // User-to-user DM never renders open decisions (+0).
-      expect(page.fullHeaderActionCount({ ...conv, peerKind: 'user' })).toBe(6);
+      expect(page.fullHeaderActionCount({ ...conv, peerKind: 'user' })).toBe(7);
     } finally {
       delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
     }

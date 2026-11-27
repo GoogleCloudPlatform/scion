@@ -15,11 +15,10 @@
  */
 
 /**
- * Opening a starred message from the conversation header
- * (web.chat_starred_messages): the page resolves the star's current
- * target, then jumps. Newer navigation wins: a conversation switch or a
- * newer entry while the detail request runs cancels the jump, and so does
- * a toast Retry after the user has moved on.
+ * Opening a starred message from the conversation header: the page resolves
+ * the star's current target, then jumps. Newer navigation wins: a
+ * conversation switch or a newer entry while the detail request runs cancels
+ * the jump, and so does a toast Retry after the user has moved on.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';

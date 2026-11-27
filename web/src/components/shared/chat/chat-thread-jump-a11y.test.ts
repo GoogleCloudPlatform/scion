@@ -19,7 +19,7 @@
  * message, and a popup menu opened while a jump is still settling.
  */
 
-import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const fakeStateManager = new (class extends EventTarget {
   currentScope = null;
@@ -300,46 +300,30 @@ describe('scion-chat-thread popup menu while the thread scrolls', () => {
 });
 
 describe('scion-chat-thread message menu keyboard contract', () => {
-  it.each([
-    { stars: false, returnsTo: 'the focused opener' },
-    { stars: true, returnsTo: "the message's More actions button" },
-  ])(
-    'opens as a named menu with focus on its first item; Escape returns focus to $returnsTo (stars $stars)',
-    async ({ stars }) => {
-      (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-        'web.chat_starred_messages': stars,
-      };
-      onTestFinished(() => {
-        delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
-      });
-      const el = await mount();
-      const opener = document.createElement('button');
-      document.body.appendChild(opener);
-      opener.focus();
-      msgEl(el, 'm2').dispatchEvent(
-        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
-      );
-      await el.updateComplete;
-      await el.updateComplete;
-      const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
-      expect(menu.getAttribute('aria-label')).toMatch(/^Message actions/);
-      const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
-      expect(items.length).toBeGreaterThan(1);
-      expect(el.shadowRoot!.activeElement).toBe(items[0]);
-      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-      expect(el.shadowRoot!.activeElement).toBe(items[1]);
-      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      await el.updateComplete;
-      expect((el as unknown as Internals).contextMenuMessage).toBeNull();
-      if (stars) {
-        const row = msgEl(el, 'm2') as HTMLElement & { actionsButton: HTMLButtonElement | null };
-        expect(row.actionsButton).not.toBeNull();
-        expect(row.shadowRoot!.activeElement).toBe(row.actionsButton);
-      } else {
-        expect(document.activeElement).toBe(opener);
-      }
-    }
-  );
+  it("opens as a named menu with focus on its first item; Escape returns focus to the message's More actions button", async () => {
+    const el = await mount();
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    msgEl(el, 'm2').dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
+    );
+    await el.updateComplete;
+    await el.updateComplete;
+    const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
+    expect(menu.getAttribute('aria-label')).toMatch(/^Message actions/);
+    const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
+    expect(items.length).toBeGreaterThan(1);
+    expect(el.shadowRoot!.activeElement).toBe(items[0]);
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(el.shadowRoot!.activeElement).toBe(items[1]);
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await el.updateComplete;
+    expect((el as unknown as Internals).contextMenuMessage).toBeNull();
+    const row = msgEl(el, 'm2') as HTMLElement & { actionsButton: HTMLButtonElement | null };
+    expect(row.actionsButton).not.toBeNull();
+    expect(row.shadowRoot!.activeElement).toBe(row.actionsButton);
+  });
 
   it('a click on the overlay closes without pulling focus back', async () => {
     const el = await mount();
@@ -360,16 +344,6 @@ describe('scion-chat-thread message menu keyboard contract', () => {
 
 describe('scion-chat-thread message list tab stop (More actions)', () => {
   type Msg = import('./chat-message.js').ScionChatMessage;
-
-  function setFlag(on: boolean): void {
-    (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-      'web.chat_starred_messages': on,
-    };
-  }
-
-  afterEach(() => {
-    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
-  });
 
   function rows(el: ScionChatThread): Msg[] {
     return [...el.shadowRoot!.querySelectorAll<Msg>('scion-chat-message')];
@@ -411,15 +385,7 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     );
   }
 
-  it('is off while the experiment is off', async () => {
-    setFlag(false);
-    const el = await mount();
-    await settled(el);
-    expect(rows(el).every((m) => m.actionsButton === null)).toBe(true);
-  });
-
   it('puts exactly one More actions button in the tab order, named for its message', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     expect(tabStops(el)).toEqual(['m3']);
@@ -436,7 +402,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('with no stop yet, a message taller than the view takes it when no message fits inside', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     placeAt(el.shadowRoot!.querySelector<HTMLElement>('.messages-scroll')!, 0, 600);
@@ -452,7 +417,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('Up/Down/Home/End move the stop and focus through the rendered messages', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     rows(el)[2].actionsButton!.focus();
@@ -471,7 +435,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('activating the button opens the menu there; Escape returns focus to it', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     const row = rows(el)[1];
@@ -491,7 +454,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('Shift+F10 and the ContextMenu key open the menu from the button', async () => {
-    setFlag(true);
     for (const [k, shift] of [
       ['F10', true],
       ['ContextMenu', false],
@@ -506,7 +468,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('a right-click makes that message the tab stop and its button the menu opener', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     rows(el)[0].dispatchEvent(
@@ -521,7 +482,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('a live message does not move the stop or focus', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     rows(el)[0].actionsButton!.focus();
@@ -549,7 +509,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('removing the focused message hands the stop and focus to the closest one; an unrelated removal moves nothing', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     const internals = el as unknown as { messages: Array<{ id: string }> };
@@ -568,7 +527,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('a jump makes its message the stop, and Shift+F10 on the focused message opens its menu', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     await el.scrollToMessageById('m1', true, true);
@@ -584,7 +542,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('keys from inside message content are left alone', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     const host = rows(el)[1];
@@ -612,7 +569,6 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
   });
 
   it('a headerless starred row keeps its star in the gutter and the button inside the bubble', async () => {
-    setFlag(true);
     const el = await mount();
     await settled(el);
     const row = rows(el)[1];

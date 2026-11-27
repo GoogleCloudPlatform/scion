@@ -15,9 +15,8 @@
  */
 
 /**
- * The Starred rail (web.chat_starred_messages): the conversations in which
- * the signed-in user has at least one star, from
- * `GET /api/v1/chat/starred-conversations`.
+ * The Starred rail: the conversations in which the signed-in user has at
+ * least one star, from `GET /api/v1/chat/starred-conversations`.
  *
  * The rows always come from that endpoint, never from the loaded All/Unread
  * rail. The hub sorts and pages them (Recent or Alphabetical); the rail

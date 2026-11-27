@@ -158,11 +158,6 @@ func TestChatStarredConversations_GateAndValidation(t *testing.T) {
 
 	assert.Equal(t, http.StatusMethodNotAllowed, f.session(t, f.member, http.MethodPost, starredConversationsPath, nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.session(t, f.member, http.MethodGet, starredConversationsPath+"/x", nil).Code)
-
-	setStarsExperiment(t, f.srv, false, true)
-	for _, m := range []string{http.MethodGet, http.MethodPost} {
-		assert.Equal(t, http.StatusNotFound, f.session(t, f.member, m, starredConversationsPath, nil).Code, m)
-	}
 }
 
 func TestChatStarredConversations_GroupsAndPaginates(t *testing.T) {
@@ -673,7 +668,6 @@ func TestChatStarredConversations_BatchedLookups(t *testing.T) {
 	require.NoError(t, wcs.Init())
 	f := &starFixture{chatFixture: &chatFixture{inboxFixture: inbox, wcs: wcs}, stars: messageStarStoreFrom(wcs)}
 	require.NotNil(t, f.stars)
-	setStarsExperiment(t, srv, true, false)
 	srv.SetWebChatStore(&starRailCountingWebChatStore{WebChatStore: wcs, MessageStarStore: f.stars, c: counter})
 
 	rail := func() map[string]int {

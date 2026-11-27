@@ -19,14 +19,10 @@
  * thread covering long prose, an unbroken URL, code, a table, a list and a
  * blockquote — content shapes known to stress narrow-viewport layout.
  *
- * Pins the chat feature flags in `__SCION_FEATURES__` explicitly, so the
- * suite does not depend on the compiled defaults (`DEFAULT_ON_FLAGS` in
+ * Pins `web.native_chat` in `__SCION_FEATURES__` explicitly, so the suite
+ * does not depend on the compiled defaults (`DEFAULT_ON_FLAGS` in
  * feature-flags.ts; the experiments fetch is not mocked, so the browser
- * would otherwise fall back to them): `web.native_chat` on, and
- * `web.chat_starred_messages` off, which keeps the layout, menu and
- * target-size baselines free of the star controls. The starred-message
- * specs (star-*.pw.ts) turn it on themselves with a later init script that
- * spreads these flags.
+ * would otherwise fall back to them).
  */
 
 import type { Page } from '@playwright/test';
@@ -144,7 +140,6 @@ export async function setupChatMobileMocks(page: Page): Promise<void> {
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = {
       'web.native_chat': true,
-      'web.chat_starred_messages': false,
     };
   });
 
@@ -240,6 +235,9 @@ export async function setupChatMobileMocks(page: Page): Promise<void> {
   });
 
   await page.route(/\/api\/v1\/chat\/topics\//, (route) => route.fulfill({ json: {} }));
+  await page.route('**/api/v1/chat/stars/state**', (route) =>
+    route.fulfill({ json: { starredMessageIds: [] } })
+  );
   await page.route('**/api/v1/chat/presence', (route) => route.fulfill({ json: {} }));
   await page.route(
     /\/api\/v1\/chat\/conversations\/[^/]+\/(read|unread|typing|pin|mute)/,

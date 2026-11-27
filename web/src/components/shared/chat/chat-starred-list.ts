@@ -15,9 +15,9 @@
  */
 
 /**
- * The conversation header's starred-message button
- * (web.chat_starred_messages): an always-visible star that opens this
- * conversation's stars, most recently starred first, with Load more.
+ * The conversation header's starred-message button: an always-visible star
+ * that opens this conversation's stars, most recently starred first, with
+ * Load more.
  *
  * - Desktop: an anchored, nonmodal dialog holding a labelled list of links.
  *   It is kept inside the viewport (shifted sideways, its height capped to

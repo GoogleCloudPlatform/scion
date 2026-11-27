@@ -123,11 +123,7 @@ import type { StarredMessageOpenDetail } from '../shared/chat/chat-starred-list.
 import '../shared/chat/chat-open-decisions.js';
 import type { OpenDecisionOpenDetail } from '../shared/chat/chat-open-decisions.js';
 import { decisionsEnabled } from '../../utils/feature-flags.js';
-import {
-  conversationSupportsStars,
-  fetchStarDetail,
-  starredMessagesEnabled,
-} from '../../client/chat-stars.js';
+import { conversationSupportsStars, fetchStarDetail } from '../../client/chat-stars.js';
 import { showToast } from '../../utils/toast.js';
 import type {
   MessageFilterChangeDetail,
@@ -3519,9 +3515,9 @@ export class ScionPageChat extends LitElement {
     );
   }
 
-  /** The center filter a rail selection asks for (only while the experiment is on). */
+  /** The center filter a rail selection asks for. */
   private railSelectionFilter(requested: 'starred' | undefined): ChatMessageFilter {
-    return requested === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+    return requested === 'starred' ? 'starred' : '';
   }
 
   /**
@@ -7244,12 +7240,12 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Whether the header shows the starred-messages button: the experiment is
-   * on and the conversation supports stars (threads and both DM kinds). It
-   * sits in the always-visible action area, not the secondary span.
+   * Whether the header shows the starred-messages button: the conversation
+   * supports stars (threads and both DM kinds). It sits in the
+   * always-visible action area, not the secondary span.
    */
   private headerShowsStars(conv: V2ConversationState): boolean {
-    return starredMessagesEnabled() && conversationSupportsStars(conv.conversationKey);
+    return conversationSupportsStars(conv.conversationKey);
   }
 
   /**
@@ -7347,32 +7343,25 @@ export class ScionPageChat extends LitElement {
 
   /**
    * The center message filter the current URL asks for, if it may apply:
-   * only on a conversation route and only while the experiment is on.
+   * only on a conversation route.
    */
   private urlMessageFilter(): ChatMessageFilter {
     const requested = messageFilterFromSearch(window.location.search);
     if (!requested) return '';
     const path = stripBasePath(window.location.pathname);
-    return isChatConversationPath(path) && starredMessagesEnabled() ? requested : '';
+    return isChatConversationPath(path) ? requested : '';
   }
 
   /**
    * Take the center message filter from the URL. A filter on a route that
-   * is not one conversation, or while the experiment is off, is dropped
-   * from the URL in place, so it is never carried on to another route;
-   * while the experiment is off a notice says the full history is shown.
+   * is not one conversation is dropped from the URL in place, so it is
+   * never carried on to another route.
    */
   private syncMessageFilterFromUrl(): void {
     const filter = this.urlMessageFilter();
     if (this.centerMessageFilter !== filter) this.centerMessageFilter = filter;
     if (filter || !messageFilterFromSearch(window.location.search)) return;
     const path = stripBasePath(window.location.pathname);
-    // On a conversation route the filter was dropped because the
-    // experiment is off: say so, so the full history is not taken for the
-    // starred messages, before the URL changes.
-    if (isChatConversationPath(path)) {
-      showToast('Starred messages are not available. Showing all messages.', 'warning');
-    }
     const search = searchWithMessageFilter(window.location.search, '');
     window.history.replaceState(
       window.history.state,
@@ -7392,7 +7381,7 @@ export class ScionPageChat extends LitElement {
     const detail = (e as CustomEvent<MessageFilterChangeDetail>).detail;
     const path = stripBasePath(window.location.pathname);
     if (!detail || !isChatConversationPath(path)) return;
-    const filter = detail.filter === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+    const filter = detail.filter === 'starred' ? 'starred' : '';
     const search = searchWithMessageFilter(window.location.search, filter);
     const hash = detail.messageId ? `#msg-${encodeURIComponent(detail.messageId)}` : '';
     ++this._userNavSeq;

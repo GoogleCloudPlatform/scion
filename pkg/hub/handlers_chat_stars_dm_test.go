@@ -336,45 +336,34 @@ func TestChatStars_LabelLookupFailureIs500(t *testing.T) {
 // TestChatStars_MessageDeleteClearsStarsAndInvalidatesOwners: deleting a
 // message through the chat route removes every owner's star in the same
 // transaction and tells exactly those owners, on their own subjects, to
-// refetch. With the experiment off the stars still go, silently.
+// refetch.
 func TestChatStars_MessageDeleteClearsStarsAndInvalidatesOwners(t *testing.T) {
-	for _, experimentOn := range []bool{true, false} {
-		t.Run(fmt.Sprintf("experiment=%t", experimentOn), func(t *testing.T) {
-			f := newStarFixture(t, true)
-			ctx := context.Background()
-			msg := f.threadMsg(t, f.topicA, f.projA, "will be deleted", time.Now().Add(-time.Minute))
-			kept := f.threadMsg(t, f.topicA, f.projA, "kept", time.Now().Add(-2*time.Minute))
-			decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
-			decodeStarPut(t, f.put(t, f.member, msg, f.topicA))
-			decodeStarPut(t, f.put(t, f.owner, kept, f.topicA))
-			setStarsExperiment(t, f.srv, experimentOn, true)
-			ch, unsub := f.ep.Subscribe("user.*.chat.stars")
-			defer unsub()
+	f := newStarFixture(t, true)
+	ctx := context.Background()
+	msg := f.threadMsg(t, f.topicA, f.projA, "will be deleted", time.Now().Add(-time.Minute))
+	kept := f.threadMsg(t, f.topicA, f.projA, "kept", time.Now().Add(-2*time.Minute))
+	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+	decodeStarPut(t, f.put(t, f.member, msg, f.topicA))
+	decodeStarPut(t, f.put(t, f.owner, kept, f.topicA))
+	ch, unsub := f.ep.Subscribe("user.*.chat.stars")
+	defer unsub()
 
-			rec := f.session(t, f.admin, http.MethodDelete, chatConversationPath(f.topicA, "messages/"+msg), nil)
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec := f.session(t, f.admin, http.MethodDelete, chatConversationPath(f.topicA, "messages/"+msg), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-			for _, u := range []string{f.admin, f.member} {
-				got, err := f.stars.GetMessageStar(ctx, u, msg)
-				require.NoError(t, err)
-				assert.Nil(t, got, "no association survives the deletion")
-			}
-			got, err := f.stars.GetMessageStar(ctx, f.owner, kept)
-			require.NoError(t, err)
-			assert.NotNil(t, got)
-			if experimentOn {
-				assert.ElementsMatch(t, []string{"user." + f.admin + ".chat.stars", "user." + f.member + ".chat.stars"}, starEvents(t, ch))
-			} else {
-				assert.Empty(t, starEvents(t, ch), "no invalidation while the experiment is off")
-			}
-			if experimentOn {
-				// Nothing of it can be read back or re-added.
-				assert.Equal(t, http.StatusNotFound, f.session(t, f.member, http.MethodGet, starPath(msg), nil).Code)
-				assert.Empty(t, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(msg), nil)))
-				assert.Equal(t, http.StatusNotFound, f.put(t, f.member, msg, f.topicA).Code)
-			}
-		})
+	for _, u := range []string{f.admin, f.member} {
+		got, err := f.stars.GetMessageStar(ctx, u, msg)
+		require.NoError(t, err)
+		assert.Nil(t, got, "no association survives the deletion")
 	}
+	got, err := f.stars.GetMessageStar(ctx, f.owner, kept)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.ElementsMatch(t, []string{"user." + f.admin + ".chat.stars", "user." + f.member + ".chat.stars"}, starEvents(t, ch))
+	// Nothing of it can be read back or re-added.
+	assert.Equal(t, http.StatusNotFound, f.session(t, f.member, http.MethodGet, starPath(msg), nil).Code)
+	assert.Empty(t, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(msg), nil)))
+	assert.Equal(t, http.StatusNotFound, f.put(t, f.member, msg, f.topicA).Code)
 }
 
 // TestChatStars_PromotionKeepsStarsAndRechecksAccess: promoting an agent
@@ -487,8 +476,6 @@ func TestChatStars_UpkeepPass(t *testing.T) {
 	_, err = f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
 		gone, msg, f.topicA, f.projA, sqliteStarTime(time.Now()))
 	require.NoError(t, err)
-	// Upkeep runs while the experiment is off.
-	setStarsExperiment(t, f.srv, false, true)
 
 	rt := &f.srv.messageStarUpkeep
 	rt.busy.Store(true)
