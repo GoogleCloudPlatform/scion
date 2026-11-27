@@ -47,7 +47,7 @@ func TestScopesForRole_ReadOnly(t *testing.T) {
 
 func TestScopesForRole_Baseline(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
-	require.Len(t, scopes, 7)
+	require.Len(t, scopes, 8)
 
 	// Must include these scopes
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -57,6 +57,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentPortForward)
 	assert.Contains(t, scopes, ScopeProjectArtifactRead)
 	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
+	assert.Contains(t, scopes, ScopeProjectArtifactRequestReview)
 
 	// Must NOT include elevated scopes
 	assert.NotContains(t, scopes, ScopeAgentCreate)
@@ -68,8 +69,9 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 14)
+	require.Len(t, scopes, 15)
 	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
+	assert.Contains(t, scopes, ScopeProjectArtifactRequestReview)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -170,6 +172,7 @@ func TestScopesForRole_RoleReadOnlyHasOnlyReadAndSelfStatus(t *testing.T) {
 		ScopeAgentCreate, ScopeAgentLifecycle, ScopeAgentNotify, ScopeAgentPortForward,
 		ScopeAgentTokenRefresh, ScopeAgentSAAssign, ScopeProjectSecretRead,
 		ScopeProjectTemplateWrite, ScopeProjectSkillWrite, ScopeAgentSetMessageMode, ScopeProjectArtifactWrite,
+		ScopeProjectArtifactRequestReview,
 	} {
 		assert.NotContains(t, scopes, s)
 	}

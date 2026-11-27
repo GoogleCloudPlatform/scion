@@ -217,7 +217,7 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			"template.read", "template.list",
 			"harness_config.read", "harness_config.list",
 			"agent.status_update", "agent.token_refresh", "agent.notify", "agent.port_forward",
-			"artifact.create",
+			"artifact.create", "artifact.request_review",
 		},
 		AgentRoleFull: {
 			"project.read", "artifact.read", "skill.read", "skill.list",
@@ -230,7 +230,7 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			"template.create", "template.update",
 			"skill.create", "skill.update",
 			"agent.set_message_mode",
-			"artifact.create",
+			"artifact.create", "artifact.request_review",
 		},
 	}
 
@@ -260,7 +260,7 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			// token also predates readonly's agent:status:update
 			// (ptone/scion#7926).
 			wantLegacy := slices.DeleteFunc(slices.Clone(want), func(p string) bool {
-				return p == "artifact.read" || p == "artifact.create" ||
+				return p == "artifact.read" || p == "artifact.create" || p == "artifact.request_review" ||
 					p == "skill.create" || p == "skill.update" ||
 					(role == AgentRoleReadOnly && p == "agent.status_update")
 			})

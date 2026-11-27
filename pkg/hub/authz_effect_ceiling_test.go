@@ -162,13 +162,14 @@ func TestUATChildRoleCappedWithinCeiling(t *testing.T) {
 	}
 
 	// The baseline cap carries project:read, the four self-op scopes and the
-	// ceiling-optional project:artifact:read and project:artifact:write. The
-	// minimal set holds no artifact permission, so the ceiling filter issues
-	// all but the two artifact scopes: optional scopes never decide the fit
-	// and are never issued beyond the ceiling.
+	// ceiling-optional project:artifact:read, project:artifact:write and
+	// project:artifact:request_review. The minimal set holds no artifact
+	// permission, so the ceiling filter issues all but the three artifact
+	// scopes: optional scopes never decide the fit and are never issued
+	// beyond the ceiling.
 	capped, _, _ := childRoleWithinCeiling(minimal, AgentRoleFull, false)
 	want := []AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward}
-	assert.ElementsMatch(t, append(append([]AgentTokenScope{}, want...), ScopeProjectArtifactRead, ScopeProjectArtifactWrite), ScopesForRole(capped))
+	assert.ElementsMatch(t, append(append([]AgentTokenScope{}, want...), ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview), ScopesForRole(capped))
 	assert.ElementsMatch(t, want, filterScopes(ScopesForRole(capped), minimal, ScopeCeilings{}))
 }
 
