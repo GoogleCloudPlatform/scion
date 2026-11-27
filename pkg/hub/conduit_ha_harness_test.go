@@ -487,7 +487,8 @@ func (e *conduitHAEnv) BlockLISTEN(t *testing.T, node *conduitHANode) (unblock f
 // transient silent TCP partition: while dropped, both Read and Write block
 // until Restore, Close, or their respective deadlines expire, without sending
 // a TCP FIN/RST or WebSocket close frame. On Restore, pending writes proceed
-// and buffered inbound data is read, preserving TCP byte-stream fidelity.
+// and buffered inbound data is read, so pending frames are delayed rather than
+// discarded (subject to any active read/write deadlines).
 type faultConn struct {
 	net.Conn
 	mu            sync.Mutex
@@ -987,6 +988,9 @@ func (b *conduitHABroker) Restore() { b.ws.Restore() }
 
 // --- Helpers ---
 
+// conduitHADSNParam mirrors withDSNParam (conduit_authz_postgres_test.go)
+// locally so hubshard does not couple conduit_ha_harness_test.go with
+// conduit_authz_postgres_test.go's shard group.
 func conduitHADSNParam(t *testing.T, dsn, key, value string) string {
 	t.Helper()
 	if !strings.Contains(dsn, "://") {
@@ -1148,7 +1152,12 @@ func TestConduitHA_FaultHooks(t *testing.T) {
 	env := newConduitHAEnv(t)
 	ctx := context.Background()
 
-	broker := env.StartBroker(t, env.HubA, nil)
+	var brokerRPCCalls atomic.Int64
+	brokerRPCHandler := conduit.RPCHandlerFunc(func(_ context.Context, _ *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		brokerRPCCalls.Add(1)
+		return &conduitv1.RpcResponse{Status: http.StatusOK, Body: []byte("pong")}
+	})
+	broker := env.StartBroker(t, env.HubA, brokerRPCHandler)
 	agent := env.StartAgent(t, env.HubB)
 	origSessionID := agent.SessionID()
 
@@ -1214,11 +1223,49 @@ func TestConduitHA_FaultHooks(t *testing.T) {
 	assert.Equal(t, agentcontrol.OutcomeDelivered, resp2.Outcome)
 	assert.Equal(t, origSessionID, agent.SessionID())
 
-	// 2. Broker SilentDrop -> Restore keeps session healthy; broker.CloseSession redials.
+	// 2. Broker SilentDrop -> in-flight hub->broker RPC -> Restore on the same
+	//    session; then broker.CloseSession triggers clean redial.
+	brokerSessions, err := env.HubA.RegStore.ListPrincipalSessions(ctx, registry.PrincipalBroker, env.BrokerID)
+	require.NoError(t, err)
+	require.Len(t, brokerSessions.Sessions, 1)
+	origBrokerSessionID := brokerSessions.Sessions[0].Session.SessionID
+	brokerLocalSess, _, ok := env.HubA.Relay().Local(ctx, origBrokerSessionID)
+	require.True(t, ok, "broker session must be local on Hub A")
+
 	broker.SilentDrop()
-	time.Sleep(100 * time.Millisecond)
+	type brokerRPCOut struct {
+		resp *conduitv1.RpcResponse
+		err  error
+	}
+	brokerRPCDone := make(chan brokerRPCOut, 1)
+	go func() {
+		resp, err := brokerLocalSess.Call(ctx, &conduitv1.RpcRequest{
+			Method: http.MethodGet,
+			Path:   "/v1/broker/ping",
+		})
+		brokerRPCDone <- brokerRPCOut{resp: resp, err: err}
+	}()
+	select {
+	case out := <-brokerRPCDone:
+		t.Fatalf("hub->broker RPC completed while broker connection was silently dropped: %+v", out)
+	case <-time.After(150 * time.Millisecond):
+	}
 	broker.Restore()
+	select {
+	case out := <-brokerRPCDone:
+		require.NoError(t, out.err)
+		require.Equal(t, int32(http.StatusOK), out.resp.GetStatus())
+		assert.Equal(t, []byte("pong"), out.resp.GetBody())
+	case <-time.After(10 * time.Second):
+		t.Fatal("hub->broker RPC did not complete after broker.Restore()")
+	}
+	assert.Equal(t, int64(1), brokerRPCCalls.Load())
 	assert.Equal(t, api.BrokerHealthHealthy, broker.Dialer.CommandPathState())
+	brokerSessionsAfter, err := env.HubA.RegStore.ListPrincipalSessions(ctx, registry.PrincipalBroker, env.BrokerID)
+	require.NoError(t, err)
+	require.Len(t, brokerSessionsAfter.Sessions, 1)
+	assert.Equal(t, origBrokerSessionID, brokerSessionsAfter.Sessions[0].Session.SessionID,
+		"transient broker SilentDrop/Restore must preserve the same session")
 
 	broker.CloseSession()
 	require.NoError(t, pollUntil(10*time.Second, func() error {
@@ -1259,11 +1306,20 @@ func TestConduitHA_FaultHooks(t *testing.T) {
 	}
 
 	unblock := env.BlockLISTEN(t, env.HubB)
+	// Hold well past PostgresEventPublisher's 250ms minBackoff (first event +
+	// 600ms, then a second event + 400ms = 1.0s total) so a hook that signals
+	// held without blocking reconnect fails this check.
 	env.HubA.Events.PublishProjectUpdated(ctx, env.Project)
 	select {
 	case ev := <-evCh:
-		t.Fatalf("unexpected event delivered to Hub B while LISTEN was blocked: %+v", ev)
-	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("unexpected event delivered to Hub B while LISTEN was blocked (first): %+v", ev)
+	case <-time.After(600 * time.Millisecond):
+	}
+	env.HubA.Events.PublishProjectUpdated(ctx, env.Project)
+	select {
+	case ev := <-evCh:
+		t.Fatalf("unexpected event delivered to Hub B while LISTEN was blocked (second): %+v", ev)
+	case <-time.After(400 * time.Millisecond):
 	}
 
 	unblock()
