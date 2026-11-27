@@ -92,18 +92,17 @@ func configDisablesTelemetry(cfg *api.ScionConfig) (string, bool) {
 	return "", false
 }
 
-// agentHasStoredTelemetryFalse reports whether agent already has telemetry
-// explicitly stored as disabled (either in CreateInputs.InlineConfig.Telemetry
-// or AppliedConfig.InlineConfig.Telemetry), so an unchanged PATCH resend is
-// allowed (mirroring project settings PUT I1).
+// agentHasStoredTelemetryFalse reports whether agent's requester-stored
+// telemetry (CreateInputs.InlineConfig.Telemetry) is already explicitly
+// disabled, so an unchanged PATCH resend is allowed (mirroring project
+// settings PUT I1). Non-requester AppliedConfig.InlineConfig.Telemetry is
+// intentionally ignored so a copied non-requester false cannot be echoed as
+// requester intent while hub enforcement is active.
 func agentHasStoredTelemetryFalse(agent *store.Agent) bool {
 	if agent == nil || agent.AppliedConfig == nil {
 		return false
 	}
 	if t := requesterTelemetry(agent.AppliedConfig); t != nil && t.Enabled != nil && !*t.Enabled {
-		return true
-	}
-	if ic := agent.AppliedConfig.InlineConfig; ic != nil && ic.Telemetry != nil && ic.Telemetry.Enabled != nil && !*ic.Telemetry.Enabled {
 		return true
 	}
 	return false

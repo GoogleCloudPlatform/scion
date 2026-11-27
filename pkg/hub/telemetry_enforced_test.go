@@ -739,6 +739,11 @@ func TestTelemetryEnforced_CreateAndPatchRefusal(t *testing.T) {
 			ProjectID: project.ID,
 			Phase:     "stopped",
 			AppliedConfig: &store.AgentAppliedConfig{
+				CreateInputs: &store.AgentCreateInputs{
+					InlineConfig: &api.ScionConfig{
+						Telemetry: &api.TelemetryConfig{Enabled: &off},
+					},
+				},
 				InlineConfig: &api.ScionConfig{
 					Telemetry: &api.TelemetryConfig{Enabled: &off},
 				},
@@ -757,6 +762,34 @@ func TestTelemetryEnforced_CreateAndPatchRefusal(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+			json.RawMessage(`{"config":{"telemetry":{"enabled":false}}}`))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeTelemetryEnforcedByHub, errResp.Error.Code)
+	})
+
+	t.Run("PATCH refuses telemetry.enabled=false when only non-requester InlineConfig has false (L1)", func(t *testing.T) {
+		off := false
+		agent := &store.Agent{
+			ID:        tid("agent-tel-patch-nonrequester-false"),
+			Slug:      "agent-tel-patch-nonrequester-false",
+			Name:      "agent-tel-patch-nonrequester-false",
+			ProjectID: project.ID,
+			Phase:     "stopped",
+			AppliedConfig: &store.AgentAppliedConfig{
+				InlineConfig: &api.ScionConfig{
+					Telemetry: &api.TelemetryConfig{Enabled: &off},
+				},
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
 			json.RawMessage(`{"config":{"telemetry":{"enabled":false}}}`))
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		var errResp struct {
