@@ -1019,6 +1019,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	beforeStart := agentStartEchoFields(agent)
+	if err := s.checkTokenBudgetAdmission(startCtx, agent, nil); err != nil {
+		failAfterProvision(store.AgentReincarnationStateStarting, "start blocked by token budget: "+err.Error())
+		return
+	}
 	if err := dispatcher.DispatchAgentStart(startCtx, agent, preamble, false); err != nil {
 		errMsg := "start failed: " + dispatchFailureText(err)
 		// A move follows the same rule: on an ambiguous outcome the agent

@@ -370,6 +370,11 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		path:              []string{"default_agent_role"},
 		absentWhenMissing: false,
 	},
+
+	// Usage / token budget policy
+	projectSettingUsageUnmeasuredPolicy: {
+		source: hubSourceNone,
+	},
 }
 
 // handleProjectSettingsResolved serves GET

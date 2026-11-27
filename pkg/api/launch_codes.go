@@ -174,4 +174,13 @@ const (
 	// refused it or could not be reached), or the broker acknowledged a
 	// different launch. The launch ends not_launched with this code.
 	LaunchCodeDispatchFailed = "dispatch_failed"
+	// LaunchCodeBudgetExhausted: a raw-token budget covering the agent's
+	// project, billing user, or user-project scope is exhausted with a
+	// blocking action (pause_new or suspend_and_pause).
+	LaunchCodeBudgetExhausted = "budget_exhausted"
+	// LaunchCodeBudgetUnmeasured: the project sets usage.unmeasured_policy
+	// to deny while an active non-zero token cap applies, and the agent's
+	// harness does not report live token usage (unmeasured, unknown, or
+	// calls_only).
+	LaunchCodeBudgetUnmeasured = "budget_unmeasured"
 )

@@ -507,6 +507,14 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return err
 	}
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+	if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+		opts.Dispatch.rollback(ctx)
+		if opts.Existing != nil {
+			opts.Existing.finish(startReleased)
+		}
+		return err
+	}
 	// Refuse to launch an agent whose create-time HomeFiles (e.g. a trigger's
 	// .scion/trigger-event.json) have not yet been delivered by its create
 	// dispatch. Prevents a concurrent manual start from starting the agent

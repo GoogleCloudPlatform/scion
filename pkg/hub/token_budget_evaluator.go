@@ -79,6 +79,19 @@ type BudgetExhaustionStatus struct {
 	TokenAction    string
 }
 
+// BudgetNoticeStatus describes the highest-severity active warn/exhausted
+// budget state applicable to an agent, surfaced on usage ingest responses
+// (Tokenomics P3.2 B1).
+type BudgetNoticeStatus struct {
+	State       string
+	LimitName   string
+	ScopeKind   string
+	Consumed    int64
+	Cap         int64
+	WindowEnd   time.Time
+	TokenAction string
+}
+
 // TokenBudgetEvaluator evaluates raw-token consumption from
 // usage_scope_counters_daily against configured llm_tokens LimitDefinitions
 // and persists monotonic state transitions in usage_budget_state using
@@ -269,8 +282,15 @@ type budgetEvalSpec struct {
 // Errors are logged and counted via EvalErrors; evaluation never fails or
 // alters the ingest response (D4).
 func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inserted []*store.UsageEvent) {
+	_ = e.EvaluateIngestedEventsWithNotice(ctx, inserted)
+}
+
+// EvaluateIngestedEventsWithNotice runs EvaluateIngestedEvents and derives the
+// highest-severity active non-overridden warn/exhausted notice directly from
+// the states evaluated for this batch (zero extra DB queries).
+func (e *TokenBudgetEvaluator) EvaluateIngestedEventsWithNotice(ctx context.Context, inserted []*store.UsageEvent) *BudgetNoticeStatus {
 	if !e.enabled() || len(inserted) == 0 {
-		return
+		return nil
 	}
 	now := e.now()
 
@@ -438,8 +458,10 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 	}
 
 	evalCache := newTokenLimitEvalCache(e.quota)
+	var bestNotice *BudgetNoticeStatus
 	for _, spec := range specs {
-		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
+		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
+		if err != nil {
 			e.evalErrors.Add(1)
 			e.logger.Warn("token budget evaluation failed",
 				"limit", spec.limitName,
@@ -448,8 +470,255 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 				"project_scope_id", spec.projectScopeID,
 				"window_start_utc", spec.windowStartUTC,
 				"error", err)
+			continue
+		}
+		if st == nil || (st.State != store.UsageBudgetStateWarn && st.State != store.UsageBudgetStateExhausted) {
+			continue
+		}
+		if st.OverrideUntil != nil && st.OverrideUntil.After(now) {
+			continue
+		}
+		bestNotice = pickHigherBudgetNotice(bestNotice, &BudgetNoticeStatus{
+			State:       st.State,
+			LimitName:   spec.limitName,
+			ScopeKind:   spec.scopeKind,
+			Consumed:    st.ConsumedAtEval,
+			Cap:         st.CapAtEval,
+			WindowEnd:   st.WindowEndUTC,
+			TokenAction: action,
+		})
+	}
+	return bestNotice
+}
+
+func pickHigherBudgetNotice(best, cand *BudgetNoticeStatus) *BudgetNoticeStatus {
+	if cand == nil {
+		return best
+	}
+	if best == nil {
+		return cand
+	}
+	rBest, rCand := budgetStateRank(best.State), budgetStateRank(cand.State)
+	if rCand != rBest {
+		if rCand > rBest {
+			return cand
+		}
+		return best
+	}
+	// Tie-break by higher utilization ratio (cand.Consumed/cand.Cap > best.Consumed/best.Cap).
+	if cand.Cap > 0 && best.Cap > 0 && cand.Consumed >= 0 && best.Consumed >= 0 {
+		hiC, loC := bits.Mul64(uint64(cand.Consumed), uint64(best.Cap))
+		hiB, loB := bits.Mul64(uint64(best.Consumed), uint64(cand.Cap))
+		if hiC > hiB || (hiC == hiB && loC > loB) {
+			return cand
 		}
 	}
+	return best
+}
+
+// HasActiveTokenCap reports whether any applicable raw-token limit for
+// (projectID, billingUserID) resolves to an effective cap > 0. Used by
+// usage.unmeasured_policy=deny admission (P3.2 B1) so unmeasured harnesses are
+// only refused when the project/scope actually enforces a token cap.
+func (e *TokenBudgetEvaluator) HasActiveTokenCap(ctx context.Context, projectID, billingUserID string) (bool, error) {
+	if !e.enabled() || projectID == "" {
+		return false, nil
+	}
+	now := e.now()
+	dayStart, dayEnd := utcDayWindow(now)
+	monthStart, monthEnd := utcMonthWindow(now)
+	specs := applicableTokenBudgetSpecs(projectID, billingUserID, dayStart, dayEnd, monthStart, monthEnd)
+	evalCache := newTokenLimitEvalCache(e.quota)
+	for _, spec := range specs {
+		def, err := evalCache.lookupLimitDef(ctx, spec.limitName)
+		if err != nil {
+			return false, err
+		}
+		if def == nil {
+			continue
+		}
+		capVal, _, err := evalCache.resolveForDef(
+			ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+		)
+		if err != nil {
+			return false, fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+		}
+		if capVal > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HighestActiveBudgetNotice reads active usage_budget_state rows for
+// (projectID, billingUserID) at the evaluator's clock and returns the
+// highest-severity non-overridden warn/exhausted notice, or nil.
+// Used only as a fallback on ingest batches that did not run
+// EvaluateIngestedEventsWithNotice (e.g. empty heartbeats or all-duplicate batches).
+func (e *TokenBudgetEvaluator) HighestActiveBudgetNotice(ctx context.Context, projectID, billingUserID string) *BudgetNoticeStatus {
+	if !e.enabled() || projectID == "" {
+		return nil
+	}
+	now := e.now()
+
+	type scopeQuery struct {
+		scopeKind      string
+		scopeID        string
+		projectScopeID string
+		bindingSubject string
+		bindingScope   string
+		bindingScopeID string
+	}
+	queries := []scopeQuery{
+		{
+			scopeKind:      store.UsageScopeKindProject,
+			scopeID:        projectID,
+			bindingScope:   store.QuotaScopeProject,
+			bindingScopeID: projectID,
+		},
+	}
+	if billingUserID != "" {
+		queries = append(queries,
+			scopeQuery{
+				scopeKind:      store.UsageScopeKindUser,
+				scopeID:        billingUserID,
+				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeSystem,
+			},
+			scopeQuery{
+				scopeKind:      store.UsageScopeKindUserProject,
+				scopeID:        billingUserID,
+				projectScopeID: projectID,
+				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: projectID,
+			},
+		)
+	}
+
+	var bestRow *store.UsageBudgetState
+	var bestQuery scopeQuery
+	var bestNotice *BudgetNoticeStatus
+	for _, q := range queries {
+		rows, err := e.store.ListUsageBudgetStatesForScope(ctx, q.scopeKind, q.scopeID, q.projectScopeID, now)
+		if err != nil {
+			e.logger.Warn("token budget notice lookup failed",
+				"scope_kind", q.scopeKind, "scope_id", q.scopeID, "error", err)
+			continue
+		}
+		for _, row := range rows {
+			if row == nil || (row.State != store.UsageBudgetStateWarn && row.State != store.UsageBudgetStateExhausted) {
+				continue
+			}
+			if row.OverrideUntil != nil && row.OverrideUntil.After(now) {
+				continue
+			}
+			cand := &BudgetNoticeStatus{
+				State:     row.State,
+				ScopeKind: row.ScopeKind,
+				Consumed:  row.ConsumedAtEval,
+				Cap:       row.CapAtEval,
+				WindowEnd: row.WindowEndUTC,
+			}
+			if pickHigherBudgetNotice(bestNotice, cand) == cand {
+				bestNotice = cand
+				bestRow = row
+				bestQuery = q
+			}
+		}
+	}
+	if bestNotice == nil || bestRow == nil {
+		return nil
+	}
+	if def, err := e.store.GetLimitDefinition(ctx, bestRow.LimitDefinitionID); err == nil && def != nil {
+		bestNotice.LimitName = def.Name
+		if _, action, rerr := e.quota.ResolveEffectiveTokenLimit(
+			ctx, def.ID, bestQuery.bindingSubject, bestQuery.bindingScope, bestQuery.bindingScopeID,
+		); rerr == nil && action != "" {
+			bestNotice.TokenAction = action
+		}
+	}
+	if bestNotice.TokenAction == "" {
+		bestNotice.TokenAction = store.TokenActionPauseNew
+	}
+	return bestNotice
+}
+
+func applicableTokenBudgetSpecs(projectID, billingUserID string, dayStart, dayEnd, monthStart, monthEnd time.Time) []budgetEvalSpec {
+	specs := []budgetEvalSpec{
+		{
+			limitName:      store.LimitLLMTokensPerProjectDay,
+			scopeKind:      store.UsageScopeKindProject,
+			scopeID:        projectID,
+			counterScopeID: projectID,
+			bindingScope:   store.QuotaScopeProject,
+			bindingScopeID: projectID,
+			windowStartUTC: dayStart,
+			windowEndUTC:   dayEnd,
+		},
+		{
+			limitName:      store.LimitLLMTokensPerProjectMonth,
+			scopeKind:      store.UsageScopeKindProject,
+			scopeID:        projectID,
+			counterScopeID: projectID,
+			bindingScope:   store.QuotaScopeProject,
+			bindingScopeID: projectID,
+			windowStartUTC: monthStart,
+			windowEndUTC:   monthEnd,
+		},
+	}
+	if billingUserID != "" {
+		upCounterID := billingUserID + ":" + projectID
+		specs = append(specs,
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerUserDay,
+				scopeKind:      store.UsageScopeKindUser,
+				scopeID:        billingUserID,
+				counterScopeID: billingUserID,
+				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			},
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerUserMonth,
+				scopeKind:      store.UsageScopeKindUser,
+				scopeID:        billingUserID,
+				counterScopeID: billingUserID,
+				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			},
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerUserProjectDay,
+				scopeKind:      store.UsageScopeKindUserProject,
+				scopeID:        billingUserID,
+				projectScopeID: projectID,
+				counterScopeID: upCounterID,
+				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: projectID,
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			},
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerUserProjectMonth,
+				scopeKind:      store.UsageScopeKindUserProject,
+				scopeID:        billingUserID,
+				projectScopeID: projectID,
+				counterScopeID: upCounterID,
+				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: projectID,
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			},
+		)
+	}
+	return specs
 }
 
 // EvaluateGroupScope evaluates the active UTC day and month pooled-group

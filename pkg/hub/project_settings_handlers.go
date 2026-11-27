@@ -75,6 +75,18 @@ const (
 	// Agent authorization
 	projectSettingMaxAgentRole     = "scion.io/max-agent-role"
 	projectSettingDefaultAgentRole = "scion.io/default-agent-role"
+
+	// Usage / token budget policy
+	projectSettingUsageUnmeasuredPolicy = "scion.io/usage-unmeasured-policy"
+)
+
+// Valid values for projectSettingUsageUnmeasuredPolicy (usage.unmeasured_policy).
+// When set to "deny" and an active non-zero raw-token cap applies, launches
+// whose harness reports no live token counts (unmeasured, unknown, or
+// calls_only per usage.yaml) are refused with 403 budget_unmeasured.
+const (
+	UsageUnmeasuredPolicyAllow = "allow"
+	UsageUnmeasuredPolicyDeny  = "deny"
 )
 
 // projectSettingKeys is the authoritative list of scion.io/* annotation keys
@@ -172,6 +184,9 @@ var projectSettingKeys = []string{
 	// Agent authorization
 	projectSettingMaxAgentRole,
 	projectSettingDefaultAgentRole,
+
+	// Usage / token budget policy
+	projectSettingUsageUnmeasuredPolicy,
 }
 
 // handleProjectSettings handles GET/PUT on /api/v1/projects/{projectId}/settings.
@@ -213,6 +228,9 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		}
 
 		out := projectSettingsFromAnnotations(project)
+		if !s.tokenBudgetsEnabled() {
+			out.UsageUnmeasuredPolicy = ""
+		}
 		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
 			out.TrajectoryCapture = ""
 			writeJSON(w, http.StatusOK, out)
@@ -324,6 +342,24 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		if present[projectSettingsFieldUsageUnmeasuredPolicy] {
+			storedPolicy := ""
+			if stored != nil {
+				storedPolicy = stored.UsageUnmeasuredPolicy
+			}
+			if !s.tokenBudgetsEnabled() {
+				if merged.UsageUnmeasuredPolicy != storedPolicy {
+					writeRuntimeTargetRefusal(w, experimentDisabledRefusal(experiments.TokenomicsTokenBudgets))
+					return
+				}
+			} else if merged.UsageUnmeasuredPolicy != "" &&
+				merged.UsageUnmeasuredPolicy != UsageUnmeasuredPolicyAllow &&
+				merged.UsageUnmeasuredPolicy != UsageUnmeasuredPolicyDeny {
+				BadRequest(w, "usageUnmeasuredPolicy must be one of allow, deny")
+				return
+			}
+		}
+
 		alreadyStoredFalse := stored != nil && stored.TelemetryEnabled != nil && !*stored.TelemetryEnabled
 		if present[projectSettingsFieldTelemetryEnabled] && merged.TelemetryEnabled != nil && !*merged.TelemetryEnabled && !alreadyStoredFalse && s.telemetryEnforced() {
 			writeError(w, http.StatusConflict, ErrCodeTelemetryEnforcedByHub,
@@ -376,6 +412,12 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		warnings := s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults)
 		warnings = append(warnings, s.projectUnlimitedBrokerWarnings(ctx, project.ID, unlimitedSet)...)
 		out := projectSettingsFromAnnotations(project)
+		if !s.tokenBudgetsEnabled() {
+			out.UsageUnmeasuredPolicy = ""
+		}
+		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			out.TrajectoryCapture = ""
+		}
 		resp := projectSettingsWithWarnings{
 			ProjectSettings: out,
 			Warnings:        warnings,
@@ -383,8 +425,6 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		if s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
 			status := s.resolveTrajectoryCapturePolicy(ctx, project)
 			resp.TrajectoryCapture = &status
-		} else {
-			out.TrajectoryCapture = ""
 		}
 		writeJSON(w, http.StatusOK, resp)
 
@@ -852,6 +892,7 @@ const (
 	projectSettingsFieldAutoExposePortsEnabled   = "autoExposePortsEnabled"
 	projectSettingsFieldMaxAgentRole             = "maxAgentRole"
 	projectSettingsFieldDefaultAgentRole         = "defaultAgentRole"
+	projectSettingsFieldUsageUnmeasuredPolicy    = "usageUnmeasuredPolicy"
 	projectSettingsFieldGCPIdentityMode          = "defaultGCPIdentityMode"
 	projectSettingsFieldGCPIdentitySAID          = "defaultGCPIdentityServiceAccountID"
 	projectSettingsFieldGCPIdentitySAIDByProfile = "defaultGCPIdentityServiceAccountIDByProfile"
@@ -1091,6 +1132,9 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	settings.MaxAgentRole = project.Annotations[projectSettingMaxAgentRole]
 	settings.DefaultAgentRole = project.Annotations[projectSettingDefaultAgentRole]
 
+	// Usage / token budget policy
+	settings.UsageUnmeasuredPolicy = project.Annotations[projectSettingUsageUnmeasuredPolicy]
+
 	return settings
 }
 
@@ -1178,6 +1222,9 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	// Agent authorization
 	setOrDelete(project.Annotations, projectSettingMaxAgentRole, settings.MaxAgentRole)
 	setOrDelete(project.Annotations, projectSettingDefaultAgentRole, settings.DefaultAgentRole)
+
+	// Usage / token budget policy
+	setOrDelete(project.Annotations, projectSettingUsageUnmeasuredPolicy, settings.UsageUnmeasuredPolicy)
 
 	// Default resources (flat keys)
 	if settings.DefaultResources != nil {

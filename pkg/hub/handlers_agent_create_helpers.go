@@ -1762,6 +1762,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeTokenBudgetAdmissionError(w, err) {
+				return existingAgentErrored
+			}
 			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 				return existingAgentErrored
 			}
@@ -1932,6 +1935,9 @@ func (s *Server) handleExistingAgent(
 			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true,
 				AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 				if answered {
+					return existingAgentErrored
+				}
+				if writeTokenBudgetAdmissionError(w, err) {
 					return existingAgentErrored
 				}
 				if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
@@ -2222,6 +2228,9 @@ func (s *Server) handleExistingAgent(
 		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true,
 			AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 			if answered {
+				return existingAgentErrored
+			}
+			if writeTokenBudgetAdmissionError(w, err) {
 				return existingAgentErrored
 			}
 			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {

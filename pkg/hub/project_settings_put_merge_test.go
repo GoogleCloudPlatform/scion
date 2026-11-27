@@ -56,8 +56,9 @@ func mergeTestStoredSettings() map[string]string {
 		DefaultGCPIdentityServiceAccountID:          "sa-a",
 		DefaultGCPIdentityServiceAccountIDByProfile: map[string]string{"p1": "sa-p1"},
 		DefaultGCPIdentityServiceAccountIDByBroker:  map[string]string{"b1": "sa-b1"},
-		MaxAgentRole:     "full",
-		DefaultAgentRole: "baseline",
+		MaxAgentRole:          "full",
+		DefaultAgentRole:      "baseline",
+		UsageUnmeasuredPolicy: UsageUnmeasuredPolicyAllow,
 	})
 	return project.Annotations
 }
@@ -149,6 +150,7 @@ var putMergeFields = []putMergeField{
 	{name: projectSettingsFieldGCPIdentitySAIDByBroker, setJSON: `{"b2":"sa-b2"}`, setWant: map[string]string{projectSettingDefaultGCPIdentitySAIDByBroker: `{"b2":"sa-b2"}`}, clearJSON: `{}`, keys: []string{projectSettingDefaultGCPIdentitySAIDByBroker}},
 	{name: projectSettingsFieldMaxAgentRole, setJSON: `"readonly"`, setWant: map[string]string{projectSettingMaxAgentRole: "readonly"}, clearJSON: `""`, keys: []string{projectSettingMaxAgentRole}},
 	{name: projectSettingsFieldDefaultAgentRole, setJSON: `"readonly"`, setWant: map[string]string{projectSettingDefaultAgentRole: "readonly"}, clearJSON: `""`, keys: []string{projectSettingDefaultAgentRole}},
+	{name: projectSettingsFieldUsageUnmeasuredPolicy, setJSON: `"deny"`, setWant: map[string]string{projectSettingUsageUnmeasuredPolicy: "deny"}, clearJSON: `""`, keys: []string{projectSettingUsageUnmeasuredPolicy}},
 }
 
 // runPutMerge applies body to a fully populated project the way the PUT

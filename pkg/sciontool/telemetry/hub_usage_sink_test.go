@@ -2888,3 +2888,58 @@ func TestDrainQuarantineOrder_RenamesBeforeCursor(t *testing.T) {
 		})
 	})
 }
+
+func TestHubUsageSink_BudgetNoticeDeduped(t *testing.T) {
+	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "outbox"))
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox: %v", err)
+	}
+	notice := &telemetrycontract.UsageBudgetNotice{
+		State:       "warn",
+		Limit:       "llm_tokens_per_project_day",
+		ScopeKind:   "project",
+		Consumed:    600,
+		Max:         1000,
+		WindowEnd:   "2026-11-28T00:00:00Z",
+		TokenAction: "pause_new",
+	}
+	sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		RunID: "run-bn-1",
+		Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+			return &telemetrycontract.UsageIngestResponse{
+				Accepted:     0,
+				BudgetNotice: notice,
+			}, nil
+		},
+	})
+	if err := sink.SendHeartbeat(context.Background(), ""); err != nil {
+		t.Fatalf("SendHeartbeat(1): %v", err)
+	}
+	first := sink.lastBudgetNotice.Load()
+	if first == nil || *first == "" {
+		t.Fatalf("expected lastBudgetNotice to be recorded after first notice")
+	}
+	// Repeating the exact same notice keeps the same dedupe key.
+	if err := sink.SendHeartbeat(context.Background(), ""); err != nil {
+		t.Fatalf("SendHeartbeat(2): %v", err)
+	}
+	if got := sink.lastBudgetNotice.Load(); got != first {
+		t.Fatalf("expected identical notice to reuse dedupe key pointer")
+	}
+	// Escalating to exhausted updates the dedupe key.
+	notice = &telemetrycontract.UsageBudgetNotice{
+		State:       "exhausted",
+		Limit:       "llm_tokens_per_project_day",
+		ScopeKind:   "project",
+		Consumed:    1100,
+		Max:         1000,
+		WindowEnd:   "2026-11-28T00:00:00Z",
+		TokenAction: "pause_new",
+	}
+	if err := sink.SendHeartbeat(context.Background(), ""); err != nil {
+		t.Fatalf("SendHeartbeat(3): %v", err)
+	}
+	if got := sink.lastBudgetNotice.Load(); got == nil || *got == *first {
+		t.Fatalf("expected escalated notice to update dedupe key")
+	}
+}

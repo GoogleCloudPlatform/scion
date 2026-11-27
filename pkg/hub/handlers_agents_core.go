@@ -3196,6 +3196,18 @@ func (s *Server) createAgentInProject(
 	// If step 2 fails we must roll back step 1's reservation ourselves: we
 	// have not reached store.CreateAgent yet, so its failure-path Release
 	// below never runs for this response.
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+	// Checked before reserving broker/project slots or committing the agent row;
+	// skipped for ProvisionOnly=true since no container is launched yet.
+	if !req.ProvisionOnly {
+		if err := s.checkTokenBudgetAdmission(ctx, agent, project); err != nil {
+			if !writeTokenBudgetAdmissionError(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+	}
+
 	if runtimeBrokerID != "" {
 		if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, runtimeBrokerID, store.QuotaScopeBroker, runtimeBrokerID, agent.ID) {
 			return
@@ -4487,6 +4499,14 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	// start claim against the trigger's own create dispatch.
 	if agentHomeFilesPending(agent) {
 		s.writeStartClaimError(ctx, w, errHomeFilesNotDelivered, agent.ID)
+		return
+	}
+
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+	if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+		if !writeTokenBudgetAdmissionError(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 

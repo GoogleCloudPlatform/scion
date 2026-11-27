@@ -98,6 +98,8 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   pod_disrupted: 'the agent pod was preempted, evicted or deleted while starting',
   broker_restarted: 'the runtime broker restarted during the launch',
   dispatch_failed: 'the runtime broker did not accept the launch',
+  budget_exhausted: 'the token budget has been exhausted',
+  budget_unmeasured: "the harness is not measured for token usage under this project's policy",
 };
 
 function fallbackLabel(key: string): string {

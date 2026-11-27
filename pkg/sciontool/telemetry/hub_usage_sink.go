@@ -109,10 +109,11 @@ func (c HubUsageSinkConfig) heartbeatInterval() time.Duration {
 // HubUsageSink drains finalized usage batches from an AnalyticsOutbox to the
 // Hub and sends periodic meter-health heartbeats.
 type HubUsageSink struct {
-	cfg          HubUsageSinkConfig
-	outbox       *AnalyticsOutbox
-	lastActivity atomic.Int64 // UnixNano of most recent observed source activity
-	now          func() time.Time
+	cfg              HubUsageSinkConfig
+	outbox           *AnalyticsOutbox
+	lastActivity     atomic.Int64 // UnixNano of most recent observed source activity
+	lastBudgetNotice atomic.Pointer[string]
+	now              func() time.Time
 }
 
 // NewHubUsageSink creates a Hub usage sink for outbox. Returns nil if outbox
@@ -370,6 +371,7 @@ func (s *HubUsageSink) sendGroup(
 		if s.cfg.OnSuppressChanged != nil {
 			s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
 		}
+		s.logBudgetNotice(resp.BudgetNotice)
 		for _, rej := range resp.Rejected {
 			if rej.Index >= 0 && rej.Index < len(origIndices) {
 				*rejected = append(*rejected, origIndices[rej.Index])
@@ -409,10 +411,26 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 	if err != nil {
 		return err
 	}
-	if resp != nil && s.cfg.OnSuppressChanged != nil {
-		s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
+	if resp != nil {
+		if s.cfg.OnSuppressChanged != nil {
+			s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
+		}
+		s.logBudgetNotice(resp.BudgetNotice)
 	}
 	return nil
+}
+
+func (s *HubUsageSink) logBudgetNotice(n *telemetrycontract.UsageBudgetNotice) {
+	if n == nil {
+		return
+	}
+	key := n.State + "|" + n.Limit + "|" + n.ScopeKind + "|" + n.WindowEnd + "|" + n.TokenAction
+	if prev := s.lastBudgetNotice.Load(); prev != nil && *prev == key {
+		return
+	}
+	s.lastBudgetNotice.Store(&key)
+	log.Warn("Hub usage sink: token budget %s (%s, scope=%s, %d/%d tokens, resets %s, action=%s)",
+		n.State, n.Limit, n.ScopeKind, n.Consumed, n.Max, n.WindowEnd, n.TokenAction)
 }
 
 func eventDirectOTelSuppressed(ev *telemetrycontract.UsageEvent) bool {

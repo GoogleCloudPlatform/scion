@@ -671,6 +671,12 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		saOrigin = ""
 	}
 
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1)
+	// before committing the agent row or dispatching to the broker.
+	if err := s.checkTokenBudgetAdmission(ctx, agent, project); err != nil {
+		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+	}
+
 	// Inject allow-listed event data environment variables after deriveAgentConfig
 	// so neither template nor project defaults overwrite hub-assigned trigger IDs.
 	if len(hc.EventEnv) > 0 {
