@@ -42,6 +42,7 @@ const defaultFakeReimportSHA = "1111111111111111111111111111111111111111"
 type fakeReimportGitHub struct {
 	mu          sync.Mutex
 	body        []byte
+	commits     map[string][]byte // optional per-commit archive map (sha -> tar.gz bytes)
 	err         error
 	commitSHA   string // optional override; if empty, extracted from PAX header or defaultFakeReimportSHA
 	treeSHA     string // optional override; if empty, derived from files in subPath
@@ -66,6 +67,20 @@ func newFakeReimportGitHubClient(t *testing.T, f *fakeReimportGitHub) *githubfet
 func (f *fakeReimportGitHub) setBody(body []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.body = body
+}
+
+// setCommitBody registers body under sha and advances the fake's current head
+// commit to sha, so per-commit /git/trees/{sha} and tarball requests serve the
+// exact contents for the requested commit SHA.
+func (f *fakeReimportGitHub) setCommitBody(sha string, body []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.commits == nil {
+		f.commits = make(map[string][]byte)
+	}
+	f.commits[sha] = body
+	f.commitSHA = sha
 	f.body = body
 }
 
@@ -106,6 +121,10 @@ func (f *fakeReimportGitHub) Open(_ context.Context, r githubfetch.Request) (*gi
 	f.urls = append(f.urls, r.URL)
 	f.auths = append(f.auths, r.Authorization)
 	body := f.body
+	commits := make(map[string][]byte, len(f.commits))
+	for k, v := range f.commits {
+		commits[k] = v
+	}
 	injectedErr := f.err
 	commitOverride := f.commitSHA
 	treeOverride := f.treeSHA
@@ -122,11 +141,25 @@ func (f *fakeReimportGitHub) Open(_ context.Context, r githubfetch.Request) (*gi
 		return nil, err
 	}
 
-	// Determine effective commit SHA and ensure tarball has a valid PAX comment.
-	sha, normalizedTar, files := inspectAndNormalizeArchive(body, commitOverride)
+	// Select per-commit archive when the request targets a specific commit SHA.
+	archiveForSHA := func(reqSHA string) (string, []byte, []fakeArchiveFile) {
+		if reqSHA != "" {
+			if b, ok := commits[reqSHA]; ok {
+				return inspectAndNormalizeArchive(b, reqSHA)
+			}
+		}
+		return inspectAndNormalizeArchive(body, commitOverride)
+	}
 
 	isTarball := strings.Contains(u.Path, "/tarball/") || strings.HasSuffix(u.Path, ".tar.gz")
 	if isTarball {
+		reqSHA := ""
+		if idx := strings.Index(u.Path, "/tarball/"); idx >= 0 {
+			reqSHA = strings.TrimPrefix(u.Path[idx+len("/tarball/"):], "/")
+		} else if idx := strings.Index(u.Path, "/archive/"); idx >= 0 {
+			reqSHA = strings.TrimSuffix(u.Path[idx+len("/archive/"):], ".tar.gz")
+		}
+		_, normalizedTar, _ := archiveForSHA(reqSHA)
 		f.mu.Lock()
 		f.tarballURLs = append(f.tarballURLs, r.URL)
 		f.tarballAuth = append(f.tarballAuth, r.Authorization)
@@ -137,6 +170,8 @@ func (f *fakeReimportGitHub) Open(_ context.Context, r githubfetch.Request) (*gi
 			Body:   io.NopCloser(bytes.NewReader(normalizedTar)),
 		}, nil
 	}
+
+	sha, _, _ := inspectAndNormalizeArchive(body, commitOverride)
 
 	// GET /repos/{o}/{r}/git/matching-refs/heads/{first}
 	if idx := strings.Index(u.Path, "/git/matching-refs/heads/"); idx >= 0 {
@@ -185,10 +220,12 @@ func (f *fakeReimportGitHub) Open(_ context.Context, r githubfetch.Request) (*gi
 	// GET /repos/{o}/{r}/git/trees/{sha}[:{subPath}]
 	if idx := strings.Index(u.Path, "/git/trees/"); idx >= 0 {
 		spec := u.Path[idx+len("/git/trees/"):]
-		subPath := ""
-		if _, after, ok := strings.Cut(spec, ":"); ok {
+		reqSHA, subPath := spec, ""
+		if before, after, ok := strings.Cut(spec, ":"); ok {
+			reqSHA = before
 			subPath = strings.Trim(after, "/")
 		}
+		_, _, files := archiveForSHA(reqSHA)
 		var treeEntries []map[string]any
 		h := sha1.New() //nolint:gosec // synthetic git tree SHA for tests
 		for _, af := range files {

@@ -853,6 +853,7 @@ var tiaSecretKeyClasses = map[string]string{
 	"SecretKeyAttachmentDeliveryKey": "attachment_delivery",
 	"SecretKeyPortViewKey":           "port_view_url",
 	"SecretKeyListCursorKey":         "list_cursor",
+	"SecretKeyGitHubScopeKey":        "exempt: keys GitHub cooldown/cache scope identifiers; signs no credential",
 	"SecretKeyOIDCSigningKey":        "oidc",
 	"SecretKeyOIDCKeyset":            "oidc", // the same manager's persisted keyset
 }
@@ -928,6 +929,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"conduit_admission.go:newConduitAdmissionAEAD:crypto/aes.NewCipher":                             "exempt: admission token key, derived only from the shared signing secret or the keyring signing ring (source keyring), both of which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
 	"conduit_admission.go:newConduitAdmissionAEAD:crypto/cipher.NewGCM":                             "exempt: admission token key, derived only from the shared signing secret or the keyring signing ring (source keyring), both of which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
+	"github_credential.go:secretCredentialScope:crypto/hmac.New":                                    "exempt: keys GitHub cooldown/cache scope identifiers; signs no credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"trigger/source/hmac.go:VerifyHMACSHA256Hex:crypto/hmac.New":                                    "exempt: canonical prefixed HMAC-SHA256 verifier (shared by githubapp.VerifyWebhookSignature, trigger/github, and trigger github_v1); signs no hub credential",

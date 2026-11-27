@@ -656,6 +656,28 @@ func TestExtractTarGz_SecurityAndIntegrity(t *testing.T) {
 		_, _, _, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, validTree, root, ImportHostedLimits())
 		assertErrorKind(t, err, KindUpstream)
 	})
+
+	t.Run("tree file omitted by export-ignore is skipped and counted", func(t *testing.T) {
+		treeWithIgnored := &Tree{
+			TreeSHA: "dddddddddddddddddddddddddddddddddddddddd",
+			Files: []File{
+				{Path: "a.txt", Mode: 0o644, Size: int64(len(content)), BlobSHA: gitBlobSHA(content)},
+				{Path: ".gitignore", Mode: 0o644, Size: 5, BlobSHA: gitBlobSHA([]byte("*.log"))},
+			},
+		}
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/t/a.txt", body: content},
+		})
+		root, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = root.Close() }()
+		files, _, skipped, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, treeWithIgnored, root, ImportHostedLimits())
+		if err != nil {
+			t.Fatalf("export-ignore subset should succeed: %v", err)
+		}
+		if files != 1 || skipped.ExportIgnored != 1 {
+			t.Fatalf("got files=%d skipped=%+v, want files=1 ExportIgnored=1", files, skipped)
+		}
+	})
 }
 
 func TestListTree_TruncatedAndOversizedFailBeforeDownload(t *testing.T) {
@@ -880,6 +902,55 @@ func TestCooldown_RemoteFetchErrorPath(t *testing.T) {
 	}
 	if res.CommitSHA != "1111111111111111111111111111111111111111" || hits != 2 {
 		t.Fatalf("unexpected res=%+v hits=%d", res, hits)
+	}
+}
+
+func TestClient_RetryTransientOnly(t *testing.T) {
+	const sha = "1111111111111111111111111111111111111111"
+	src := Source{Owner: "acme", Repo: "repo", Ref: "main"}
+
+	for _, reason := range []remotefetch.Reason{remotefetch.ReasonConnect, remotefetch.ReasonTimeout} {
+		t.Run("retries transient "+string(reason), func(t *testing.T) {
+			attempts := 0
+			doer := funcDoer(func(_ context.Context, _ Request) (*Response, error) {
+				attempts++
+				if attempts == 1 {
+					return nil, &remotefetch.Error{Reason: reason, Detail: "transient"}
+				}
+				return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sha + "\n"))}, nil
+			})
+			client := New(Options{Endpoint: DefaultEndpoint(), Doer: doer, Cooldown: NewCooldown(nil), MaxRetries: 1})
+			res, _, err := client.ResolveRef(context.Background(), src, Credential{})
+			if err != nil {
+				t.Fatalf("expected retry to succeed, got %v", err)
+			}
+			if attempts != 2 || res.CommitSHA != sha {
+				t.Fatalf("attempts=%d sha=%q, want 2 and %q", attempts, res.CommitSHA, sha)
+			}
+		})
+	}
+
+	for _, reason := range []remotefetch.Reason{
+		remotefetch.ReasonDeniedAddress,
+		remotefetch.ReasonHostNotAllowed,
+		remotefetch.ReasonRedirects,
+		remotefetch.ReasonTooLarge,
+	} {
+		t.Run("never retries policy refusal "+string(reason), func(t *testing.T) {
+			attempts := 0
+			doer := funcDoer(func(_ context.Context, _ Request) (*Response, error) {
+				attempts++
+				return nil, &remotefetch.Error{Reason: reason, Detail: "policy"}
+			})
+			client := New(Options{Endpoint: DefaultEndpoint(), Doer: doer, Cooldown: NewCooldown(nil), MaxRetries: 1})
+			_, _, err := client.ResolveRef(context.Background(), src, Credential{})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if attempts != 1 {
+				t.Fatalf("attempts = %d, want 1 (must not retry policy refusal %s)", attempts, reason)
+			}
+		})
 	}
 }
 

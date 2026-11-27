@@ -31,10 +31,11 @@ import (
 
 // SkipCounts records non-fatal entries skipped during extraction.
 type SkipCounts struct {
-	Symlinks   int
-	Hardlinks  int
-	Submodules int
-	DotGit     int
+	Symlinks      int
+	Hardlinks     int
+	Submodules    int
+	DotGit        int
+	ExportIgnored int
 }
 
 var errUnpackedLimit = errors.New("unpacked archive stream exceeds limit")
@@ -240,17 +241,31 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 		return 0, 0, skipped, &Error{Kind: KindUpstream, Repo: repo, Hint: "archive PAX commit SHA does not match resolved commit"}
 	}
 
+	// Verify archive ⊆ tree: every extracted regular file must appear in the
+	// git tree with a matching git blob SHA. Tree files absent from the archive
+	// (e.g. omitted by .gitattributes export-ignore) are counted in
+	// skipped.ExportIgnored rather than failing.
+	//
+	// Known limitation: files rewritten by git archive (such as .gitattributes
+	// export-subst or LFS-content-in-archive) have different bytes than the git
+	// blob SHA in the tree and fail integrity verification.
 	if tree != nil && !tree.Truncated {
-		if len(actualBlobs) != len(tree.Files) {
-			return 0, 0, skipped, &Error{Kind: KindUpstream, Repo: repo, Hint: "archive file set does not match git tree"}
-		}
+		expected := make(map[string]File, len(tree.Files))
 		for _, tf := range tree.Files {
-			gotSHA, ok := actualBlobs[tf.Path]
+			expected[tf.Path] = tf
+		}
+		for rel, gotSHA := range actualBlobs {
+			tf, ok := expected[rel]
 			if !ok {
-				return 0, 0, skipped, &Error{Kind: KindUpstream, Repo: repo, Hint: "archive missing file listed in git tree"}
+				return 0, 0, skipped, &Error{Kind: KindUpstream, Repo: repo, Hint: "archive contains file not listed in git tree"}
 			}
 			if tf.BlobSHA != "" && gotSHA != tf.BlobSHA {
 				return 0, 0, skipped, &Error{Kind: KindUpstream, Repo: repo, Hint: "archive file blob SHA mismatch"}
+			}
+		}
+		for _, tf := range tree.Files {
+			if _, ok := actualBlobs[tf.Path]; !ok {
+				skipped.ExportIgnored++
 			}
 		}
 	}

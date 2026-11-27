@@ -332,13 +332,18 @@ func TestTemplateReimport_OversizeExtractRefused(t *testing.T) {
 	assert.Empty(t, got.Files, "a refused source must not change the template")
 }
 
-// TestTemplateGitHubClient_DefaultIsGuarded checks the default client reimport
-// builds when none is injected: hosted uses NetworkVetted and refuses http,
-// non-allowlisted hosts, and userinfo before making any connection.
+// TestTemplateGitHubClient_DefaultIsGuarded checks the server's network-mode
+// selection (hosted -> NetworkVetted, workstation -> NetworkSystem) and that
+// the hosted Doer refuses http, non-allowlisted hosts, and userinfo before
+// making any connection.
 func TestTemplateGitHubClient_DefaultIsGuarded(t *testing.T) {
-	srv := &Server{}
-	doer := githubfetch.NewDoer(githubfetch.DefaultEndpoint(), remotefetch.NetworkVetted, 1<<20, 0, nil)
-	_ = srv.getTemplateGitHubClient(githubfetch.ImportHostedLimits())
+	hostedSrv := &Server{workstation: false}
+	workstationSrv := &Server{workstation: true}
+	assert.Equal(t, remotefetch.NetworkVetted, hostedSrv.templateReimportNetworkMode(), "hosted Hub must select NetworkVetted")
+	assert.Equal(t, remotefetch.NetworkSystem, workstationSrv.templateReimportNetworkMode(), "workstation Hub must select NetworkSystem")
+
+	doer := githubfetch.NewDoer(githubfetch.DefaultEndpoint(), hostedSrv.templateReimportNetworkMode(), 1<<20, 0, nil)
+	_ = hostedSrv.getTemplateGitHubClient(githubfetch.ImportHostedLimits())
 
 	for name, tc := range map[string]struct {
 		url  string
@@ -807,11 +812,12 @@ func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 	const commit1 = "1111111111111111111111111111111111111111"
 	const commit2 = "2222222222222222222222222222222222222222"
 
-	fetcher := &fakeReimportGitHub{body: buildTarGz(t, []tarEntry{
+	fetcher := &fakeReimportGitHub{}
+	fetcher.setCommitBody(commit1, buildTarGz(t, []tarEntry{
 		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit1},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 		{name: "repo-main/templates/my-template/README.md", body: "v1"},
-	})}
+	}))
 	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
 
@@ -825,7 +831,7 @@ func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 
 	// Refresh again with identical files (same tree SHA) at a newer commit:
 	// tarball download and storage write are skipped, hash stays, commit advances.
-	fetcher.setBody(buildTarGz(t, []tarEntry{
+	fetcher.setCommitBody(commit2, buildTarGz(t, []tarEntry{
 		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 		{name: "repo-main/templates/my-template/README.md", body: "v1"},
@@ -837,6 +843,47 @@ func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 	assert.Equal(t, firstHash, got.ContentHash)
 	assert.Equal(t, commit2, got.SourceCommit)
 	assert.Len(t, fetcher.recordedTarballURLs(), 1, "unchanged tree SHA must skip tarball download and storage write")
+}
+
+func TestTemplateReimport_ChangedTreeAtNewCommitReimports(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-commit-changed", "my-template", store.TemplateScopeGlobal, "", reimportTestSource+"/my-template")
+
+	const commit1 = "1111111111111111111111111111111111111111"
+	const commit2 = "2222222222222222222222222222222222222222"
+
+	fetcher := &fakeReimportGitHub{}
+	fetcher.setCommitBody(commit1, buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit1},
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/README.md", body: "v1"},
+	}))
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	first, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit1, first.SourceCommit)
+	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+
+	// Advance to commit2 with a modified file (different tree SHA):
+	// tarball MUST be downloaded, ContentHash must change, and SourceCommit must advance.
+	fetcher.setCommitBody(commit2, buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/README.md", body: "v2-updated-content"},
+	}))
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	second, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit2, second.SourceCommit)
+	assert.NotEqual(t, first.ContentHash, second.ContentHash, "changed tree must rewrite storage and update ContentHash")
+	assert.Len(t, fetcher.recordedTarballURLs(), 2, "changed tree SHA must download the new commit tarball")
 }
 
 func TestTemplateReimport_TagsSHAsAndSlashedBranches(t *testing.T) {

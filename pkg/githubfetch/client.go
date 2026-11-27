@@ -60,8 +60,8 @@ type Options struct {
 	Doer     Doer
 	Cooldown *Cooldown
 	Clock    func() time.Time
-	// MaxRetries caps transient 5xx/network retries per HTTP call (0 means no
-	// retries; default 1 when negative or unset via DefaultMaxRetries).
+	// MaxRetries caps transient 5xx and network retries per HTTP call (0 means
+	// no retries; negative values are treated as 0).
 	MaxRetries int
 }
 
@@ -499,6 +499,9 @@ func (c *Client) do(ctx context.Context, req Request, repo string, cred Credenti
 func isRetryableError(e *Error) bool {
 	if e == nil {
 		return false
+	}
+	if e.transient {
+		return true
 	}
 	if e.Kind == KindUpstream && e.Status >= 500 && e.Status <= 599 {
 		return true

@@ -49,6 +49,7 @@ type Error struct {
 	Repo       string // "owner/repo" when known
 	CredKind   CredKind
 	Hint       string
+	transient  bool // true for transient network/timeout errors eligible for retry
 	err        error
 }
 
@@ -167,10 +168,11 @@ func ClassifyRemoteFetchError(err error, repo string, cred Credential, now time.
 		case remotefetch.ReasonTooLarge:
 			return &Error{Kind: KindTooLarge, Repo: repo, CredKind: cred.Kind}
 		case remotefetch.ReasonTimeout:
-			return &Error{Kind: KindTimeout, Repo: repo, CredKind: cred.Kind}
+			return &Error{Kind: KindTimeout, Repo: repo, CredKind: cred.Kind, transient: true}
+		case remotefetch.ReasonConnect:
+			return &Error{Kind: KindUnreachable, Repo: repo, CredKind: cred.Kind, transient: true}
 		case remotefetch.ReasonResolve,
 			remotefetch.ReasonDeniedAddress,
-			remotefetch.ReasonConnect,
 			remotefetch.ReasonHostNotAllowed,
 			remotefetch.ReasonRedirects,
 			remotefetch.ReasonScheme,

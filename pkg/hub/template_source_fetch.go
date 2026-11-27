@@ -171,14 +171,18 @@ func (s *Server) templateReimportLimits() githubfetch.Limits {
 	return githubfetch.ImportHostedLimits()
 }
 
+func (s *Server) templateReimportNetworkMode() remotefetch.NetworkMode {
+	if s.workstation {
+		return remotefetch.NetworkSystem
+	}
+	return remotefetch.NetworkVetted
+}
+
 func (s *Server) getTemplateGitHubClient(lim githubfetch.Limits) *githubfetch.Client {
 	if s.templateGitHubClient != nil {
 		return s.templateGitHubClient
 	}
-	network := remotefetch.NetworkVetted
-	if s.workstation {
-		network = remotefetch.NetworkSystem
-	}
+	network := s.templateReimportNetworkMode()
 	ep := githubfetch.DefaultEndpoint()
 	reqTimeout := lim.RequestTimeout
 	if reqTimeout <= 0 {
