@@ -691,14 +691,28 @@ func (f *faultWSDialer) Restore() {
 // recordingTmuxRunner implements tmuxdeliver.Runner and records every argv
 // and stdin payload it executes.
 type recordingTmuxRunner struct {
-	mu      sync.Mutex
-	calls   [][]string
-	stdins  []string
-	flushes int
+	mu        sync.Mutex
+	calls     [][]string
+	stdins    []string
+	flushes   int
+	beforeRun func([]string)
+}
+
+// SetBeforeRun installs an optional hook invoked before each Run call (nil clears it).
+func (r *recordingTmuxRunner) SetBeforeRun(fn func([]string)) {
+	r.mu.Lock()
+	r.beforeRun = fn
+	r.mu.Unlock()
 }
 
 func (r *recordingTmuxRunner) Run(_ context.Context, argv []string, stdin io.Reader) (string, error) {
 	cp := append([]string(nil), argv...)
+	r.mu.Lock()
+	hook := r.beforeRun
+	r.mu.Unlock()
+	if hook != nil {
+		hook(cp)
+	}
 	var stdinStr string
 	if stdin != nil {
 		b, _ := io.ReadAll(stdin)
@@ -1161,9 +1175,21 @@ func TestConduitHA_FaultHooks(t *testing.T) {
 	agent := env.StartAgent(t, env.HubB)
 	origSessionID := agent.SessionID()
 
-	// 1. Agent SilentDrop -> in-flight deliver RPC -> Restore within ping timeout.
-	//    Verify frames are paused (not discarded) and the session stays intact.
-	agent.SilentDrop()
+	// 1. Agent SilentDrop while the agent writes its RPC response -> Restore
+	//    within ping timeout. Gate the tmux runner so the RPC request reaches
+	//    the agent before SilentDrop, then let the agent finish and write its
+	//    RpcResponse while dropped (hitting faultConn.Write). A blocking Write
+	//    delays the frame and delivers it on Restore; a blackhole Write that
+	//    discards bytes while dropped loses the response and times out.
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var enterOnce sync.Once
+	agent.Runner.SetBeforeRun(func(_ []string) {
+		enterOnce.Do(func() {
+			close(entered)
+			<-proceed
+		})
+	})
 
 	msgID := env.CreateMessage(t, store.MessageDispatchDispatched, "after-partition")
 	text := "after-partition"
@@ -1181,14 +1207,33 @@ func TestConduitHA_FaultHooks(t *testing.T) {
 		resp   agentcontrol.DeliverResponse
 		err    error
 	}
+	deliverCtx, deliverCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer deliverCancel()
 	done := make(chan deliverOut, 1)
 	go func() {
-		st, resp, err := broker.DeliverMessage(ctx, env.Agent.ID, req)
+		st, resp, err := broker.DeliverMessage(deliverCtx, env.Agent.ID, req)
 		done <- deliverOut{status: st, resp: resp, err: err}
 	}()
 
-	// Hold the partition briefly so the RPC request is stalled on the paused TCP
-	// connection, then heal well within the ping/RPC timeout.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliver RPC never reached the fake agent runner")
+	}
+
+	// Engage SilentDrop before the agent produces and writes its RpcResponse.
+	agent.SilentDrop()
+	close(proceed)
+	agent.Runner.SetBeforeRun(nil)
+
+	// Wait until the agent has completed the flush so its RpcResponse write
+	// hits faultConn.Write while dropped.
+	require.NoError(t, pollUntil(2*time.Second, func() error {
+		if agent.Runner.Flushes() < 1 {
+			return errors.New("waiting for agent runner flush during SilentDrop")
+		}
+		return nil
+	}))
 	select {
 	case out := <-done:
 		t.Fatalf("deliver completed while agent connection was silently dropped: %+v", out)
@@ -1201,9 +1246,10 @@ func TestConduitHA_FaultHooks(t *testing.T) {
 		require.NoError(t, out.err)
 		require.Equal(t, http.StatusOK, out.status)
 		assert.Equal(t, agentcontrol.OutcomeDelivered, out.resp.Outcome)
-	case <-time.After(10 * time.Second):
-		t.Fatal("deliver did not complete after agent.Restore()")
+	case <-time.After(4 * time.Second):
+		t.Fatal("deliver response did not arrive after agent.Restore()")
 	}
+	assert.Equal(t, 1, agent.Runner.Flushes(), "agent must execute exactly one flush")
 	assert.Equal(t, origSessionID, agent.SessionID(), "transient SilentDrop/Restore must preserve the same session")
 
 	// A follow-up RPC on the same session confirms no protocol desync.
