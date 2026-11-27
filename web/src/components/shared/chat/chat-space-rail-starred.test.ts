@@ -204,7 +204,11 @@ describe('space rail — Starred filter control', () => {
     el.addEventListener('rail-filter-change', (e: CustomEvent) => seen.push(e.detail.filter));
     starredPages = [{ items: [] }];
     button(el, 'Starred').click();
-    button(el, 'Unread').click();
+    const menu = el.shadowRoot.querySelector('[data-unread-filter-menu]') as HTMLElement;
+    const unreadItem = menu.querySelector('sl-menu-item[value="unread"]') as HTMLElement;
+    menu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item: unreadItem }, bubbles: true })
+    );
     button(el, 'All').click();
     await settle(el);
     expect(seen).toEqual(['starred', 'unread', 'all']);
@@ -519,7 +523,11 @@ describe('space rail — the filter follows the open center', () => {
 
   it('Unread and All keep working as before (regression)', async () => {
     const el = await mount();
-    button(el, 'Unread').click();
+    const menu = el.shadowRoot.querySelector('[data-unread-filter-menu]') as HTMLElement;
+    const unreadItem = menu.querySelector('sl-menu-item[value="unread"]') as HTMLElement;
+    menu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item: unreadItem }, bubbles: true })
+    );
     await settle(el);
     expect(el.spaceFilter).toBe('unread');
     expect(text(el)).toContain('All caught up!');

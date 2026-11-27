@@ -451,7 +451,7 @@ describe('space rail — sort menu and space menu rendering', () => {
     await el.updateComplete;
 
     const items = [
-      ...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item[type="checkbox"]'),
+      ...el.shadowRoot.querySelectorAll('[data-sort-menu] sl-menu-item[type="checkbox"]'),
     ];
     expect(items.map((i: any) => i.getAttribute('value'))).toEqual(['activity', 'alpha', 'custom']);
     const checked = items.filter((i: any) => i.hasAttribute('checked'));

@@ -598,6 +598,8 @@ export class ScionChatSpaceRail extends LitElement {
    * starred-conversations endpoint, never from the loaded rail).
    */
   @state() private spaceFilter: RailFilter = 'all';
+  /** Whether the Unread/Mentions dropdown menu is currently open. */
+  @state() private unreadMenuOpen = false;
   /** The Starred rail's rows and paging (active only under the Starred filter). */
   private readonly starred = new StarredRailController();
   /** Bumped by every Starred rail change, so the rail re-renders. */
@@ -746,6 +748,7 @@ export class ScionChatSpaceRail extends LitElement {
       height: 100%;
       overflow: hidden;
       background: var(--scion-surface, #ffffff);
+      position: relative;
       container-type: inline-size;
     }
 
@@ -1211,7 +1214,28 @@ export class ScionChatSpaceRail extends LitElement {
       display: inline-flex;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: calc(var(--scion-radius) * 0.75);
-      overflow: hidden;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .filter-toggle > button:first-child {
+      border-top-left-radius: var(--scion-radius-sm);
+      border-bottom-left-radius: var(--scion-radius-sm);
+    }
+
+    .filter-toggle > button:last-child {
+      border-top-right-radius: var(--scion-radius-sm);
+      border-bottom-right-radius: var(--scion-radius-sm);
+    }
+
+    .filter-toggle > .filter-dropdown {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .filter-toggle > .filter-dropdown::part(trigger) {
+      display: flex;
       flex: 1;
       min-width: 0;
     }
@@ -1236,64 +1260,32 @@ export class ScionChatSpaceRail extends LitElement {
       justify-content: center;
     }
 
+    .filter-toggle > .filter-dropdown button {
+      width: 100%;
+    }
+
     @container (max-width: 259px) {
       .rail-toolbar {
         padding: 0.375rem 0.5rem;
         gap: 0.25rem;
       }
 
+      .filter-toggle > .filter-dropdown,
       .filter-toggle button {
         flex: auto;
+      }
+
+      .filter-toggle button {
         padding: 0 0.25rem;
         font-size: var(--chat-fs-xs);
       }
 
-      .filter-toggle button sl-icon {
+      .filter-toggle button sl-icon:not(.filter-caret) {
         display: none;
       }
     }
 
-    .rail-subfilter {
-      display: flex;
-      align-items: center;
-      padding: 0.25rem 0.75rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .mentions-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      height: 1.5rem;
-      padding: 0 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius);
-      background: var(--scion-surface, #ffffff);
-      color: var(--scion-text-muted, #64748b);
-      font-size: var(--chat-fs-xs);
-      font-family: inherit;
-      font-weight: 500;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: all 150ms ease;
-    }
-
-    .mentions-chip:hover:not(.active) {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .mentions-chip.active {
-      background: var(--scion-primary, #3b82f6);
-      border-color: var(--scion-primary, #3b82f6);
-      color: var(--scion-primary-text, #ffffff);
-    }
-
-    .mentions-chip:focus-visible {
-      outline: 2px solid var(--scion-primary, #3b82f6);
-      outline-offset: 1px;
-    }
-
-    .filter-toggle button:not(:last-child) {
+    .filter-toggle > :not(:last-child) {
       border-right: 1px solid var(--scion-border, #e2e8f0);
     }
 
@@ -1308,6 +1300,17 @@ export class ScionChatSpaceRail extends LitElement {
 
     .filter-toggle button sl-icon {
       font-size: var(--chat-fs-sm);
+    }
+
+    .filter-toggle button .filter-caret {
+      font-size: var(--chat-fs-2xs);
+      margin-left: 0.0625rem;
+      flex-shrink: 0;
+      transition: transform 150ms ease;
+    }
+
+    .filter-toggle button[aria-expanded='true'] .filter-caret {
+      transform: rotate(180deg);
     }
 
     .filter-toggle button:focus-visible {
@@ -1461,10 +1464,8 @@ export class ScionChatSpaceRail extends LitElement {
         min-height: 44px;
       }
 
-      .mentions-chip {
-        font-size: 14px;
-        min-height: 36px;
-        padding: 0 0.75rem;
+      .filter-dropdown sl-menu-item::part(base) {
+        font-size: 16px;
       }
 
       .sort-btn::part(base) {
@@ -4478,33 +4479,79 @@ export class ScionChatSpaceRail extends LitElement {
     return this.spaceFilter === 'unread' || this.spaceFilter === 'mentions';
   }
 
+  private handleUnreadMenuShow = (e: Event): void => {
+    if (e.target !== e.currentTarget) return;
+    this.unreadMenuOpen = true;
+  };
+
+  private handleUnreadMenuHide = (e: Event): void => {
+    if (e.target !== e.currentTarget) return;
+    this.unreadMenuOpen = false;
+  };
+
+  private handleUnreadFilterSelect = (e: Event): void => {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const value = detail?.item?.getAttribute('value');
+    if (value === 'unread' || value === 'mentions') {
+      this.setSpaceFilter(value, true);
+    }
+  };
+
   /**
    * Render the filter + sort toolbar below the rail header. The sort menu
    * also holds Refresh spaces, the same refresh as a pull.
    */
   private renderToolbar() {
     const unreadActive = this.isUnreadMode();
+    const mentionsActive = this.spaceFilter === 'mentions';
     return html`
       <div class="rail-toolbar">
         <div class="filter-toggle" role="group" aria-label="Show conversations">
           <button
+            type="button"
             class=${this.spaceFilter === 'all' ? 'active' : ''}
             aria-pressed=${this.spaceFilter === 'all' ? 'true' : 'false'}
             @click=${() => this.setSpaceFilter('all', true)}
           >
             All
           </button>
-          <button
-            class=${unreadActive ? 'active' : ''}
-            aria-pressed=${unreadActive ? 'true' : 'false'}
-            @click=${() => {
-              if (!unreadActive) this.setSpaceFilter('unread', true);
-            }}
+          <sl-dropdown
+            class="filter-dropdown"
+            placement="bottom-start"
+            @sl-show=${this.handleUnreadMenuShow}
+            @sl-hide=${this.handleUnreadMenuHide}
           >
-            <sl-icon name="envelope" aria-hidden="true"></sl-icon>
-            Unread
-          </button>
+            <button
+              slot="trigger"
+              type="button"
+              class=${unreadActive ? 'active' : ''}
+              data-unread-dropdown-trigger
+              aria-pressed=${unreadActive ? 'true' : 'false'}
+              aria-haspopup="menu"
+              aria-expanded=${this.unreadMenuOpen ? 'true' : 'false'}
+            >
+              <span>${mentionsActive ? 'Mentions' : 'Unread'}</span>
+              <sl-icon name="chevron-down" class="filter-caret" aria-hidden="true"></sl-icon>
+            </button>
+            <sl-menu data-unread-filter-menu @sl-select=${this.handleUnreadFilterSelect}>
+              <sl-menu-item
+                type="checkbox"
+                value="unread"
+                ?checked=${this.spaceFilter === 'unread'}
+              >
+                Unread
+              </sl-menu-item>
+              <sl-menu-item
+                type="checkbox"
+                value="mentions"
+                ?checked=${this.spaceFilter === 'mentions'}
+              >
+                Mentions
+              </sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
           <button
+            type="button"
             class=${this.spaceFilter === 'starred' ? 'active' : ''}
             aria-pressed=${this.spaceFilter === 'starred' ? 'true' : 'false'}
             @click=${() => this.setSpaceFilter('starred', true)}
@@ -4520,7 +4567,7 @@ export class ScionChatSpaceRail extends LitElement {
             class="sort-btn"
             label="Sort"
           ></sl-icon-button>
-          <sl-menu @sl-select=${this.handleSortSelect}>
+          <sl-menu data-sort-menu @sl-select=${this.handleSortSelect}>
             <sl-menu-label>Sort</sl-menu-label>
             <sl-menu-item
               type="checkbox"
@@ -4551,25 +4598,6 @@ export class ScionChatSpaceRail extends LitElement {
           </sl-menu>
         </sl-dropdown>
       </div>
-      ${unreadActive
-        ? html`
-            <div class="rail-subfilter" data-rail-subfilter>
-              <button
-                type="button"
-                class="mentions-chip ${this.spaceFilter === 'mentions' ? 'active' : ''}"
-                aria-pressed=${this.spaceFilter === 'mentions' ? 'true' : 'false'}
-                data-mentions-chip
-                @click=${() =>
-                  this.setSpaceFilter(
-                    this.spaceFilter === 'mentions' ? 'unread' : 'mentions',
-                    true
-                  )}
-              >
-                @ Mentions only
-              </button>
-            </div>
-          `
-        : nothing}
     `;
   }
 
@@ -5153,7 +5181,7 @@ export class ScionChatSpaceRail extends LitElement {
           ${space.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
           <span class="space-name">${space.projectName}</span>
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
-            ${space.hasUnreadMention
+            ${this.spaceHasUnreadMention(space)
               ? html`<span class="mention-badge">@</span>`
               : space.unreadCount > 0
                 ? html`<span class="unread-badge">${space.unreadCount}</span>`
