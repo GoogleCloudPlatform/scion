@@ -282,6 +282,14 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src githu
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
+	// Bound the entire reimport (ref resolution, tree listing, and folder
+	// download/extraction) by a single total deadline.
+	if lim.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, lim.Timeout)
+		defer cancel()
+	}
+
 	cred := s.githubCredential(ctx, ghCredRequest{
 		Scope:   tmpl.Scope,
 		ScopeID: tmpl.ScopeID,

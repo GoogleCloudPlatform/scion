@@ -726,6 +726,73 @@ func TestExtractTarGz_SecurityAndIntegrity(t *testing.T) {
 			t.Fatalf("got files=%d skipped=%+v, want files=1 ExportIgnored=1", files, skipped)
 		}
 	})
+
+	t.Run("unsafe name and device outside sub-path are skipped; inside sub-path are rejected", func(t *testing.T) {
+		// Outside sub-path: odd filename with backslash and a FIFO outside "t"
+		// must not fail extraction of "t".
+		tarOutside := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/other/a\\b.txt", body: []byte("weird")},
+			{name: "repo-sha/other/dev", typeflag: tar.TypeFifo},
+			{name: "repo-sha/t/a.txt", body: content},
+		})
+		dir := t.TempDir()
+		root, _ := os.OpenRoot(dir)
+		files, _, _, err := extractTarGz(bytes.NewReader(tarOutside), "acme/repo", "t", sha, validTree, root, ImportHostedLimits())
+		_ = root.Close()
+		if err != nil {
+			t.Fatalf("unsafe entries outside sub-path should be skipped, got: %v", err)
+		}
+		if files != 1 {
+			t.Fatalf("got files=%d, want 1", files)
+		}
+
+		// Inside sub-path: backslash name must be rejected.
+		tarInsideName := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/t/a\\b.txt", body: []byte("bad")},
+		})
+		root2, _ := os.OpenRoot(t.TempDir())
+		_, _, _, err = extractTarGz(bytes.NewReader(tarInsideName), "acme/repo", "t", sha, nil, root2, ImportHostedLimits())
+		_ = root2.Close()
+		assertErrorKind(t, err, KindUnsupportedContent)
+
+		// Inside sub-path: traversal segment must be rejected.
+		tarInsideDotDot := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/t/../escape.txt", body: []byte("bad")},
+		})
+		root3, _ := os.OpenRoot(t.TempDir())
+		_, _, _, err = extractTarGz(bytes.NewReader(tarInsideDotDot), "acme/repo", "t", sha, nil, root3, ImportHostedLimits())
+		_ = root3.Close()
+		assertErrorKind(t, err, KindUnsupportedContent)
+	})
+
+	t.Run("MaxFiles counts regular files only, not directories", func(t *testing.T) {
+		// 1999 regular files spread across 20 directories (2019 total entries)
+		// must succeed under a 2000 MaxFiles cap.
+		entries := make([]tarTestEntry, 0, 2020)
+		for d := 0; d < 20; d++ {
+			entries = append(entries, tarTestEntry{
+				name:     fmt.Sprintf("repo-sha/t/dir-%02d/", d),
+				typeflag: tar.TypeDir,
+			})
+		}
+		for i := 0; i < 1999; i++ {
+			entries = append(entries, tarTestEntry{
+				name: fmt.Sprintf("repo-sha/t/dir-%02d/f-%04d.txt", i%20, i),
+				body: []byte("x"),
+			})
+		}
+		tarData := buildTestTarGz(t, sha, entries)
+		lim := ImportHostedLimits() // MaxFiles = 2000
+		root, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = root.Close() }()
+		files, _, _, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, nil, root, lim)
+		if err != nil {
+			t.Fatalf("1999 files across 20 dirs under MaxFiles=2000 failed: %v", err)
+		}
+		if files != 1999 {
+			t.Fatalf("files = %d, want 1999", files)
+		}
+	})
 }
 
 func TestListTree_TruncatedAndOversizedFailBeforeDownload(t *testing.T) {

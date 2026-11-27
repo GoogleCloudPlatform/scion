@@ -119,19 +119,21 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 			continue
 		}
 
-		// Devices and FIFOs are always refused.
-		switch hdr.Typeflag {
-		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
-			return 0, 0, skipped, &Error{Kind: KindUnsupportedContent, Repo: repo, Hint: "archive contains a device or FIFO entry"}
-		}
-
-		// Validate raw tar entry path before stripping the top-level directory.
+		// Decide whether the entry falls inside subPath on the raw tar name
+		// first, skipping out-of-scope entries so an unusual filename or
+		// device elsewhere in the repository does not abort a sub-path fetch.
 		rel, inSub, err := stripTarPath(hdr.Name, subPath, repo)
 		if err != nil {
 			return 0, 0, skipped, err
 		}
 		if !inSub {
 			continue
+		}
+
+		// Devices and FIFOs inside the fetched sub-path are always refused.
+		switch hdr.Typeflag {
+		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
+			return 0, 0, skipped, &Error{Kind: KindUnsupportedContent, Repo: repo, Hint: "archive contains a device or FIFO entry"}
 		}
 
 		if rel != "" && hasDotGitSegment(rel) {
@@ -163,11 +165,6 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 			return 0, 0, skipped, &Error{Kind: KindTooLarge, Repo: repo, Hint: "archive entry path exceeds MaxNameBytes"}
 		}
 
-		entries++
-		if l.MaxFiles > 0 && entries > l.MaxFiles {
-			return 0, 0, skipped, &Error{Kind: KindTooLarge, Repo: repo, Hint: "archive exceeds MaxFiles"}
-		}
-
 		if hdr.Typeflag == tar.TypeDir {
 			d, err := rootopen.MkdirAll(dst, rel, 0o755)
 			if err != nil {
@@ -175,6 +172,13 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 			}
 			_ = d.Close()
 			continue
+		}
+
+		// Regular file: count regular files only against MaxFiles to match
+		// git tree validation (directories are bounded by the tree response).
+		entries++
+		if l.MaxFiles > 0 && entries > l.MaxFiles {
+			return 0, 0, skipped, &Error{Kind: KindTooLarge, Repo: repo, Hint: "archive exceeds MaxFiles"}
 		}
 
 		// Regular file.
@@ -273,18 +277,33 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 	return len(actualBlobs), written, skipped, nil
 }
 
-// stripTarPath validates rawName (rejecting absolute paths, backslashes, NUL
-// bytes, "." and ".." segments, and empty interior segments), strips the
-// archive's single top-level directory, and returns the path relative to
-// subPath and whether the entry falls inside subPath.
+// stripTarPath decides whether rawName falls inside subPath on the raw entry
+// name first, skipping out-of-scope entries, and then validates in-scope
+// entries (rejecting absolute paths, backslashes, NUL bytes, "." and ".."
+// segments, and empty interior segments). It strips the archive's single
+// top-level directory and returns the path relative to subPath.
 func stripTarPath(rawName, subPath, repo string) (string, bool, error) {
+	trimmed := strings.TrimSuffix(rawName, "/")
+	if subPath != "" {
+		if rawName == "" || strings.HasPrefix(rawName, "/") || trimmed == "" {
+			return "", false, nil
+		}
+		segs := strings.Split(trimmed, "/")
+		subSegs := strings.Split(subPath, "/")
+		if len(segs) < 1+len(subSegs) || segs[0] == "" || segs[0] == "." || segs[0] == ".." {
+			return "", false, nil
+		}
+		if !segmentsMatchPrefix(segs[1:], subSegs) {
+			return "", false, nil
+		}
+	}
+
 	if rawName == "" || strings.ContainsAny(rawName, "\\\x00") {
 		return "", false, &Error{Kind: KindUnsupportedContent, Repo: repo, Hint: "unsafe archive entry path"}
 	}
 	if strings.HasPrefix(rawName, "/") {
 		return "", false, &Error{Kind: KindUnsupportedContent, Repo: repo, Hint: "archive contains absolute path"}
 	}
-	trimmed := strings.TrimSuffix(rawName, "/")
 	if trimmed == "" {
 		return "", false, &Error{Kind: KindUnsupportedContent, Repo: repo, Hint: "unsafe archive entry path"}
 	}
