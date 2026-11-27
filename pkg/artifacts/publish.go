@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"slices"
@@ -786,7 +787,7 @@ func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool
 
 // putBlob stores the spooled body at its content address (see storeBlob).
 func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType string) error {
-	return storeBlob(ctx, b, sp.digest, mediaType, func() (io.Reader, error) {
+	return storeBlob(ctx, b, sp.digest, mediaType, sp.size, func() (io.Reader, error) {
 		if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("rewind spool: %w", err)
 		}
@@ -798,15 +799,49 @@ func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType
 // can run publishes and sweeps on one simulated clock.
 var blobClock = time.Now
 
-// Blob write retries: a blob write is idempotent (the object always gets
-// the same bytes), so a failed write is retried, at most blobWriteAttempts
-// times in all and within blobWriteDeadline, with a growing pause; the
-// last error is returned. Variables so tests can shorten them.
+// Blob write retries and large-blob scaling: a blob write is idempotent (the
+// object always gets the same bytes), so a failed write is retried, at most
+// blobWriteAttempts times in all and within blobDeadline(size), with a
+// growing pause; the last error is returned. Blobs larger than
+// blobResumableThreshold clear UploadOptions.Idempotent so GCS uses its
+// chunked resumable writer instead of a single non-resumable PUT. Variables
+// so tests can shorten them.
 var (
-	blobWriteAttempts = 5
-	blobWriteDeadline = 60 * time.Second
-	blobWriteBackoff  = 200 * time.Millisecond
+	blobWriteAttempts      = 5
+	blobWriteDeadline      = 60 * time.Second
+	blobWriteMaxDeadline   = 30 * time.Minute
+	blobWriteBytesPerSec   = int64(1 << 20) // 1 MiB/s conservative floor
+	blobWriteBackoff       = 200 * time.Millisecond
+	blobResumableThreshold = int64(32 << 20) // 32 MiB
 )
+
+// blobDeadline returns the write deadline for a blob of size bytes: at least
+// blobWriteDeadline, scaled linearly at blobWriteBytesPerSec, and capped at
+// blobWriteMaxDeadline (well below MinGCGrace so the pre-upload touch keeps
+// the blob sweep off the object for the entire write).
+func blobDeadline(size int64) time.Duration {
+	d := blobWriteDeadline
+	if size > 0 && blobWriteBytesPerSec > 0 {
+		maxExtra := time.Duration(math.MaxInt64) - d
+		if blobWriteMaxDeadline > d {
+			maxExtra = blobWriteMaxDeadline - d
+		} else if blobWriteMaxDeadline > 0 {
+			return d
+		}
+		secs := size / blobWriteBytesPerSec
+		rem := size % blobWriteBytesPerSec
+		if secs > int64(maxExtra/time.Second) {
+			d += maxExtra
+		} else {
+			extra := time.Duration(secs)*time.Second + time.Duration(rem)*time.Second/time.Duration(blobWriteBytesPerSec)
+			if extra > maxExtra {
+				extra = maxExtra
+			}
+			d += extra
+		}
+	}
+	return d
+}
 
 // storeBlob stores the bytes open yields at digest's content address. It
 // is the only way bytes are written. It touches the blob first (waiting
@@ -816,12 +851,21 @@ var (
 // there, so a delete the sweep issued earlier (which names the generation
 // it saw) can never remove the bytes this write stores. There is still
 // one object per digest. open is called again for each attempt.
-func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
+//
+// Blobs up to blobResumableThreshold are uploaded with Idempotent: true
+// (a single non-resumable PUT on GCS); larger blobs leave Idempotent false
+// so GCS uses its resumable chunked writer, while still overwriting any
+// existing object and keeping the touch-before-upload sweep protocol intact.
+func storeBlob(ctx context.Context, b backend, digest, mediaType string, size int64, open func() (io.Reader, error)) error {
 	if err := b.store.TouchBlob(ctx, digest, blobClock()); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, blobWriteDeadline)
+	ctx, cancel := context.WithTimeout(ctx, blobDeadline(size))
 	defer cancel()
+	opts := storage.UploadOptions{
+		ContentType: mediaType,
+		Idempotent:  size <= blobResumableThreshold,
+	}
 	pause := blobWriteBackoff
 	var err error
 	for attempt := 1; attempt <= blobWriteAttempts; attempt++ {
@@ -837,7 +881,7 @@ func storeBlob(ctx context.Context, b backend, digest, mediaType string, open fu
 		if body, err = open(); err != nil {
 			return err
 		}
-		if _, err = b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType, Idempotent: true}); err == nil {
+		if _, err = b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, opts); err == nil {
 			return nil
 		}
 	}
