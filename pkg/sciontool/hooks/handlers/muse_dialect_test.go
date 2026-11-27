@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1673,5 +1674,410 @@ func TestMuseVersionProbeWaitDelayPreservesOutputAndKillsGrandchild(t *testing.T
 	}
 	if !waitForProcessDead(pid, 300*time.Millisecond) {
 		t.Fatalf("grandchild pid %d survived WaitDelay expiry (post-wait process-group SIGKILL failed)", pid)
+	}
+}
+
+func makeMuseModelEndEvent(sessionID, turnID string, input, output int64) *hooks.Event {
+	return &hooks.Event{
+		Name:    hooks.EventModelEnd,
+		Dialect: "muse-code",
+		Data: hooks.EventData{
+			SessionID:    sessionID,
+			InputTokens:  input,
+			OutputTokens: output,
+			TokenPresence: hooks.TokenPresence{
+				Input:  true,
+				Output: true,
+			},
+			Raw: map[string]interface{}{"turn_id": turnID},
+		},
+	}
+}
+
+// TestMuseTurnUsage_HeldLockReturnsWithinBound verifies that when another
+// process/fd holds the sibling flock indefinitely, normalizeMuseTurnUsage
+// returns within the bounded wait instead of hanging, leaves the state file
+// untouched, fails closed on the skipped step's tokens, and recovers the
+// skipped step's cumulative tokens on the next step once the lock is released.
+func TestMuseTurnUsage_HeldLockReturnsWithinBound(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "muse-turn-usage.json")
+	lockPath := statePath + ".lock"
+
+	// Step 0 succeeds and seeds the state file (high-water mark: in=600, out=100).
+	h0 := &TelemetryHandler{
+		MuseTurnUsageStatePath: statePath,
+		museVersionProbe:       func(context.Context) string { return "1.4.25" },
+	}
+	ev0 := h0.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", 600, 100))
+	if ev0.Data.InputTokens != 600 || ev0.Data.OutputTokens != 100 {
+		t.Fatalf("step 0 delta = (%d, %d), want (600, 100)", ev0.Data.InputTokens, ev0.Data.OutputTokens)
+	}
+	beforeState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+
+	// Hold an exclusive flock on a separate fd and never release it during step 1.
+	held, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX); err != nil {
+		_ = held.Close()
+		t.Fatal(err)
+	}
+	released := false
+	releaseHeld := func() {
+		if !released {
+			released = true
+			_ = unix.Flock(int(held.Fd()), unix.LOCK_UN)
+			_ = held.Close()
+		}
+	}
+	t.Cleanup(releaseHeld)
+
+	// Step 1 arrives while the lock is held forever; must return within bound.
+	done := make(chan *hooks.Event, 1)
+	start := time.Now()
+	go func() {
+		h1 := &TelemetryHandler{
+			MuseTurnUsageStatePath: statePath,
+			museVersionProbe:       func(context.Context) string { return "1.4.25" },
+		}
+		done <- h1.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", 1200, 250))
+	}()
+
+	var ev1 *hooks.Event
+	select {
+	case ev1 = <-done:
+	case <-time.After(3 * time.Second):
+		releaseHeld()
+		<-done
+		t.Fatal("normalizeMuseTurnUsage blocked past 3s with held flock")
+	}
+	elapsed := time.Since(start)
+	if elapsed > 2500*time.Millisecond {
+		t.Errorf("held-lock wait = %v, want <= 2.5s", elapsed)
+	}
+	if ev1.Data.HasInputTokens() || ev1.Data.HasOutputTokens() || ev1.Data.InputTokens != 0 || ev1.Data.OutputTokens != 0 {
+		t.Errorf("skipped step must fail closed with cleared tokens, got in=%d (has=%v) out=%d (has=%v)",
+			ev1.Data.InputTokens, ev1.Data.HasInputTokens(), ev1.Data.OutputTokens, ev1.Data.HasOutputTokens())
+	}
+	afterState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state after skip: %v", err)
+	}
+	if string(afterState) != string(beforeState) {
+		t.Fatalf("state file modified while lock was held:\nbefore: %s\nafter:  %s", beforeState, afterState)
+	}
+
+	// Release lock: step 2 (cumulative 1900/400) must recover step 1 + step 2 delta (1300/300).
+	releaseHeld()
+	h2 := &TelemetryHandler{
+		MuseTurnUsageStatePath: statePath,
+		museVersionProbe:       func(context.Context) string { return "1.4.25" },
+	}
+	ev2 := h2.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", 1900, 400))
+	if ev2.Data.InputTokens != 1300 || ev2.Data.OutputTokens != 300 {
+		t.Fatalf("recovered step 2 delta = (%d, %d), want (1300, 300)", ev2.Data.InputTokens, ev2.Data.OutputTokens)
+	}
+}
+
+// TestMuseTurnUsage_ConcurrentUpdatesBothLand verifies that concurrent hook
+// handlers updating distinct turns when the lock is free both persist their
+// high-water marks without lost updates or state corruption.
+func TestMuseTurnUsage_ConcurrentUpdatesBothLand(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), ".scion", "muse-turn-usage.json")
+	const workers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			key := fmt.Sprintf("sess:turn-%d", idx)
+			d0, err := applyMuseTurnUsageFile(statePath, key, museTurnUsageTotals{Input: 100, Output: 20})
+			if err != nil {
+				errs <- fmt.Errorf("worker %d step 0: %w", idx, err)
+				return
+			}
+			if d0.Input != 100 || d0.Output != 20 {
+				errs <- fmt.Errorf("worker %d step 0 delta = %+v, want (100,20)", idx, d0)
+				return
+			}
+			d1, err := applyMuseTurnUsageFile(statePath, key, museTurnUsageTotals{Input: 250, Output: 55})
+			if err != nil {
+				errs <- fmt.Errorf("worker %d step 1: %w", idx, err)
+				return
+			}
+			if d1.Input != 150 || d1.Output != 35 {
+				errs <- fmt.Errorf("worker %d step 1 delta = %+v, want (150,35)", idx, d1)
+				return
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read final state: %v", err)
+	}
+	var st museTurnUsageState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal final state: %v", err)
+	}
+	for i := 0; i < workers; i++ {
+		key := fmt.Sprintf("sess:turn-%d", i)
+		got, ok := st.Turns[key]
+		if !ok || got.Input != 250 || got.Output != 55 {
+			t.Errorf("state[%q] = (%+v, %v), want (250, 55, true)", key, got, ok)
+		}
+	}
+}
+
+// TestMuseTurnUsage_SymlinkedStateAndLockRefused verifies that symlinked state
+// files (live or dangling) and symlinked lock files are refused without
+// touching the symlink target.
+func TestMuseTurnUsage_SymlinkedStateAndLockRefused(t *testing.T) {
+	t.Run("live symlink at state path", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(base, "victim.txt")
+		const sentinel = "sentinel-state-target"
+		if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(base, ".scion")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		statePath := filepath.Join(dir, "muse-turn-usage.json")
+		if err := os.Symlink(target, statePath); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := applyMuseTurnUsageFile(statePath, "s:t", museTurnUsageTotals{Input: 100}); !errors.Is(err, privatefs.ErrReparsePoint) {
+			t.Fatalf("applyMuseTurnUsageFile(live symlink) err = %v, want ErrReparsePoint", err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != sentinel {
+			t.Fatalf("victim file altered: got=%q err=%v", string(got), err)
+		}
+	})
+
+	t.Run("dangling symlink at state path", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(base, "nonexistent-victim.txt")
+		dir := filepath.Join(base, ".scion")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		statePath := filepath.Join(dir, "muse-turn-usage.json")
+		if err := os.Symlink(target, statePath); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := applyMuseTurnUsageFile(statePath, "s:t", museTurnUsageTotals{Input: 100}); !errors.Is(err, privatefs.ErrReparsePoint) {
+			t.Fatalf("applyMuseTurnUsageFile(dangling symlink) err = %v, want ErrReparsePoint", err)
+		}
+		if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("dangling symlink target was created: err=%v", err)
+		}
+		if fi, err := os.Lstat(statePath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("dangling symlink was replaced: fi=%v err=%v", fi, err)
+		}
+	})
+
+	t.Run("symlink at lock path", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(base, "victim-lock.txt")
+		const sentinel = "sentinel-lock-target"
+		if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(base, ".scion")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		statePath := filepath.Join(dir, "muse-turn-usage.json")
+		if err := os.Symlink(target, statePath+".lock"); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := applyMuseTurnUsageFile(statePath, "s:t", museTurnUsageTotals{Input: 100}); !errors.Is(err, privatefs.ErrReparsePoint) {
+			t.Fatalf("applyMuseTurnUsageFile(symlink lock) err = %v, want ErrReparsePoint", err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != sentinel {
+			t.Fatalf("lock symlink target altered: got=%q err=%v", string(got), err)
+		}
+	})
+}
+
+// TestMuseTurnUsage_SkipPathLogsOncePerProcess verifies that repeated lock
+// timeouts in the same process leave the state file unchanged, never panic,
+// fail closed on tokens, and log a warning only once per process (re-arming
+// after a successful update).
+func TestMuseTurnUsage_SkipPathLogsOncePerProcess(t *testing.T) {
+	cap := &museCaptureSlogHandler{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(cap))
+	defer slog.SetDefault(prevLogger)
+
+	prevWait := museTurnUsageLockWait
+	museTurnUsageLockWait = 40 * time.Millisecond
+	defer func() { museTurnUsageLockWait = prevWait }()
+
+	dir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "muse-turn-usage.json")
+	defer resetMuseTurnUsageWarned(statePath)
+
+	// Seed initial state (step 0 = 500).
+	h0 := &TelemetryHandler{
+		MuseTurnUsageStatePath: statePath,
+		museVersionProbe:       func(context.Context) string { return "1.4.25" },
+	}
+	ev0 := h0.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", 500, 50))
+	if ev0.Data.InputTokens != 500 {
+		t.Fatalf("step 0 input = %d, want 500", ev0.Data.InputTokens)
+	}
+	initialBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold lock across 5 consecutive hook invocations.
+	held, err := os.OpenFile(statePath+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX); err != nil {
+		_ = held.Close()
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			_ = unix.Flock(int(held.Fd()), unix.LOCK_UN)
+			_ = held.Close()
+		}
+	}
+	t.Cleanup(release)
+
+	for i := 1; i <= 5; i++ {
+		h := &TelemetryHandler{
+			MuseTurnUsageStatePath: statePath,
+			museVersionProbe:       func(context.Context) string { return "1.4.25" },
+		}
+		ev := h.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", int64(500+i*100), int64(50+i*10)))
+		if ev.Data.HasInputTokens() || ev.Data.HasOutputTokens() || ev.Data.InputTokens != 0 || ev.Data.OutputTokens != 0 {
+			t.Fatalf("call %d with held lock did not fail closed: in=%d out=%d", i, ev.Data.InputTokens, ev.Data.OutputTokens)
+		}
+	}
+
+	if warns := cap.warnings(); len(warns) != 1 {
+		t.Fatalf("warnings across 5 skipped calls = %d, want 1 (%+v)", len(warns), warns)
+	}
+	afterBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterBytes) != string(initialBytes) {
+		t.Fatalf("state file changed during skipped calls:\nbefore: %s\nafter:  %s", initialBytes, afterBytes)
+	}
+
+	// Release lock: next step recovers cumulative delta and re-arms warning.
+	release()
+	hOk := &TelemetryHandler{
+		MuseTurnUsageStatePath: statePath,
+		museVersionProbe:       func(context.Context) string { return "1.4.25" },
+	}
+	evOk := hOk.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", 1200, 120))
+	if evOk.Data.InputTokens != 700 || evOk.Data.OutputTokens != 70 {
+		t.Fatalf("post-recovery delta = (%d, %d), want (700, 70)", evOk.Data.InputTokens, evOk.Data.OutputTokens)
+	}
+
+	// Re-acquire lock: warning must be re-armed so a subsequent failure burst
+	// logs exactly one new warning (total 2), still deduped within the burst.
+	held2, err := os.OpenFile(statePath+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(held2.Fd()), unix.LOCK_EX); err != nil {
+		_ = held2.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Flock(int(held2.Fd()), unix.LOCK_UN)
+		_ = held2.Close()
+	})
+
+	for i := 1; i <= 2; i++ {
+		h := &TelemetryHandler{
+			MuseTurnUsageStatePath: statePath,
+			museVersionProbe:       func(context.Context) string { return "1.4.25" },
+		}
+		ev := h.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", int64(1200+i*100), int64(120+i*10)))
+		if ev.Data.HasInputTokens() || ev.Data.HasOutputTokens() || ev.Data.InputTokens != 0 || ev.Data.OutputTokens != 0 {
+			t.Fatalf("post-recovery held-lock call %d did not fail closed: in=%d out=%d", i, ev.Data.InputTokens, ev.Data.OutputTokens)
+		}
+	}
+	if warns := cap.warnings(); len(warns) != 2 {
+		t.Fatalf("warnings after re-arm and second held-lock burst = %d, want 2 (%+v)", len(warns), warns)
+	}
+}
+
+// TestMuseTurnUsage_RetryCapStopsBeforeTimeout verifies that the retry cap
+// bounds attempts even when the time budget is large.
+func TestMuseTurnUsage_RetryCapStopsBeforeTimeout(t *testing.T) {
+	prevWait := museTurnUsageLockWait
+	prevCap := museTurnUsageLockRetryCap
+	museTurnUsageLockWait = 10 * time.Second
+	museTurnUsageLockRetryCap = 3
+	defer func() {
+		museTurnUsageLockWait = prevWait
+		museTurnUsageLockRetryCap = prevCap
+	}()
+
+	dir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "muse-turn-usage.json")
+	held, err := os.OpenFile(statePath+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = unix.Flock(int(held.Fd()), unix.LOCK_UN)
+		_ = held.Close()
+	}()
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err = applyMuseTurnUsageFile(statePath, "s:t", museTurnUsageTotals{Input: 100})
+	elapsed := time.Since(start)
+	if !errors.Is(err, errMuseTurnUsageLocked) {
+		t.Fatalf("err = %v, want errMuseTurnUsageLocked", err)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("retry cap=3 took %v (with 10s wait), expected < 500ms", elapsed)
 	}
 }
