@@ -43,24 +43,14 @@ type notifyTestDispatcher struct {
 	failIDs map[string]error
 }
 
-func (d *notifyTestDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool) error {
+func (d *notifyTestDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	d.mu.Lock()
 	err := d.failIDs[agent.ID]
 	d.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	return d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt)
-}
-
-func (d *notifyTestDispatcher) DispatchAgentStructuredMessage(ctx context.Context, agent *store.Agent, msg *messages.StructuredMessage, interrupt bool) error {
-	d.mu.Lock()
-	err := d.failIDs[agent.ID]
-	d.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return d.recordingDispatcher.DispatchAgentStructuredMessage(ctx, agent, msg, interrupt)
+	return d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
 }
 
 func TestTriggerNotify_AuthoringValidationAndRevisionBump(t *testing.T) {
@@ -239,9 +229,9 @@ func TestTriggerNotify_EndToEndCooldownUserAndAgentSinks(t *testing.T) {
 
 	calls := disp.getCalls()
 	require.Len(t, calls, 1, "expected exactly 1 agent notification message")
-	assert.Equal(t, f.agentA.ID, calls[0].agentID)
-	assert.NotContains(t, calls[0].message, payloadSentinel, "agent notification message must never contain payload text")
-	env := extractEnvelopeJSONFromDelivery(t, calls[0].message)
+	assert.Equal(t, f.agentA.ID, calls[0].Agent.ID)
+	assert.NotContains(t, calls[0].Message, payloadSentinel, "agent notification message must never contain payload text")
+	env := extractEnvelopeJSONFromDelivery(t, calls[0].Message)
 	assert.Equal(t, FireNotifyEventType, env.Event.EventType)
 	assert.Nil(t, env.Event.External, "synthetic trigger.fire_failed event must have no external_payload")
 	assert.Equal(t, trResp.ID, env.Event.Attributes["trigger"])
@@ -330,7 +320,7 @@ func TestTriggerNotify_AgentCreatorDelegatingUserNoRecursionAndNoWake(t *testing
 		InitiatorAttribution: store.InitiatorAttribution{
 			InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
 			InitiatorPrincipalID:    f.agentA.ID,
-			InitiatorCredentialKind: store.InitiatorCredentialKindAgentToken,
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
 			AttributionVersion:      1,
 			AuthorizationRevision:   1,
 		},
@@ -473,7 +463,7 @@ func TestTriggerNotify_ExpiredProjectCapAndMultiAction(t *testing.T) {
 	require.Len(t, notifs, 1, "multi-action trigger with 1 failing action must produce 1 user notice")
 	var notifyAgentMsgs int
 	for _, c := range disp.getCalls() {
-		if c.agentID == f.agentA.ID {
+		if c.Agent.ID == f.agentA.ID {
 			notifyAgentMsgs++
 		}
 	}
