@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -60,10 +61,13 @@ func exactSizeJSON(t *testing.T, prefix, suffix string, targetBytes int) []byte 
 	t.Helper()
 	padLen := targetBytes - len(prefix) - len(suffix)
 	require.GreaterOrEqual(t, padLen, 0, "prefix+suffix exceeds targetBytes")
-	out := make([]byte, 0, targetBytes)
-	out = append(out, prefix...)
-	out = append(out, bytes.Repeat([]byte("a"), padLen)...)
-	out = append(out, suffix...)
+	out := make([]byte, targetBytes)
+	copy(out, prefix)
+	padding := out[len(prefix) : targetBytes-len(suffix)]
+	for i := range padding {
+		padding[i] = 'a'
+	}
+	copy(out[targetBytes-len(suffix):], suffix)
 	require.Equal(t, targetBytes, len(out))
 	return out
 }
@@ -170,11 +174,13 @@ func buildManifestCreateRequestBytes(t *testing.T, projectID, name string, targe
 		count -= 2
 	}
 	require.Greater(t, count, 0)
+	require.Less(t, count, 1_000_000, "manifest entry count must fit 6-digit zero-padded path width")
 
 	files := make([]transfer.FileInfo, count)
 	for i := range files {
 		files[i] = transfer.FileInfo{
-			Path: fmt.Sprintf("node_modules/@scope/pkg-%06d/dist/cjs/index.js", i),
+			// 6-digit zero-padded index matching sample's fixed entry width.
+			Path: "node_modules/@scope/pkg-" + strconv.Itoa(1_000_000 + i)[1:] + "/dist/cjs/index.js",
 			Size: 12345,
 			Hash: hash,
 			Mode: "0644",
