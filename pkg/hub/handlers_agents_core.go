@@ -4996,12 +4996,19 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// Agents may never modify agent labels (ptone/scion#9521). Check explicitly
 	// before general authorization when the caller is an agent principal and
 	// the request includes a labels field, without altering non-label behavior.
+	// Bound the pre-auth read with http.MaxBytesReader so an agent caller cannot
+	// force unbounded buffering before authorization runs.
 	var preReadBody []byte
 	var bodyPreRead bool
 	if isAgentDerivedCaller(ctx) && r.Body != nil {
 		var err error
-		preReadBody, err = io.ReadAll(r.Body)
+		preReadBody, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxSettingsBodySize))
 		if err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					"request body exceeds maximum size", nil)
+				return
+			}
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
 		}

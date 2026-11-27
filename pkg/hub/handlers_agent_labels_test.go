@@ -839,3 +839,74 @@ func TestPatchAgentLabels_ConcurrentSameKeyMerge(t *testing.T) {
 	assert.True(t, expected[got.Labels["shared"]], "final shared label %q must be one of the concurrent values", got.Labels["shared"])
 	assert.Equal(t, "dev", got.Labels["env"], "unrelated labels must remain intact")
 }
+
+func TestPatchAgentLabels_PatchNoopNoAudit(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+
+	t.Run("PATCH resending identical labels writes zero audit records", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.agent.ID, map[string]any{
+			"labels": map[string]string{"env": "dev", "team": "core"},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+		assert.Empty(t, f.labelAudits(t, f.agent.ID), "no-op PATCH resending identical labels must write zero audit records")
+	})
+
+	t.Run("PATCH resending identical labels with another field change writes zero label audit records", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.agent.ID, map[string]any{
+			"labels":      map[string]string{"env": "dev", "team": "core"},
+			"taskSummary": "updated without changing labels",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+		assert.Equal(t, "updated without changing labels", got.TaskSummary)
+		assert.Empty(t, f.labelAudits(t, f.agent.ID), "no-op labels alongside another field update must write zero label audit records")
+	})
+}
+
+func TestPatchAgentLabels_PatchAgentPreReadBodyLimit(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+
+	t.Run("agent caller oversized PATCH body is rejected with 413 before authz", func(t *testing.T) {
+		agentToken := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.project.ID, []AgentTokenScope{
+			ScopeAgentStatusUpdate,
+			ScopeAgentLifecycle,
+		}, nil)
+
+		oversized := `{"labels":{"env":"hacked"},"pad":"` + strings.Repeat("a", maxSettingsBodySize+1024) + `"}`
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID, bytes.NewReader([]byte(oversized)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+agentToken)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "payload_too_large")
+
+		got, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+		assert.Empty(t, f.labelAudits(t, f.agent.ID))
+	})
+
+	t.Run("normal caller oversized PATCH body keeps existing behavior unchanged", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.agent.ID, map[string]any{
+			"labels":      map[string]string{"env": "prod", "team": "core"},
+			"annotations": map[string]string{"pad": strings.Repeat("a", maxSettingsBodySize+1024)},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"env": "prod", "team": "core"}, got.Labels)
+		assert.Len(t, f.labelAudits(t, f.agent.ID), 1)
+	})
+}
