@@ -23,14 +23,19 @@ import (
 
 const emptyGenericCommandStatus = http.StatusBadRequest
 
-func emptyGenericCommandFrom(err error) bool {
-	return errors.Is(err, harness.ErrEmptyGenericCommand)
+func genericCommandErrorFrom(err error) (string, bool) {
+	switch {
+	case errors.Is(err, harness.ErrEmptyGenericCommand):
+		return harness.ErrEmptyGenericCommand.Error(), true
+	case errors.Is(err, harness.ErrGenericShellResumeUnsupported):
+		return harness.ErrGenericShellResumeUnsupported.Error(), true
+	case errors.Is(err, harness.ErrGenericShellCommandMissingScript):
+		return harness.ErrGenericShellCommandMissingScript.Error(), true
+	default:
+		return "", false
+	}
 }
 
-func emptyGenericCommandMessage() string {
-	return harness.ErrEmptyGenericCommand.Error()
-}
-
-func writeEmptyGenericCommandRefused(w http.ResponseWriter, op string, details map[string]interface{}) {
-	ValidationError(w, failedOpText(op)+": "+emptyGenericCommandMessage(), details)
+func writeGenericCommandRefused(w http.ResponseWriter, op, msg string, details map[string]interface{}) {
+	ValidationError(w, failedOpText(op)+": "+msg, details)
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,6 +31,17 @@ import (
 // produce an empty command because neither a task, harness args, nor
 // command_args were provided.
 var ErrEmptyGenericCommand = errors.New("generic harness needs a task, harness args or command_args")
+
+// ErrGenericShellResumeUnsupported is returned when resuming a generic harness
+// configured with a shell-form command (e.g. "sh -c") without an explicit task,
+// which would otherwise invoke the shell with no command string and exit 2.
+var ErrGenericShellResumeUnsupported = errors.New("generic harness with shell-form command (sh -c) does not support resume without a task; start the agent fresh or pass a task explicitly")
+
+// ErrGenericShellCommandMissingScript is returned when starting a generic
+// harness configured with a shell-form command (e.g. "sh -c") and no command
+// string, which would otherwise invoke the shell with no script argument and
+// exit 2.
+var ErrGenericShellCommandMissingScript = errors.New("generic harness with shell-form command (sh -c) requires a task or command string")
 
 type commandValidator interface {
 	validateCommand(task string, resume bool, baseArgs []string) error
@@ -73,11 +85,67 @@ func HonoursSettingsArgs(harnessName string) bool {
 	return config.HarnessHonoursSettingsArgs(harnessName)
 }
 
-// ValidateCommand checks that h produces a non-empty command for the given
-// start inputs. The built-in generic harness has no executable of its own, so
-// an empty command is rejected with ErrEmptyGenericCommand; custom/on-disk
-// harness configs and other harnesses are unaffected here (the runtime still
-// guards against any empty command line as defense in depth).
+// shellCommandMissingScript reports whether argv invokes a POSIX-style shell
+// with a -c option (including combined short flags such as -lc or -ec) and no
+// command string operand, which always exits with status 2 at runtime.
+func shellCommandMissingScript(argv []string) bool {
+	if !isShellCommandBase(argv) {
+		return false
+	}
+	hasC := false
+	i := 1
+	for i < len(argv) {
+		arg := argv[i]
+		if arg == "--" {
+			i++
+			break
+		}
+		if arg == "-o" || arg == "+o" {
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			i++
+			continue
+		}
+		if len(arg) > 1 && arg[0] == '-' {
+			if strings.ContainsRune(arg[1:], 'c') {
+				hasC = true
+			}
+			i++
+			continue
+		}
+		if len(arg) > 1 && arg[0] == '+' {
+			i++
+			continue
+		}
+		break
+	}
+	return hasC && i >= len(argv)
+}
+
+func validateGenericCommand(builtin bool, cmd []string, resume bool) error {
+	if builtin && len(cmd) == 0 {
+		return ErrEmptyGenericCommand
+	}
+	if shellCommandMissingScript(cmd) {
+		if resume {
+			return ErrGenericShellResumeUnsupported
+		}
+		return ErrGenericShellCommandMissingScript
+	}
+	return nil
+}
+
+// ValidateCommand checks that h produces a valid command for the given start
+// inputs. The built-in generic harness has no executable of its own, so an
+// empty command is rejected with ErrEmptyGenericCommand; generic and
+// declarative-generic harnesses whose command is a bare POSIX shell -c
+// invocation with no command string are rejected with
+// ErrGenericShellResumeUnsupported (on resume) or
+// ErrGenericShellCommandMissingScript (on fresh start). Other harnesses are
+// unaffected here (the runtime still guards against any empty command line as
+// defense in depth).
 func ValidateCommand(h api.Harness, task string, resume bool, baseArgs []string) error {
 	if v, ok := h.(commandValidator); ok {
 		return v.validateCommand(task, resume, baseArgs)
@@ -89,11 +157,11 @@ func ValidateCommand(h api.Harness, task string, resume bool, baseArgs []string)
 // build from, without constructing a container-script harness (for preflight
 // admission checks that hold only an EffectiveConfig entry and its source).
 func ValidateEntryCommand(source config.HarnessConfigSource, entry config.HarnessConfigEntry, task string, resume bool, baseArgs []string) error {
-	if source != config.HarnessConfigSourceBuiltin || entry.Provisioner != nil || entry.Harness == config.ShellHarnessConfigName {
+	if entry.Provisioner != nil || entry.Harness == config.ShellHarnessConfigName {
 		return nil
 	}
 	d := NewDeclarativeGenericHarness(entry)
-	d.builtin = true
+	d.builtin = source == config.HarnessConfigSourceBuiltin
 	return d.validateCommand(task, resume, baseArgs)
 }
 
@@ -156,13 +224,7 @@ func (g *Generic) GetCommand(task string, resume bool, baseArgs []string) []stri
 }
 
 func (g *Generic) validateCommand(task string, resume bool, baseArgs []string) error {
-	if !g.builtin {
-		return nil
-	}
-	if len(g.GetCommand(task, resume, baseArgs)) == 0 {
-		return ErrEmptyGenericCommand
-	}
-	return nil
+	return validateGenericCommand(g.builtin, g.GetCommand(task, resume, baseArgs), resume)
 }
 
 func (g *Generic) DefaultConfigDir() string {
