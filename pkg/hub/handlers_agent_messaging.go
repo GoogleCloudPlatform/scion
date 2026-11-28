@@ -641,6 +641,10 @@ func (s *Server) resolveOutboundRouting(
 				return nil, fmt.Errorf("group post refused: %s", decision.Reason)
 			}
 
+			if err := s.checkGroupThreadIDNotDMKey(w, conv.ID, req.ThreadID); err != nil {
+				return nil, err
+			}
+
 			// Auto-register sender as participant (listing concern, non-fatal)
 			// when its message mode allows joining by posting.
 			if authKind, authID := authenticatedSender(ctx); authID != "" && decision.MayJoin {
@@ -695,8 +699,13 @@ func (s *Server) resolveOutboundRouting(
 			// The sender's message mode is checked before the thread
 			// conversation is resolved, so a refused post writes no row
 			// (group_message_mode.go).
-			if kind == "group" && !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
-				return nil, fmt.Errorf("group post refused by message mode")
+			if kind == "group" {
+				if err := s.checkGroupThreadIDNotDMKey(w, "", req.ThreadID); err != nil {
+					return nil, err
+				}
+				if !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
+					return nil, fmt.Errorf("group post refused by message mode")
+				}
 			}
 			var keyOpts []messaging.ConversationByKeyOption
 			s.mu.RLock()
@@ -1199,6 +1208,21 @@ func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversa
 		return fmt.Errorf("thread_id does not match DM key")
 	}
 	return nil
+}
+
+// checkGroupThreadIDNotDMKey rejects a dm:-prefixed thread_id when routing to
+// a group conversation. A caller-supplied dm: thread_id is only valid for a
+// matching direct conversation, so rejecting it here ensures plain messages,
+// decisions, secret requests, and command requests all enforce the same rule.
+func (s *Server) checkGroupThreadIDNotDMKey(w http.ResponseWriter, conversationID, threadID string) error {
+	if !strings.HasPrefix(strings.TrimSpace(threadID), "dm:") {
+		return nil
+	}
+	s.messageLog.Warn("supplied dm: thread_id cannot be used with a group conversation",
+		"thread_id", threadID, "conversation_id", conversationID)
+	ValidationError(w, "a dm: thread_id cannot be used with a non-DM conversation",
+		map[string]interface{}{"field": "thread_id"})
+	return fmt.Errorf("dm: thread_id cannot be used with a group conversation")
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
