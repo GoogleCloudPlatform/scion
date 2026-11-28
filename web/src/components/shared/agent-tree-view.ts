@@ -813,10 +813,17 @@ export class ScionAgentTreeView extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.showUsers = localStorage.getItem('scion-graph-show-users') === 'true';
+    // Register listeners before reading optional storage so a restricted-storage
+    // environment (sandboxed iframe, strict privacy mode) can never disable
+    // pan/zoom or keyboard controls.
     // Wheel needs passive:false so we can preventDefault (prevent page zoom/scroll).
     this.addEventListener('wheel', this.boundOnWheel, { passive: false });
     window.addEventListener('keydown', this.boundOnKeyDown);
+    try {
+      this.showUsers = localStorage.getItem('scion-graph-show-users') === 'true';
+    } catch {
+      this.showUsers = false;
+    }
   }
 
   override disconnectedCallback(): void {
@@ -1112,7 +1119,11 @@ export class ScionAgentTreeView extends LitElement {
 
   private onShowUsersChange(e: Event): void {
     this.showUsers = (e.target as HTMLInputElement & { checked: boolean }).checked;
-    localStorage.setItem('scion-graph-show-users', String(this.showUsers));
+    try {
+      localStorage.setItem('scion-graph-show-users', String(this.showUsers));
+    } catch {
+      // Storage unavailable (e.g. sandboxed iframe or privacy-restricted context).
+    }
     // Toggling user nodes changes the canvas dimensions significantly; re-fit
     // so newly added user nodes (or freed space after hiding them) are visible.
     this.didAutoFit = false;

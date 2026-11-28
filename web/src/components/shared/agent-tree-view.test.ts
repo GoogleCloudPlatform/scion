@@ -2003,4 +2003,93 @@ describe('scion-agent-tree-view wheel & trackpad zoom (ptone/scion#9714)', () =>
     expect(rafQueue).toHaveLength(0);
     expect(internal().scale).toBe(1);
   });
+
+  it('keeps wheel and ctrl-wheel pinch zoom working when localStorage throws SecurityError', async () => {
+    const origDesc = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException(
+          "Failed to read the 'localStorage' property from 'Window': The document is sandboxed.",
+          'SecurityError'
+        );
+      },
+    });
+    const sandboxed = document.createElement('scion-agent-tree-view');
+    try {
+      sandboxed.agents = [agent('a', 'alpha'), agent('b', 'beta', ['a'])];
+      document.body.appendChild(sandboxed);
+      await sandboxed.updateComplete;
+
+      const sandboxCanvas = sandboxed.shadowRoot!.querySelector<HTMLElement>('.canvas')!;
+      vi.spyOn(sandboxCanvas, 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        top: 0,
+        width: 800,
+        height: 600,
+        right: 800,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: (): Record<string, never> => ({}),
+      });
+      flushFrames();
+      const sInternal = sandboxed as unknown as TreeInternal;
+      sInternal.scale = 1;
+      sInternal.panX = 0;
+      sInternal.panY = 0;
+
+      // Two-finger scroll (non-ctrl wheel) must preventDefault and update scale.
+      const scrollEv = new WheelEvent('wheel', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        deltaY: -40,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      });
+      Object.defineProperties(scrollEv, {
+        clientX: { value: 400 },
+        clientY: { value: 300 },
+        ctrlKey: { value: false },
+        altKey: { value: false },
+      });
+      sandboxCanvas.dispatchEvent(scrollEv);
+      expect(scrollEv.defaultPrevented).toBe(true);
+      flushFrames();
+      expect(sInternal.scale).toBeCloseTo(Math.exp(40 * WHEEL_ZOOM_SENSITIVITY), 8);
+
+      // Pinch (ctrlKey wheel) must preventDefault and update scale.
+      const beforePinch = sInternal.scale;
+      const pinchEv = new WheelEvent('wheel', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        deltaY: -20,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        ctrlKey: true,
+      });
+      Object.defineProperties(pinchEv, {
+        clientX: { value: 400 },
+        clientY: { value: 300 },
+        ctrlKey: { value: true },
+        altKey: { value: false },
+      });
+      sandboxCanvas.dispatchEvent(pinchEv);
+      expect(pinchEv.defaultPrevented).toBe(true);
+      flushFrames();
+      expect(sInternal.scale).toBeCloseTo(beforePinch * Math.exp(20 * PINCH_ZOOM_SENSITIVITY), 6);
+
+      // Toggling "Show users" must also not throw when localStorage is unavailable.
+      const sw = sandboxed.shadowRoot!.querySelector<HTMLElement & { checked: boolean }>(
+        'sl-switch'
+      )!;
+      sw.checked = true;
+      expect(() => sw.dispatchEvent(new Event('sl-change', { bubbles: true }))).not.toThrow();
+    } finally {
+      sandboxed.remove();
+      if (origDesc) {
+        Object.defineProperty(window, 'localStorage', origDesc);
+      }
+    }
+  });
 });
