@@ -61,7 +61,7 @@ func TestIsShellExecContainerEnv(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "READY malformed + SCION_HARNESS=shell => false (fails closed when READY present)",
+			name: "READY malformed + SCION_HARNESS=shell => false (consistent with ExecEnabled)",
 			env:  map[string]string{HarnessReadyEnv: "not-json", "SCION_HARNESS": "shell"},
 			want: false,
 		},

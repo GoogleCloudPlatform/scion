@@ -1405,6 +1405,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	supChildArgs := childArgs
 	if shellIsolation {
 		supChildArgs = resolveShellStartCmdArgs(childArgs, os.Getenv)
+		if hasUnresolvedScionEnvRef(supChildArgs) {
+			log.Error("Unresolved $SCION_ or ${SCION_ reference remains in child argv under shell workload isolation; SCION_* variables are stripped so tmux or the workload may not start")
+		}
 	}
 	if beforeSupervisorRunForTest != nil {
 		beforeSupervisorRunForTest(config)

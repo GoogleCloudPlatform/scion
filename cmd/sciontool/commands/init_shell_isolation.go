@@ -29,14 +29,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
-// fuseStartCmdExecSuffix is the exact suffix emitted by pkg/runtime/common.go
-// (buildCommonRunArgs) when FUSE mounts wrap the tmux start command.
-const fuseStartCmdExecSuffix = `exec sh -c "$SCION_START_CMD"`
-
 // resolveShellStartCmdArgs resolves a FUSE start wrapper's "$SCION_START_CMD"
-// reference from PID 1's own environment before sup.Run launches the child
-// with WorkloadIsolation enabled (where all SCION_* variables, including
-// SCION_START_CMD, are stripped from the child environment).
+// reference (state.FUSEStartCmdExecSuffix) from PID 1's own environment before
+// sup.Run launches the child with WorkloadIsolation enabled (where all SCION_*
+// variables, including SCION_START_CMD, are stripped from the child
+// environment).
 //
 // Passing the value as positional argv ($1) via `exec sh -c "$1" sh <cmd>`
 // avoids shell-quoting issues, keeps supervisor.stripScionControlEnv's
@@ -47,12 +44,25 @@ func resolveShellStartCmdArgs(childArgs []string, getenv func(string) string) []
 	if getenv == nil || len(childArgs) != 3 || childArgs[0] != "sh" || childArgs[1] != "-c" {
 		return childArgs
 	}
-	if !strings.HasSuffix(childArgs[2], fuseStartCmdExecSuffix) {
+	if !strings.HasSuffix(childArgs[2], state.FUSEStartCmdExecSuffix) {
 		return childArgs
 	}
 	startCmd := getenv("SCION_START_CMD")
-	rewritten := strings.TrimSuffix(childArgs[2], fuseStartCmdExecSuffix) + `exec sh -c "$1"`
+	rewritten := strings.TrimSuffix(childArgs[2], state.FUSEStartCmdExecSuffix) + `exec sh -c "$1"`
 	return []string{"sh", "-c", rewritten, "sh", startCmd}
+}
+
+// hasUnresolvedScionEnvRef reports whether any element of args still contains
+// a shell reference to a SCION_* environment variable ($SCION_ or ${SCION_}).
+// Used under shellIsolation after resolveShellStartCmdArgs to detect wrapper
+// drift that would otherwise expand to empty strings once SCION_* is stripped.
+func hasUnresolvedScionEnvRef(args []string) bool {
+	for _, a := range args {
+		if strings.Contains(a, "$SCION_") || strings.Contains(a, "${SCION_") {
+			return true
+		}
+	}
+	return false
 }
 
 // beforeSupervisorRunForTest, when non-nil, fires synchronously in runInit

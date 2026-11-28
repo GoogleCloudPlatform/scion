@@ -91,7 +91,7 @@ func TestIsShellExecContainer(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "READY malformed + SCION_HARNESS=shell => false (fails closed)",
+			name: "READY malformed + SCION_HARNESS=shell => false (consistent with ExecEnabled)",
 			env:  map[string]string{"SCION_HARNESS": "shell", state.HarnessReadyEnv: "not-json"},
 			want: false,
 		},
@@ -397,6 +397,7 @@ func TestRunInit_ShellIsolationOrderingAndBehavior(t *testing.T) {
 	ctxFilePath := filepath.Join(scionDir, "context.yaml")
 
 	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
 	t.Setenv("SCION_HUB_ENDPOINT", "https://Hub.Example.COM:443/")
 	t.Setenv("SCION_AGENT_ID", "agent-shell-1")
 	t.Setenv("SCION_CLI_MODE", "agent")
@@ -521,6 +522,11 @@ func TestRunInit_ShellIsolationSkipsDelegationAndAutoexpose(t *testing.T) {
 		}
 
 		t.Setenv("SCION_HARNESS", harness)
+		if harness == "shell" {
+			t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+		} else {
+			t.Setenv(state.HarnessReadyEnv, `{"strategy":"delay","timeout_ms":15000}`)
+		}
 		t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
 		t.Setenv("SCION_AGENT_ID", "agent-test-1")
 		t.Setenv(autoexpose.EnvAutoExposePorts, "true")
@@ -577,6 +583,7 @@ func TestRunInit_NonShellKeepsEnvFileAndScionEnv(t *testing.T) {
 	t.Cleanup(func() { limitsTriggerPath = origTrigger })
 
 	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"delay","timeout_ms":15000}`)
 	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
 	t.Setenv("SCION_AGENT_ID", "agent-llm-1")
 
@@ -682,6 +689,7 @@ func TestRunInit_ShellIsolation_FUSEStartWrapper(t *testing.T) {
 	startCmd := `printf '%s\n' 'TMUX_WOULD_START' > '` + markerFile + `' && env > '` + envOut + `' && sleep 0.2`
 
 	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
 	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
 	t.Setenv("SCION_AGENT_ID", "agent-fuse-1")
 	t.Setenv("SCION_CLI_MODE", "agent")
@@ -721,5 +729,54 @@ func TestRunInit_ShellIsolation_FUSEStartWrapper(t *testing.T) {
 	}
 	if !sawUserVar {
 		t.Error("started command under FUSE wrapper lost non-SCION USER_CUSTOM_VAR")
+	}
+}
+
+func TestHasUnresolvedScionEnvRef(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"plain command", []string{"sh", "-c", "tmux new-session"}, false},
+		{"rewritten FUSE wrapper", []string{"sh", "-c", `true && exec sh -c "$1"`, "sh", "tmux new-session"}, false},
+		{"unmatched $SCION_ ref", []string{"sh", "-c", `exec sh -c "$SCION_START_CMD_V2"`}, true},
+		{"unmatched ${SCION_ ref", []string{"sh", "-c", `exec sh -c "${SCION_START_CMD}"`}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasUnresolvedScionEnvRef(tc.args); got != tc.want {
+				t.Errorf("hasUnresolvedScionEnvRef(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunInit_ShellIsolation_UnresolvedScionRefLogsErrorAndDoesNotRefuseStart
+// verifies the drift guard: if an unrecognized $SCION_ or ${SCION_ reference
+// remains in child argv after resolveShellStartCmdArgs, RunInit logs an error
+// naming the impact without refusing to start the workload.
+func TestRunInit_ShellIsolation_UnresolvedScionRefLogsErrorAndDoesNotRefuseStart(t *testing.T) {
+	agentHome := t.TempDir()
+	setupRunInitAsRootlessScion(t, agentHome)
+	t.Cleanup(hub.SetTokenHome(agentHome))
+	readLog := captureSciontoolLog(t)
+
+	origExitCodePath := harnessExitCodePath
+	harnessExitCodePath = filepath.Join(t.TempDir(), "no-harness-exit-code")
+	t.Cleanup(func() { harnessExitCodePath = origExitCodePath })
+	origTrigger := limitsTriggerPath
+	limitsTriggerPath = filepath.Join(t.TempDir(), "limits-exceeded")
+	t.Cleanup(func() { limitsTriggerPath = origTrigger })
+
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+
+	code := RunInit([]string{"sh", "-c", `true "${SCION_DRIFTED_VAR}"; sleep 0.2`},
+		InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
+	if code != 0 {
+		t.Fatalf("RunInit() = %d, want 0 (must log error, not refuse start)", code)
+	}
+	if out := readLog(); !strings.Contains(out, "Unresolved $SCION_ or ${SCION_ reference") {
+		t.Errorf("expected drift error log naming unresolved $SCION_ ref, got:\n%s", out)
 	}
 }
