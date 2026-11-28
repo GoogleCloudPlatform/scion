@@ -4912,8 +4912,7 @@ func TestSystemOneInstanceProjects_AuthzAndList(t *testing.T) {
 		}
 
 		// Forbidden: hub admin with UAT (SessionOnly route).
-		uatAdmin, _, err := srv.userAccessTokenService.CreateToken(ctx, hubAdmin.ID, pAlpha.ID, "hubadmin-uat", []string{"project:read"}, nil)
-		require.NoError(t, err)
+		uatAdmin := projectOpsMint(t, srv, hubAdmin.ID, hubBoundary(), "project:read")
 		recUAT := doRequestWithToken(t, srv, uatAdmin, http.MethodGet, boundPath, nil)
 		assert.Equal(t, http.StatusForbidden, recUAT.Code, "UAT should be refused on SessionOnly admin route: %s", recUAT.Body.String())
 
@@ -4930,18 +4929,12 @@ func TestSystemOneInstanceProjects_AuthzAndList(t *testing.T) {
 		recVAM := doRequestWithToken(t, srv, vamTok, http.MethodGet, boundPath, nil)
 		assert.Equal(t, http.StatusForbidden, recVAM.Code, "hub admin under VAM should be 403: %s", recVAM.Body.String())
 
-		// Forbidden: agent token (even an agent owned by hubAdmin).
-		agentRow := &store.Agent{
-			ID:        uuid.NewString(),
-			Slug:      "admin-proj-agent",
-			Name:      "admin-proj-agent",
-			ProjectID: pAlpha.ID,
-			OwnerID:   hubAdmin.ID,
-		}
-		require.NoError(t, s.CreateAgent(ctx, agentRow))
-		agentTok, err := srv.agentTokenService.GenerateAgentToken(agentRow.ID, pAlpha.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
-		require.NoError(t, err)
-		recAgent := doRequestWithToken(t, srv, agentTok, http.MethodGet, boundPath, nil)
+		// Forbidden: agent JWT credential.
+		agentReq := httptest.NewRequest(http.MethodGet, boundPath, nil)
+		agentCtx := contextWithIdentity(agentReq.Context(), dcAgentIdentity(uuid.NewString(), pAlpha.ID, AgentRoleBaseline))
+		agentCtx = contextWithCredentialContext(agentCtx, CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-admin-proj"})
+		recAgent := httptest.NewRecorder()
+		srv.mux.ServeHTTP(recAgent, agentReq.WithContext(agentCtx))
 		assert.Equal(t, http.StatusForbidden, recAgent.Code, "agent token should be 403: %s", recAgent.Body.String())
 
 		// Unauthenticated -> 401.

@@ -1180,14 +1180,13 @@ func TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage(t *testing.T
 		bindRole(viewer, "project-viewer")
 
 		// Custom role granting project.manage_system_one_instances without project-owner/admin.
-		customRole := &store.RoleDefinition{
+		customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
 			ID:          uuid.NewString(),
 			Name:        "custom-s1-avail-role",
-			DisplayName: "Custom S1 Avail Role",
-			Scope:       store.RoleScopeProject,
+			ScopeType:   store.RoleScopeProject,
 			Permissions: []string{"project.read", "project.manage_system_one_instances"},
-		}
-		require.NoError(t, s.CreateRoleDefinition(ctx, customRole))
+		})
+		require.NoError(t, err)
 		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 			ID:               uuid.NewString(),
 			RoleDefinitionID: customRole.ID,
@@ -1343,8 +1342,7 @@ func TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage(t *testing.T
 		}
 
 		// Allowed: project-owner with scoped UAT carrying project:manage_system_one_instances.
-		uatOwner, _, err := srv.userAccessTokenService.CreateToken(ctx, owner.ID, proj.ID, "owner-avail-uat", []string{"project:manage_system_one_instances"}, nil)
-		require.NoError(t, err)
+		uatOwner := projectOpsMint(t, srv, owner.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
 		recUATAllowed := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, uatOwner, nil)
 		assert.Equal(t, http.StatusOK, recUATAllowed.Code, "owner UAT with manage scope should be allowed: %s", recUATAllowed.Body.String())
 
@@ -1365,8 +1363,7 @@ func TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage(t *testing.T
 		}
 
 		// Forbidden: owner UAT with only project:read (lacks manage scope).
-		uatReadOnly, _, err := srv.userAccessTokenService.CreateToken(ctx, owner.ID, proj.ID, "owner-read-uat", []string{"project:read"}, nil)
-		require.NoError(t, err)
+		uatReadOnly := projectOpsMint(t, srv, owner.ID, projectBoundary(proj.ID), "project:read")
 		recUATDenied := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, uatReadOnly, nil)
 		assert.Equal(t, http.StatusForbidden, recUATDenied.Code, "read-only UAT should be 403: %s", recUATDenied.Body.String())
 
@@ -1383,19 +1380,22 @@ func TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage(t *testing.T
 		recVAM := doRequestWithToken(t, srv, vamTok, http.MethodGet, availPath, nil)
 		assert.Equal(t, http.StatusForbidden, recVAM.Code, "hub admin under VAM should be 403: %s", recVAM.Body.String())
 
-		// Forbidden: agent token (even an agent created by hubAdmin in this project).
-		agentRow := &store.Agent{
-			ID:        uuid.NewString(),
-			Slug:      "avail-agent",
-			Name:      "avail-agent",
-			ProjectID: proj.ID,
-			OwnerID:   hubAdmin.ID,
+		// Forbidden: agent JWT and delegated-agent credentials.
+		for _, tc := range []struct {
+			name  string
+			ident Identity
+			cc    CredentialContext
+		}{
+			{"agent_jwt", dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline), CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-avail"}},
+			{"delegated_agent", dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline), CredentialContext{Kind: CredentialKindDelegatedAgent, ID: "dcred-avail"}},
+		} {
+			req := httptest.NewRequest(http.MethodGet, availPath, nil)
+			reqCtx := contextWithIdentity(req.Context(), tc.ident)
+			reqCtx = contextWithCredentialContext(reqCtx, tc.cc)
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req.WithContext(reqCtx))
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s should be 403: %s", tc.name, rec.Body.String())
 		}
-		require.NoError(t, s.CreateAgent(ctx, agentRow))
-		agentTok, err := srv.agentTokenService.GenerateAgentToken(agentRow.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
-		require.NoError(t, err)
-		recAgent := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, agentTok, nil)
-		assert.Equal(t, http.StatusForbidden, recAgent.Code, "agent token should be 403: %s", recAgent.Body.String())
 
 		// Unauthenticated -> 401.
 		recUnauth := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, "", nil)
