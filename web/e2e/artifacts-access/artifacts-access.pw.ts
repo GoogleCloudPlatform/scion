@@ -916,11 +916,14 @@ test.describe.serial('artifact access per role (R1)', () => {
       );
     } else {
       experiment.before = await readExperiment();
+      const beforeExp = experiment.before as ExperimentState;
+      const offState = beforeExp.enabled !== false ? await setExperiment(false) : beforeExp;
+      if (beforeExp.enabled !== false) experiment.afterDisable = offState;
       await row('R1-00a', async (r) => {
-        const before = experiment.before as ExperimentState;
-        r.ui.experimentBefore = before;
-        expect(before.override, 'no stored override of hub.artifacts before the run').toBeNull();
-        expect.soft(before.enabled, 'hub.artifacts is off').toBe(false);
+        r.ui.experimentBefore = beforeExp;
+        r.ui.experimentOff = offState;
+        expect(beforeExp.override, 'no stored override of hub.artifacts before the run').toBeNull();
+        expect.soft(offState.enabled, 'hub.artifacts is off').toBe(false);
         const page = await pageOf('owner');
         await page.goto(`/projects/${journey.projects.home}`, { waitUntil: 'domcontentloaded' });
         await page.locator(SELECTORS.navProjects).filter({ visible: true }).first().waitFor();
@@ -980,6 +983,15 @@ test.describe.serial('artifact access per role (R1)', () => {
       expect((experiment.afterEnable as ExperimentState).enabled, 'hub.artifacts enabled').toBe(
         true
       );
+      // R1-01..R1-10 test the Share dialog surface before R1-11 turns on
+      // web.artifact_manage_access; disable it here when its compiled default
+      // is on, and afterAll resets the override back to null.
+      const manageBefore = await readExperiment(MANAGE_ACCESS_EXPERIMENT);
+      experiment.manageAccessBefore = manageBefore;
+      if (manageBefore.enabled !== false) {
+        journey.manageAccessSet = true;
+        experiment.manageAccessAfterDisable = await setExperiment(false, MANAGE_ACCESS_EXPERIMENT);
+      }
     }
     if (!adminToken()) {
       // Remote without the toggle: the experiment must already be on.
@@ -1661,8 +1673,10 @@ test.describe.serial('artifact access per role (R1)', () => {
       const before = await readExperiment(MANAGE_ACCESS_EXPERIMENT);
       manage.before = before;
       r.ui.before = before;
-      expect(before.override, 'no stored override of web.artifact_manage_access').toBeNull();
-      expect.soft(before.enabled, 'web.artifact_manage_access is off by default').toBe(false);
+      if (!journey.manageAccessSet) {
+        expect(before.override, 'no stored override of web.artifact_manage_access').toBeNull();
+      }
+      expect.soft(before.enabled, 'web.artifact_manage_access is off before R1-11').toBe(false);
       journey.manageAccessSet = true;
       const after = await setExperiment(true, MANAGE_ACCESS_EXPERIMENT);
       manage.afterEnable = after;

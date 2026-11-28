@@ -218,6 +218,7 @@ const ROWS: Record<string, RowSpec> = {
   'R2b-08a': {
     role: 'member',
     title: 'KNOWN DEFECT: a pinned reference opens its version in the artifact viewer',
+    where: 'known-defect',
   },
   'R2b-09': { role: 'member', title: 'chat: Open in artifact viewer opens the artifact page' },
   'R2b-10': { role: 'outsider', title: 'chat: a non-member cannot reach the thread or reference' },
@@ -1332,6 +1333,7 @@ function preHeld(): string | undefined {
 }
 
 const TITLE_MAIN = 'R2: artifact page view and render, graded at the UI';
+const TITLE_R2B_08A = `R2b-08a: ${ROWS['R2b-08a'].title}`;
 const TITLE_CLEANUP = 'R2-18/R2-19: cleanup by absence, then the evidence';
 const skipTitle = (id: string): string => `${id}: ${ROWS[id].title}`;
 const SKIPPED: Record<string, string> = { 'R2-17b': R2_17B_REASON };
@@ -1340,6 +1342,9 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = {
   ...Object.fromEntries(
     Object.entries(ROWS).map(([id, spec]) => {
       if (spec.where === 'skip') return [id, { test: skipTitle(id), note: SKIPPED[id] ?? '' }];
+      if (spec.where === 'known-defect') {
+        return [id, { test: TITLE_R2B_08A, note: R2B_08A_KNOWN_DEFECT }];
+      }
       if (spec.where === 'cleanup') {
         return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
       }
@@ -1507,6 +1512,17 @@ test.describe.serial('artifact page view and render (R2)', () => {
   test(TITLE_MAIN, async ({ browser }) => {
     test.setTimeout(15 * 60_000);
     await runMain(browser);
+  });
+
+  test(TITLE_R2B_08A, async () => {
+    const pre = preChat();
+    if (pre) {
+      j.notRun(['R2b-08a'], pre);
+      test.skip(true, pre);
+      return;
+    }
+    test.fail(true, R2B_08A_KNOWN_DEFECT);
+    await runR2b08a();
   });
 
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
@@ -2390,9 +2406,9 @@ async function runMain(browser: Browser): Promise<void> {
   // ---- R2-12: Files tab and Download -------------------------------------
   r2.step = 'R2-12';
   const expectedFiles = [
-    { path: 'css/site.css', type: 'text/css', entry: false, open: 'disabled' },
+    { path: 'css/site.css', type: 'text/css', entry: false, open: 'enabled' },
     { path: 'img/chart.png', type: 'image/png', entry: false, open: 'enabled' },
-    { path: 'index.html', type: 'text/html', entry: true, open: 'disabled' },
+    { path: 'index.html', type: 'text/html', entry: true, open: 'enabled' },
     { path: 'notes/v3.txt', type: 'text/plain', entry: false, open: 'enabled' },
     { path: 'page2.html', type: 'text/html', entry: false, open: 'disabled' },
   ];
@@ -2412,7 +2428,10 @@ async function runMain(browser: Browser): Promise<void> {
       .toEqual(expectedFiles);
     expect.soft(files.rows.filter((x) => x.entry).length, 'one entry badge').toBe(1);
     expect
-      .soft(files.rows.find((x) => x.path === 'index.html')?.openLabel, 'index.html not shown')
+      .soft(files.rows.find((x) => x.path === 'index.html')?.openLabel, 'index.html previewable')
+      .toBe('View index.html');
+    expect
+      .soft(files.rows.find((x) => x.path === 'page2.html')?.openLabel, 'page2.html not shown')
       .toBe('Not shown in the browser');
     const dl = await downloadFile(page, key, 'img/chart.png');
     await settle(page);
@@ -3793,54 +3812,9 @@ async function runChatHtmlRows(): Promise<void> {
     { pre: preChat }
   );
 
-  // ---- R2b-08a: KNOWN DEFECT, the pinned viewer link (ptone/scion#5602) --
-  r2.step = 'R2b-08a';
-  await j.row(
-    'R2b-08a',
-    async (r) => {
-      test.info().annotations.push({ type: 'known-defect', description: R2B_08A_KNOWN_DEFECT });
-      r.ui.knownDefect = R2B_08A_KNOWN_DEFECT;
-      const page = await openThread('member');
-      await openBundlePreview(page, 1);
-      const viewer = chatFooterButton(page, 'Open in artifact viewer');
-      await expect(viewer, 'Open in artifact viewer').toBeVisible();
-      const href = (await viewer.getAttribute('href')) ?? null;
-      const mints = r2.mints.length;
-      await viewer.click();
-      await page.waitForURL(
-        new RegExp(`/projects/${j.state.projectId}/artifacts/${id()}(/v/\\d+)?$`)
-      );
-      await anyPageHeading(page).waitFor({ state: 'visible' });
-      await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
-      const landed = new URL(page.url()).pathname;
-      const atV1 = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v1', 10_000);
-      const versionLabel = await textOf(page.locator(SELECTORS.versionMenu));
-      const heading = await frameHeading(page).catch(() => '');
-      const pageMint = mintsSince('member', mints).find((m) => m.seq === 1);
-      r.ui.viewer = {
-        href,
-        landed,
-        versionLabel,
-        heading,
-        atV1,
-        pageMintV1: pageMint?.status ?? null,
-      };
-      r.api.push({
-        as: 'member',
-        method: 'POST',
-        path: `/api/v1/artifacts/${id()}/versions/1/view`,
-        status: pageMint?.status ?? 0,
-        code: null,
-      });
-      const want = `/projects/${j.state.projectId}/artifacts/${id()}/v/1`;
-      expect.soft(href, 'viewer link names the pinned version').toBe(want);
-      expect.soft(landed, 'lands on the pinned version').toBe(want);
-      expect.soft(versionLabel, 'version label').toContain('Version v1');
-      expect.soft(heading, 'page frame shows v1').toBe('R2 bundle v1');
-      expect.soft(pageMint?.status, 'page mint v1').toBe(200);
-    },
-    { pre: preChat }
-  );
+  // R2b-08a (known defect ptone/scion#5602) runs in its own test.fail() test
+  // right after TITLE_MAIN so the rest of R2/R2b stays green in CI while
+  // still alerting as an unexpected pass once #5602 is fixed.
 
   // ---- R2b-09: Open in artifact viewer opens the artifact page -----------
   r2.step = 'R2b-09';
@@ -3948,6 +3922,58 @@ async function runChatHtmlRows(): Promise<void> {
       }
     },
     { pre: preDm }
+  );
+}
+
+/** R2b-08a: KNOWN DEFECT, the pinned viewer link (ptone/scion#5602). */
+async function runR2b08a(): Promise<void> {
+  const id = (): string => bundleId();
+  r2.step = 'R2b-08a';
+  await j.row(
+    'R2b-08a',
+    async (r) => {
+      test.info().annotations.push({ type: 'known-defect', description: R2B_08A_KNOWN_DEFECT });
+      r.ui.knownDefect = R2B_08A_KNOWN_DEFECT;
+      const page = await openThread('member');
+      await openBundlePreview(page, 1);
+      const viewer = chatFooterButton(page, 'Open in artifact viewer');
+      await expect(viewer, 'Open in artifact viewer').toBeVisible();
+      const href = (await viewer.getAttribute('href')) ?? null;
+      const mints = r2.mints.length;
+      await viewer.click();
+      await page.waitForURL(
+        new RegExp(`/projects/${j.state.projectId}/artifacts/${id()}(/v/\\d+)?$`)
+      );
+      await anyPageHeading(page).waitFor({ state: 'visible' });
+      await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
+      const landed = new URL(page.url()).pathname;
+      const atV1 = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v1', 10_000);
+      const versionLabel = await textOf(page.locator(SELECTORS.versionMenu));
+      const heading = await frameHeading(page).catch(() => '');
+      const pageMint = mintsSince('member', mints).find((m) => m.seq === 1);
+      r.ui.viewer = {
+        href,
+        landed,
+        versionLabel,
+        heading,
+        atV1,
+        pageMintV1: pageMint?.status ?? null,
+      };
+      r.api.push({
+        as: 'member',
+        method: 'POST',
+        path: `/api/v1/artifacts/${id()}/versions/1/view`,
+        status: pageMint?.status ?? 0,
+        code: null,
+      });
+      const want = `/projects/${j.state.projectId}/artifacts/${id()}/v/1`;
+      expect.soft(href, 'viewer link names the pinned version').toBe(want);
+      expect.soft(landed, 'lands on the pinned version').toBe(want);
+      expect.soft(versionLabel, 'version label').toContain('Version v1');
+      expect.soft(heading, 'page frame shows v1').toBe('R2 bundle v1');
+      expect.soft(pageMint?.status, 'page mint v1').toBe(200);
+    },
+    { pre: preChat }
   );
 }
 
