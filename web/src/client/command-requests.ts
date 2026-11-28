@@ -165,6 +165,7 @@ export interface CommandRequestDetailResponse {
   canApprove: boolean;
   canDismiss?: boolean;
   outputAvailable?: boolean;
+  promptAvailable?: boolean;
   reason?: string;
 }
 

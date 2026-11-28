@@ -64,9 +64,9 @@ func loadHarnessEnvCases(t *testing.T) map[string]harnessEnvCase {
 }
 
 const (
-	// Declarative harness-configs (config_dir is declarative metadata).
-	containerHarnessHCClaude = "harness: claude\nimage: scion-base:test\nuser: scion\nconfig_dir: .claude\n"
-	containerHarnessHCGemini = "harness: gemini-cli\nimage: scion-base:test\nuser: scion\nconfig_dir: .gemini\n"
+	// Declarative harness-configs (config_dir + command.base are declarative metadata).
+	containerHarnessHCClaude = "harness: claude\nimage: scion-base:test\nuser: scion\nconfig_dir: .claude\ncommand:\n  base: [\"claude\"]\n"
+	containerHarnessHCGemini = "harness: gemini-cli\nimage: scion-base:test\nuser: scion\nconfig_dir: .gemini\ncommand:\n  base: [\"gemini\"]\n"
 	// No declarative metadata: Resolve falls back to the plain Generic.
 	containerHarnessHCBare = "harness: claude\nimage: scion-base:test\nuser: scion\n"
 )

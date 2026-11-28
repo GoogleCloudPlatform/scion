@@ -119,15 +119,18 @@ Sender signing contracts and examples:
        HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
        SECRET="<one-time-secret>"
        TS="$(date +%s)"
-       DELIVERY="$(uuidgen)"
+       DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"
+       # X-Scion-Event: <name> sets event.type=webhook.<name> (default webhook.received rules then stop matching; use --type webhook.<name>)
        EVENT=""
-       SUBJECT="service/api"
+       # X-Scion-Subject is stored as event.subject=webhook:<endpoint-id>/<subject>
+       SUBJECT=""
        BODY='{"status":"ok","commit":"abc1234"}'
-       SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+       SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"
        curl -fsS -X POST "$HOOK_URL" \
          -H "Content-Type: application/json" \
          -H "X-Scion-Signature: t=${TS},v1=${SIG}" \
          -H "X-Scion-Delivery: ${DELIVERY}" \
+         -H "X-Scion-Event: ${EVENT}" \
          -H "X-Scion-Subject: ${SUBJECT}" \
          --data-raw "$BODY"
 
@@ -140,9 +143,9 @@ Sender signing contracts and examples:
      Example (curl + openssl):
        HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
        SECRET="<one-time-secret>"
-       DELIVERY="$(uuidgen)"
+       DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"
        BODY='{"action":"opened","repository":{"full_name":"org/repo"}}'
-       SIG="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+       SIG="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"
        curl -fsS -X POST "$HOOK_URL" \
          -H "Content-Type: application/json" \
          -H "X-Hub-Signature-256: sha256=${SIG}" \
@@ -160,7 +163,7 @@ Sender signing contracts and examples:
        SECRET="<one-time-secret>"
        TS="$(date +%s)"
        BODY='{"id":"evt_123","type":"invoice.payment_succeeded","data":{"object":{"id":"in_456"}}}'
-       SIG="$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+       SIG="$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"
        curl -fsS -X POST "$HOOK_URL" \
          -H "Content-Type: application/json" \
          -H "Stripe-Signature: t=${TS},v1=${SIG}" \

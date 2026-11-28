@@ -157,7 +157,7 @@ func setupTriggersTestFixtureOnServer(t *testing.T, srv *Server, s store.Store) 
 	bindRole(member.ID, store.ProjectRoleMember)
 	bindRole(viewer.ID, store.ProjectRoleViewer)
 
-	mkAgent := func(slug string, scopes ...AgentTokenScope) (*store.Agent, AgentIdentity) {
+	mkAgent := func(slug string, role AgentRole, scopes ...AgentTokenScope) (*store.Agent, AgentIdentity) {
 		ag := &store.Agent{
 			ID:        tid("trig-agent-" + slug),
 			Slug:      slug,
@@ -167,6 +167,9 @@ func setupTriggersTestFixtureOnServer(t *testing.T, srv *Server, s store.Store) 
 			CreatedBy: owner.ID,
 			OwnerID:   owner.ID,
 			Ancestry:  []string{owner.ID},
+			AppliedConfig: &store.AgentAppliedConfig{
+				AgentRole: string(role),
+			},
 		}
 		require.NoError(t, s.CreateAgent(ctx, ag))
 		require.NoError(t, s.CreateDelegationEdge(ctx, &store.DelegationEdge{
@@ -177,7 +180,7 @@ func setupTriggersTestFixtureOnServer(t *testing.T, srv *Server, s store.Store) 
 			DelegateID:    ag.ID,
 			ScopeType:     store.RoleScopeProject,
 			ScopeID:       proj.ID,
-			Role:          string(AgentRoleBaseline),
+			Role:          string(role),
 			EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
 			Active:        true,
 			CreatedAt:     now,
@@ -190,10 +193,10 @@ func setupTriggersTestFixtureOnServer(t *testing.T, srv *Server, s store.Store) 
 		return ag, jwtID
 	}
 
-	agentA, agentAAuth := mkAgent("agent-a", ScopeProjectRead)
-	agentB, agentBAuth := mkAgent("agent-b", ScopeProjectRead)
-	agentNone, agentNoneJWT := mkAgent("agent-none")
-	targetAgent, _ := mkAgent("lead", ScopeProjectRead)
+	agentA, agentAAuth := mkAgent("agent-a", AgentRoleBaseline, ScopesForRole(AgentRoleBaseline)...)
+	agentB, agentBAuth := mkAgent("agent-b", AgentRoleBaseline, ScopesForRole(AgentRoleBaseline)...)
+	agentNone, agentNoneJWT := mkAgent("agent-none", AgentRoleNone)
+	targetAgent, _ := mkAgent("lead", AgentRoleBaseline, ScopesForRole(AgentRoleBaseline)...)
 
 	return &triggersTestFixture{
 		srv:          srv,

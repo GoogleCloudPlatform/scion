@@ -467,8 +467,8 @@ export class ScionWebhookEndpointList extends LitElement {
     }
   }
 
-  private buildCurlExample(url: string, secret: string): string {
-    return buildScionV1CurlExample(url, secret);
+  private buildCurlExample(mode: string, url: string, secret: string): string {
+    return buildWebhookCurlExample(mode, url, secret);
   }
 
   private affectedTriggersFor(ep: WebhookEndpoint | null): TriggerDefinition[] {
@@ -697,13 +697,16 @@ export class ScionWebhookEndpointList extends LitElement {
                   <sl-select
                     label="Signature mode"
                     hoist
+                    data-signature-mode-select
                     .value=${this.formSignatureMode}
                     @sl-change=${(e: Event) => {
                       this.formSignatureMode = (e.target as HTMLSelectElement).value;
                     }}
                   >
-                    <sl-option value="scion_v1">scion_v1 (replay protected)</sl-option>
-                    <sl-option value="body_only">body_only (message rules only)</sl-option>
+                    ${SUPPORTED_SIGNATURE_MODES.map(
+                      (mode) =>
+                        html`<sl-option value=${mode}>${SIGNATURE_MODE_LABELS[mode]}</sl-option>`
+                    )}
                   </sl-select>
                 `
               : html`
@@ -818,7 +821,9 @@ export class ScionWebhookEndpointList extends LitElement {
 
   private renderSecretDialog() {
     const secret = this.revealedSecret ?? '';
-    const curlSnippet = secret ? this.buildCurlExample(this.revealedEndpointUrl, secret) : '';
+    const curlSnippet = secret
+      ? this.buildCurlExample(this.revealedSignatureMode, this.revealedEndpointUrl, secret)
+      : '';
     return html`
       <sl-dialog
         label=${this.secretDialogTitle || 'Webhook Secret'}
@@ -866,18 +871,20 @@ export class ScionWebhookEndpointList extends LitElement {
                   </div>
                 </div>
 
-                ${this.revealedSignatureMode === 'scion_v1'
+                ${curlSnippet
                   ? html`
                       <div>
                         <div
                           style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;"
                         >
                           <span class="endpoint-desc"
-                            >Example signed sender (scion_v1, curl + openssl)</span
+                            >Example signed sender (${this.revealedSignatureMode}, curl +
+                            openssl)</span
                           >
                           <sl-button
                             size="small"
                             variant="text"
+                            data-copy-curl-example
                             @click=${() => this.copyToClipboard(curlSnippet, 'curl')}
                           >
                             <sl-icon
@@ -992,6 +999,15 @@ export class ScionWebhookEndpointList extends LitElement {
   }
 }
 
+/** Hub-supported HMAC webhook signature modes (`pkg/hub/handlers_webhook_endpoints.go`). */
+export const SUPPORTED_SIGNATURE_MODES = ['scion_v1', 'github_v1', 'stripe_v1'] as const;
+
+const SIGNATURE_MODE_LABELS: Record<(typeof SUPPORTED_SIGNATURE_MODES)[number], string> = {
+  scion_v1: 'scion_v1 (replay protected)',
+  github_v1: 'github_v1 (GitHub webhooks, message rules only)',
+  stripe_v1: 'stripe_v1 (Stripe webhooks, replay protected)',
+};
+
 /**
  * Builds the scion_v1 curl + openssl sender example matching `cmd/trigger_webhook.go`
  * and `pkg/hub/trigger/signature.go` (`VerifyScionV1SignatureWithWindow`).
@@ -1004,17 +1020,75 @@ export function buildScionV1CurlExample(url: string, secret: string): string {
     `SECRET="${secret}"`,
     `TS="$(date +%s)"`,
     `DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"`,
+    `# X-Scion-Event: <name> sets event.type=webhook.<name> (default webhook.received rules then stop matching; use --type webhook.<name>)`,
     `EVENT=""`,
-    `SUBJECT="service/api"`,
+    `# X-Scion-Subject is stored as event.subject=webhook:<endpoint-id>/<subject>`,
+    `SUBJECT=""`,
     `BODY='{"status":"ok","commit":"abc1234"}'`,
-    `SIG="$(printf 'v1\\n%s\\n%s\\n%s\\n%s\\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"`,
+    `SIG="$(printf 'v1\\n%s\\n%s\\n%s\\n%s\\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"`,
     `curl -fsS -X POST "$HOOK_URL" \\`,
     `  -H "Content-Type: application/json" \\`,
     `  -H "X-Scion-Signature: t=\${TS},v1=\${SIG}" \\`,
     `  -H "X-Scion-Delivery: \${DELIVERY}" \\`,
+    `  -H "X-Scion-Event: \${EVENT}" \\`,
     `  -H "X-Scion-Subject: \${SUBJECT}" \\`,
     `  --data-raw "$BODY"`,
   ].join('\n');
+}
+
+/**
+ * Builds the github_v1 curl + openssl sender example matching `cmd/trigger_webhook.go`
+ * and `pkg/hub/trigger/verifier_github_v1.go`.
+ */
+export function buildGitHubV1CurlExample(url: string, secret: string): string {
+  return [
+    `HOOK_URL="${url}"`,
+    `SECRET="${secret}"`,
+    `DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"`,
+    `BODY='{"action":"opened","repository":{"full_name":"org/repo"}}'`,
+    `SIG="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"`,
+    `curl -fsS -X POST "$HOOK_URL" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -H "X-Hub-Signature-256: sha256=\${SIG}" \\`,
+    `  -H "X-GitHub-Event: issues" \\`,
+    `  -H "X-GitHub-Delivery: \${DELIVERY}" \\`,
+    `  --data-raw "$BODY"`,
+  ].join('\n');
+}
+
+/**
+ * Builds the stripe_v1 curl + openssl sender example matching `cmd/trigger_webhook.go`
+ * and `pkg/hub/trigger/verifier_stripe_v1.go`.
+ */
+export function buildStripeV1CurlExample(url: string, secret: string): string {
+  return [
+    `HOOK_URL="${url}"`,
+    `SECRET="${secret}"`,
+    `TS="$(date +%s)"`,
+    `BODY='{"id":"evt_123","type":"invoice.payment_succeeded","data":{"object":{"id":"in_456"}}}'`,
+    `SIG="$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"`,
+    `curl -fsS -X POST "$HOOK_URL" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -H "Stripe-Signature: t=\${TS},v1=\${SIG}" \\`,
+    `  --data-raw "$BODY"`,
+  ].join('\n');
+}
+
+/**
+ * Builds the curl + openssl sender example for a hub-supported HMAC signature mode,
+ * or returns `""` for unrecognized modes.
+ */
+export function buildWebhookCurlExample(mode: string, url: string, secret: string): string {
+  switch (mode) {
+    case 'scion_v1':
+      return buildScionV1CurlExample(url, secret);
+    case 'github_v1':
+      return buildGitHubV1CurlExample(url, secret);
+    case 'stripe_v1':
+      return buildStripeV1CurlExample(url, secret);
+    default:
+      return '';
+  }
 }
 
 declare global {

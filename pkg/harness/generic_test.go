@@ -47,11 +47,19 @@ func TestGeneric_GetEnv(t *testing.T) {
 func TestGeneric_GetCommand(t *testing.T) {
 	g := &Generic{}
 
-	cmd := g.GetCommand("test task", false, nil)
-	if !reflect.DeepEqual(cmd, []string{"test task"}) {
-		t.Errorf("Expected command ['test task'], got %v", cmd)
+	// Default exec form: without baseArgs, task is a single argv element (no implicit sh -c).
+	cmd := g.GetCommand("sleep infinity", false, nil)
+	if !reflect.DeepEqual(cmd, []string{"sleep infinity"}) {
+		t.Errorf("Expected exec-form command ['sleep infinity'], got %v", cmd)
 	}
 
+	// Explicit shell-form opt-in via baseArgs ["sh", "-c"].
+	cmdShellOptIn := g.GetCommand("npm test && echo ok", false, []string{"sh", "-c"})
+	if !reflect.DeepEqual(cmdShellOptIn, []string{"sh", "-c", "npm test && echo ok"}) {
+		t.Errorf("Expected shell opt-in command [sh -c 'npm test && echo ok'], got %v", cmdShellOptIn)
+	}
+
+	// Exec form with explicit command baseArgs keeps task as a single argv element.
 	cmdWithArgs := g.GetCommand("test task", false, []string{"--arg1"})
 	if !reflect.DeepEqual(cmdWithArgs, []string{"--arg1", "test task"}) {
 		t.Errorf("Expected command ['--arg1', 'test task'], got %v", cmdWithArgs)
@@ -60,6 +68,130 @@ func TestGeneric_GetCommand(t *testing.T) {
 	cmdEmpty := g.GetCommand("", false, nil)
 	if len(cmdEmpty) != 0 {
 		t.Errorf("Expected empty command, got %v", cmdEmpty)
+	}
+}
+
+func TestDeclarativeGenericHarness_GetCommand(t *testing.T) {
+	cases := []struct {
+		name     string
+		entry    config.HarnessConfigEntry
+		task     string
+		resume   bool
+		baseArgs []string
+		want     []string
+	}{
+		{
+			name:  "nil command uses exec form",
+			entry: config.HarnessConfigEntry{Harness: "generic"},
+			task:  "npm test && echo ok",
+			want:  []string{"npm test && echo ok"},
+		},
+		{
+			name: "explicit sh -c opt-in via command.base",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+			},
+			task: "npm test && echo ok",
+			want: []string{"sh", "-c", "npm test && echo ok"},
+		},
+		{
+			name: "empty command.base uses exec form",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{},
+			},
+			task: "sleep infinity",
+			want: []string{"sleep infinity"},
+		},
+		{
+			name: "empty command.base with task_flag",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{TaskFlag: "--x"},
+			},
+			task: "npm test && echo ok",
+			want: []string{"--x", "npm test && echo ok"},
+		},
+		{
+			name: "empty command.base with baseArgs",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{},
+			},
+			task:     "npm test && echo ok",
+			baseArgs: []string{"python3", "agent.py"},
+			want:     []string{"python3", "agent.py", "npm test && echo ok"},
+		},
+		{
+			name: "empty command.base with resume_flag",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{ResumeFlag: "--resume"},
+			},
+			task:   "npm test && echo ok",
+			resume: true,
+			want:   []string{"--resume", "npm test && echo ok"},
+		},
+		{
+			name: "command.base with task_flag",
+			entry: config.HarnessConfigEntry{
+				Harness: "custom",
+				Command: &config.HarnessCommandConfig{Base: []string{"my-agent"}, TaskFlag: "--task"},
+			},
+			task:     "do work",
+			baseArgs: []string{"--verbose"},
+			want:     []string{"my-agent", "--verbose", "--task", "do work"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewDeclarativeGenericHarness(tc.entry)
+			got := d.GetCommand(tc.task, tc.resume, tc.baseArgs)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("GetCommand() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSupportsModelFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		h    api.Harness
+		want bool
+	}{
+		{"plain Generic", &Generic{}, false},
+		{"Shell", &Shell{}, false},
+		{"declarative generic without command", NewDeclarativeGenericHarness(config.HarnessConfigEntry{Harness: "generic"}), false},
+		{"declarative generic with sh -c", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "generic",
+			Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+		}), false},
+		{"declarative generic with custom base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "generic",
+			Command: &config.HarnessCommandConfig{Base: []string{"python3", "worker.py"}},
+		}), false},
+		{"declarative custom without command.base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "custom-cli",
+		}), false},
+		{"declarative custom with /bin/bash base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "custom-shell",
+			Command: &config.HarnessCommandConfig{Base: []string{"/bin/bash", "-lc"}},
+		}), false},
+		{"declarative custom with non-shell command.base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "custom-cli",
+			Command: &config.HarnessCommandConfig{Base: []string{"custom-cli"}},
+		}), true},
+		{"container-script harness", &ContainerScriptHarness{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SupportsModelFlag(tc.h); got != tc.want {
+				t.Errorf("SupportsModelFlag(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }
 

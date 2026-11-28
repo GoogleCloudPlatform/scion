@@ -788,4 +788,104 @@ describe('<scion-page-profile-agent-secrets>', () => {
     expect(inner.shadowRoot!.querySelector('[data-secret-request-card="open-p2"]')).not.toBeNull();
     expect(inner.shadowRoot!.querySelector('[data-action-new-activity]')).not.toBeNull();
   });
+
+  it('refreshes live on inbox-changed for agent_secrets and ignores other categories (design §5.2)', async () => {
+    vi.useFakeTimers();
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        jsonResp({
+          counts: { answerable: 0, open: 0 },
+          cards: [],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      )
+    );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('inbox-changed', { detail: { data: { category: 'agent_executions' } } })
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('inbox-changed', { detail: { data: { category: 'agent_secrets' } } })
+    );
+    await vi.advanceTimersByTimeAsync(800);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders Open in chat on Agent Secrets cards and purged note when promptAvailable is false (AC-16)', async () => {
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+
+    const threadCard = makeCard({
+      messageId: 'msg-sr-thread',
+      projectId: 'proj-1',
+      threadId: 'topic-99',
+      promptAvailable: true,
+    });
+    const dmCard = makeCard({
+      messageId: 'msg-sr-dm',
+      projectId: 'proj-1',
+      threadId: 'dm:agent:agent-1:user:user-1',
+      promptAvailable: true,
+    });
+    const purgedCard = makeCard({
+      messageId: 'msg-sr-purged',
+      projectId: 'proj-1',
+      threadId: 'topic-99',
+      promptAvailable: false,
+    });
+
+    fetchMock.mockResolvedValue(
+      jsonResp({
+        counts: { answerable: 3, open: 3 },
+        cards: [threadCard, dmCard, purgedCard],
+        facets: { agents: [], projects: [] },
+        truncatedProjects: false,
+        capped: false,
+      })
+    );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await flush();
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+
+    const threadLink = inner.shadowRoot!.querySelector<HTMLAnchorElement>(
+      '[data-secret-request-card="msg-sr-thread"] [data-open-in-chat]'
+    );
+    expect(threadLink).not.toBeNull();
+    expect(threadLink!.getAttribute('href')).toBe(
+      '/chat/space/proj-1/thread/topic-99#msg-msg-sr-thread'
+    );
+    expect(threadLink!.textContent).toContain('Open in chat');
+
+    const dmLink = inner.shadowRoot!.querySelector<HTMLAnchorElement>(
+      '[data-secret-request-card="msg-sr-dm"] [data-open-in-chat]'
+    );
+    expect(dmLink).not.toBeNull();
+    expect(dmLink!.getAttribute('href')).toBe(
+      `/chat/dm/${encodeURIComponent('dm:agent:agent-1:user:user-1')}#msg-msg-sr-dm`
+    );
+
+    const purgedEl = inner.shadowRoot!.querySelector('[data-secret-request-card="msg-sr-purged"]')!;
+    expect(purgedEl.querySelector('[data-open-in-chat]')).toBeNull();
+    expect(purgedEl.querySelector('[data-purged-note]')?.textContent).toContain(
+      'Original message no longer available'
+    );
+  });
 });

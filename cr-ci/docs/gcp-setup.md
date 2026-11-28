@@ -36,7 +36,7 @@ nothing exists yet), and `#` lines are notes.
   ephemeral-disk volumes they use, before choosing it. The ephemeral-disk quotas (section 9) are per
   region, so a new region needs its own quota requests. Moving region means
   redeploying everything (a new `MEDIATOR_URL`, so the App's webhook URL changes too).
-- **Tools:** bash >= 4, the gcloud CLI (version floor `CRCI_MIN_GCLOUD` in
+- **Tools:** bash >= 3.2 (macOS `/bin/bash` works), the gcloud CLI (version floor `CRCI_MIN_GCLOUD` in
   `scripts/lib.sh`; see [matrix U8](permissions-matrix.md#5-design-corrections-and-open-items)),
   authenticated as the deployer (`gcloud auth login`). docker only for
   `--local` builds, gh only for `set-routing-variable.sh`.

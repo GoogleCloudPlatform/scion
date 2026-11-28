@@ -1273,6 +1273,7 @@ func (s *Server) executeRoleTransition(
 	if err := syncHubRoleGrants(ctx, tx, user.ID, newRole, store.AdminAPICreatedBy); err != nil {
 		return bindingMutationNone, fmt.Errorf("sync hub role grants: %w", err)
 	}
+	s.InvalidatePooledGroupCacheForUser(user.ID)
 
 	user.Role = newRole
 	return mutation, nil

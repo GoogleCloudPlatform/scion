@@ -40,6 +40,7 @@ crci_help_exit "$USAGE"
 crci_start
 [[ -n $TAG ]] || TAG=$(crci_default_tag runner)
 
-crci_note "C7: runner image ${CFG[RUNNER_IMAGE_NAME]}:$TAG"
-crci_build_image "${CFG[RUNNER_IMAGE_NAME]}" Dockerfile runner "$TAG" "$LOCAL"
+RUNNER_IMAGE=$(crci_cfg RUNNER_IMAGE_NAME)
+crci_note "C7: runner image $RUNNER_IMAGE:$TAG"
+crci_build_image "$RUNNER_IMAGE" Dockerfile runner "$TAG" "$LOCAL"
 crci_note "done; next: deploy-mediator.sh if the mediator changed too, then deploy-job.sh --tag $TAG"

@@ -2187,11 +2187,12 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 	}
 }
 
-// seedTokenBudgetLimitDefinitions idempotently seeds the six non-group
-// raw-token budget limit definitions (Tokenomics P3.1, §4.4). All default to
-// 0 (unlimited). Invoked when tokenomics.token_budgets is enabled (at startup
-// and on live OFF->ON toggle via ApplySnapshot) so Hubs with the experiment
-// off see no schema/list changes (D5).
+// seedTokenBudgetLimitDefinitions idempotently seeds the eight raw-token budget
+// limit definitions (six non-group + two pooled user-group limits; Tokenomics
+// P3.1/P3.3, §4.4). All default to 0 (unlimited). Invoked when
+// tokenomics.token_budgets is enabled (at startup and on live OFF->ON toggle
+// via ApplySnapshot) so Hubs with the experiment off see no schema/list
+// changes (D5).
 func seedTokenBudgetLimitDefinitions(ctx context.Context, s store.Store) {
 	tokenLimits := []struct {
 		name        string
@@ -2203,6 +2204,8 @@ func seedTokenBudgetLimitDefinitions(ctx context.Context, s store.Store) {
 		{store.LimitLLMTokensPerUserMonth, "Maximum LLM tokens per user per UTC calendar month across all projects (0 = unlimited)"},
 		{store.LimitLLMTokensPerUserProjectDay, "Maximum LLM tokens per user within a project per UTC day (0 = unlimited)"},
 		{store.LimitLLMTokensPerUserProjectMonth, "Maximum LLM tokens per user within a project per UTC calendar month (0 = unlimited)"},
+		{store.LimitLLMTokensPerGroupDay, "Maximum pooled LLM tokens across all effective members of a group per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerGroupMonth, "Maximum pooled LLM tokens across all effective members of a group per UTC calendar month (0 = unlimited)"},
 	}
 
 	for _, lim := range tokenLimits {

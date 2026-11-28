@@ -3195,6 +3195,7 @@ type V1TelemetryRetentionConfig struct {
 	HourlyRollupsDays *int   `json:"hourly_rollups_days,omitempty" yaml:"hourly_rollups_days,omitempty" koanf:"hourly_rollups_days"`
 	DailyRollupsDays  *int   `json:"daily_rollups_days,omitempty" yaml:"daily_rollups_days,omitempty" koanf:"daily_rollups_days"`
 	ScopeCountersDays *int   `json:"scope_counters_days,omitempty" yaml:"scope_counters_days,omitempty" koanf:"scope_counters_days"`
+	GroupRollupsDays  *int   `json:"group_rollups_days,omitempty" yaml:"group_rollups_days,omitempty" koanf:"group_rollups_days"`
 	BudgetStateDays   *int   `json:"budget_state_days,omitempty" yaml:"budget_state_days,omitempty" koanf:"budget_state_days"`
 	MeterHealthDays   *int   `json:"meter_health_days,omitempty" yaml:"meter_health_days,omitempty" koanf:"meter_health_days"`
 	SweepInterval     string `json:"sweep_interval,omitempty" yaml:"sweep_interval,omitempty" koanf:"sweep_interval"`

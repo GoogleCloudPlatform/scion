@@ -111,6 +111,8 @@ func TestInboxSummaryClientTypeMatchesHub(t *testing.T) {
 
 func TestInboxConstantsMatchHub(t *testing.T) {
 	assert.Equal(t, hub.InboxCategoryDecisions, hubclient.InboxCategoryDecisions)
+	assert.Equal(t, hub.InboxCategoryAgentSecrets, hubclient.InboxCategoryAgentSecrets)
+	assert.Equal(t, hub.InboxCategoryAgentExecutions, hubclient.InboxCategoryAgentExecutions)
 	assert.Equal(t, hub.InboxCategoryWaiting, hubclient.InboxCategoryWaiting)
 	assert.Equal(t, hub.InboxCategoryReviews, hubclient.InboxCategoryReviews)
 	assert.Equal(t, hub.InboxCategoryPendingSecrets, hubclient.InboxCategoryPendingSecrets)
@@ -481,6 +483,82 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		assert.Contains(t, out, "/profile/secrets in the browser)")
 		assert.NotContains(t, out, "Artifact Reviews", "disabled category must be omitted")
 		assert.Contains(t, out, "Chat                !   error (timeout)")
+	})
+
+	t.Run("Agent Executions renders after Secrets with prose, and shows unavailable under UAT", func(t *testing.T) {
+		okFixture := `{
+  "generatedAt": "2026-11-24T18:02:00Z",
+  "total": 5,
+  "totalCapped": false,
+  "categories": {
+    "pending_secrets": {
+      "state": "ok",
+      "count": 1,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/profile/secrets",
+      "breakdown": {"agents": 1, "projects": 1},
+      "previews": []
+    },
+    "agent_executions": {
+      "state": "ok",
+      "count": 3,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/profile/agent-executions",
+      "breakdown": {"agents": 2, "projects": 1},
+      "previews": []
+    },
+    "waiting": {
+      "state": "ok",
+      "count": 1,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/agents?q=activity%3Awaiting_for_input",
+      "breakdown": {"projects": 1},
+      "previews": []
+    }
+  }
+}`
+		withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(okFixture))
+		})
+
+		out, err := runInboxCmdForTest(t, "")
+		require.NoError(t, err)
+		assert.Contains(t, out, "Agent Executions    3")
+		assert.Contains(t, out, "/profile/agent-executions")
+		assert.Contains(t, out, "  3 execution requests from 2 agents in 1 project")
+		idxSec := strings.Index(out, "Secrets")
+		idxExec := strings.Index(out, "Agent Executions")
+		idxWait := strings.Index(out, "Agents Waiting")
+		assert.True(t, idxSec < idxExec && idxExec < idxWait, "Agent Executions must appear after Secrets and before Agents Waiting:\n%s", out)
+
+		uatFixture := `{
+  "generatedAt": "2026-11-24T18:02:00Z",
+  "total": 0,
+  "totalCapped": false,
+  "categories": {
+    "agent_executions": {
+      "state": "unavailable",
+      "count": 0,
+      "capped": false,
+      "countsTowardTotal": false,
+      "href": "/profile/agent-executions",
+      "previews": []
+    }
+  }
+}`
+		withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(uatFixture))
+		})
+
+		uatOut, err := runInboxCmdForTest(t, "")
+		require.NoError(t, err)
+		assert.Contains(t, uatOut, "Agent Executions    –   unavailable with token auth (open ")
+		assert.Contains(t, uatOut, "/profile/agent-executions in the browser)")
 	})
 }
 

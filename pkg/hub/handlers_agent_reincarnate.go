@@ -356,8 +356,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// typo would otherwise reset the home for nothing (ptone/scion#7757).
 	var targetHC *store.HarnessConfig
 	if req.HarnessConfig != "" {
-		hc, err := s.resolveHarnessConfigBySlug(ctx, project.ID, req.HarnessConfig)
+		hc, err := s.resolveActiveHarnessConfigBySlug(ctx, project.ID, req.HarnessConfig)
 		if err != nil {
+			if writeHarnessConfigNotActive(w, err) {
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -535,6 +538,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, resolveTag, patch)
 	if err != nil {
+		if writeHarnessConfigNotActive(w, err) {
+			return
+		}
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
@@ -876,6 +882,9 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
 	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, resolveTag, patch)
 	if err != nil {
+		if writeHarnessConfigNotActive(w, err) {
+			return
+		}
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}

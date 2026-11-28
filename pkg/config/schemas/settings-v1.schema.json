@@ -3118,6 +3118,13 @@
           "description": "Retention window in days for usage_scope_counters_daily (min 65, or 0 for unlimited; always preserves current and previous calendar months).",
           "x-since": "1"
         },
+        "group_rollups_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 365,
+          "description": "Retention window in days for usage_group_rollups_daily (min 90, or 0 for unlimited; always preserves active windows).",
+          "x-since": "1"
+        },
         "budget_state_days": {
           "type": "integer",
           "minimum": 0,

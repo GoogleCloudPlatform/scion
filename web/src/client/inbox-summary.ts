@@ -26,8 +26,8 @@
  * - Always fetches `previews=0`; Inbox cards render summary-of-state prose from
  *   `count`, `capped`, and `breakdown`.
  * - Safety poll: 5 min while SSE is healthy, 30 s while unhealthy.
- * - Schedules an expiry refresh from `min(category.nextExpiresAt)` across
- *   expiring categories (`pending_secrets`, `agent_secrets`).
+ * - Schedules an expiry refresh from `min(category.nextExpiresAt)` across all
+ *   expiring categories.
  */
 
 import { apiFetch } from './api.js';
@@ -58,6 +58,7 @@ export type InboxCategoryState = 'ok' | 'disabled' | 'unavailable' | 'error';
 export type InboxCategoryKey =
   | 'decisions'
   | 'agent_secrets'
+  | 'agent_executions'
   | 'waiting'
   | 'pending_secrets'
   | 'reviews'
@@ -103,6 +104,7 @@ export interface InboxSummaryResponse {
     reviews: InboxCategory;
     chat: InboxCategory;
     agent_secrets?: InboxCategory;
+    agent_executions?: InboxCategory;
   };
 }
 
@@ -420,7 +422,7 @@ export class InboxSummaryStore {
       clearTimeout(this.expiryTimer);
       this.expiryTimer = null;
     }
-    const candidates = [summary.categories?.pending_secrets, summary.categories?.agent_secrets];
+    const candidates = Object.values(summary.categories ?? {});
 
     let soonestMs = Number.POSITIVE_INFINITY;
     for (const cat of candidates) {

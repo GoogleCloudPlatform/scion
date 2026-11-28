@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 )
@@ -521,7 +522,10 @@ const scheduledMessagePermission = "agent.message"
 // The revision ceiling is read for user principals only. agent.message is
 // not covered by any agent scope, so an agent's bounded ceiling never lists
 // it; an agent principal's send is decided by the agent message rule
-// (authorizeAgentToAgent), as a live send by that agent is.
+// (authorizeAgentToAgent), as a live send by that agent is. For event
+// triggers (DefinitionKindTrigger), an agent author must also still hold
+// ScopeAgentNotify (baseline floor, Stage 2 §4.3, ptone/scion#8065) under its
+// live role and ceiling; if downgraded below baseline, the fire is refused.
 func (s *Server) authorizeMessageFire(
 	ctx context.Context,
 	projectID string,
@@ -559,6 +563,20 @@ func (s *Server) authorizeMessageFire(
 			return fmt.Errorf("%w: revision ceiling does not allow %s", errScheduledAuthorityDenied, scheduledMessagePermission)
 		}
 	case store.DelegationPrincipalAgent:
+		// Fail closed: apply the baseline authoring floor to every
+		// agent-principal deferred fire except explicit schedule definitions
+		// (DefinitionKindSchedule / DefinitionKindScheduledEvent), so an unset
+		// or future definition kind cannot bypass the floor
+		// (Stage 2 §4.3, ptone/scion#8065).
+		if auth.Recorded.DefinitionKind != hubfire.DefinitionKindSchedule &&
+			auth.Recorded.DefinitionKind != hubfire.DefinitionKindScheduledEvent {
+			if _, ok := identity.(AgentIdentity); !ok {
+				return fmt.Errorf("%w: agent principal missing agent identity", errScheduledAuthorityDenied)
+			}
+			if err := requireAgentAuthoringFloor(identity); err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("%w: unsupported principal kind %q", errScheduledAuthorityDenied, auth.PrincipalKind)
 	}

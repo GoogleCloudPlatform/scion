@@ -459,7 +459,7 @@ func TestTriggerG4a_Reuse_AuthoringRequiresWakeAuthority(t *testing.T) {
 	noWakeIdent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: agNoWake.ID},
 		ProjectID: agNoWake.ProjectID,
-		Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}, // deliberately omits ScopeAgentLifecycle
+		Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeAgentNotify, ScopeAgentCreate}, // deliberately omits ScopeAgentLifecycle
 	}}
 	noWakeCtx := contextWithIdentity(ctx, noWakeIdent)
 	noWakeCtx = contextWithCredentialContext(noWakeCtx, CredentialContext{Kind: CredentialKindAgentJWT})

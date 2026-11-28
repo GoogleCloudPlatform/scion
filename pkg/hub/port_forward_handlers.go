@@ -902,6 +902,30 @@ func stripFromProxyResponse(k string) bool {
 // policy sets.
 var portProxyPolicyHeaders = [...]string{"Content-Security-Policy", "Permissions-Policy", "Referrer-Policy", "X-Content-Type-Options"}
 
+// setAgentPortPagePolicy sets the hub's sandbox page policy on a hub-generated
+// response for an agent-port proxy route. Proxied app responses replace these
+// headers (portProxyPolicyHeaders) via applyPortProxyResponsePolicy.
+func setAgentPortPagePolicy(h http.Header) {
+	setUntrustedContentHeaders(h, untrustedContentSandboxCSP)
+	h.Set("X-Content-Type-Options", "nosniff")
+}
+
+// agentPortPolicyMiddleware applies the sandbox page policy to every response
+// on agent-port proxy routes before auth or routing runs, so every
+// hub-generated response (sign-in required, not found, forbidden, agent
+// offline, upstream errors, redirects) carries the policy even on a hub-only
+// listener without WebServer.securityHeadersMiddleware. Proxied app responses
+// replace these headers via portProxyPolicyHeaders and
+// applyPortProxyResponsePolicy without duplicating them.
+func agentPortPolicyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isProxyRoute(r.URL.Path) {
+			setAgentPortPagePolicy(w.Header())
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // applyPortProxyResponsePolicy sets the hub's response policy on h, the
 // headers of a proxied app response after stripFromProxyResponse, for both
 // port proxy transports: the page view rules (portViewModifyResponse) when

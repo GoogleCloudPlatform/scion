@@ -705,6 +705,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-agent-secrets.js'),
   },
   {
+    pattern: /^\/profile\/agent-executions$/,
+    tag: 'scion-page-profile-agent-executions',
+    load: () => import('../components/pages/profile-agent-executions.js'),
+  },
+  {
     pattern: /^\/profile\/env$/,
     tag: 'scion-page-profile-env-vars',
     load: () => import('../components/pages/profile-env-vars.js'),
@@ -809,6 +814,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/project-triggers.js'),
   },
   {
+    // Project Message Policies page (experiment hub.message_policies; renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/message-policies$/,
+    tag: 'scion-page-project-message-policies',
+    load: () => import('../components/pages/project-message-policies.js'),
+  },
+  {
     // Project Decisions page (experiment web.decisions; renders 404 when off).
     pattern: /^\/projects\/[^/]+\/decisions$/,
     tag: 'scion-page-project-decisions',
@@ -910,6 +921,7 @@ const PROFILE_ROUTES = new Set([
   'scion-page-profile-inbox',
   'scion-page-profile-decisions',
   'scion-page-profile-agent-secrets',
+  'scion-page-profile-agent-executions',
   'scion-page-profile-env-vars',
   'scion-page-profile-secrets',
   'scion-page-profile-settings',

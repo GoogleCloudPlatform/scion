@@ -3371,6 +3371,10 @@ type Server struct {
 	// ingest commits (token_budget_evaluator.go).
 	tokenBudgetEvaluator *TokenBudgetEvaluator
 
+	// pooledGroupResolver caches effective pooled-budget group memberships per
+	// billing user on this replica (token_budget_groups.go).
+	pooledGroupResolver *PooledGroupResolver
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime
@@ -9103,6 +9107,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
+
+	// Apply the sandbox page policy to every response on agent-port proxy
+	// routes before CORS, auth or routing runs, so every hub-generated
+	// response carries it even on a hub-only listener (ptone/scion#5944).
+	h = agentPortPolicyMiddleware(h)
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
 	// Requests whose path carries a bearer credential (artifact share-link

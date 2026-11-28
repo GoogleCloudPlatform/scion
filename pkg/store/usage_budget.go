@@ -72,6 +72,12 @@ type UsageBudgetStore interface {
 	// "user_project", counterScopeID is "<user_id>:<project_id>".
 	SumUsageScopeCounterTokens(ctx context.Context, scopeKind, counterScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error)
 
+	// SumUsageGroupRollupTokens returns the saturating SUM(tokens_summable)
+	// from usage_group_rollups_daily across BOTH origins ("ingest" and "seed")
+	// for (groupID, projectScopeID) over the half-open UTC day range
+	// [fromDayUTC, toDayUTC). projectScopeID == "" selects the system-wide pool.
+	SumUsageGroupRollupTokens(ctx context.Context, groupID, projectScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error)
+
 	// GetUsageBudgetState returns the usage_budget_state row for key, or
 	// ErrNotFound if no row exists yet.
 	GetUsageBudgetState(ctx context.Context, key UsageBudgetStateKey) (*UsageBudgetState, error)

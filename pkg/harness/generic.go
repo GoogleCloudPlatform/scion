@@ -35,6 +35,36 @@ type commandValidator interface {
 	validateCommand(task string, resume bool, baseArgs []string) error
 }
 
+type modelFlagSupport interface {
+	supportsModelFlag() bool
+}
+
+// SupportsModelFlag reports whether h accepts a CLI "--model <name>" flag
+// prepended to CommandArgs. Container-script harnesses and non-generic
+// declarative harnesses with a non-shell command.base support it; Generic,
+// Shell, and generic/shell-based declarative harnesses do not (they still
+// receive SCION_MODEL in their environment).
+func SupportsModelFlag(h api.Harness) bool {
+	if s, ok := h.(modelFlagSupport); ok {
+		return s.supportsModelFlag()
+	}
+	return false
+}
+
+// isShellCommandBase reports whether base invokes a POSIX-style shell binary
+// (e.g. "sh", "/bin/sh", "bash"), which does not accept a "--model" flag.
+func isShellCommandBase(base []string) bool {
+	if len(base) == 0 {
+		return false
+	}
+	switch filepath.Base(base[0]) {
+	case "sh", "bash", "zsh", "dash", "ash":
+		return true
+	default:
+		return false
+	}
+}
+
 // HonoursSettingsArgs reports whether settings.yaml's
 // harness_configs.<name>.args field is applied for the given harness type.
 // Only the generic harness honours settings-level harness args; other
@@ -111,6 +141,10 @@ func (g *Generic) GetEnv(agentName string, agentHome string, unixUsername string
 	env := make(map[string]string)
 	env["SCION_AGENT_NAME"] = agentName
 	return env
+}
+
+func (g *Generic) supportsModelFlag() bool {
+	return false
 }
 
 func (g *Generic) GetCommand(task string, resume bool, baseArgs []string) []string {

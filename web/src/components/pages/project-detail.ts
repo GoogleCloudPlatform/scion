@@ -171,6 +171,7 @@ import {
   agentsColumnPickerEnabled,
   decisionsEnabled,
   isFeatureEnabled,
+  messagePoliciesEnabled,
   triggersEnabled,
   usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
@@ -603,6 +604,9 @@ export class ScionPageProjectDetail extends LitElement {
   private triggersEnabled = false;
 
   @state()
+  private messagePoliciesEnabled = false;
+
+  @state()
   private usageLedgerEnabled = false;
 
   @state()
@@ -613,6 +617,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnFeatureFlagsChanged = (): void => {
     this.triggersEnabled = triggersEnabled();
+    this.messagePoliciesEnabled = messagePoliciesEnabled();
     this.requestUpdate();
     const nextUsage = usageLedgerEnabled();
     if (nextUsage !== this.usageLedgerEnabled) {
@@ -1508,6 +1513,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     this.decisionsEnabled = decisionsEnabled();
     this.triggersEnabled = triggersEnabled();
+    this.messagePoliciesEnabled = messagePoliciesEnabled();
     this.usageLedgerEnabled = usageLedgerEnabled();
 
     // Set SSE scope to this project (receives all agent events within
@@ -3384,6 +3390,21 @@ export class ScionPageProjectDetail extends LitElement {
                   <sl-button size="small" data-triggers-button>
                     <sl-icon slot="prefix" name="lightning-charge"></sl-icon>
                     Triggers
+                  </sl-button>
+                </a>
+              `
+            : nothing}
+          ${this.messagePoliciesEnabled &&
+          canAny(this.project?._capabilities, 'read_message_policies', 'manage_message_policies')
+            ? html`
+                <a
+                  href="/projects/${encodeURIComponent(this.projectId)}/message-policies"
+                  style="text-decoration: none;"
+                  data-message-policies-link
+                >
+                  <sl-button size="small" data-message-policies-button>
+                    <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                    Message Policies
                   </sl-button>
                 </a>
               `
