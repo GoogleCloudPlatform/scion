@@ -576,21 +576,26 @@ func TestChatUploads_StaleWriterPartNeverReplacesCommittedPart(t *testing.T) {
 	chunkURL := "/api/v1/chat/attachments/uploads/" + started.ID
 	require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=0", part0).Code)
 
-	// Stale writer claims a short lease at offset len(part0) and writes its
-	// token-named part object, then stalls until its lease expires.
+	// Stale writer claims a short lease at offset len(part0), then stalls until
+	// after its lease expires and the winning writer has already committed.
 	staleClaimed, err := env.st.ClaimUploadLease(ctx, started.ID, store.UploadStateUploading, int64(len(part0)), "stale-tok", 10*time.Millisecond)
 	require.NoError(t, err)
-	sink := newObjectUploadSink(env.blobs, env.srv.attachmentService())
-	stalePartPath, err := sink.WriteChunk(ctx, staleClaimed, int64(len(part0)), "stale-tok", bytes.NewReader(stalePart1), int64(len(stalePart1)))
-	require.NoError(t, err)
-	require.Contains(t, stalePartPath, "stale-tok")
 
-	// Wait for stale lease to expire; winning writer takes over via HTTP PUT.
+	// Wait for stale lease to expire; winning writer takes over via HTTP PUT
+	// and commits goodPart1 first.
 	time.Sleep(25 * time.Millisecond)
 	winRec := chatUploadChunkReq(t, env.srv, env.token, fmt.Sprintf("%s?offset=%d", chunkURL, len(part0)), goodPart1)
 	require.Equal(t, http.StatusOK, winRec.Code, "body: %s", winRec.Body.String())
 
-	// Stale writer attempts to commit its part -> ErrLeaseLost.
+	// Stale writer now wakes up and writes stalePart1 AFTER the winner has
+	// committed. Without token-fenced part names, this late write would
+	// overwrite the committed part object on disk and corrupt the finalized
+	// artifact.
+	sink := newObjectUploadSink(env.blobs, env.srv.attachmentService())
+	stalePartPath, err := sink.WriteChunk(ctx, staleClaimed, int64(len(part0)), "stale-tok", bytes.NewReader(stalePart1), int64(len(stalePart1)))
+	require.NoError(t, err)
+
+	// Stale writer's commit attempt fails with ErrLeaseLost.
 	err = env.st.CommitUploadChunk(ctx, started.ID, "stale-tok", store.UploadChunkCommit{
 		Received:      int64(len(wantFull)),
 		HashState:     staleClaimed.HashState,
