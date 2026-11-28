@@ -783,15 +783,13 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// WP1 design 5.2 (N11): while an observer is installed, both fast
 		// paths take the transactional route, so the observer sees the
 		// locked before row and runs in the write's transaction.
-		anchoredLAE, err := s.updateAgentObserved(ctx, obs, uid, a, expectedVersion, newVersion, now)
+		effectiveLAE, err := s.updateAgentObserved(ctx, obs, uid, a, expectedVersion, newVersion, now)
 		if err != nil {
 			return err
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
-		if anchoredLAE {
-			a.LastActivityEvent = now
-		}
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
 
@@ -803,7 +801,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// buildAgentUpdate reads the row's recorded native Cloud Run
 		// decision first (appliedConfigForWrite), so the write is one read
 		// and one conditional update.
-		update, anchoredLAE, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
+		update, effectiveLAE, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
 		if err != nil {
 			return err
 		}
@@ -816,9 +814,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
-		if anchoredLAE {
-			a.LastActivityEvent = now
-		}
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
 
@@ -827,16 +823,14 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	// is already atomic on its own — no transaction needed — and it is the
 	// only path taken by a row that has never had a launch (the overwhelming
 	// majority of UpdateAgent calls while the feature is off or unused).
-	affected, anchoredLAE, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
+	affected, effectiveLAE, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
 	if err != nil {
 		return err
 	}
 	if affected {
 		a.Updated = now
 		a.StateVersion = newVersion
-		if anchoredLAE {
-			a.LastActivityEvent = now
-		}
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
 
@@ -866,16 +860,14 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// failed UPDATE and this probe. Retry the fast path once; it should
 		// now match.
 		injectAgentRunningRace("before_retry")
-		affected, anchoredLAE, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
+		affected, effectiveLAE, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
 		if err != nil {
 			return err
 		}
 		if affected {
 			a.Updated = now
 			a.StateVersion = newVersion
-			if anchoredLAE {
-				a.LastActivityEvent = now
-			}
+			a.LastActivityEvent = effectiveLAE
 			return nil
 		}
 		// Yet another race landed in between (e.g. a BeginLaunch
@@ -915,18 +907,16 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// store.WithTx) — run directly on it so this participates in the
 		// caller's transaction instead of starting (and failing to start) a
 		// nested one. The caller owns commit/rollback.
-		anchoredLAE, err := s.updateAgentRunningTx(ctx, s.client, uid, a, expectedVersion, newVersion, now)
+		effectiveLAE, err := s.updateAgentRunningTx(ctx, s.client, uid, a, expectedVersion, newVersion, now)
 		if err != nil {
 			return err
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
-		if anchoredLAE {
-			a.LastActivityEvent = now
-		}
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
-	anchoredLAE, err = s.updateAgentRunningTx(ctx, tx.Client(), uid, a, expectedVersion, newVersion, now)
+	effectiveLAE, err = s.updateAgentRunningTx(ctx, tx.Client(), uid, a, expectedVersion, newVersion, now)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -936,9 +926,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	}
 	a.Updated = now
 	a.StateVersion = newVersion
-	if anchoredLAE {
-		a.LastActivityEvent = now
-	}
+	a.LastActivityEvent = effectiveLAE
 	return nil
 }
 
@@ -946,17 +934,17 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 // write, excluding rows with an active launch (agent_store.go's UpdateAgent
 // running branch). It reports whether the statement matched a row; it never
 // opens a transaction.
-func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, bool, error) {
-	update, anchoredLAE, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
+func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, time.Time, error) {
+	update, effectiveLAE, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
 	if err != nil {
-		return false, false, err
+		return false, time.Time{}, err
 	}
 	update.Where(agent.Or(agent.LaunchStateIsNil(), agent.LaunchStateNEQ(store.LaunchStateActive)))
 	affected, err := update.Save(ctx)
 	if err != nil {
-		return false, false, mapError(err)
+		return false, time.Time{}, mapError(err)
 	}
-	return affected == 1, anchoredLAE, nil
+	return affected == 1, effectiveLAE, nil
 }
 
 // agentVersionAndLaunchState is the projection probeAgentVersionAndLaunchState
@@ -1037,21 +1025,21 @@ func injectAgentRunningRace(point string) {
 // tx-scoped client when s is already inside one. It returns
 // store.ErrNotFound / store.ErrVersionConflict, without touching
 // launch_state, when the CAS did not match a row.
-func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, error) {
-	update, anchoredLAE, err := buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks())
+func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (time.Time, error) {
+	update, effectiveLAE, err := buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks())
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	affected, err := update.Save(ctx)
 	if err != nil {
-		return false, mapError(err)
+		return time.Time{}, mapError(err)
 	}
 	if affected == 0 {
-		return false, agentUpdateConflictError(ctx, client.Agent, uid)
+		return time.Time{}, agentUpdateConflictError(ctx, client.Agent, uid)
 	}
 
 	if err := injectAgentRunningTxFailure(); err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 
 	// T1 async agent create (design §3.3): end any still-active launch as
@@ -1068,7 +1056,7 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 		SetLaunchState(store.LaunchStateEnded).
 		SetLaunchEndReason(store.LaunchEndReasonRunningObserved).
 		Save(ctx)
-	return anchoredLAE, err
+	return effectiveLAE, err
 }
 
 // updateAgentObserved is UpdateAgent while a lifecycle observer is
@@ -1077,22 +1065,22 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 // the running write's conditional launch end, a read of the after row and
 // the observer. A CAS miss returns ErrNotFound / ErrVersionConflict and
 // observes nothing.
-func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (anchoredLAE bool, err error) {
+func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (effectiveLAE time.Time, err error) {
 	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	defer done()
 	defer markOwnTxErr(&err, tx, s.entTx)
 	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	if a.Phase == "running" {
-		anchoredLAE, err = s.updateAgentRunningTx(ctx, client, uid, a, expectedVersion, newVersion, now)
+		effectiveLAE, err = s.updateAgentRunningTx(ctx, client, uid, a, expectedVersion, newVersion, now)
 	} else {
 		var update *ent.AgentUpdate
-		if update, anchoredLAE, err = buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks()); err == nil {
+		if update, effectiveLAE, err = buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks()); err == nil {
 			var affected int
 			if affected, err = update.Save(ctx); err != nil {
 				err = mapError(err)
@@ -1102,20 +1090,20 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 		}
 	}
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	if before != nil {
 		after, err := lifecycleAfterRow(ctx, client, uid)
 		if err != nil {
-			return false, err
+			return time.Time{}, err
 		}
 		if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
 			Op: store.AgentWriteUpdate, Before: before, After: after, Now: now,
 		}); err != nil {
-			return false, err
+			return time.Time{}, err
 		}
 	}
-	return anchoredLAE, commitLifecycleWriteTx(tx, s.entTx)
+	return effectiveLAE, commitLifecycleWriteTx(tx, s.entTx)
 }
 
 // buildAgentUpdate constructs the CAS update statement shared by both the
@@ -1128,10 +1116,10 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 // row lock for that read inside the caller's transaction). a.AppliedConfig
 // is updated to the row's value, so the caller's copy matches what is
 // written.
-func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time, lock bool) (*ent.AgentUpdate, bool, error) {
+func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time, lock bool) (*ent.AgentUpdate, time.Time, error) {
 	appliedRaw, native, keepNative, prior, err := appliedConfigForWrite(ctx, ac, uid, a.AppliedConfig, lock)
 	if err != nil {
-		return nil, false, err
+		return nil, time.Time{}, err
 	}
 	if a.AppliedConfig != nil {
 		a.AppliedConfig.NativeCloudRun = native
@@ -1191,7 +1179,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		update.ClearAppliedConfig()
 	}
 	if err := setPendingConfig(update.Mutation(), a.PendingConfig); err != nil {
-		return nil, false, err
+		return nil, time.Time{}, err
 	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
@@ -1208,21 +1196,28 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	} else {
 		update.SetLastSeen(a.LastSeen)
 	}
-	// Entering running from any non-running phase via whole-row UpdateAgent
-	// (e.g., create-endpoint existing-agent resume/start when async start is
-	// unavailable) anchors LastActivityEvent at now so a stale pre-suspension
-	// snapshot cannot cause an immediate STALLED false positive on the next
-	// stall sweep (ptone/scion#8304). Routine running -> running whole-row
-	// updates preserve a.LastActivityEvent.
+	// Whole-row LastActivityEvent writes are monotonic: never rewind below the
+	// stored row's LastActivityEvent (for example when sciontool's first
+	// running status report lands before afterStart's stale-snapshot
+	// UpdateAgent on the sync resume path). Entering running from any
+	// non-running phase also anchors LastActivityEvent at now so a stale
+	// pre-suspension snapshot cannot cause an immediate STALLED false positive
+	// on the next stall sweep (ptone/scion#8304). Routine running -> running
+	// whole-row updates never refresh a stale LastActivityEvent to now.
+	effectiveLAE := a.LastActivityEvent
+	if prior != nil && prior.LastActivityEvent != nil && prior.LastActivityEvent.After(effectiveLAE) {
+		effectiveLAE = *prior.LastActivityEvent
+	}
 	anchoredLAE := prior != nil &&
-		prior.Phase != string(state.PhaseRunning) &&
+		!strings.EqualFold(prior.Phase, string(state.PhaseRunning)) &&
 		strings.EqualFold(a.Phase, string(state.PhaseRunning))
-	if anchoredLAE {
-		update.SetLastActivityEvent(now)
-	} else if a.LastActivityEvent.IsZero() {
+	if anchoredLAE && now.After(effectiveLAE) {
+		effectiveLAE = now
+	}
+	if effectiveLAE.IsZero() {
 		update.ClearLastActivityEvent()
 	} else {
-		update.SetLastActivityEvent(a.LastActivityEvent)
+		update.SetLastActivityEvent(effectiveLAE)
 	}
 	if a.DeletedAt.IsZero() {
 		update.ClearDeletedAt()
@@ -1239,7 +1234,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 			priorOwnerID = prior.OwnerID.String()
 		}
 		if a.OwnerID != priorOwnerID {
-			return nil, false, store.ErrShellAgentOwnerImmutable
+			return nil, time.Time{}, store.ErrShellAgentOwnerImmutable
 		}
 	}
 	if a.OwnerID == "" {
@@ -1247,7 +1242,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	} else {
 		ownerUID, err := parseUUID(a.OwnerID)
 		if err != nil {
-			return nil, false, err
+			return nil, time.Time{}, err
 		}
 		update.SetOwnerID(ownerUID)
 	}
@@ -1270,7 +1265,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		update.SetLaunchError("").SetLaunchCause("")
 	}
 
-	return update, anchoredLAE, nil
+	return update, effectiveLAE, nil
 }
 
 // agentUpdateConflictError distinguishes a missing agent from a stale write
@@ -2586,7 +2581,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// (su.Restore) and routine running -> running updates without activity
 	// leave LastActivityEvent untouched.
 	if !activityProvided && !su.Restore &&
-		current.Phase != string(state.PhaseRunning) &&
+		!strings.EqualFold(current.Phase, string(state.PhaseRunning)) &&
 		strings.EqualFold(su.Phase, string(state.PhaseRunning)) {
 		upd.SetLastActivityEvent(now)
 	}

@@ -166,24 +166,55 @@ func TestHandleExistingAgent_ClearsStaleExitReason(t *testing.T) {
 	})
 }
 
+type statusRacingStartDispatcher struct {
+	createAgentDispatcher
+	onStart func(ctx context.Context, agent *store.Agent)
+}
+
+func (d *statusRacingStartDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	if err := d.createAgentDispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+		return err
+	}
+	if d.onStart != nil {
+		d.onStart(ctx, agent)
+	}
+	return nil
+}
+
 // TestHandleExistingAgent_ResumeAnchorsLastActivityEvent covers the sync
 // create-endpoint resume/restart paths (handleExistingAgent with async start
 // unavailable): resuming a suspended or stopped agent whose LastActivityEvent
 // is hours old must anchor LastActivityEvent at now so an immediate stall
-// sweep does not mark it STALLED, while a sweep after StalledThreshold still
-// catches a silent hang (ptone/scion#8304).
+// sweep does not mark it STALLED, both when no status report lands during
+// dispatch and when sciontool's first running status report lands before
+// afterStart's whole-row UpdateAgent, while a sweep after StalledThreshold
+// still catches a silent hang (ptone/scion#8304).
 func TestHandleExistingAgent_ResumeAnchorsLastActivityEvent(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		phase state.Phase
+		name                string
+		phase               state.Phase
+		statusReportOnStart bool
 	}{
 		{name: "suspended agent", phase: state.PhaseSuspended},
 		{name: "stopped agent", phase: state.PhaseStopped},
+		{name: "suspended agent (status report before afterStart)", phase: state.PhaseSuspended, statusReportOnStart: true},
+		{name: "stopped agent (status report before afterStart)", phase: state.PhaseStopped, statusReportOnStart: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			f := handleExistingAgentAuthzSetup(t)
-			f.srv.SetDispatcher(&createAgentDispatcher{})
+			if tc.statusReportOnStart {
+				f.srv.SetDispatcher(&statusRacingStartDispatcher{
+					onStart: func(callCtx context.Context, a *store.Agent) {
+						require.NoError(t, f.store.UpdateAgentStatus(callCtx, a.ID, store.AgentStatusUpdate{
+							Phase:    string(state.PhaseRunning),
+							Activity: string(state.ActivityInitializing),
+						}))
+					},
+				})
+			} else {
+				f.srv.SetDispatcher(&createAgentDispatcher{})
+			}
 
 			agent := f.agent(t, "hea-lae-"+string(tc.phase), string(tc.phase))
 			staleAct := time.Now().Add(-6 * time.Hour)

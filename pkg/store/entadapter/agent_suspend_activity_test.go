@@ -678,3 +678,293 @@ func TestUpdateAgent_WholeRowResumeToRunningRefreshesLastActivityEvent(t *testin
 	assert.ElementsMatch(t, resumedIDs, stalledLaterIDs,
 		"silent resumed agents must be marked stalled once StalledThreshold elapses")
 }
+
+// TestResumeLastActivityEvent_Orderings is a table test over every ordering of
+// {first status report (with/without activity), afterStart whole-row write with
+// stale or zero LastActivityEvent snapshot, launch report success, broker
+// heartbeat, whole-row metadata edit}, verifying that LastActivityEvent ends
+// fresh and an immediate stall sweep never marks the resumed agent STALLED,
+// while preserving the genuinely-stalled and failed-start rollback guards
+// (ptone/scion#8304).
+func TestResumeLastActivityEvent_Orderings(t *testing.T) {
+	ctx := context.Background()
+
+	type opKind int
+	const (
+		opFirstStatusWithActivity opKind = iota
+		opFirstStatusNoActivity
+		opAfterStartStale
+		opAfterStartZeroLAE
+		opLaunchReportSucceeded
+		opHeartbeat
+		opMetadataEditFresh
+		opMetadataEditStaleLAE
+	)
+
+	cases := []struct {
+		name        string
+		asyncLaunch bool
+		ops         []opKind
+	}{
+		{
+			name: "sync: afterStart -> firstStatus(act) -> heartbeat -> metadataEdit(fresh)",
+			ops:  []opKind{opAfterStartStale, opFirstStatusWithActivity, opHeartbeat, opMetadataEditFresh},
+		},
+		{
+			name: "sync R1: firstStatus(act) -> afterStart(stale) -> heartbeat",
+			ops:  []opKind{opFirstStatusWithActivity, opAfterStartStale, opHeartbeat},
+		},
+		{
+			name: "sync R1: firstStatus(no act) -> afterStart(stale) -> heartbeat",
+			ops:  []opKind{opFirstStatusNoActivity, opAfterStartStale, opHeartbeat},
+		},
+		{
+			name: "sync R1: firstStatus(act) -> afterStart(zero LAE)",
+			ops:  []opKind{opFirstStatusWithActivity, opAfterStartZeroLAE},
+		},
+		{
+			name: "sync: heartbeat -> afterStart(stale) -> firstStatus(act)",
+			ops:  []opKind{opHeartbeat, opAfterStartStale, opFirstStatusWithActivity},
+		},
+		{
+			name: "sync: afterStart(stale) -> metadataEdit(stale LAE)",
+			ops:  []opKind{opAfterStartStale, opMetadataEditStaleLAE},
+		},
+		{
+			name: "sync: firstStatus(act) -> metadataEdit(stale LAE)",
+			ops:  []opKind{opFirstStatusWithActivity, opMetadataEditStaleLAE},
+		},
+		{
+			name:        "async: launchReport -> firstStatus(act) -> heartbeat -> metadataEdit(fresh)",
+			asyncLaunch: true,
+			ops:         []opKind{opLaunchReportSucceeded, opFirstStatusWithActivity, opHeartbeat, opMetadataEditFresh},
+		},
+		{
+			name:        "async: firstStatus(act) -> launchReport -> heartbeat -> metadataEdit(fresh)",
+			asyncLaunch: true,
+			ops:         []opKind{opFirstStatusWithActivity, opLaunchReportSucceeded, opHeartbeat, opMetadataEditFresh},
+		},
+		{
+			name:        "async: firstStatus(no act) -> launchReport -> heartbeat",
+			asyncLaunch: true,
+			ops:         []opKind{opFirstStatusNoActivity, opLaunchReportSucceeded, opHeartbeat},
+		},
+		{
+			name:        "async: heartbeat -> launchReport -> firstStatus(act)",
+			asyncLaunch: true,
+			ops:         []opKind{opHeartbeat, opLaunchReportSucceeded, opFirstStatusWithActivity},
+		},
+		{
+			name:        "async: afterStart(stale) -> launchReport -> heartbeat",
+			asyncLaunch: true,
+			ops:         []opKind{opAfterStartStale, opLaunchReportSucceeded, opHeartbeat},
+		},
+		{
+			name:        "async: firstStatus(act) -> afterStart(stale) -> launchReport",
+			asyncLaunch: true,
+			ops:         []opKind{opFirstStatusWithActivity, opAfterStartStale, opLaunchReportSucceeded},
+		},
+		{
+			name:        "async: launchReport -> metadataEdit(stale LAE)",
+			asyncLaunch: true,
+			ops:         []opKind{opLaunchReportSucceeded, opMetadataEditStaleLAE},
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+
+			now := time.Now()
+			staleAct := now.Add(-6 * time.Hour)
+
+			a := makeAgent(projectID, fmt.Sprintf("ord-resume-%d", i))
+			a.Phase = string(state.PhaseSuspended)
+			a.Activity = string(state.ActivityIdle)
+			a.LastActivityEvent = staleAct
+			a.LastSeen = now
+			require.NoError(t, s.CreateAgent(ctx, a))
+
+			// beginStartDispatch transitions suspended -> starting (does not bump LAE).
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:   string(state.PhaseStarting),
+				IfPhase: string(state.PhaseSuspended),
+			}))
+
+			var launchID string
+			if tc.asyncLaunch {
+				var err error
+				launchID, err = s.BeginStartLaunch(ctx, a.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{
+					PriorPhase: string(state.PhaseSuspended),
+				})
+				require.NoError(t, err)
+			}
+
+			// Snapshot read before dispatch completes: carries stale pre-suspension LAE.
+			staleSnap, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			require.True(t, staleSnap.LastActivityEvent.Equal(staleAct))
+
+			beforeResume := time.Now().Add(-time.Second)
+
+			for _, op := range tc.ops {
+				switch op {
+				case opFirstStatusWithActivity:
+					require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+						Phase:    string(state.PhaseRunning),
+						Activity: string(state.ActivityInitializing),
+					}))
+				case opFirstStatusNoActivity:
+					require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+						Phase: string(state.PhaseRunning),
+					}))
+				case opAfterStartStale:
+					snap := *staleSnap
+					snap.Phase = string(state.PhaseRunning)
+					snap.Activity = ""
+					snap.ToolName = ""
+					snap.Message = ""
+					snap.StalledFromActivity = ""
+					snap.LastSeen = time.Now()
+					require.NoError(t, s.UpdateAgent(ctx, &snap))
+					assert.False(t, snap.LastActivityEvent.Before(beforeResume),
+						"afterStart UpdateAgent must propagate fresh LastActivityEvent to caller struct (got %v, want >= %v)",
+						snap.LastActivityEvent, beforeResume)
+				case opAfterStartZeroLAE:
+					snap := *staleSnap
+					snap.Phase = string(state.PhaseRunning)
+					snap.Activity = ""
+					snap.ToolName = ""
+					snap.Message = ""
+					snap.StalledFromActivity = ""
+					snap.LastActivityEvent = time.Time{}
+					snap.LastSeen = time.Now()
+					require.NoError(t, s.UpdateAgent(ctx, &snap))
+					assert.False(t, snap.LastActivityEvent.Before(beforeResume),
+						"afterStart UpdateAgent with zero LAE must propagate stored fresh LastActivityEvent (got %v, want >= %v)",
+						snap.LastActivityEvent, beforeResume)
+				case opLaunchReportSucceeded:
+					_, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+						LaunchID:   launchID,
+						InstanceID: fmt.Sprintf("inst-ord-%d", i),
+						State:      store.LaunchReportStateSucceeded,
+					})
+					require.NoError(t, err)
+				case opHeartbeat:
+					require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+						Phase:        string(state.PhaseRunning),
+						ReportSource: store.StatusReportSourceRuntime,
+					}))
+				case opMetadataEditFresh:
+					row, err := s.GetAgent(ctx, a.ID)
+					require.NoError(t, err)
+					row.TaskSummary = "metadata edit (fresh)"
+					require.NoError(t, s.UpdateAgent(ctx, row))
+				case opMetadataEditStaleLAE:
+					row, err := s.GetAgent(ctx, a.ID)
+					require.NoError(t, err)
+					row.TaskSummary = "metadata edit (stale LAE)"
+					row.LastActivityEvent = staleAct
+					require.NoError(t, s.UpdateAgent(ctx, row))
+					assert.False(t, row.LastActivityEvent.Before(beforeResume),
+						"whole-row metadata edit with stale LAE must preserve fresh stored LAE on caller struct (got %v, want >= %v)",
+						row.LastActivityEvent, beforeResume)
+				}
+			}
+
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			assert.False(t, got.LastActivityEvent.Before(beforeResume),
+				"final LastActivityEvent must be fresh (got %v, want >= %v)", got.LastActivityEvent, beforeResume)
+
+			// Immediate stall sweep must not mark the freshly resumed agent STALLED.
+			sweepNow := time.Now()
+			stalled, err := s.MarkStalledAgents(ctx, store.StallCutoffs{
+				Activity: sweepNow.Add(-5 * time.Minute),
+				Thinking: sweepNow.Add(-20 * time.Minute),
+			}, sweepNow.Add(-2*time.Minute))
+			require.NoError(t, err)
+			assert.Empty(t, stalled, "immediate stall sweep must not mark freshly resumed agent STALLED")
+
+			// Once StalledThreshold elapses with no further activity, the silent
+			// resumed agent IS marked STALLED.
+			stalledLater, err := s.MarkStalledAgents(ctx, store.StallCutoffs{
+				Activity: time.Now().Add(time.Second),
+				Thinking: time.Now().Add(time.Second),
+			}, sweepNow.Add(-2*time.Minute))
+			require.NoError(t, err)
+			require.Len(t, stalledLater, 1)
+			assert.Equal(t, a.ID, stalledLater[0].ID)
+		})
+	}
+
+	// Guard: genuinely stalled running agent receiving heartbeat + whole-row
+	// metadata edit keeps its old LastActivityEvent and IS marked STALLED.
+	t.Run("guard: genuinely stalled running agent stays stalled", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		now := time.Now()
+		oldAct := now.Add(-30 * time.Minute)
+
+		a := makeAgent(projectID, "ord-genuinely-stalled")
+		a.Phase = string(state.PhaseRunning)
+		a.Activity = string(state.ActivityExecuting)
+		a.LastActivityEvent = oldAct
+		a.LastSeen = now
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:        string(state.PhaseRunning),
+			ReportSource: store.StatusReportSourceRuntime,
+		}))
+		row, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		row.TaskSummary = "metadata edit while stalled"
+		require.NoError(t, s.UpdateAgent(ctx, row))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.True(t, got.LastActivityEvent.Equal(oldAct),
+			"genuinely stalled running agent must keep old LAE (got %v, want %v)", got.LastActivityEvent, oldAct)
+
+		stalled, err := s.MarkStalledAgents(ctx, store.StallCutoffs{
+			Activity: now.Add(-5 * time.Minute),
+			Thinking: now.Add(-20 * time.Minute),
+		}, now.Add(-2*time.Minute))
+		require.NoError(t, err)
+		require.Len(t, stalled, 1)
+		assert.Equal(t, a.ID, stalled[0].ID)
+	})
+
+	// Guard: failed-start rollback via Restore preserves pre-suspension LAE.
+	t.Run("guard: failed-start Restore rollback keeps pre-suspend LAE", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		now := time.Now()
+		staleAct := now.Add(-6 * time.Hour)
+
+		a := makeAgent(projectID, "ord-rollback-restore")
+		a.Phase = string(state.PhaseSuspended)
+		a.Activity = string(state.ActivityIdle)
+		a.LastActivityEvent = staleAct
+		a.LastSeen = now
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:   string(state.PhaseStarting),
+			IfPhase: string(state.PhaseSuspended),
+		}))
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseSuspended),
+			Activity: string(state.ActivityIdle),
+			IfPhase:  string(state.PhaseStarting),
+			Restore:  true,
+		}))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Equal(t, string(state.ActivityIdle), got.Activity)
+		assert.True(t, got.LastActivityEvent.Equal(staleAct),
+			"failed-start rollback must preserve pre-suspension LAE (got %v, want %v)", got.LastActivityEvent, staleAct)
+	})
+}
