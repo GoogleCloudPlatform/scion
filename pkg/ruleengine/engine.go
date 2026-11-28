@@ -677,6 +677,9 @@ func (e *Engine) evaluateCore(ctx context.Context, c Compiled, input Input, budg
 		defer cancel()
 	}
 
+	if err := ctx.Err(); err != nil {
+		return Decision{}, 0, &FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+	}
 	dec, err := d.Evaluate(evalCtx, c, input, effBudget)
 	elapsed := max(time.Since(start), time.Duration(0))
 	if budget.Tracker != nil {
