@@ -507,6 +507,56 @@ func TestChatUploads_OwnerScopeBindingAndAuthz(t *testing.T) {
 		"/api/v1/chat/attachments/uploads/"+sessHubDM.ID+"?offset=0", []byte("hello")).Code, "case (iv) project-less PUT with hub-boundary token")
 }
 
+func TestChatUploads_ProjectMembershipRevocationStopsNextChunk(t *testing.T) {
+	env := newChatUploadEnv(t, true, true)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "chat-upl-revoke@example.com",
+		DisplayName: "Revoked Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, env.st.CreateUser(ctx, member))
+	memberToken, _, _, err := env.srv.userTokenService.GenerateTokenPair(member.ID, member.Email, member.DisplayName, member.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	project, _ := createTestHubManagedProject(t, env.srv, "Chat Upload Revocation Project")
+	memberRole, err := env.st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	binding, err := env.st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      member.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	bindingID := binding.ID
+
+	// Member starts a project-scoped upload and uploads chunk 0.
+	startRec := chatUploadJSONReq(t, env.srv, memberToken, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "revoked.txt", Size: 10, ProjectID: project.ID})
+	require.Equal(t, http.StatusCreated, startRec.Code, "body: %s", startRec.Body.String())
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+
+	chunkURL := "/api/v1/chat/attachments/uploads/" + started.ID
+	c0 := chatUploadChunkReq(t, env.srv, memberToken, chunkURL+"?offset=0", []byte("01234"))
+	require.Equal(t, http.StatusOK, c0.Code, "body: %s", c0.Body.String())
+
+	// Revoke project membership mid-upload (§3.8).
+	require.NoError(t, env.st.DeleteRoleBinding(ctx, bindingID))
+
+	// Next chunk PUT and complete are refused with 403.
+	c1 := chatUploadChunkReq(t, env.srv, memberToken, chunkURL+"?offset=5", []byte("56789"))
+	assert.Equal(t, http.StatusForbidden, c1.Code, "revoked member's next PUT must be refused; body: %s", c1.Body.String())
+	comp := chatUploadJSONReq(t, env.srv, memberToken, http.MethodPost, chunkURL+"/complete", nil)
+	assert.Equal(t, http.StatusForbidden, comp.Code, "revoked member's complete must be refused; body: %s", comp.Body.String())
+}
+
 func TestChatUploads_StaleWriterPartNeverReplacesCommittedPart(t *testing.T) {
 	env := newChatUploadEnv(t, true, true)
 	ctx := context.Background()
