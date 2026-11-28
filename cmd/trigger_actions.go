@@ -289,7 +289,7 @@ func bindGroupedTriggerActionFlags(
 		"Explicit role for dispatched agents (optional; defaults to project/hub ladder)",
 		func(v string) { g := c.current(); g.dispatch.agentRole = v; g.markChanged("agent-role") })
 	bindGroupedStringArray(fs, &dispatchTarget.allow, "allow",
-		"Explicitly opt in an untrusted event variable path (or trailing .*) for template rendering (repeatable; derived automatically when omitted)",
+		"Optional narrowing list of allowed untrusted event variable paths (or trailing .*) for template rendering (repeatable; derived by the Hub when omitted)",
 		func(v string) {
 			g := c.current()
 			g.dispatch.allow = append(g.dispatch.allow, v)
@@ -374,25 +374,15 @@ func buildActionSpecFromGroup(g *triggerActionGroup, isGitHubSource bool) (hubcl
 			Offline:         offline,
 			QueueTTLSeconds: queueTTLSeconds,
 		}
-		var derivedUntrusted []string
 		if allowExplicit || len(g.dispatch.allow) > 0 {
 			action.UntrustedVars = append([]string(nil), g.dispatch.allow...)
-		} else {
-			derived, dErr := deriveMessageUntrustedVars(action.Message)
-			if dErr != nil {
-				return hubclient.TriggerActionSpec{}, nil, dErr
-			}
-			if len(derived) > 0 {
-				action.UntrustedVars = derived
-				derivedUntrusted = derived
-			}
 		}
 		if uuid.Validate(agentRef) == nil {
 			action.AgentID = agentRef
 		} else {
 			action.AgentName = agentRef
 		}
-		return action, derivedUntrusted, nil
+		return action, nil, nil
 
 	case "dispatch_agent":
 		if badFlag, ok := hasMessageFlagValues(g.agent, g.message, g.interrupt, g.wake, g.plain); ok {

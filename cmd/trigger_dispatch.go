@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -67,7 +66,7 @@ func bindDispatchAgentFlags(fs *pflag.FlagSet, v *dispatchAgentFlagValues) {
 	fs.StringVar(&v.ackComment, "ack-comment", "", "GitHub acknowledgement comment template posted after dispatch-agent succeeds (requires --github)")
 	fs.StringVar(&v.githubToken, "github-token", "", "GitHub token precedence for dispatched agents (installation or user_preferred)")
 	fs.StringVar(&v.agentRole, "agent-role", "", "Explicit role for dispatched agents (optional; defaults to project/hub ladder)")
-	fs.StringArrayVar(&v.allow, "allow", nil, "Explicitly opt in an untrusted event variable path (or trailing .*) for template rendering (repeatable; derived automatically when omitted)")
+	fs.StringArrayVar(&v.allow, "allow", nil, "Optional narrowing list of allowed untrusted event variable paths (or trailing .*) for template rendering (repeatable; derived by the Hub when omitted)")
 }
 
 func normalizeTriggerActionKind(raw string) (string, error) {
@@ -117,68 +116,6 @@ func parseTriggerLabels(rawArgs []string) (map[string]string, error) {
 		out[key] = raw[idx+1:]
 	}
 	return out, nil
-}
-
-// deriveDispatchUntrustedVars parses every template slot on a dispatch_agent
-// action using pkg/triggertemplate and returns the deduplicated untrusted
-// placeholder paths in first-appearance order (Stage 2 D-S2-5).
-func deriveDispatchUntrustedVars(action *hubclient.TriggerActionSpec) ([]string, error) {
-	var (
-		derived []string
-		seen    = make(map[string]bool)
-	)
-	collect := func(raw, slot string) error {
-		if raw == "" {
-			return nil
-		}
-		tmpl, err := triggertemplate.Parse(raw, slot)
-		if err != nil {
-			var pe *triggertemplate.ParseError
-			if errors.As(err, &pe) {
-				return newUsageError("invalid template in slot %q at byte offset %d: %s",
-					triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
-			}
-			return newUsageError("invalid template in slot %q: %v", triggerTerminalText(slot, false), err)
-		}
-		for _, p := range tmpl.Untrusted() {
-			if !seen[p] {
-				seen[p] = true
-				derived = append(derived, p)
-			}
-		}
-		return nil
-	}
-
-	if err := collect(action.Task, triggertemplate.SlotTask); err != nil {
-		return nil, err
-	}
-	if err := collect(action.AgentName, triggertemplate.SlotName); err != nil {
-		return nil, err
-	}
-	if err := collect(action.Branch, triggertemplate.SlotBranch); err != nil {
-		return nil, err
-	}
-	if len(action.Labels) > 0 {
-		keys := make([]string, 0, len(action.Labels))
-		for k := range action.Labels {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if err := collect(action.Labels[k], triggertemplate.SlotLabel); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err := collect(action.ReuseMessage, triggertemplate.SlotMessage); err != nil {
-		return nil, err
-	}
-	if action.AckComment != nil && action.AckComment.Body != "" {
-		if err := collect(action.AckComment.Body, hub.TriggerTemplateSlotGitHubAckCommentBody); err != nil {
-			return nil, err
-		}
-	}
-	return derived, nil
 }
 
 // deriveGitHubCommentUntrustedVars parses a github.comment body template using
@@ -316,37 +253,6 @@ func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) err
 	return nil
 }
 
-// deriveMessageUntrustedVars parses a message-action template using
-// triggertemplate.SlotMessage and returns the deduplicated untrusted
-// placeholder paths in first-appearance order (Stage 2 §5.7, D-S2-5).
-func deriveMessageUntrustedVars(raw string) ([]string, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	tmpl, err := triggertemplate.Parse(raw, triggertemplate.SlotMessage)
-	if err != nil {
-		var pe *triggertemplate.ParseError
-		if errors.As(err, &pe) {
-			return nil, newUsageError("invalid template in slot %q at byte offset %d: %s",
-				triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
-		}
-		return nil, newUsageError("invalid template in slot %q: %v", triggertemplate.SlotMessage, err)
-	}
-	untrusted := tmpl.Untrusted()
-	if len(untrusted) == 0 {
-		return nil, nil
-	}
-	seen := make(map[string]bool, len(untrusted))
-	derived := make([]string, 0, len(untrusted))
-	for _, p := range untrusted {
-		if !seen[p] {
-			seen[p] = true
-			derived = append(derived, p)
-		}
-	}
-	return derived, nil
-}
-
 func parseTriggerQueueTTL(raw string) (int, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
@@ -419,20 +325,30 @@ func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool
 		AgentRole:    strings.TrimSpace(v.agentRole),
 	}
 
-	var derived []string
 	if allowExplicit || len(v.allow) > 0 {
 		action.UntrustedVars = append([]string(nil), v.allow...)
-	} else {
-		derived, err = deriveDispatchUntrustedVars(&action)
-		if err != nil {
-			return hubclient.TriggerActionSpec{}, nil, err
-		}
-		if len(derived) > 0 {
-			action.UntrustedVars = derived
-		}
 	}
 
-	return action, derived, nil
+	return action, nil, nil
+}
+
+func collectTriggerUntrustedVars(actions []hubclient.TriggerActionSpec) []string {
+	var (
+		out  []string
+		seen map[string]bool
+	)
+	for _, act := range actions {
+		for _, p := range act.UntrustedVars {
+			if seen == nil {
+				seen = make(map[string]bool)
+			}
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 func printDerivedUntrustedVars(paths []string) {
@@ -735,7 +651,6 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		flags.Changed("on-name-conflict") || flags.Changed("branch") || flags.Changed("label") || flags.Changed("ephemeral") ||
 		flags.Changed("reuse-message") || flags.Changed("ack-comment") || flags.Changed("github-token") || flags.Changed("agent-role") || flags.Changed("allow")
 
-	var derivedUntrusted []string
 	if actionFlagsChanged {
 		existing, gErr := hubCtx.Client.Triggers(projectID).Get(ctx, fullID)
 		if gErr != nil {
@@ -752,12 +667,11 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 			} else if flags.Changed("webhook") {
 				isGitHub = false
 			}
-			specs, derived, gErr := buildActionSpecsFromGroups(updateActionCollector.groups, isGitHub)
+			specs, _, gErr := buildActionSpecsFromGroups(updateActionCollector.groups, isGitHub)
 			if gErr != nil {
 				return gErr
 			}
 			req.Actions = &specs
-			derivedUntrusted = derived
 			anyChange = true
 		} else {
 			existingActions := effectiveTriggerActions(existing)
@@ -850,12 +764,8 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 				if flags.Changed("allow") {
 					spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
 				} else if flags.Changed("message") || flags.Changed("action") {
-					derived, dErr := deriveMessageUntrustedVars(spec.Message)
-					if dErr != nil {
-						return dErr
-					}
-					spec.UntrustedVars = derived
-					derivedUntrusted = derived
+					// Omit untrustedVars when templates change without --allow so the Hub re-derives.
+					spec.UntrustedVars = nil
 				}
 				req.Action = &spec
 
@@ -947,13 +857,11 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 				}
 				if flags.Changed("allow") {
 					spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
-				} else {
-					derived, dErr := deriveDispatchUntrustedVars(&spec)
-					if dErr != nil {
-						return dErr
-					}
-					spec.UntrustedVars = derived
-					derivedUntrusted = derived
+				} else if flags.Changed("action") || flags.Changed("task") || flags.Changed("task-file") ||
+					flags.Changed("agent-name") || flags.Changed("branch") || flags.Changed("label") ||
+					flags.Changed("reuse-message") || flags.Changed("ack-comment") {
+					// Omit untrustedVars when template slots change without --allow so the Hub re-derives.
+					spec.UntrustedVars = nil
 				}
 				req.Action = &spec
 
@@ -968,8 +876,6 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		return newUsageError("at least one field flag is required to update a trigger")
 	}
 
-	printDerivedUntrustedVars(derivedUntrusted)
-
 	updated, err := hubCtx.Client.Triggers(projectID).Update(ctx, fullID, req)
 	if err != nil {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to update trigger: %w", formatTriggerAPIError(err)))
@@ -980,7 +886,9 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Trigger updated: %s (revision %d)\n", triggerTerminalText(updated.ID, false), updated.AuthorizationRevision)
-	printTriggerActionsSummary(effectiveTriggerActions(updated))
+	updatedActions := effectiveTriggerActions(updated)
+	printTriggerActionsSummary(updatedActions)
+	printDerivedUntrustedVars(collectTriggerUntrustedVars(updatedActions))
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(updated.Status, updated.StatusReason), false))
 	return nil
 }

@@ -123,17 +123,18 @@ func TestDispatchAgentAckComment_AuthoringValidation(t *testing.T) {
 		})
 	require.Equal(t, http.StatusBadRequest, recEmpty.Code, recEmpty.Body.String())
 
-	// 3. Un-opted-in untrusted variable in ackComment.body -> 400 untrusted_var_not_allowed.
+	// 3. Explicit narrower/empty untrustedVars missing ackComment.body var -> 400 untrusted_var_not_allowed.
 	recUntrusted := f.doJSON(t, creatorCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
-		CreateTriggerRequest{
-			Name:   "gh-ack-untrusted",
-			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
-			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
-			Action: TriggerActionSpec{
-				Type:       store.TriggerActionDispatchAgent,
-				Task:       "run",
-				AckComment: &DispatchAgentAckComment{Body: "Requested by @${event.attributes.sender}"},
+		map[string]any{
+			"name":   "gh-ack-untrusted",
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			"match":  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			"action": map[string]any{
+				"type":          store.TriggerActionDispatchAgent,
+				"task":          "run",
+				"ackComment":    map[string]any{"body": "Requested by @${event.attributes.sender}"},
+				"untrustedVars": []string{},
 			},
 		})
 	require.Equal(t, http.StatusBadRequest, recUntrusted.Code, recUntrusted.Body.String())

@@ -67,14 +67,15 @@ func TestTriggerMessageP2b_AuthoringAndScheduleRefusals(t *testing.T) {
 		assert.Equal(t, []string{"event.attributes.number", "event.payload.title"}, tr.Action.UntrustedVars)
 	})
 
-	t.Run("refuses missing untrusted opt-in", func(t *testing.T) {
-		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
-			Name:   "msg-p2b-no-optin",
-			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
-			Action: TriggerActionSpec{
-				Type:    "message",
-				AgentID: f.targetAgent.ID,
-				Message: "PR #${event.attributes.number}",
+	t.Run("refuses supplied untrustedVars missing placeholder", func(t *testing.T) {
+		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, map[string]any{
+			"name":   "msg-p2b-no-optin",
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			"action": map[string]any{
+				"type":          "message",
+				"agentId":       f.targetAgent.ID,
+				"message":       "PR #${event.attributes.number}",
+				"untrustedVars": []string{},
 			},
 		})
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())

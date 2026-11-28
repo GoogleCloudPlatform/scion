@@ -637,15 +637,6 @@ func buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commen
 			}
 			if allowExplicit || len(triggerDispatch.allow) > 0 {
 				action.UntrustedVars = append([]string(nil), triggerDispatch.allow...)
-			} else {
-				derived, dErr := deriveMessageUntrustedVars(action.Message)
-				if dErr != nil {
-					return nil, nil, dErr
-				}
-				if len(derived) > 0 {
-					action.UntrustedVars = derived
-					derivedUntrusted = derived
-				}
 			}
 			if uuid.Validate(agentRef) == nil {
 				action.AgentID = agentRef
@@ -787,7 +778,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	commentExplicit := cmd != nil && cmd.Flags().Changed("comment")
 	ackCommentExplicit := cmd != nil && cmd.Flags().Changed("ack-comment")
 	notifyUserExplicit := cmd != nil && cmd.Flags().Changed("notify-user")
-	req, derivedUntrusted, err := buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, notifyUserExplicit)
+	req, _, err := buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, notifyUserExplicit)
 	if err != nil {
 		return err
 	}
@@ -797,8 +788,6 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer cancel()
-
-	printDerivedUntrustedVars(derivedUntrusted)
 
 	created, err := hubCtx.Client.Triggers(projectID).Create(ctx, req)
 	if err != nil {
@@ -828,7 +817,9 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	if created.Subject.CoalesceWindow != "" {
 		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
-	printTriggerActionsSummary(effectiveTriggerActions(created))
+	createdActions := effectiveTriggerActions(created)
+	printTriggerActionsSummary(createdActions)
+	printDerivedUntrustedVars(collectTriggerUntrustedVars(createdActions))
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
 	return nil
 }

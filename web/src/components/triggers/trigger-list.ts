@@ -78,11 +78,11 @@ export class ScionTriggerList extends LitElement {
   pendingCreatePreset = '';
 
   /**
-   * P9 HOOK (ptone/scion#9065): flip to true when the Hub accepts `actions[]`
-   * on POST /triggers and PATCH /triggers/{id}.
+   * Multi-action support (P9, ptone/scion#9065 / ptone/scion#9785): sends
+   * `actions[]` on POST /triggers and PATCH /triggers/{id}.
    */
   @property({ type: Boolean })
-  multiActionEnabled = false;
+  multiActionEnabled = true;
 
   @state() private triggers: TriggerDefinition[] = [];
   @state() private loading = true;
@@ -542,10 +542,10 @@ export class ScionTriggerList extends LitElement {
       if (this.multiActionEnabled) {
         const hasReadOnly = this.formActions.some((a) => this.isReadOnlyActionType(a.type));
         if (!hasReadOnly) {
-          body['actions'] = this.formActions;
+          body['actions'] = this.formActions.map((a) => this.sanitizeActionForSave(a));
         }
       } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
-        body['action'] = firstAction;
+        body['action'] = this.sanitizeActionForSave(firstAction);
       }
     }
 
@@ -556,18 +556,32 @@ export class ScionTriggerList extends LitElement {
       body['maxFiresPerMinute'] = nextFpm;
     }
 
+    const hasDispatchAction = this.formActions.some((a) => a.type === 'dispatch_agent');
     const rawConc = this.formMaxConcurrentDispatches.trim();
     const nextConc = rawConc === '' ? 0 : parseInt(rawConc, 10);
     if (
       Number.isFinite(nextConc) &&
       nextConc >= 0 &&
-      firstAction?.type === 'dispatch_agent' &&
+      hasDispatchAction &&
       nextConc !== (orig.maxConcurrentDispatches ?? 0)
     ) {
       body['maxConcurrentDispatches'] = nextConc;
     }
 
     return body;
+  }
+
+  /**
+   * Omit untrustedVars on message and dispatch_agent payloads when saving so
+   * the hub derives and stores the list from the current templates (ptone/scion#9776).
+   */
+  private sanitizeActionForSave(action: TriggerActionSpec): TriggerActionSpec {
+    if (action.type === 'message' || action.type === 'dispatch_agent') {
+      const copy = { ...action };
+      delete copy.untrustedVars;
+      return copy;
+    }
+    return action;
   }
 
   private async submitTriggerForm(): Promise<void> {
@@ -635,9 +649,11 @@ export class ScionTriggerList extends LitElement {
       // Until P9 merges on the Hub, send the single `action` object.
       const firstAction = this.formActions[0];
       if (this.multiActionEnabled) {
-        body['actions'] = this.formActions.filter((a) => !this.isReadOnlyActionType(a.type));
+        body['actions'] = this.formActions
+          .filter((a) => !this.isReadOnlyActionType(a.type))
+          .map((a) => this.sanitizeActionForSave(a));
       } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
-        body['action'] = firstAction;
+        body['action'] = this.sanitizeActionForSave(firstAction);
       }
 
       const maxFpm = parseInt(this.formMaxFiresPerMinute, 10);
@@ -645,7 +661,11 @@ export class ScionTriggerList extends LitElement {
         body['maxFiresPerMinute'] = maxFpm;
       }
       const maxConc = parseInt(this.formMaxConcurrentDispatches, 10);
-      if (Number.isFinite(maxConc) && maxConc > 0 && firstAction?.type === 'dispatch_agent') {
+      if (
+        Number.isFinite(maxConc) &&
+        maxConc > 0 &&
+        this.formActions.some((a) => a.type === 'dispatch_agent')
+      ) {
         body['maxConcurrentDispatches'] = maxConc;
       }
     }
@@ -1206,7 +1226,7 @@ export class ScionTriggerList extends LitElement {
                 ></scion-trigger-where-editor>
               `}
 
-          <div class="section-divider">Action</div>
+          <div class="section-divider">${this.multiActionEnabled ? 'Actions' : 'Action'}</div>
           <scion-trigger-action-editor
             .actions=${this.formActions}
             .agents=${this.agents}

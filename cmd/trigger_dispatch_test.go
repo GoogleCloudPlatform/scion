@@ -106,6 +106,13 @@ func TestTriggerCreate_DispatchAgentDerivedAllowAndFlags(t *testing.T) {
 		require.Equal(t, http.MethodPost, r.Method)
 		require.Equal(t, "/api/v1/projects/proj-1/triggers", r.URL.Path)
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+		respAction := gotReq.Action
+		respAction.UntrustedVars = []string{
+			"event.payload.title",
+			"event.attributes.number",
+			"event.payload.env",
+			"event.attributes.sha",
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(hubclient.Trigger{
@@ -114,7 +121,7 @@ func TestTriggerCreate_DispatchAgentDerivedAllowAndFlags(t *testing.T) {
 			Name:      gotReq.Name,
 			Source:    gotReq.Source,
 			Match:     hubclient.TriggerMatchSpec{Types: []string{"webhook.received"}, Rules: []hubclient.TriggerMatchRuleSpec{}},
-			Action:    gotReq.Action,
+			Action:    respAction,
 			Status:    "active",
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),
@@ -167,13 +174,9 @@ func TestTriggerCreate_DispatchAgentDerivedAllowAndFlags(t *testing.T) {
 	assert.Equal(t, "user_preferred", gotReq.Action.GithubToken)
 	assert.Equal(t, "baseline", gotReq.Action.AgentRole)
 
-	// Derived untrusted vars are deduplicated in deterministic slot order and printed.
-	assert.Equal(t, []string{
-		"event.payload.title",
-		"event.attributes.number",
-		"event.payload.env",
-		"event.attributes.sha",
-	}, gotReq.Action.UntrustedVars)
+	// untrustedVars is omitted on the request when --allow is not set; the CLI
+	// prints the Hub-derived list returned in the response.
+	assert.Nil(t, gotReq.Action.UntrustedVars)
 	assert.Contains(t, out, "Event values that will be inserted as data: event.payload.title, event.attributes.number, event.payload.env, event.attributes.sha")
 	assert.Contains(t, out, "Action:  dispatch_agent (template: default)")
 }
@@ -194,6 +197,54 @@ func TestTriggerCreate_DispatchAgentExplicitAllowNotReDerived(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, derived)
 	assert.Equal(t, []string{"event.payload.*"}, req.Action.UntrustedVars)
+}
+
+func TestTriggerCreate_CLIHubParityOmitsUntrustedVars(t *testing.T) {
+	t.Run("message omits untrustedVars on wire when --allow is not set", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		triggerName = "parity-msg"
+		triggerWebhookRef = "ep-1"
+		triggerAction = "message"
+		triggerAgent = "lead"
+		triggerMessage = "CI at ${event.payload.commit}"
+
+		req, derived, err := buildCreateTriggerRequestWithAllow(false)
+		require.NoError(t, err)
+		assert.Nil(t, derived)
+		assert.Nil(t, req.Action.UntrustedVars)
+
+		raw, err := json.Marshal(req)
+		require.NoError(t, err)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		actionMap := decoded["action"].(map[string]any)
+		_, hasUntrusted := actionMap["untrustedVars"]
+		assert.False(t, hasUntrusted, "CLI message request must omit untrustedVars so Hub derives identically to direct API calls")
+	})
+
+	t.Run("dispatch_agent omits untrustedVars on wire when --allow is not set", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		triggerName = "parity-disp"
+		triggerWebhookRef = "ep-1"
+		triggerAction = "dispatch-agent"
+		triggerDispatch = dispatchAgentFlagValues{
+			template: "developer",
+			task:     "Fix ${event.payload.commit}",
+		}
+
+		req, derived, err := buildCreateTriggerRequestWithAllow(false)
+		require.NoError(t, err)
+		assert.Nil(t, derived)
+		assert.Nil(t, req.Action.UntrustedVars)
+
+		raw, err := json.Marshal(req)
+		require.NoError(t, err)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		actionMap := decoded["action"].(map[string]any)
+		_, hasUntrusted := actionMap["untrustedVars"]
+		assert.False(t, hasUntrusted, "CLI dispatch_agent request must omit untrustedVars so Hub derives identically to direct API calls")
+	})
 }
 
 func TestTriggerCreate_DispatchAgentFlagValidation(t *testing.T) {
@@ -264,19 +315,19 @@ func TestTriggerCreate_DispatchAgentFlagValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "--github-token")
 	})
 
-	t.Run("invalid template syntax caught during derivation", func(t *testing.T) {
+	t.Run("omits untrustedVars when --allow is not passed", func(t *testing.T) {
 		resetTriggerDispatchTestFlags(t)
-		triggerName = "bad"
+		triggerName = "hub-derives"
 		triggerWebhookRef = "ep-1"
 		triggerAction = "dispatch-agent"
 		triggerDispatch = dispatchAgentFlagValues{
 			template: "default",
-			task:     "hello ${unclosed",
+			task:     "hello ${event.payload.title}",
 		}
-		_, _, err := buildCreateTriggerRequestWithAllow(false)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `slot "task"`)
-		assert.Contains(t, err.Error(), "byte offset 6")
+		req, derived, err := buildCreateTriggerRequestWithAllow(false)
+		require.NoError(t, err)
+		assert.Nil(t, derived)
+		assert.Nil(t, req.Action.UntrustedVars)
 	})
 }
 
@@ -476,6 +527,8 @@ func TestTriggerPresetApply_DispatchAgentSucceeds(t *testing.T) {
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotCreate))
+			respAction := gotCreate.Action
+			respAction.UntrustedVars = []string{"event.attributes.number"}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
 				ID:        "tr-preset-disp-1",
@@ -483,7 +536,7 @@ func TestTriggerPresetApply_DispatchAgentSucceeds(t *testing.T) {
 				Name:      gotCreate.Name,
 				Source:    gotCreate.Source,
 				Match:     *gotCreate.Match,
-				Action:    gotCreate.Action,
+				Action:    respAction,
 				Status:    "active",
 			})
 		default:
@@ -516,7 +569,7 @@ func TestTriggerPresetApply_DispatchAgentSucceeds(t *testing.T) {
 	assert.Equal(t, "dispatch_agent", gotCreate.Action.Type)
 	assert.Equal(t, "default", gotCreate.Action.Template)
 	assert.Equal(t, "installation", gotCreate.Action.GithubToken)
-	assert.Equal(t, []string{"event.attributes.number"}, gotCreate.Action.UntrustedVars)
+	assert.Nil(t, gotCreate.Action.UntrustedVars)
 	assert.Contains(t, out, "Event values that will be inserted as data: event.attributes.number")
 	assert.Contains(t, out, "Action:  dispatch_agent (template: default)")
 }
@@ -554,12 +607,14 @@ func TestTriggerUpdate_DispatchAgentPartialUpdateAndDerivedAllow(t *testing.T) {
 			})
 		case http.MethodPatch:
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPatch))
+			respAction := *gotPatch.Action
+			respAction.UntrustedVars = []string{"event.payload.title", "event.attributes.number"}
 			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
 				ID:                    trigID,
 				ProjectID:             "proj-1",
 				Name:                  "pr-fix",
 				AuthorizationRevision: 3,
-				Action:                *gotPatch.Action,
+				Action:                respAction,
 				Status:                "active",
 			})
 		default:
@@ -606,7 +661,7 @@ func TestTriggerUpdate_DispatchAgentPartialUpdateAndDerivedAllow(t *testing.T) {
 	assert.Equal(t, "default", gotPatch.Action.Template, "existing template should be preserved on partial update")
 	assert.Equal(t, "Fix ${event.payload.title}", gotPatch.Action.Task)
 	assert.Equal(t, "fix/${event.attributes.number}", gotPatch.Action.Branch, "existing branch should be preserved")
-	assert.Equal(t, []string{"event.payload.title", "event.attributes.number"}, gotPatch.Action.UntrustedVars)
+	assert.Nil(t, gotPatch.Action.UntrustedVars, "untrustedVars should be omitted when templates change without --allow so the Hub re-derives")
 	assert.Contains(t, out, "Event values that will be inserted as data: event.payload.title, event.attributes.number")
 	assert.Contains(t, out, "Trigger updated: "+trigID+" (revision 3)")
 }

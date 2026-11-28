@@ -246,7 +246,11 @@ func (s *Server) validateMessageAuthoringTarget(
 			}
 		}
 
-		// Validate untrustedVars and message-slot template (Stage 2 §5.7).
+		// Validate untrustedVars and message-slot template (Stage 2 §5.7,
+		// untrusted_optin v1). When untrustedVars is omitted (nil), derive it
+		// from the message template's untrusted placeholders and store it on
+		// the payload; when supplied (including []), enforce coverage as-is.
+		untrustedSupplied := parsed.UntrustedVars != nil
 		if len(parsed.UntrustedVars) > 0 {
 			deduped, uErr := validateUntrustedVars(parsed.UntrustedVars)
 			if uErr != nil {
@@ -284,6 +288,11 @@ func (s *Server) validateMessageAuthoringTarget(
 					"slot":  triggertemplate.SlotMessage,
 					"paths": msgTmpl.Untrusted(),
 				},
+			}
+		}
+		if !untrustedSupplied {
+			if derived := msgTmpl.Untrusted(); len(derived) > 0 {
+				parsed.UntrustedVars = derived
 			}
 		}
 		if _, vErr := validateTemplateSlot(parsed.Message, triggertemplate.SlotMessage, parsed.UntrustedVars); vErr != nil {

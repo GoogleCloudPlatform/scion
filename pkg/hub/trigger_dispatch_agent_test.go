@@ -389,9 +389,26 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 	})
 
 	t.Run("untrusted_var_not_allowed", func(t *testing.T) {
-		req := baseReq("untrusted-uncovered")
-		req.Action.Task = "PR ${event.payload.title}"
-		details := assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, "untrusted_var_not_allowed")
+		// Explicit narrower untrustedVars refuses missing paths.
+		reqNarrow := baseReq("untrusted-narrow")
+		reqNarrow.Action.Task = "PR ${event.payload.title} by ${event.attributes.sender}"
+		reqNarrow.Action.UntrustedVars = []string{"event.attributes.sender"}
+		detailsNarrow := assertErrCode(t, postTrigger(userCtx, reqNarrow), http.StatusBadRequest, "untrusted_var_not_allowed")
+		assert.Equal(t, "task", detailsNarrow["slot"])
+		assert.Equal(t, "event.payload.title", detailsNarrow["path"])
+
+		// Explicit empty untrustedVars ([]) in JSON also refuses untrusted placeholders.
+		rawBody := map[string]any{
+			"name":   "untrusted-empty",
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			"action": map[string]any{
+				"type":          store.TriggerActionDispatchAgent,
+				"template":      "developer",
+				"task":          "PR ${event.payload.title}",
+				"untrustedVars": []string{},
+			},
+		}
+		details := assertErrCode(t, postTrigger(userCtx, rawBody), http.StatusBadRequest, "untrusted_var_not_allowed")
 		assert.Equal(t, "task", details["slot"])
 		assert.Equal(t, "event.payload.title", details["path"])
 	})

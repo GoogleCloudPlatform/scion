@@ -64,7 +64,7 @@ func TestTriggerCreateCLI_RepeatableActionGroups(t *testing.T) {
 	assert.Equal(t, "dev", req.Actions[0].Template)
 	assert.Equal(t, "Review ${event.attributes.repo}", req.Actions[0].Task)
 	assert.Equal(t, "main", req.Actions[0].Branch)
-	assert.Equal(t, []string{"event.attributes.repo"}, req.Actions[0].UntrustedVars)
+	assert.Nil(t, req.Actions[0].UntrustedVars, "untrustedVars should be omitted when --allow is not passed so the Hub derives it")
 
 	assert.Equal(t, "message", req.Actions[1].Type)
 	assert.Equal(t, "lead", req.Actions[1].AgentName)

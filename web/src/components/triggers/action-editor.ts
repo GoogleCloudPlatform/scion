@@ -60,8 +60,73 @@ export function createDefaultDispatchAction(): TriggerActionSpec {
     ephemeral: false,
     nameConflict: 'suffix',
     reuseMessage: '',
-    untrustedVars: [],
   };
+}
+
+/**
+ * Shared read-only display of hub-derived untrusted event variable paths for
+ * both message and dispatch_agent actions (ptone/scion#9776, untrusted_optin v1).
+ */
+@customElement('scion-trigger-untrusted-vars')
+export class ScionTriggerUntrustedVars extends LitElement {
+  @property({ type: Array })
+  vars: string[] = [];
+
+  @property({ type: Number })
+  actionIndex = 0;
+
+  static override styles = css`
+    :host {
+      display: block;
+    }
+
+    .untrusted-readonly {
+      padding: 0.5rem 0.625rem;
+      background: var(--scion-surface);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+    }
+
+    .untrusted-readonly-label {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted);
+    }
+
+    .untrusted-readonly-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+    }
+
+    .untrusted-var-chip {
+      font-family: var(--scion-font-mono);
+      font-size: 0.75rem;
+      padding: 0.125rem 0.375rem;
+      background: var(--scion-bg-subtle);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-sm);
+      color: var(--scion-text);
+    }
+  `;
+
+  override render() {
+    if (!this.vars || this.vars.length === 0) {
+      return nothing;
+    }
+    return html`
+      <div class="untrusted-readonly" data-untrusted-vars-display=${this.actionIndex}>
+        <div class="untrusted-readonly-label">
+          Event values inserted as data, not instructions (derived by hub):
+        </div>
+        <div class="untrusted-readonly-list">
+          ${this.vars.map((v) => html`<code class="untrusted-var-chip">${v}</code>`)}
+        </div>
+      </div>
+    `;
+  }
 }
 
 @customElement('scion-trigger-action-editor')
@@ -79,12 +144,11 @@ export class ScionTriggerActionEditor extends LitElement {
   readonly = false;
 
   /**
-   * P9 HOOK (ptone/scion#9065): when true, enables adding/removing/reordering
-   * up to 8 ordered actions per trigger. Defaults to false while the Hub
-   * accepts a single `action`.
+   * Multi-action support (P9, ptone/scion#9065 / ptone/scion#9785): enables
+   * adding/removing/reordering up to 8 ordered actions per trigger.
    */
   @property({ type: Boolean })
-  multiActionEnabled = false;
+  multiActionEnabled = true;
 
   static override styles = css`
     :host {
@@ -347,7 +411,7 @@ export class ScionTriggerActionEditor extends LitElement {
         rows="3"
         resize="auto"
         placeholder="Webhook received: \${event.type}"
-        help-text="Supports \${event.*} placeholders (use \${path?} for optional values)."
+        help-text="Supports \${event.*} placeholders (use \${path?} for optional values). Untrusted placeholders are derived by the hub on save and inserted as data, not instructions."
         ?readonly=${this.readonly}
         .value=${action.message || ''}
         data-action-message=${index}
@@ -355,6 +419,11 @@ export class ScionTriggerActionEditor extends LitElement {
           this.updateAction(index, { message: (e.target as HTMLTextAreaElement).value });
         }}
       ></sl-textarea>
+
+      <scion-trigger-untrusted-vars
+        .vars=${action.untrustedVars ?? []}
+        .actionIndex=${index}
+      ></scion-trigger-untrusted-vars>
 
       <div class="toggles-row">
         <sl-checkbox
@@ -459,7 +528,7 @@ export class ScionTriggerActionEditor extends LitElement {
         rows="3"
         resize="auto"
         placeholder="Investigate event \${event.id}"
-        help-text="Untrusted placeholders are framed as data; list opted-in paths below if required."
+        help-text="Untrusted placeholders are derived by the hub on save and inserted as data, not instructions."
         ?readonly=${this.readonly}
         .value=${action.task || ''}
         data-action-task=${index}
@@ -517,22 +586,10 @@ export class ScionTriggerActionEditor extends LitElement {
           `
         : nothing}
 
-      <sl-input
-        label="Opted-in untrusted paths (comma-separated)"
-        size="small"
-        placeholder="event.attributes.title, event.payload.message"
-        ?readonly=${this.readonly}
-        .value=${(action.untrustedVars ?? []).join(', ')}
-        data-action-untrusted=${index}
-        @sl-input=${(e: Event) => {
-          const raw = (e.target as HTMLInputElement).value;
-          const parts = raw
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean);
-          this.updateAction(index, { untrustedVars: parts });
-        }}
-      ></sl-input>
+      <scion-trigger-untrusted-vars
+        .vars=${action.untrustedVars ?? []}
+        .actionIndex=${index}
+      ></scion-trigger-untrusted-vars>
 
       <div class="labels-editor">
         <div class="labels-header">
@@ -684,18 +741,21 @@ export class ScionTriggerActionEditor extends LitElement {
                         <sl-icon-button
                           name="arrow-up"
                           label="Move action up"
+                          data-move-action-up=${index}
                           ?disabled=${index === 0}
                           @click=${() => this.moveAction(index, -1)}
                         ></sl-icon-button>
                         <sl-icon-button
                           name="arrow-down"
                           label="Move action down"
+                          data-move-action-down=${index}
                           ?disabled=${index === rows.length - 1}
                           @click=${() => this.moveAction(index, 1)}
                         ></sl-icon-button>
                         <sl-icon-button
                           name="trash"
                           label="Remove action"
+                          data-remove-action=${index}
                           @click=${() => this.removeAction(index)}
                         ></sl-icon-button>
                       </div>
