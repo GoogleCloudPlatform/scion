@@ -1286,23 +1286,6 @@ func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 	}
 }
 
-// agentRequiresProjectReadScope reports whether permissionID declares
-// ScopeProjectRead ("project:read") in its AgentScopes mapping in the
-// permission registry.
-func agentRequiresProjectReadScope(permissionID string) bool {
-	for _, p := range permissions.Registry {
-		if p.ID == permissionID {
-			for _, sc := range p.AgentScopes {
-				if sc == string(ScopeProjectRead) {
-					return true
-				}
-			}
-			return false
-		}
-	}
-	return false
-}
-
 func specAdmitsAgentJWT(spec authzop.OperationSpec) bool {
 	hasPrincipal := false
 	for _, p := range spec.Principals {
@@ -1337,57 +1320,106 @@ func (m *bearerMatrixFixture) mintAgentTokenWithScopes(t *testing.T, agentID, pr
 	return tok
 }
 
+// agentProjectReadScopeExemptions lists the catalogued GET entry points that
+// admit PrincipalAgent + CredentialAgentJWT but do not refuse an agent token
+// lacking ScopeProjectRead in the bearer-matrix fixture (for example agent
+// self-service routes, caller-owned inbox routes, hub-level discovery routes,
+// or routes that reject/redirect before reaching scope enforcement in this
+// fixture). Every other agent-JWT GET entry point in the catalog is required
+// by TestAgentProjectReadScopeMatrix_CatalogEntryPoints to refuse an agent
+// token lacking ScopeProjectRead (deny-by-default).
+var agentProjectReadScopeExemptions = map[liveInventoryKey]string{
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages/stream"}:                        "fixture has no message stream backend (501 before scope check)",
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}:                        "bare proxy path redirects to trailing slash (308) before auth",
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:              "fixture agent has no port tunnel configured (503 before scope check)",
+	{"agent.port.list", http.MethodGet, "/api/v1/agents/{id}/ports"}:                                      "agent self-service route listing its own exposed ports",
+	{"agent.port.tunnel", http.MethodGet, "/api/v1/agents/{id}/ports/tunnel"}:                             "agent self-service WebSocket tunnel endpoint (400 without upgrade)",
+	{"agent.usage.capabilities", http.MethodGet, "/api/v1/agents/{id}/usage/capabilities"}:                "agent self-service capabilities check",
+	{"artifact.list", http.MethodGet, "/api/v1/artifacts"}:                                                "requires scope query parameters (400) and uses project:artifact:read",
+	{"inbox.capabilities.read", http.MethodGet, "/api/v1/messaging/capabilities"}:                         "self-service messaging capability discovery",
+	{"inbox.conversation.list", http.MethodGet, "/api/v1/conversations"}:                                  "caller's own inbox conversations (filtered to caller participation)",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}"}:                      "caller's own direct conversation",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages"}:             "caller's own direct conversation messages",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages/{messageId}"}: "caller's own direct conversation message",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/watch"}:                "caller's own direct conversation watch",
+	{"agent.message.target.resolve", http.MethodGet, "/api/v1/messaging/targets/resolve"}:                 "requires target query parameter (400) before authorization",
+	{"chat.attachment.probe", http.MethodGet, "/api/v1/chat/attachments"}:                                 "self-service chat attachment capability probe",
+	{"user.self.profile", http.MethodGet, "/api/v1/auth/me"}:                                              "caller self-profile endpoint",
+	{"hub.experiments.read", http.MethodGet, "/api/v1/experiments"}:                                       "hub-level experiment flag discovery",
+	{"hub.profiling.read", http.MethodGet, "/api/v1/profiling"}:                                           "hub-level profiling status discovery",
+	{"hub.injectedskills.read", http.MethodGet, "/api/v1/hub/settings/injected-skills"}:                   "hub-level injected skills settings",
+	{"hub.conduitgrantkeys.read", http.MethodGet, "/api/v1/conduit/grant-keys"}:                           "hub-level conduit grant public keys",
+	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts"}:                                 "requires scope query parameter (400) before authorization",
+	{"secret.hub.read", http.MethodGet, "/api/v1/secrets"}:                                                "hub-level secret listing, not a project read",
+	{"agent.delegation.list", http.MethodGet, "/api/v1/agents/{id}/delegations"}:                          "agent self-service listing its own delegations",
+	{"agent.delegation.read", http.MethodGet, "/api/v1/agents/{id}/delegations/{grantId}"}:                "agent self-service reading its own delegation grant",
+}
+
 // TestAgentProjectReadScopeMatrix_CatalogEntryPoints drives real agent JWTs
 // through every catalogued GET entry point that admits PrincipalAgent with
-// CredentialAgentJWT and whose BasePermission maps to project:read in the
-// permission registry. An agent token belonging to the fixture project but
-// lacking ScopeProjectRead must be refused (403 or 404) on every such route,
-// and an agent token carrying ScopeProjectRead must not be refused on routes
-// whose only required agent scope is project:read.
+// CredentialAgentJWT (deny-by-default). Every entry point not listed in
+// agentProjectReadScopeExemptions must refuse a same-project agent token
+// lacking ScopeProjectRead (403 or 404). Every exemption is checked for
+// staleness against the live catalog and live refusal behavior.
 func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 
 	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
 	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
 
-	// Operations that require an additional agent scope beyond project:read
-	// (e.g. project:secret:read for project secrets) are still expected to
-	// refuse a token lacking project:read, and are not expected to succeed
-	// with only project:read.
-	requiresExtraAgentScope := map[authzop.OperationID]bool{
-		"project.secret.read": true,
-	}
-
-	checked := 0
+	seen := map[liveInventoryKey]bool{}
+	enforced := 0
+	exempted := 0
 	for _, e := range bearerMatrixEntries() {
 		ep := e.EntryPoint
-		if ep.Method != http.MethodGet {
+		if ep.Method != http.MethodGet || !specAdmitsAgentJWT(e.Spec) {
 			continue
 		}
-		if !specAdmitsAgentJWT(e.Spec) || !agentRequiresProjectReadScope(e.Spec.BasePermission) {
-			continue
-		}
+		key := e.key()
+		seen[key] = true
 		label := string(e.Spec.ID) + " " + ep.Method + " " + ep.Pattern
+
 		recWithout := m.request(t, e, withoutScope)
-		recWith := m.request(t, e, withScope)
-		t.Logf("agent project:read row %s: without=%d with=%d", label, recWithout.Code, recWith.Code)
+		if reason, ok := agentProjectReadScopeExemptions[key]; ok {
+			if strings.TrimSpace(reason) == "" {
+				t.Errorf("exemption %v has an empty reason", key)
+			}
+			if bearerMatrixRefused(ep.Method, recWithout.Code) {
+				t.Errorf("stale exemption %s: agent token without %s is already refused (%d); remove it from agentProjectReadScopeExemptions",
+					label, ScopeProjectRead, recWithout.Code)
+			}
+			exempted++
+			continue
+		}
+
 		if !bearerMatrixRefused(ep.Method, recWithout.Code) {
-			t.Errorf("%s: agent token without %s got %d, want %s: %s",
+			t.Errorf("%s: agent token without %s got %d, want %s (or add a justified entry to agentProjectReadScopeExemptions): %s",
 				label, ScopeProjectRead, recWithout.Code, bearerMatrixRefusal(ep.Method), recWithout.Body.String())
 		}
-		if !requiresExtraAgentScope[e.Spec.ID] {
+
+		// For operations whose base permission is project.read (except
+		// project.secret.read, which additionally requires project:secret:read),
+		// verify that carrying ScopeProjectRead is not refused.
+		if e.Spec.BasePermission == "project.read" && e.Spec.ID != "project.secret.read" {
+			recWith := m.request(t, e, withScope)
 			if recWith.Code == http.StatusUnauthorized || recWith.Code == http.StatusForbidden || recWith.Code == http.StatusNotFound {
 				t.Errorf("%s: agent token with %s got %d, want admitted (not 401/403/404): %s",
 					label, ScopeProjectRead, recWith.Code, recWith.Body.String())
 			}
 		}
-		checked++
+		enforced++
 	}
 
-	if checked == 0 {
-		t.Fatal("matrix exercised no catalog entry points requiring agent project:read")
+	for key := range agentProjectReadScopeExemptions {
+		if !seen[key] {
+			t.Errorf("stale exemption %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
+		}
 	}
-	t.Logf("agent project:read scope matrix checked %d entry points", checked)
+
+	if enforced == 0 {
+		t.Fatal("matrix exercised no catalog entry points enforcing agent project:read")
+	}
+	t.Logf("agent project:read scope matrix: enforced=%d exempted=%d", enforced, exempted)
 }
 
 // TestProjectMetricsRoutes_AgentProjectReadScope verifies that the three
