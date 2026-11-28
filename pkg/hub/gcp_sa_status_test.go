@@ -304,12 +304,12 @@ func TestGCPSAStatus_AgentOnlyInOwnProject(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, other))
 	otherAgent := createSAStatusAgent(t, s, other.ID, "outsider", "")
 
-	ownToken := srv.generateRecordedAgentToken(t, agent.ID, projectID, nil, nil)
+	ownToken := srv.generateRecordedAgentToken(t, agent.ID, projectID, []AgentTokenScope{ScopeProjectRead}, nil)
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, ownToken)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), mappedGSA, "project agents may see the account email")
 
-	otherToken := srv.generateRecordedAgentToken(t, otherAgent.ID, other.ID, nil, nil)
+	otherToken := srv.generateRecordedAgentToken(t, otherAgent.ID, other.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	rec = doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, otherToken)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
