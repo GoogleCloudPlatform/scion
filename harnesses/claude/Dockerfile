@@ -69,7 +69,8 @@ RUN chmod 0755 /usr/local/bin/init-firewall.sh
 # RUN curl -fsSL https://claude.ai/install.sh | bash
 # ENV PATH=/home/scion/.local/bin:$PATH
 
+ARG CLAUDE_CLI_VERSION=latest
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
     npm cache clean --force \
-  && npm install -g @anthropic-ai/claude-code@latest \
+  && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" \
   && npm cache clean --force
