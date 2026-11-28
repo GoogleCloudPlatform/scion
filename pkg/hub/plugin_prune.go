@@ -28,7 +28,7 @@ import (
 )
 
 // PruneStalePluginRecords deletes runtime_brokers rows that represent broker
-// plugins (carrying Labels["scion.io/plugin"]) when the record is stale:
+// plugins (carrying the pluginBrokerLabel label) when the record is stale:
 //   - no live hub instance reports running the plugin,
 //   - it is not loaded in this server's plugin manager,
 //   - it is not present in configuredPlugins (server.plugins.broker), and
