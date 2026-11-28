@@ -1390,3 +1390,47 @@ func TestChownTokenFileForStartup_SkippedUnderShellIsolation(t *testing.T) {
 		t.Fatalf("non-shell runChownTokenFile called=%d uid=%d gid=%d, want 1, 1000, 1000", called, gotUID, gotGID)
 	}
 }
+
+func TestStartCredentialFileWatch_IsolatedTakesPreExistingAgentHandoff(t *testing.T) {
+	h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+
+	// Write an agent handoff BEFORE startCredentialFileWatch creates the watcher.
+	handoff := writeHandoffTokenForTest(t, h.newTok)
+
+	fc := clock.NewFake(h.now)
+	notify := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := startCredentialFileWatch(ctx, h.client, hub.TokenWatchConfig{
+		Interval:    time.Second,
+		StableDelay: 100 * time.Millisecond,
+		Notify:      notify,
+		Clock:       fc,
+	})
+	w.RecheckAgent()
+	h.r.watcher = w
+
+	// Must notify within one interval + stable delay.
+	deadline := time.Now().Add(2 * time.Second)
+	notified := false
+	for !notified && time.Now().Before(deadline) {
+		fc.Advance(time.Second)
+		select {
+		case <-notify:
+			notified = true
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+	if !notified {
+		t.Fatal("watcher did not report pre-existing agent handoff within one interval")
+	}
+
+	h.r.reset(authResetFileChange)
+	if got := h.client.AuthToken(); got != h.newTok {
+		t.Fatalf("client.AuthToken() = %q, want newTok", got)
+	}
+	if _, err := os.Lstat(handoff); !os.IsNotExist(err) {
+		t.Fatalf("pre-existing agent handoff still exists after watcher cycle: err=%v", err)
+	}
+}

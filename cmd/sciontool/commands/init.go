@@ -1895,6 +1895,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	defer credWatchCancel()
 	if hubClient != nil && hubClient.IsConfigured() {
 		authReset.watcher = startCredentialFileWatch(credWatchCtx, hubClient, hub.TokenWatchConfig{Notify: credFileChan})
+		if shellIsolation && authReset.watcher != nil {
+			// A reset-auth handoff written between the pre-sup.Run reconcile
+			// and watcher startup must be reported on the first interval rather
+			// than recorded as already seen and left on disk.
+			authReset.watcher.RecheckAgent()
+		}
 		if lateHandoffPending != "" && authReset.watcher != nil {
 			authReset.watcher.RetryPendingAfter(hub.TokenFingerprint(lateHandoffPending), 0)
 		}
