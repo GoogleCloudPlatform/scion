@@ -1880,7 +1880,7 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	if finalAgent != nil && finalAgent.TrajectoryCapture != nil {
 		printTrajectoryCaptureNotice(finalAgent.TrajectoryCapture)
-	} else if resp != nil && resp.TrajectoryCapture != nil {
+	} else if resp.TrajectoryCapture != nil {
 		printTrajectoryCaptureNotice(resp.TrajectoryCapture)
 	}
 	printPendingSecretHint(context.Background(), os.Stderr, hubCtx.Client)

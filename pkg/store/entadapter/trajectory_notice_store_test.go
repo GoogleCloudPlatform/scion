@@ -201,3 +201,103 @@ func TestResolveRunAttributionCaptureFields_MatchesTelemetryContract(t *testing.
 		}
 	}
 }
+
+func TestResolveRunAttributionCaptureFields_ProjectLookupErrorLeavesFieldsEmpty(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+
+	pid := uuid.New()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   pid.String(),
+		Name: "proj-off-err",
+		Slug: "proj-off-err-" + pid.String()[:8],
+		Annotations: map[string]string{
+			telemetrycontract.TrajectoryCaptureProjectAnnotation: telemetrycontract.TrajectoryCapturePolicyOff,
+		},
+	}))
+
+	// 1. Project annotated "off" whose lookup fails (cancelled context) must NOT attest full/v1.
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	gotPolicy, gotNotice := resolveRunAttributionCaptureFields(cancelledCtx, client, pid, func() (bool, bool) {
+		return true, true
+	})
+	assert.Empty(t, gotPolicy, "project lookup error must leave capture_policy empty")
+	assert.Empty(t, gotNotice, "project lookup error must not attest notice_version")
+
+	// 2. Nonexistent project ID (ErrNotFound) also leaves both fields empty when opt-out is allowed.
+	gotPolicy, gotNotice = resolveRunAttributionCaptureFields(ctx, client, uuid.New(), func() (bool, bool) {
+		return true, true
+	})
+	assert.Empty(t, gotPolicy)
+	assert.Empty(t, gotNotice)
+}
+
+func TestRunAttribution_TxStorePropagatesTrajectoryCaptureState(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+
+	cs.SetTrajectoryCaptureState(func() (bool, bool) {
+		return true, true
+	})
+	cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-tx-notice"})
+
+	pid := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   pid,
+		Name: "proj-tx",
+		Slug: "proj-tx-" + pid[:8],
+		Annotations: map[string]string{
+			telemetrycontract.TrajectoryCaptureProjectAnnotation: telemetrycontract.TrajectoryCapturePolicyMetadataOnly,
+		},
+	}))
+
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		ProjectID: pid,
+		Name:      "ag-tx",
+		Slug:      "ag-tx-" + uuid.NewString()[:6],
+		Template:  "claude",
+		Phase:     "created",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	// Mint a run ID inside WithTx (exercises CompositeStore.newTxStore's AgentStore.trajectoryCapture wiring).
+	err := cs.WithTx(ctx, func(tx store.Store) error {
+		_, setErr := tx.SetAgentRunID(ctx, ag.ID, "run-tx-atomic", nil)
+		return setErr
+	})
+	require.NoError(t, err)
+
+	attr, err := cs.GetRunAttribution(ctx, "run-tx-atomic")
+	require.NoError(t, err)
+	assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyMetadataOnly, attr.CapturePolicy)
+	assert.Equal(t, telemetrycontract.TrajectoryNoticeVersion, attr.NoticeVersion)
+
+	// Also verify EnsureRunAttributionForAgent inside WithTx (exercises UsageLedgerStore.trajectoryCapture wiring).
+	cs.SetRunAttributionConfig(nil)
+	agLazy := &store.Agent{
+		ID:        uuid.NewString(),
+		ProjectID: pid,
+		Name:      "ag-tx-lazy",
+		Slug:      "ag-tx-lazy-" + uuid.NewString()[:6],
+		Template:  "claude",
+		Phase:     "created",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agLazy))
+	_, err = cs.SetAgentRunID(ctx, agLazy.ID, "run-tx-lazy", nil)
+	require.NoError(t, err)
+
+	var lazyAttr *store.RunAttribution
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		var ensureErr error
+		lazyAttr, ensureErr = tx.EnsureRunAttributionForAgent(ctx, agLazy.ID, "run-tx-lazy", "hub-tx-notice")
+		return ensureErr
+	})
+	require.NoError(t, err)
+	require.NotNil(t, lazyAttr)
+	assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyMetadataOnly, lazyAttr.CapturePolicy)
+	assert.Equal(t, telemetrycontract.TrajectoryNoticeVersion, lazyAttr.NoticeVersion)
+}

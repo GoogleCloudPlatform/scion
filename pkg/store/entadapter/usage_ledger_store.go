@@ -468,7 +468,13 @@ func resolveRunAttributionCaptureFields(ctx context.Context, client *ent.Client,
 			Where(entproject.IDEQ(projectID)).
 			Select(entproject.FieldAnnotations).
 			Only(ctx)
-		if err == nil && proj != nil && proj.Annotations != nil {
+		if err != nil {
+			// Never attest full/v1 when the project's capture policy could not
+			// be read: a project annotated "off" or "metadata_only" must not
+			// receive a permanent immutable "full"/"v1" row.
+			return "", ""
+		}
+		if proj != nil && proj.Annotations != nil {
 			annotation = proj.Annotations[telemetrycontract.TrajectoryCaptureProjectAnnotation]
 		}
 	}

@@ -96,3 +96,91 @@ func TestTrajectoryCaptureNotice_RunAttributionAndUsageRead(t *testing.T) {
 	assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyFull, usageResp.Runs[0].CapturePolicy)
 	assert.Equal(t, telemetrycontract.TrajectoryNoticeVersion, usageResp.Runs[0].NoticeVersion)
 }
+
+func TestCreateAgentResponse_TrajectoryCapture(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("sync 201 create includes trajectory_capture when experiment on and omits when off", func(t *testing.T) {
+		disp := &createAgentDispatcher{}
+		srv, s, project := setupCreateAgentServer(t, disp)
+		project.Annotations = map[string]string{
+			projectSettingTrajectoryCapture: telemetrycontract.TrajectoryCapturePolicyMetadataOnly,
+		}
+		require.NoError(t, s.UpdateProject(ctx, project))
+
+		// Experiment OFF -> key must be absent from raw JSON.
+		setNoticeTestExperiments(t, srv, s, map[string]bool{
+			experiments.TokenomicsTrajectoryCapture: false,
+		})
+		recOff := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name:      "sync-exp-off",
+			ProjectID: project.ID,
+			Task:      "hello",
+		})
+		require.Equal(t, http.StatusCreated, recOff.Code, recOff.Body.String())
+		var rawOff map[string]any
+		require.NoError(t, json.Unmarshal(recOff.Body.Bytes(), &rawOff))
+		_, hasOff := rawOff["trajectory_capture"]
+		assert.False(t, hasOff, "trajectory_capture must be omitted when experiment is off")
+
+		// Experiment ON -> key present with resolved project policy.
+		setNoticeTestExperiments(t, srv, s, map[string]bool{
+			experiments.TokenomicsTrajectoryCapture: true,
+		})
+		recOn := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name:      "sync-exp-on",
+			ProjectID: project.ID,
+			Task:      "hello",
+		})
+		require.Equal(t, http.StatusCreated, recOn.Code, recOn.Body.String())
+		var respOn CreateAgentResponse
+		require.NoError(t, json.Unmarshal(recOn.Body.Bytes(), &respOn))
+		require.NotNil(t, respOn.TrajectoryCapture)
+		assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyMetadataOnly, respOn.TrajectoryCapture.Policy)
+		assert.False(t, respOn.TrajectoryCapture.EnforcedByHub)
+	})
+
+	t.Run("202 env-gather includes trajectory_capture when experiment on and omits when off", func(t *testing.T) {
+		disp := &createAgentDispatcher{
+			envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}},
+		}
+		srv, s, project := setupCreateAgentServer(t, disp)
+		project.Annotations = map[string]string{
+			projectSettingTrajectoryCapture: telemetrycontract.TrajectoryCapturePolicyMetadataOnly,
+		}
+		require.NoError(t, s.UpdateProject(ctx, project))
+
+		// Experiment OFF -> key absent.
+		setNoticeTestExperiments(t, srv, s, map[string]bool{
+			experiments.TokenomicsTrajectoryCapture: false,
+		})
+		recOff := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name:      "gather-exp-off",
+			ProjectID: project.ID,
+			Task:      "hello",
+			GatherEnv: true,
+		})
+		require.Equal(t, http.StatusAccepted, recOff.Code, recOff.Body.String())
+		var rawOff map[string]any
+		require.NoError(t, json.Unmarshal(recOff.Body.Bytes(), &rawOff))
+		_, hasOff := rawOff["trajectory_capture"]
+		assert.False(t, hasOff, "trajectory_capture must be omitted on 202 env-gather when experiment is off")
+
+		// Experiment ON -> key present with resolved policy.
+		setNoticeTestExperiments(t, srv, s, map[string]bool{
+			experiments.TokenomicsTrajectoryCapture: true,
+		})
+		recOn := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name:      "gather-exp-on",
+			ProjectID: project.ID,
+			Task:      "hello",
+			GatherEnv: true,
+		})
+		require.Equal(t, http.StatusAccepted, recOn.Code, recOn.Body.String())
+		var respOn CreateAgentResponse
+		require.NoError(t, json.Unmarshal(recOn.Body.Bytes(), &respOn))
+		require.NotNil(t, respOn.TrajectoryCapture)
+		assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyMetadataOnly, respOn.TrajectoryCapture.Policy)
+		assert.False(t, respOn.TrajectoryCapture.EnforcedByHub)
+	})
+}
