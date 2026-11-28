@@ -2546,6 +2546,19 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// Entering running from any non-running phase (e.g. waking from suspended
+	// via starting, or a direct suspended/stopped -> running transition)
+	// anchors LastActivityEvent at now so a stall sweep landing before the
+	// container's first activity report does not inherit a stale
+	// pre-suspension timestamp (ptone/scion#8304). Rollback restores
+	// (su.Restore) and routine running -> running updates without activity
+	// leave LastActivityEvent untouched.
+	if !activityProvided && !su.Restore &&
+		current.Phase != string(state.PhaseRunning) &&
+		strings.EqualFold(su.Phase, string(state.PhaseRunning)) {
+		upd.SetLastActivityEvent(now)
+	}
+
 	// A stored signaled reason describes the run that ended; it is cleared
 	// when the agent next moves to starting or running, by any path (a
 	// reincarnation, or a start whose started-status write failed). This

@@ -991,7 +991,11 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 			msg += " (was " + agent.StalledFromActivity + ")"
 		}
 		if !agent.LastActivityEvent.IsZero() {
-			msg += ": no activity for " + formatStallAge(time.Since(agent.LastActivityEvent))
+			since := agent.LastActivityEvent
+			if !agent.StartedAt.IsZero() && agent.StartedAt.After(since) {
+				since = agent.StartedAt
+			}
+			msg += ": no activity for " + formatStallAge(time.Since(since))
 			if agent.Message == state.StalledNoHookActivityHint {
 				msg += " (" + agent.Message + ")"
 			}

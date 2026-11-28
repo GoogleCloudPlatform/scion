@@ -375,3 +375,179 @@ func TestUpdateAgentStatus_SuspendReasonAndRetainedActivityTogether(t *testing.T
 		})
 	}
 }
+
+func TestUpdateAgentStatus_ResumeToRunningRefreshesLastActivityEvent(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	now := time.Now()
+	staleAct := now.Add(-6 * time.Hour)
+	cutoffs := store.StallCutoffs{
+		Activity: now.Add(-5 * time.Minute),
+		Thinking: now.Add(-20 * time.Minute),
+	}
+	heartbeatRecency := now.Add(-2 * time.Minute)
+
+	backdateLastActivity := func(t *testing.T, id string, ts time.Time) {
+		t.Helper()
+		row, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		row.LastActivityEvent = ts
+		require.NoError(t, s.UpdateAgent(ctx, row))
+	}
+
+	// 1. Suspended -> starting -> running (sync wake/resume) refreshes
+	// LastActivityEvent on entering running, not on starting (preserving
+	// failed-start rollback), and prevents an immediate stall false positive.
+	aSync := makeAgent(projectID, "resume-sync-anchor")
+	aSync.Phase = string(state.PhaseRunning)
+	aSync.Activity = string(state.ActivityIdle)
+	require.NoError(t, s.CreateAgent(ctx, aSync))
+	require.NoError(t, s.UpdateAgentStatus(ctx, aSync.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseSuspended),
+	}))
+	backdateLastActivity(t, aSync.ID, staleAct)
+
+	// Entering starting must not bump LastActivityEvent.
+	require.NoError(t, s.UpdateAgentStatus(ctx, aSync.ID, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseStarting),
+		IfPhase: string(state.PhaseSuspended),
+	}))
+	gotStarting, err := s.GetAgent(ctx, aSync.ID)
+	require.NoError(t, err)
+	assert.True(t, gotStarting.LastActivityEvent.Equal(staleAct), "starting must not bump LastActivityEvent")
+
+	// Failed-start rollback restores suspended with pre-suspension LastActivityEvent.
+	require.NoError(t, s.UpdateAgentStatus(ctx, aSync.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseSuspended),
+		Activity: string(state.ActivityIdle),
+		IfPhase:  string(state.PhaseStarting),
+		Restore:  true,
+	}))
+	gotRolledBack, err := s.GetAgent(ctx, aSync.ID)
+	require.NoError(t, err)
+	assert.True(t, gotRolledBack.LastActivityEvent.Equal(staleAct), "rollback must preserve pre-suspension LastActivityEvent")
+
+	// Retry: suspended -> starting -> running refreshes LastActivityEvent.
+	require.NoError(t, s.UpdateAgentStatus(ctx, aSync.ID, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseStarting),
+		IfPhase: string(state.PhaseSuspended),
+	}))
+	beforeRunning := time.Now().Add(-time.Second)
+	require.NoError(t, s.UpdateAgentStatus(ctx, aSync.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning),
+	}))
+	gotSyncRunning, err := s.GetAgent(ctx, aSync.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotSyncRunning.Phase)
+	assert.Empty(t, gotSyncRunning.Activity)
+	assert.False(t, gotSyncRunning.LastActivityEvent.Before(beforeRunning),
+		"entering running via starting must refresh LastActivityEvent (got %v, want >= %v)", gotSyncRunning.LastActivityEvent, beforeRunning)
+
+	// 2. Direct suspended -> running refreshes LastActivityEvent.
+	aDirect := makeAgent(projectID, "resume-direct-anchor")
+	aDirect.Phase = string(state.PhaseSuspended)
+	aDirect.Activity = string(state.ActivityCompleted)
+	aDirect.LastActivityEvent = staleAct
+	require.NoError(t, s.CreateAgent(ctx, aDirect))
+
+	beforeDirect := time.Now().Add(-time.Second)
+	require.NoError(t, s.UpdateAgentStatus(ctx, aDirect.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning),
+	}))
+	gotDirect, err := s.GetAgent(ctx, aDirect.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotDirect.Phase)
+	assert.Empty(t, gotDirect.Activity)
+	assert.False(t, gotDirect.LastActivityEvent.Before(beforeDirect),
+		"direct suspended -> running must refresh LastActivityEvent (got %v, want >= %v)", gotDirect.LastActivityEvent, beforeDirect)
+
+	// 3. Async launch path: suspended -> starting -> BeginStartLaunch ->
+	// ApplyLaunchReport(Succeeded) refreshes LastActivityEvent on entering
+	// running, not on BeginStartLaunch.
+	aAsync := makeAgent(projectID, "resume-async-anchor")
+	aAsync.Phase = string(state.PhaseSuspended)
+	aAsync.Activity = string(state.ActivityIdle)
+	aAsync.LastActivityEvent = staleAct
+	require.NoError(t, s.CreateAgent(ctx, aAsync))
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, aAsync.ID, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseStarting),
+		IfPhase: string(state.PhaseSuspended),
+	}))
+	launchID, err := s.BeginStartLaunch(ctx, aAsync.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{
+		PriorPhase: string(state.PhaseSuspended),
+	})
+	require.NoError(t, err)
+	gotPreReport, err := s.GetAgent(ctx, aAsync.ID)
+	require.NoError(t, err)
+	assert.True(t, gotPreReport.LastActivityEvent.Equal(staleAct), "BeginStartLaunch must not bump LastActivityEvent")
+
+	beforeAsyncRunning := time.Now().Add(-time.Second)
+	ans, _, err := s.ApplyLaunchReport(ctx, aAsync.ID, aAsync.RuntimeBrokerID, store.LaunchReport{
+		LaunchID:   launchID,
+		InstanceID: "inst-async-anchor",
+		State:      store.LaunchReportStateSucceeded,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.LaunchReportResultApplied, ans.Result)
+	gotAsyncRunning, err := s.GetAgent(ctx, aAsync.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotAsyncRunning.Phase)
+	assert.Empty(t, gotAsyncRunning.Activity)
+	assert.False(t, gotAsyncRunning.LastActivityEvent.Before(beforeAsyncRunning),
+		"ApplyLaunchReport(Succeeded) entering running must refresh LastActivityEvent (got %v, want >= %v)", gotAsyncRunning.LastActivityEvent, beforeAsyncRunning)
+
+	// Broker heartbeat with empty activity bumps LastSeen; must not trigger stall.
+	require.NoError(t, s.UpdateAgentStatus(ctx, aAsync.ID, store.AgentStatusUpdate{
+		Phase:        string(state.PhaseRunning),
+		ReportSource: store.StatusReportSourceRuntime,
+	}))
+
+	// 4. Guard against over-fix: a genuinely stalled running agent receiving a
+	// routine running -> running heartbeat without activity keeps its old
+	// LastActivityEvent and IS marked stalled by MarkStalledAgents.
+	aStalled := makeAgent(projectID, "genuinely-stalled")
+	aStalled.Phase = string(state.PhaseRunning)
+	aStalled.Activity = string(state.ActivityExecuting)
+	aStalled.LastActivityEvent = now.Add(-30 * time.Minute)
+	aStalled.LastSeen = now
+	require.NoError(t, s.CreateAgent(ctx, aStalled))
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, aStalled.ID, store.AgentStatusUpdate{
+		Phase:        string(state.PhaseRunning),
+		ReportSource: store.StatusReportSourceRuntime,
+	}))
+	gotStillStale, err := s.GetAgent(ctx, aStalled.ID)
+	require.NoError(t, err)
+	assert.True(t, gotStillStale.LastActivityEvent.Equal(aStalled.LastActivityEvent),
+		"routine running -> running heartbeat without activity must not refresh LastActivityEvent")
+
+	// 5. Guard against over-fix: a resumed agent that genuinely hangs before
+	// posting its first activity (Activity == "") and ages past StalledThreshold
+	// IS still caught by MarkStalledAgents.
+	aHungStartup := makeAgent(projectID, "hung-after-resume")
+	aHungStartup.Phase = string(state.PhaseRunning)
+	aHungStartup.Activity = ""
+	aHungStartup.LastActivityEvent = now.Add(-10 * time.Minute)
+	aHungStartup.LastSeen = now
+	require.NoError(t, s.CreateAgent(ctx, aHungStartup))
+
+	// Run stall sweep: none of the freshly resumed agents should be marked
+	// stalled, while both genuinely stalled agents must be.
+	stalled, err := s.MarkStalledAgents(ctx, cutoffs, heartbeatRecency)
+	require.NoError(t, err)
+	stalledIDs := make([]string, 0, len(stalled))
+	for _, a := range stalled {
+		stalledIDs = append(stalledIDs, a.ID)
+	}
+	assert.ElementsMatch(t, []string{aStalled.ID, aHungStartup.ID}, stalledIDs,
+		"immediate stall sweep must skip freshly resumed agents and catch genuinely stalled ones")
+
+	for _, freshID := range []string{aSync.ID, aDirect.ID, aAsync.ID} {
+		got, err := s.GetAgent(ctx, freshID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Empty(t, got.Activity, "freshly resumed agent %s must not be marked stalled", got.Slug)
+	}
+}
