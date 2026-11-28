@@ -552,3 +552,173 @@ func TestDeleteAgentFiles_LastSharerWorktreeDanglingLinkRefused(t *testing.T) {
 		t.Errorf("the agent directory was removed: %v", err)
 	}
 }
+
+// Positive control for os.Root-confined removal: an ordinary nested directory
+// path (including read-only files/directories) inside the agent directory is
+// removed while sibling paths and project files survive.
+func TestAgentFilesGuard_RemoveAll_OrdinaryNestedPath(t *testing.T) {
+	tr := newGuardTestTree(t)
+	deep := filepath.Join(tr.agentDir, "nested", "deep")
+	roDir := filepath.Join(deep, "rodir")
+	roFile := filepath.Join(roDir, "ro.txt")
+	keep := filepath.Join(tr.agentDir, "nested", "other", "keep.txt")
+	mustMkdir(t, roDir)
+	mustWrite(t, roFile, "readonly")
+	mustMkdir(t, filepath.Dir(keep))
+	mustWrite(t, keep, "keep")
+	if err := os.Chmod(roFile, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(roDir, 0o700)
+		_ = os.Chmod(roFile, 0o600)
+	})
+
+	if err := tr.guard().removeAll(deep); err != nil {
+		t.Fatalf("removeAll(%s) = %v, want nil", deep, err)
+	}
+	if _, err := os.Lstat(deep); !os.IsNotExist(err) {
+		t.Errorf("nested directory %s not removed (lstat err %v)", deep, err)
+	}
+	for _, p := range []string{keep, tr.projectFile} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("unrelated file %s was removed: %v", p, err)
+		}
+	}
+}
+
+// Every intermediate path component must be a real directory within the agent
+// files root: a symbolic link at an intermediate component is refused (never
+// followed and never repaired/removed), whether it points outside or inside
+// the agent files root.
+func TestAgentFilesGuard_RemoveAll_RefusesIntermediateSymlink(t *testing.T) {
+	t.Run("intermediate link pointing outside root", func(t *testing.T) {
+		tr := newGuardTestTree(t)
+		outside := t.TempDir()
+		victim := filepath.Join(outside, "victim.txt")
+		mustWrite(t, victim, "outside")
+		link := filepath.Join(tr.agentDir, "via-link")
+		mustSymlink(t, outside, link)
+
+		err := tr.guard().removeAll(filepath.Join(link, "victim.txt"))
+		assertRefused(t, err, "removeAll through intermediate link outside root")
+		if _, err := os.Stat(victim); err != nil {
+			t.Errorf("outside target removed: %v", err)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("intermediate link was removed or altered (refuse rather than repair): fi=%v err=%v", fi, err)
+		}
+	})
+
+	t.Run("intermediate link pointing inside agent root", func(t *testing.T) {
+		tr := newGuardTestTree(t)
+		realDir := filepath.Join(tr.agentDir, "real-dir")
+		target := filepath.Join(realDir, "target.txt")
+		mustMkdir(t, realDir)
+		mustWrite(t, target, "stay")
+
+		relLink := filepath.Join(tr.agentDir, "rel-link")
+		mustSymlink(t, "real-dir", relLink)
+		absLink := filepath.Join(tr.agentDir, "abs-link")
+		mustSymlink(t, realDir, absLink)
+		deepParent := filepath.Join(tr.agentDir, "sub")
+		mustMkdir(t, deepParent)
+		deepLink := filepath.Join(deepParent, "mid-link")
+		mustSymlink(t, realDir, deepLink)
+
+		g := tr.guard()
+		for name, p := range map[string]string{
+			"relative intermediate link": filepath.Join(relLink, "target.txt"),
+			"absolute intermediate link": filepath.Join(absLink, "target.txt"),
+			"deep intermediate link":     filepath.Join(deepLink, "target.txt"),
+		} {
+			assertRefused(t, g.removeAll(p), name)
+		}
+		assertRefused(t, g.removeAllLeaf(filepath.Join(relLink, "target.txt")), "removeAllLeaf through intermediate link")
+
+		if _, err := os.Stat(target); err != nil {
+			t.Errorf("target inside real-dir was removed: %v", err)
+		}
+		for _, l := range []string{relLink, absLink, deepLink} {
+			if fi, err := os.Lstat(l); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("intermediate link %s was removed or altered: fi=%v err=%v", l, fi, err)
+			}
+		}
+	})
+
+	t.Run("leaf symlink in removeAllLeaf is unlinked without following", func(t *testing.T) {
+		tr := newGuardTestTree(t)
+		outside := t.TempDir()
+		victim := filepath.Join(outside, "victim.txt")
+		mustWrite(t, victim, "outside")
+		leafLink := filepath.Join(tr.agentDir, "leaf-link")
+		mustSymlink(t, victim, leafLink)
+
+		if err := tr.guard().removeAllLeaf(leafLink); err != nil {
+			t.Fatalf("removeAllLeaf(%s) = %v, want nil", leafLink, err)
+		}
+		if _, err := os.Lstat(leafLink); !os.IsNotExist(err) {
+			t.Errorf("leaf symlink was not unlinked (lstat err %v)", err)
+		}
+		if data, err := os.ReadFile(victim); err != nil || string(data) != "outside" {
+			t.Errorf("leaf symlink target was modified: %q, %v", data, err)
+		}
+	})
+}
+
+func TestAgentFilesGuard_RemoveAll_RefusesDotDotAndPrefixEscape(t *testing.T) {
+	tr := newGuardTestTree(t)
+	g := tr.guard()
+	sibling := mkdirReturn(t, filepath.Join(tr.scion, "agents", "ab"))
+	siblingFile := filepath.Join(sibling, "keep.txt")
+	mustWrite(t, siblingFile, "sibling")
+
+	assertRefused(t, g.removeAll(tr.agentDir+"/home/../home"), "raw dotdot segment inside agentDir")
+	assertRefused(t, g.removeAll(tr.agentDir+"/../../src/main.go"), "raw dotdot escape to project")
+	assertRefused(t, g.removeAll(sibling), "sibling prefix match")
+	if _, err := os.Stat(siblingFile); err != nil {
+		t.Errorf("sibling file removed: %v", err)
+	}
+	if _, err := os.Stat(tr.projectFile); err != nil {
+		t.Errorf("project file removed: %v", err)
+	}
+}
+
+func TestRemoveAgentWorktreeDir_ConfinedToBase(t *testing.T) {
+	t.Run("removes ordinary nested worktree", func(t *testing.T) {
+		base := t.TempDir()
+		wt := filepath.Join(base, "worktrees", "a")
+		nested := filepath.Join(wt, "sub", "file.txt")
+		mustMkdir(t, filepath.Dir(nested))
+		mustWrite(t, nested, "ok")
+
+		if err := RemoveAgentWorktreeDir("a", base, wt); err != nil {
+			t.Fatalf("RemoveAgentWorktreeDir = %v, want nil", err)
+		}
+		if _, err := os.Lstat(wt); !os.IsNotExist(err) {
+			t.Errorf("worktree %s not removed (lstat err %v)", wt, err)
+		}
+	})
+
+	t.Run("refuses symlinked worktrees intermediate dir without repairing", func(t *testing.T) {
+		base := t.TempDir()
+		outside := t.TempDir()
+		victim := filepath.Join(outside, "a", "keep.txt")
+		mustMkdir(t, filepath.Dir(victim))
+		mustWrite(t, victim, "keep")
+		worktreesLink := filepath.Join(base, "worktrees")
+		mustSymlink(t, outside, worktreesLink)
+
+		err := RemoveAgentWorktreeDir("a", base, filepath.Join(worktreesLink, "a"))
+		assertRefused(t, err, "RemoveAgentWorktreeDir through symlinked worktrees dir")
+		if _, err := os.Stat(victim); err != nil {
+			t.Errorf("outside target removed: %v", err)
+		}
+		if fi, err := os.Lstat(worktreesLink); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("symlinked worktrees dir was removed or altered: fi=%v err=%v", fi, err)
+		}
+	})
+}

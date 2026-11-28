@@ -89,7 +89,6 @@ var (
 	removeWorktree      = util.RemoveWorktree
 	removeWorktreeEntry = util.RemoveWorktreeEntryIn
 	deleteBranchByName  = util.DeleteBranchIn
-	removeAllSafe       = util.RemoveAllSafe
 )
 
 // DeleteHubAgentFiles is DeleteAgentFiles for a hub agent: sharerKey is the
@@ -389,8 +388,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// separate from the agent config dir under agents/.
 	// Skip when the refcount path already handled removal/detach.
 	if worktreeDir != "" && !refcountHandled {
-		worktreeRemove, err := guard.check(worktreeDir)
-		if err != nil {
+		if _, err := guard.check(worktreeDir); err != nil {
 			return branchDeleted, fmt.Errorf("delete: %w", err)
 		}
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
@@ -404,12 +402,12 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 			} else {
 				util.Debugf("delete: worktree-per-agent removal failed in %v: %v", time.Since(worktreeStart), err)
 				if !errors.Is(err, util.ErrPathNotContained) {
-					if rmErr := removeAllSafe(worktreeRemove); rmErr != nil {
+					if rmErr := guard.removeAll(worktreeDir); rmErr != nil {
 						return branchDeleted, fmt.Errorf("delete: remove worktree %s: %w", worktreeDir, rmErr)
 					}
 				}
 			}
-		} else if err := removeAllSafe(worktreeRemove); err != nil {
+		} else if err := guard.removeAll(worktreeDir); err != nil {
 			return branchDeleted, fmt.Errorf("delete: remove worktree directory %s: %w", worktreeDir, err)
 		}
 	}
@@ -429,8 +427,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		// the shared worktree must not be removed while other sharers remain.
 		if !refcountHandled && !emptyPerAgent {
 			if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
-				workspaceRemove, err := guard.check(agentWorkspace)
-				if err != nil {
+				if _, err := guard.check(agentWorkspace); err != nil {
 					return branchDeleted, fmt.Errorf("delete: %w", err)
 				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
@@ -443,7 +440,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				} else {
 					util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
 					if !errors.Is(err, util.ErrPathNotContained) {
-						if rmErr := removeAllSafe(workspaceRemove); rmErr != nil {
+						if rmErr := guard.removeAll(agentWorkspace); rmErr != nil {
 							return branchDeleted, fmt.Errorf("delete: remove workspace %s: %w", agentWorkspace, rmErr)
 						}
 					}
@@ -490,8 +487,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 
 	// Phase 2: directory removal.
 	for _, agentDir := range dirsToDelete {
-		dirRemove, err := guard.check(agentDir)
-		if err != nil {
+		if _, err := guard.check(agentDir); err != nil {
 			return branchDeleted, fmt.Errorf("delete: %w", err)
 		}
 		// ProvisionAgent's worktree-mode layout nests an agent's worktree at
@@ -521,12 +517,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 					continue
 				}
 				// Classified by its directory and name: a symlink
-				// here is unlinked, never followed (checkLeaf).
-				entryRemove, err := guard.checkLeaf(filepath.Join(agentDir, e.Name()))
-				if err != nil {
-					return branchDeleted, fmt.Errorf("delete: %w", err)
-				}
-				if err := removeAllSafe(entryRemove); err != nil {
+				// here is unlinked, never followed (removeAllLeaf).
+				if err := guard.removeAllLeaf(filepath.Join(agentDir, e.Name())); err != nil {
+					if errors.Is(err, ErrAgentFilesDeleteRefused) {
+						return branchDeleted, fmt.Errorf("delete: %w", err)
+					}
 					return branchDeleted, fmt.Errorf("failed to remove agent directory entry: %w", err)
 				}
 			}
@@ -535,8 +530,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		}
 		util.Debugf("delete: removing directory: %s", agentDir)
 		removeStart := time.Now()
-		if err := removeAllSafe(dirRemove); err != nil {
+		if err := guard.removeAll(agentDir); err != nil {
 			util.Debugf("delete: removal failed in %v: %v", time.Since(removeStart), err)
+			if errors.Is(err, ErrAgentFilesDeleteRefused) {
+				return branchDeleted, fmt.Errorf("delete: %w", err)
+			}
 			return branchDeleted, fmt.Errorf("failed to remove agent directory: %w", err)
 		}
 		util.Debugf("delete: removal completed in %v", time.Since(removeStart))
@@ -571,7 +569,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				return branchDeleted, fmt.Errorf("delete: %w", err)
 			}
 			util.Debugf("delete: removing external agent state dir: %s", extDir)
-			if err := removeAllSafe(extRemove); err != nil {
+			if err := guard.removeAll(extDir); err != nil {
 				if err := retryRemovalInUserNamespace(extRemove, err); err != nil {
 					return branchDeleted, fmt.Errorf("delete: remove external agent state dir %s: %w", extDir, err)
 				}
@@ -2348,12 +2346,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				isRealClone := gitErr == nil && gitDirInfo.IsDir()
 				if !isRealClone {
 					util.Debugf("provision: clearing stale workspace before git clone: %s", agentWorkspace)
-					target, err := filesGuard().check(agentWorkspace)
-					if err != nil {
-						return "", "", nil, fmt.Errorf("failed to clear stale workspace dir: %w", err)
-					}
-					_ = util.MakeWritableRecursive(target)
-					if err := os.RemoveAll(target); err != nil {
+					if err := filesGuard().removeAll(agentWorkspace); err != nil {
 						return "", "", nil, fmt.Errorf("failed to clear stale workspace dir: %w", err)
 					}
 				}
@@ -2539,12 +2532,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		worktreeStart := time.Now()
 		// Remove existing workspace dir if it exists to allow worktree add
 		if _, err := os.Lstat(agentWorkspace); err == nil {
-			target, err := filesGuard().check(agentWorkspace)
-			if err != nil {
+			if err := filesGuard().removeAll(agentWorkspace); err != nil && errors.Is(err, ErrAgentFilesDeleteRefused) {
 				return "", "", nil, fmt.Errorf("failed to clear the workspace for the worktree: %w", err)
 			}
-			_ = util.MakeWritableRecursive(target)
-			_ = os.RemoveAll(target)
 		}
 		// Remove a stale entry for this agent's own workspace path, so git
 		// lets the worktree be added there again. Only that entry is
@@ -4617,46 +4607,45 @@ func worktreeGitEnv() []string {
 	return append(env, "LC_ALL=C")
 }
 
-// removeAgentDirGuarded removes agentDir, once the guard g allows it
-// (removeCheckedAgentDir does the removal, at the path the guard returns),
-// and returns the guard's refusal otherwise.
+// removeAgentDirGuarded removes agentDir, once the guard g allows it,
+// confined to the verified agent files root via os.Root, and returns the
+// guard's refusal otherwise.
 func removeAgentDirGuarded(g *agentFilesGuard, agentDir, agentWorkspace string) error {
-	target, err := g.check(agentDir)
-	if err != nil {
+	if _, err := g.check(agentDir); err != nil {
 		return err
 	}
-	removeCheckedAgentDir(target, agentWorkspace)
-	return nil
-}
-
-// removeCheckedAgentDir removes agentDir, a path the agent files guard
-// already allowed, and then git's entry for the worktree at agentWorkspace,
-// so git forgets a worktree that pointed into the removed directory and a
-// later provision can recreate it. agentWorkspace is the path git
-// registered the worktree under, which can differ from a path inside
-// agentDir (agentDir may have been moved before removal). An empty
-// agentWorkspace (a shared-workspace agent, or a directory with no worktree
-// of its own) removes no entry.
-func removeCheckedAgentDir(agentDir, agentWorkspace string) {
-	// chmod to ensure we can remove root-owned files left by containers.
-	// Links are skipped, so their targets are left unchanged; RemoveAll
-	// removes the link itself.
-	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-		_ = os.Chmod(path, 0755)
-		return nil
-	})
 	// The agent's scion-agent.json goes first (a link is removed, never
 	// followed): a removal that then fails part-way leaves a directory the
 	// legacy agent look-up (config.LegacySharedProjectAgentDir) no longer
 	// recognises as the agent's.
-	_ = os.Remove(filepath.Join(agentDir, "scion-agent.json"))
-	_ = os.RemoveAll(agentDir)
+	_ = g.removeAllLeaf(filepath.Join(agentDir, "scion-agent.json"))
+	if err := g.removeAll(agentDir); errors.Is(err, ErrAgentFilesDeleteRefused) {
+		return err
+	}
+	removeWorkspaceWorktreeEntry(agentWorkspace)
+	return nil
+}
+
+// removeCheckedAgentDir removes agentDir, a path the agent files guard
+// already allowed, confined to its parent directory via os.Root, and then
+// git's entry for the worktree at agentWorkspace, so git forgets a worktree
+// that pointed into the removed directory and a later provision can recreate
+// it. agentWorkspace is the path git registered the worktree under, which can
+// differ from a path inside agentDir (agentDir may have been moved before
+// removal). An empty agentWorkspace (a shared-workspace agent, or a directory
+// with no worktree of its own) removes no entry.
+func removeCheckedAgentDir(agentDir, agentWorkspace string) {
+	clean := filepath.Clean(agentDir)
+	parent := filepath.Dir(clean)
+	base := filepath.Base(clean)
+	if parent != clean && base != "" && base != "." && base != ".." {
+		// The agent's scion-agent.json goes first (a link is removed, never
+		// followed): a removal that then fails part-way leaves a directory the
+		// legacy agent look-up (config.LegacySharedProjectAgentDir) no longer
+		// recognises as the agent's.
+		_ = removeAllInRoot(parent, filepath.Join(base, "scion-agent.json"), true)
+		_ = removeAllInRoot(parent, base, true)
+	}
 	removeWorkspaceWorktreeEntry(agentWorkspace)
 }
 
@@ -4810,12 +4799,10 @@ func wipeShellHomeOnFreshProvisionGuarded(g *agentFilesGuard, agentName, agentDi
 		if !has {
 			continue
 		}
-		target, err := g.check(h)
-		if err != nil {
-			return fmt.Errorf("%w: agent %q: refusing to reuse an execution container home: %w", config.ErrAgentStateConflict, agentName, err)
-		}
-		_ = util.MakeWritableRecursive(target)
-		if err := os.RemoveAll(target); err != nil {
+		if err := g.removeAll(h); err != nil {
+			if errors.Is(err, ErrAgentFilesDeleteRefused) {
+				return fmt.Errorf("%w: agent %q: refusing to reuse an execution container home: %w", config.ErrAgentStateConflict, agentName, err)
+			}
 			return fmt.Errorf("%w: agent %q: failed to wipe execution container home: %w", config.ErrAgentStateConflict, agentName, err)
 		}
 		if err := os.MkdirAll(h, 0755); err != nil {
@@ -5042,12 +5029,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		if info, err := os.Stat(agentWorkspace); err == nil && info.IsDir() {
 			if !isWorkspaceEmptyDir(agentWorkspace) {
 				util.Debugf("GetAgent: clearing existing workspace for git-clone re-provision: %s", agentWorkspace)
-				target, err := projectAgentFilesGuard(ctx, projectDir, agentName, agentDir).check(agentWorkspace)
-				if err != nil {
-					return "", "", "", nil, fmt.Errorf("failed to clear the workspace for a fresh clone: %w", err)
-				}
-				_ = util.MakeWritableRecursive(target)
-				if err := os.RemoveAll(target); err != nil {
+				if err := projectAgentFilesGuard(ctx, projectDir, agentName, agentDir).removeAll(agentWorkspace); err != nil {
+					if errors.Is(err, ErrAgentFilesDeleteRefused) {
+						return "", "", "", nil, fmt.Errorf("failed to clear the workspace for a fresh clone: %w", err)
+					}
 					util.Debugf("GetAgent: failed to clear workspace: %v", err)
 				}
 				if err := os.MkdirAll(agentWorkspace, 0755); err != nil {

@@ -101,16 +101,16 @@ func TestRetryRemovalInUserNamespace_RetryFailureReturned(t *testing.T) {
 	}
 }
 
-// failRemoveAllSafeWith makes removeAllSafe fail with err for the directory
-// named name, and remove every other path normally.
+// failRemoveAllSafeWith makes agentFilesRemoveAll fail with err for the
+// directory named name, and remove every other path normally.
 func failRemoveAllSafeWith(t *testing.T, name string, err error) {
 	t.Helper()
-	orig := removeAllSafe
-	setSeam(t, &removeAllSafe, func(path string) error {
-		if filepath.Base(path) == name {
+	orig := agentFilesRemoveAll
+	setSeam(t, &agentFilesRemoveAll, func(rootDir, rel string) error {
+		if filepath.Base(filepath.Join(rootDir, rel)) == name {
 			return err
 		}
-		return orig(path)
+		return orig(rootDir, rel)
 	})
 }
 
