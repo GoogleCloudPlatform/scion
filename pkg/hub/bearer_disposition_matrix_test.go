@@ -1433,6 +1433,10 @@ var agentProjectReadRefusedForAllAgents = map[liveInventoryKey]agentProjectReadR
 		RequireScopeRefusal: false,
 		Reason:              "flat by-ID route requires a user identity; agent callers get 404",
 	},
+	{"project.workspace.read", http.MethodGet, "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		RequireScopeRefusal: false,
+		Reason:              "handleProjectWorkspaceUploads requires a user principal (404 while hub.large_uploads is off, 403 for agents when on)",
+	},
 }
 
 // agentProjectReadFixturePending lists catalogued GET entry points that cannot
