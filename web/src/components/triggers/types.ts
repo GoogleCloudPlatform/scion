@@ -413,6 +413,19 @@ export function formatRedactedExecSummary(action: TriggerActionSpec): string {
   return `exec (${argc} arg${argc === 1 ? '' : 's'}, redacted)`;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Splits a free-text agent reference into `{ agentId, agentName }`:
+ * UUID-shaped values map to `agentId` (resolved via GetAgent); any other
+ * non-empty string maps to `agentName` (resolved by slug/name on the Hub).
+ */
+export function splitAgentRef(raw: string): { agentId: string; agentName: string } {
+  const val = raw.trim();
+  if (!val) return { agentId: '', agentName: '' };
+  return UUID_RE.test(val) ? { agentId: val, agentName: '' } : { agentId: '', agentName: val };
+}
+
 /**
  * Returns the Shoelace badge variant for a trigger fire status.
  */

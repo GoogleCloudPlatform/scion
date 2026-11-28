@@ -30,6 +30,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import {
   formatRedactedExecSummary,
+  splitAgentRef,
   type ProjectAgentOption,
   type TriggerActionSpec,
 } from './types.js';
@@ -352,8 +353,8 @@ export class ScionTriggerActionEditor extends LitElement {
                 .value=${action.agentId || action.agentName || ''}
                 data-action-agent=${index}
                 @sl-input=${(e: Event) => {
-                  const val = (e.target as HTMLInputElement).value.trim();
-                  this.updateAction(index, { agentId: val, agentName: '' });
+                  const val = (e.target as HTMLInputElement).value;
+                  this.updateAction(index, splitAgentRef(val));
                 }}
               ></sl-input>
             `}

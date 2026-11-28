@@ -22,3 +22,10 @@ export {
   createDefaultMessageAction,
   createDefaultDispatchAction,
 } from './action-editor.js';
+export {
+  ScionTriggerNotifyEditor,
+  ALL_NOTIFY_OUTCOMES,
+  DEFAULT_NOTIFY_OUTCOMES,
+  createDefaultNotifySpec,
+  normalizeNotifySpec,
+} from './notify-editor.js';
