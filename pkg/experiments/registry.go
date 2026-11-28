@@ -638,11 +638,12 @@ const Triggers = "hub.triggers"
 
 // MessagePolicies gates project-scoped message admission policies
 // (ptone/scion#8047): /api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]],
-// scion message-policy create|list|get|delete|test|decisions, and the H2
-// outbound agent message gate (agent->user DMs, agent conversation posts and
-// choice prompts; shadow and enforce modes). While it is off, the message
-// policy routes answer 404, the outbound gate evaluates and records nothing,
-// and stored policies and decision records are kept.
+// scion message-policy create|update|list|get|delete|test|decisions, and the outbound
+// agent message gate (agent_to_user, agent_to_conversation, agent_dm,
+// mention_delivery; shadow and enforce modes). Server layer: while it is off,
+// the message policy routes answer 404, the outbound gate evaluates and records
+// nothing, and stored policies and decision records are kept. Web layer:
+// exposes the flag for UI presentation.
 const MessagePolicies = "hub.message_policies"
 
 // EffectivePermissions gates the admin effective-permissions viewer
@@ -1448,9 +1449,9 @@ var compiled = []Experiment{
 	{
 		Name:        MessagePolicies,
 		Title:       "Project message policies",
-		Description: "Enables project-scoped CEL message policies on outbound agent messages to users, conversations and choice prompts (/api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]] and scion message-policy create|list|get|delete|test|decisions), with shadow and enforce modes and content-free decision records. Agent-to-agent DMs, group-set fan-out and mention deliveries are not covered yet and are reported in coverage.uncovered_agent_paths. While off, the routes answer 404, the gate evaluates nothing and stored policies and decisions are kept.",
+		Description: "Enables project-scoped message policies on outbound agent messages to users, conversations, choice prompts, agent-to-agent DMs, and mention deliveries (agent_to_user, agent_to_conversation, agent_dm, mention_delivery) (/api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]] and scion message-policy), with shadow and enforce modes and content-free decision records. Uncovered agent paths (group_post, group_set, mention_fanout, broadcast) are reported in coverage.uncovered_agent_paths. Server layer: while off, the routes answer 404, the gate evaluates nothing and stored policies and decisions are kept. Web layer: exposes the flag for UI presentation.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8047",
 		Owner:       "system-one",

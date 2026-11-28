@@ -366,6 +366,20 @@ export function systemOneEnabled(): boolean {
 }
 
 /**
+ * Project message policies (hub.message_policies, ptone/scion#8047):
+ * exposes the message-policies experiment flag for UI presentation.
+ * Presentation only: the hub enforces the experiment (404 when off) and
+ * permissions on every /api/v1/projects/{id}/message-policies* route.
+ * Default OFF.
+ */
+export const MESSAGE_POLICIES_FLAG = 'hub.message_policies';
+
+/** Whether project message policies UI surfaces are enabled in this session. */
+export function messagePoliciesEnabled(): boolean {
+  return isFeatureEnabled(MESSAGE_POLICIES_FLAG);
+}
+
+/**
  * Effective permissions viewer (hub.effective_permissions, ptone/scion#8439):
  * shows the two-tab Roles dialog (Effective roles + Effective permissions) on
  * the admin Users page. Presentation only: the hub gates GET/HEAD

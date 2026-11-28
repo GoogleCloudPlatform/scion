@@ -213,6 +213,30 @@ func TestResolvedExperiments_IncludesProjectVisitors(t *testing.T) {
 	}
 }
 
+// TestResolvedExperiments_IncludesMessagePolicies: the browser reads
+// GET /api/v1/experiments to gate the project Message Policies UI, so
+// hub.message_policies must appear in the resolved web-layer map with its
+// effective value (off by default, true when overridden on).
+func TestResolvedExperiments_IncludesMessagePolicies(t *testing.T) {
+	srv := &Server{}
+	got := srv.resolvedExperiments()
+	if v, ok := got[experiments.MessagePolicies]; !ok || v {
+		t.Errorf("resolvedExperiments()[%q] = %v (present=%v), want false and present", experiments.MessagePolicies, v, ok)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.message_policies":true}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	on := &Server{}
+	on.SetOperationalSettings(ops)
+	if v, ok := on.resolvedExperiments()[experiments.MessagePolicies]; !ok || !v {
+		t.Errorf("with the override on: resolvedExperiments()[%q] = %v (present=%v), want true", experiments.MessagePolicies, v, ok)
+	}
+}
+
 // --- requireExperiment ---
 
 func TestRequireExperiment_OffReturns404(t *testing.T) {
