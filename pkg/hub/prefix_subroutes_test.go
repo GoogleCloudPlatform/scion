@@ -23,8 +23,12 @@ import "net/http"
 //   - TestEntryPointsCoverRouteMetadata (pkg/hub/authzop, via AST parsing of
 //     prefixSubRouteTable)
 //   - TestBearerDisposition_EveryRoutePatternCovered (pkg/hub)
-//   - TestPrefixSubRoutes_HandlerDispatchCompleteness (pkg/hub, AST-checks
-//     the registered handlers for undeclared methods or action cases)
+//   - TestPrefixSubRoutes_HandlerDispatchCompleteness (pkg/hub/authzop,
+//     AST-checks the registered prefix handlers and their delegated s.handle*
+//     callees for literal action switches, equality checks, and prefix/suffix
+//     string matches not represented in prefixSubRouteTable)
+//   - TestPrefixSubRoutes_LiveUndeclaredMethodCheck (pkg/hub, live HTTP probe
+//     requiring undeclared standard methods on each row to return 404 or 405)
 type prefixSubRouteRow struct {
 	prefix  string
 	pattern string

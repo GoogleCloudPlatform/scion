@@ -631,3 +631,113 @@ func TestLiveInventoryExclusionsNoRepeatedKeys(t *testing.T) {
 		}
 	}
 }
+
+type undeclaredMethodKey struct {
+	Method  string
+	Pattern string
+}
+
+// prefixUndeclaredMethodExclusions lists (method, pattern) pairs on
+// prefixSubRouteTable rows where sending an undeclared standard HTTP method
+// returns a status other than 404/405 for a documented pre-dispatch reason
+// (for example, an unconfigured backend returning 501/503 before method
+// dispatch, or a handler that runs a pre-method auth/validation check).
+var prefixUndeclaredMethodExclusions = map[undeclaredMethodKey]string{
+	{Method: http.MethodDelete, Pattern: "/api/v1/admin/invites/stats"}: "handleAdminInviteByID (admin_invites.go) matches id == \"stats\" only on GET; DELETE falls through to the declared sibling route DELETE /api/v1/admin/invites/{id} with id=\"stats\"",
+}
+
+// TestPrefixSubRoutes_LiveUndeclaredMethodCheck probes every row in
+// prefixSubRouteTable with every standard HTTP method (GET, POST, PUT, PATCH,
+// DELETE) NOT declared in row.methods and requires the live server mux to
+// reject it with 404 or 405 (unless explicitly excluded in
+// prefixUndeclaredMethodExclusions with a specific reason).
+//
+// This closes the method-completeness gap of the static AST guard: adding a
+// new HTTP method (e.g. PUT) to an existing prefix dispatcher without adding
+// it to prefixSubRouteTable (and the authz catalog) fails this test.
+//
+// Boundary: for experiment-gated routes whose experiment is off in testServer,
+// the handler returns 404 to every method, so this probe cannot distinguish
+// undeclared methods until the experiment is enabled.
+func TestPrefixSubRoutes_LiveUndeclaredMethodCheck(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	f := seedLiveInventoryFixtures(t, ctx, srv, s)
+	patternFallback := patternOverrides(f)
+	opFallback := make(map[string]map[string]string)
+	for k, v := range opPatternOverrides(f) {
+		if _, exists := opFallback[k.Pattern]; !exists {
+			opFallback[k.Pattern] = v
+		}
+	}
+	queryFor := queryOverrides(f)
+
+	standardMethods := []string{
+		http.MethodGet,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+	}
+
+	// Track valid (undeclared) keys for staleness checking of
+	// prefixUndeclaredMethodExclusions.
+	validUndeclared := make(map[undeclaredMethodKey]bool)
+
+	checked, excluded := 0, 0
+	for _, row := range prefixSubRouteTable {
+		declared := make(map[string]bool, len(row.methods))
+		for _, m := range row.methods {
+			declared[m] = true
+		}
+
+		params := patternFallback[row.pattern]
+		if params == nil {
+			params = opFallback[row.pattern]
+		}
+		path := substituteLiveInventoryParams(row.pattern, params)
+		if q, ok := queryFor[row.pattern]; ok {
+			path += "?" + q
+		}
+
+		for _, method := range standardMethods {
+			if declared[method] {
+				continue
+			}
+			key := undeclaredMethodKey{Method: method, Pattern: row.pattern}
+			validUndeclared[key] = true
+
+			if reason, skip := prefixUndeclaredMethodExclusions[key]; skip {
+				t.Logf("undeclared-method check skipped for %s %s: %s", method, path, reason)
+				excluded++
+				continue
+			}
+
+			var body interface{}
+			switch method {
+			case http.MethodPost, http.MethodPut, http.MethodPatch:
+				body = map[string]interface{}{}
+			}
+
+			rec := doRequest(t, srv, method, path, body)
+			checked++
+			if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s (prefix %s, pattern %s): undeclared method returned %d, want 404 or 405 — either add %s to prefixSubRouteTable and the authz catalog, or document a pre-dispatch reason in prefixUndeclaredMethodExclusions",
+					method, path, row.prefix, row.pattern, rec.Code, method)
+			}
+		}
+	}
+
+	for key := range prefixUndeclaredMethodExclusions {
+		if !validUndeclared[key] {
+			t.Errorf("stale prefixUndeclaredMethodExclusions entry: %s %s is either not in prefixSubRouteTable or is already declared",
+				key.Method, key.Pattern)
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("no undeclared methods were probed on prefixSubRouteTable — this test is broken")
+	}
+	t.Logf("prefix sub-route undeclared-method check: %d probes passed (%d excluded)", checked, excluded)
+}

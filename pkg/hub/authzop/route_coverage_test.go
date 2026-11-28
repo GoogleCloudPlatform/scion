@@ -274,6 +274,11 @@ func routePrefixCovered(method, base string, cov routeCoverageSet, exactRoutes m
 // Trailing-slash prefix classification (fail-closed, ptone/scion#4883)
 // ---------------------------------------------------------------------------
 
+// prefixSubRouteTableSource is the canonical description for trailing-slash
+// prefixes whose concrete (method, pattern) operations are enumerated in
+// pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable).
+const prefixSubRouteTableSource = "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)"
+
 // enumeratedSubRoutePrefixes lists trailing-slash routeMetadataTable prefixes
 // whose concrete sub-routes are discovered and verified individually by
 // discoverPrefixSubRoutes.
@@ -283,52 +288,52 @@ var enumeratedSubRoutePrefixes = map[string]string{
 	"/api/v1/projects/":  "enumerated per-segment from pkg/hub/project_subroutes.go (projectSubRouteTable)",
 
 	// Admin prefix dispatchers (enumerated per-method from pkg/hub/prefix_subroutes_test.go)
-	"/api/v1/admin/access-constraint-previews/": "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/access-constraints/":         "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/allow-list/":                 "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/entitlements/":               "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/integrations/":               "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/invites/":                    "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/lifecycle-hooks/":            "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/limits/":                     "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/maintenance/migrations/":     "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/maintenance/operations/":     "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/role-bindings/":              "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/roles/":                      "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/server-config/sections/":     "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/system-one/instances/":       "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/admin/usage/":                      "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
+	"/api/v1/admin/access-constraint-previews/": prefixSubRouteTableSource,
+	"/api/v1/admin/access-constraints/":         prefixSubRouteTableSource,
+	"/api/v1/admin/allow-list/":                 prefixSubRouteTableSource,
+	"/api/v1/admin/entitlements/":               prefixSubRouteTableSource,
+	"/api/v1/admin/integrations/":               prefixSubRouteTableSource,
+	"/api/v1/admin/invites/":                    prefixSubRouteTableSource,
+	"/api/v1/admin/lifecycle-hooks/":            prefixSubRouteTableSource,
+	"/api/v1/admin/limits/":                     prefixSubRouteTableSource,
+	"/api/v1/admin/maintenance/migrations/":     prefixSubRouteTableSource,
+	"/api/v1/admin/maintenance/operations/":     prefixSubRouteTableSource,
+	"/api/v1/admin/role-bindings/":              prefixSubRouteTableSource,
+	"/api/v1/admin/roles/":                      prefixSubRouteTableSource,
+	"/api/v1/admin/server-config/sections/":     prefixSubRouteTableSource,
+	"/api/v1/admin/system-one/instances/":       prefixSubRouteTableSource,
+	"/api/v1/admin/usage/":                      prefixSubRouteTableSource,
 
 	// Resource, user, chat, and messaging prefix dispatchers (enumerated per-method from pkg/hub/prefix_subroutes_test.go)
-	"/api/v1/attachment-deliveries/":    "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/auth/tokens/":              "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/chat/attachments/":         "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/chat/conversations/":       "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/chat/spaces/":              "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/chat/stars/":               "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/chat/topics/":              "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/command-requests/":         "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/conversations/":            "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/decision-prompts/":         "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/decisions/":                "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/env/":                      "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/gcp-service-accounts/":     "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/groups/":                   "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/harness-configs/":          "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/messages/":                 "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/metrics/":                  "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/notifications/":            "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/pending-secrets/":          "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/runtime-brokers/":          "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/secret-requests/":          "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/secrets/":                  "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/skill-registries/":         "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/skills/":                   "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/templates/":                "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/thread-groups/":            "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/users/":                    "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/users/me/injected-skills/": "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
-	"/api/v1/users/me/templates/":       "enumerated per-method from pkg/hub/prefix_subroutes_test.go (prefixSubRouteTable)",
+	"/api/v1/attachment-deliveries/":    prefixSubRouteTableSource,
+	"/api/v1/auth/tokens/":              prefixSubRouteTableSource,
+	"/api/v1/chat/attachments/":         prefixSubRouteTableSource,
+	"/api/v1/chat/conversations/":       prefixSubRouteTableSource,
+	"/api/v1/chat/spaces/":              prefixSubRouteTableSource,
+	"/api/v1/chat/stars/":               prefixSubRouteTableSource,
+	"/api/v1/chat/topics/":              prefixSubRouteTableSource,
+	"/api/v1/command-requests/":         prefixSubRouteTableSource,
+	"/api/v1/conversations/":            prefixSubRouteTableSource,
+	"/api/v1/decision-prompts/":         prefixSubRouteTableSource,
+	"/api/v1/decisions/":                prefixSubRouteTableSource,
+	"/api/v1/env/":                      prefixSubRouteTableSource,
+	"/api/v1/gcp-service-accounts/":     prefixSubRouteTableSource,
+	"/api/v1/groups/":                   prefixSubRouteTableSource,
+	"/api/v1/harness-configs/":          prefixSubRouteTableSource,
+	"/api/v1/messages/":                 prefixSubRouteTableSource,
+	"/api/v1/metrics/":                  prefixSubRouteTableSource,
+	"/api/v1/notifications/":            prefixSubRouteTableSource,
+	"/api/v1/pending-secrets/":          prefixSubRouteTableSource,
+	"/api/v1/runtime-brokers/":          prefixSubRouteTableSource,
+	"/api/v1/secret-requests/":          prefixSubRouteTableSource,
+	"/api/v1/secrets/":                  prefixSubRouteTableSource,
+	"/api/v1/skill-registries/":         prefixSubRouteTableSource,
+	"/api/v1/skills/":                   prefixSubRouteTableSource,
+	"/api/v1/templates/":                prefixSubRouteTableSource,
+	"/api/v1/thread-groups/":            prefixSubRouteTableSource,
+	"/api/v1/users/":                    prefixSubRouteTableSource,
+	"/api/v1/users/me/injected-skills/": prefixSubRouteTableSource,
+	"/api/v1/users/me/templates/":       prefixSubRouteTableSource,
 }
 
 // ownerOnlyTrailingSlashPrefixes is the explicit, audited allowlist of
@@ -403,6 +408,7 @@ func findUnclassifiedTrailingSlashPrefixes(routeKeys map[string]bool, enumerated
 // /api/v1/agents/, /api/v1/projects/).
 type discoveredSubRoute struct {
 	Source           string // origin table/handler for diagnostics
+	Prefix           string // owning trailing-slash prefix when populated (e.g. from prefixSubRouteTable)
 	Method           string // HTTP method when known, or "" for path/segment-level checks
 	Pattern          string // normalized path pattern (placeholders canonicalized to "{}")
 	AllowPrefix      bool   // true when any covered pattern under Pattern+"/" satisfies this entry
@@ -1255,6 +1261,7 @@ func discoverPrefixTableSubRoutes(t *testing.T, repoRoot string) []discoveredSub
 		for _, m := range uniqueSortedStrings(methods) {
 			out = append(out, discoveredSubRoute{
 				Source:  "pkg/hub/prefix_subroutes_test.go",
+				Prefix:  prefix,
 				Method:  m,
 				Pattern: norm,
 			})
@@ -1264,7 +1271,7 @@ func discoverPrefixTableSubRoutes(t *testing.T, repoRoot string) []discoveredSub
 	// Verify every enumerated prefix (other than the 3 dedicated discoverers)
 	// actually has rows in prefixSubRouteTable.
 	for prefix, desc := range enumeratedSubRoutePrefixes {
-		if strings.Contains(desc, "prefixSubRouteTable") && !seenPrefixes[prefix] {
+		if desc == prefixSubRouteTableSource && !seenPrefixes[prefix] {
 			t.Errorf("enumeratedSubRoutePrefixes lists %q as prefixSubRouteTable-backed, but prefixSubRouteTable has no rows for it", prefix)
 		}
 	}
@@ -1602,23 +1609,30 @@ func TestProofPrefixDoesNotMaskUncoveredPrefixSubRouteOperation(t *testing.T) {
 
 // TestPrefixSubRoutes_HandlerDispatchCompleteness AST-parses pkg/hub/server.go
 // and the handler functions registered for every prefixSubRouteTable-backed
-// trailing-slash prefix to verify that every literal sub-route action case in
-// a handler's path-action switch is represented in prefixSubRouteTable.
+// trailing-slash prefix (plus their same-package (*Server) s.handle* callees up
+// to depth 2) to verify that literal sub-route actions dispatched via:
+//   - switch statements on path/action variables or parts[i]/segs[i]
+//   - equality comparisons (if/switch case `x == "lit"`) on path/action variables
+//   - strings.HasPrefix/HasSuffix/CutPrefix/CutSuffix/TrimPrefix on path/action variables
 //
-// If a developer adds a new `case "new-action":` to any of the 44 prefix
-// dispatchers without adding it to prefixSubRouteTable (and the authz catalog),
-// this test fails closed.
+// are represented in that prefix's own rows of prefixSubRouteTable.
+//
+// Static-analysis boundaries:
+//   - HTTP method completeness is NOT checked here; it is verified live by
+//     TestPrefixSubRoutes_LiveUndeclaredMethodCheck in pkg/hub.
+//   - Dynamically constructed path literals, map-driven dispatch tables, or
+//     delegated helpers not named s.handle* are outside this AST scan.
 func TestPrefixSubRoutes_HandlerDispatchCompleteness(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	subRoutes := discoverPrefixTableSubRoutes(t, repoRoot)
 
-	// Index discovered patterns by prefix.
+	// Index discovered patterns strictly by each row's own owning prefix so
+	// nested prefixes (e.g. /api/v1/users/me/templates/) cannot mask actions on
+	// their parent prefix (/api/v1/users/).
 	patternsByPrefix := make(map[string][]string)
 	for _, sr := range subRoutes {
-		for prefix := range enumeratedSubRoutePrefixes {
-			if strings.HasPrefix(sr.Pattern, prefix) {
-				patternsByPrefix[prefix] = append(patternsByPrefix[prefix], sr.Pattern)
-			}
+		if sr.Prefix != "" {
+			patternsByPrefix[sr.Prefix] = append(patternsByPrefix[sr.Prefix], sr.Pattern)
 		}
 	}
 
@@ -1656,17 +1670,156 @@ func TestPrefixSubRoutes_HandlerDispatchCompleteness(t *testing.T) {
 		}
 	}
 
-	// Action switch tag names used by prefix dispatchers in pkg/hub.
-	actionSwitchTags := map[string]bool{
+	// Path/action variable names used by prefix dispatchers in pkg/hub.
+	actionPathIdents := map[string]bool{
 		"action":      true,
 		"sub":         true,
 		"subPath":     true,
+		"subpath":     true,
 		"subresource": true,
+		"rest":        true,
+		"remaining":   true,
+		"suffix":      true,
+		"segment":     true,
+		"seg":         true,
+		"relPath":     true,
+		"tail":        true,
+		"id":          true,
+		"path":        true,
+		"agentPath":   true,
+		"envPath":     true,
+		"secretPath":  true,
+		"memberPath":  true,
+	}
+	// Slice variable names indexed for path segments (e.g. parts[1], segs[0]).
+	actionSliceIdents := map[string]bool{
+		"parts":    true,
+		"segs":     true,
+		"segments": true,
+	}
+	// strings.* functions used for prefix/suffix path dispatch.
+	pathMatchFuncs := map[string]bool{
+		"HasPrefix":  true,
+		"HasSuffix":  true,
+		"CutPrefix":  true,
+		"CutSuffix":  true,
+		"TrimPrefix": true,
+	}
+
+	isPathActionExpr := func(expr ast.Expr) bool {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			return actionPathIdents[e.Name]
+		case *ast.IndexExpr:
+			if id, ok := e.X.(*ast.Ident); ok && actionSliceIdents[id.Name] {
+				return true
+			}
+		}
+		return false
+	}
+
+	normalizeActionLit := func(raw string) string {
+		trimmed := strings.Trim(raw, "/")
+		if trimmed == "" {
+			return ""
+		}
+		// Ignore full API paths (e.g. strings.TrimPrefix(path, "/api/v1/...")),
+		// query strings, or non-segment literals with whitespace/punctuation.
+		if strings.HasPrefix(trimmed, "api/") || strings.ContainsAny(trimmed, " \t\n?=%:") {
+			return ""
+		}
+		return trimmed
+	}
+
+	var collectActions func(fn *ast.FuncDecl, depth int, visited map[string]bool, actions *[]string)
+	collectActions = func(fn *ast.FuncDecl, depth int, visited map[string]bool, actions *[]string) {
+		if fn == nil || fn.Body == nil {
+			return
+		}
+		var callees []string
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.SwitchStmt:
+				if node.Tag == nil || node.Body == nil || !isPathActionExpr(node.Tag) {
+					return true
+				}
+				for _, stmt := range node.Body.List {
+					cc, ok := stmt.(*ast.CaseClause)
+					if !ok {
+						continue
+					}
+					for _, expr := range cc.List {
+						lit, ok := expr.(*ast.BasicLit)
+						if !ok || lit.Kind != token.STRING {
+							continue
+						}
+						if val, err := strconv.Unquote(lit.Value); err == nil {
+							if tok := normalizeActionLit(val); tok != "" {
+								*actions = append(*actions, tok)
+							}
+						}
+					}
+				}
+			case *ast.BinaryExpr:
+				if node.Op != token.EQL {
+					return true
+				}
+				var lit *ast.BasicLit
+				if isPathActionExpr(node.X) {
+					lit, _ = node.Y.(*ast.BasicLit)
+				} else if isPathActionExpr(node.Y) {
+					lit, _ = node.X.(*ast.BasicLit)
+				}
+				if lit != nil && lit.Kind == token.STRING {
+					if val, err := strconv.Unquote(lit.Value); err == nil {
+						if tok := normalizeActionLit(val); tok != "" {
+							*actions = append(*actions, tok)
+						}
+					}
+				}
+			case *ast.CallExpr:
+				sel, ok := node.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				recv, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				// strings.HasPrefix/HasSuffix/CutPrefix/CutSuffix/TrimPrefix(pathVar, "lit")
+				if recv.Name == "strings" && pathMatchFuncs[sel.Sel.Name] && len(node.Args) == 2 {
+					if isPathActionExpr(node.Args[0]) {
+						if lit, ok := node.Args[1].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							if val, err := strconv.Unquote(lit.Value); err == nil {
+								if tok := normalizeActionLit(val); tok != "" {
+									*actions = append(*actions, tok)
+								}
+							}
+						}
+					}
+				}
+				// Recurse into delegated s.handle* (*Server) callees.
+				if recv.Name == "s" && strings.HasPrefix(sel.Sel.Name, "handle") && depth < 2 {
+					callees = append(callees, sel.Sel.Name)
+				}
+			}
+			return true
+		})
+
+		for _, callee := range uniqueSortedStrings(callees) {
+			if visited[callee] {
+				continue
+			}
+			visited[callee] = true
+			if subFn, ok := serverMethods[callee]; ok {
+				collectActions(subFn, depth+1, visited, actions)
+			}
+		}
 	}
 
 	checkedHandlers := 0
 	for prefix, desc := range enumeratedSubRoutePrefixes {
-		if !strings.Contains(desc, "prefixSubRouteTable") {
+		if desc != prefixSubRouteTableSource {
 			continue
 		}
 		handlerName, ok := handlerByPrefix[prefix]
@@ -1681,44 +1834,9 @@ func TestPrefixSubRoutes_HandlerDispatchCompleteness(t *testing.T) {
 		}
 		checkedHandlers++
 
-		// Collect string literal action cases from path-action switches in fn.
 		var actions []string
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			sw, ok := n.(*ast.SwitchStmt)
-			if !ok || sw.Tag == nil || sw.Body == nil {
-				return true
-			}
-			isActionSwitch := false
-			switch tag := sw.Tag.(type) {
-			case *ast.Ident:
-				isActionSwitch = actionSwitchTags[tag.Name]
-			case *ast.IndexExpr:
-				if id, ok := tag.X.(*ast.Ident); ok && id.Name == "parts" {
-					isActionSwitch = true
-				}
-			}
-			if !isActionSwitch {
-				return true
-			}
-			for _, stmt := range sw.Body.List {
-				cc, ok := stmt.(*ast.CaseClause)
-				if !ok {
-					continue
-				}
-				for _, expr := range cc.List {
-					lit, ok := expr.(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
-					}
-					val, err := strconv.Unquote(lit.Value)
-					if err != nil || val == "" {
-						continue
-					}
-					actions = append(actions, val)
-				}
-			}
-			return true
-		})
+		visited := map[string]bool{handlerName: true}
+		collectActions(fn, 0, visited, &actions)
 
 		pats := patternsByPrefix[prefix]
 		for _, act := range uniqueSortedStrings(actions) {
@@ -1739,7 +1857,7 @@ func TestPrefixSubRoutes_HandlerDispatchCompleteness(t *testing.T) {
 	if checkedHandlers == 0 {
 		t.Fatal("checked 0 prefix handlers — server.go parser is broken")
 	}
-	t.Logf("verified action-switch dispatch completeness across %d prefix handlers", checkedHandlers)
+	t.Logf("verified action dispatch completeness across %d prefix handlers", checkedHandlers)
 }
 
 // extractServerPrefixHandlers walks pkg/hub/server.go for s.mux.HandleFunc
