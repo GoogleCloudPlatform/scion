@@ -593,3 +593,46 @@ func TestSharedDirUploads_SweeperRetriesOnGetProjectProvidersFault(t *testing.T)
 	_, err = st.GetUploadSession(ctx, sess.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "terminal row should be deleted once resolve returns co-located broker sentinel")
 }
+
+func TestSharedDirUploads_RoleRevocationStopsNextChunk(t *testing.T) {
+	srv, st := testServer(t)
+	sdSetLargeUploadsExperiment(t, srv, true)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("user-sdupload-revoked"),
+		Email:       "sdupload-revoked@test.com",
+		DisplayName: "SD Upload Revoked",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, member))
+
+	project, _ := createTestProjectWithSharedDirs(t, srv, st, "SD Uploads Role Revoke", "scratchpad")
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, member.ID))
+
+	uploadsURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad/uploads", project.ID)
+	startRec := doRequestAsUser(t, srv, member, http.MethodPost, uploadsURL,
+		UploadStartRequest{Name: "revoke.bin", Path: "revoke.bin", Size: 16, Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code, "body: %s", startRec.Body.String())
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+
+	memberToken, _, _, err := srv.userTokenService.GenerateTokenPair(
+		member.ID, member.Email, member.DisplayName, member.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	u := fmt.Sprintf("%s/%s", uploadsURL, started.ID)
+	c1 := sdDoChunkPut(t, srv, memberToken, u+"?offset=0", []byte("01234567"))
+	require.Equal(t, http.StatusOK, c1.Code, "body: %s", c1.Body.String())
+
+	// Revoke the user's project role binding between chunks.
+	_, err = st.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, member.ID)
+	require.NoError(t, err)
+
+	// Next chunk PUT must be rejected by route authorization (403 or 404).
+	c2 := sdDoChunkPut(t, srv, memberToken, u+"?offset=8", []byte("89abcdef"))
+	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, c2.Code,
+		"revoked project role must stop the next chunk, got %d: %s", c2.Code, c2.Body.String())
+}
