@@ -27,9 +27,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1320,56 +1322,228 @@ func (m *bearerMatrixFixture) mintAgentTokenWithScopes(t *testing.T, agentID, pr
 	return tok
 }
 
-// agentProjectReadScopeExemptions lists the catalogued GET entry points that
-// admit PrincipalAgent + CredentialAgentJWT but do not refuse an agent token
-// lacking ScopeProjectRead in the bearer-matrix fixture (for example agent
-// self-service routes, caller-owned inbox routes, hub-level discovery routes,
-// or routes that reject/redirect before reaching scope enforcement in this
-// fixture). Every other agent-JWT GET entry point in the catalog is required
-// by TestAgentProjectReadScopeMatrix_CatalogEntryPoints to refuse an agent
-// token lacking ScopeProjectRead (deny-by-default).
+// agentProjectReadScopeExemptions lists catalogued GET entry points that admit
+// PrincipalAgent + CredentialAgentJWT but by policy are NOT gated by
+// ScopeProjectRead (agent self-service routes, caller-owned inbox/DM routes,
+// hub-level discovery routes, user-only endpoints, or routes gated by a
+// different scope/authority such as project:secret:read, project:artifact:read,
+// or agent.attach).
+//
+// Every entry must carry a non-empty policy reason and is staleness-checked
+// against both the live catalog and live enforcement behavior.
 var agentProjectReadScopeExemptions = map[liveInventoryKey]string{
-	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages/stream"}:                        "fixture has no message stream backend (501 before scope check)",
-	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}:                        "bare proxy path redirects to trailing slash (308) before auth",
-	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:              "fixture agent has no port tunnel configured (503 before scope check)",
-	{"agent.port.list", http.MethodGet, "/api/v1/agents/{id}/ports"}:                                      "agent self-service route listing its own exposed ports",
-	{"agent.port.tunnel", http.MethodGet, "/api/v1/agents/{id}/ports/tunnel"}:                             "agent self-service WebSocket tunnel endpoint (400 without upgrade)",
-	{"agent.usage.capabilities", http.MethodGet, "/api/v1/agents/{id}/usage/capabilities"}:                "agent self-service capabilities check",
-	{"artifact.list", http.MethodGet, "/api/v1/artifacts"}:                                                "requires scope query parameters (400) and uses project:artifact:read",
-	{"inbox.capabilities.read", http.MethodGet, "/api/v1/messaging/capabilities"}:                         "self-service messaging capability discovery",
-	{"inbox.conversation.list", http.MethodGet, "/api/v1/conversations"}:                                  "caller's own inbox conversations (filtered to caller participation)",
-	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}"}:                      "caller's own direct conversation",
-	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages"}:             "caller's own direct conversation messages",
-	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages/{messageId}"}: "caller's own direct conversation message",
-	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/watch"}:                "caller's own direct conversation watch",
-	{"agent.message.target.resolve", http.MethodGet, "/api/v1/messaging/targets/resolve"}:                 "requires target query parameter (400) before authorization",
-	{"chat.attachment.probe", http.MethodGet, "/api/v1/chat/attachments"}:                                 "self-service chat attachment capability probe",
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/logs"}:                                       "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/logs"}:                  "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs"}:                                 "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs"}:            "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs/stream"}:                          "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream"}:     "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages"}:                               "user-only agent message history endpoint (refuses all agent tokens regardless of scope)",
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages/stream"}:                        "user-only stream endpoint (agents are refused even with a stream backend installed)",
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}:                        "self-only port proxy (authorizePortAccess admits only the owning agent)",
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:              "self-only port proxy (authorizePortAccess admits only the owning agent)",
+	{"agent.port.list", http.MethodGet, "/api/v1/agents/{id}/ports"}:                                      "agent self-service route listing only the calling agent's own exposed ports",
+	{"agent.port.tunnel", http.MethodGet, "/api/v1/agents/{id}/ports/tunnel"}:                             "agent self-service WebSocket tunnel gated by self-ownership and agent:port:forward",
+	{"agent.usage.capabilities", http.MethodGet, "/api/v1/agents/{id}/usage/capabilities"}:                "agent self-service capabilities check (self-only; reads no project data)",
+	{"agent.secrets.access", http.MethodGet, "/api/v1/agents/{id}/secrets"}:                               "agent self-service secret access gated by self-identity, not project:read",
+	{"agent.secrets.access", http.MethodGet, "/api/v1/agents/{id}/secrets/{key}"}:                         "agent self-service secret access gated by self-identity, not project:read",
+	{"agent.screen.read", http.MethodGet, "/api/v1/agents/{id}/screen"}:                                   "gated by agent.attach lifecycle authority rather than project:read",
+	{"agent.screen.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/screen"}:              "gated by agent.attach lifecycle authority rather than project:read",
+	{"agent.attach", http.MethodGet, "/api/v1/agents/{id}/pty"}:                                           "gated by agent.attach lifecycle authority rather than project:read",
+	{"project.secret.read", http.MethodGet, "/api/v1/projects/{id}/secrets"}:                              "gated by project:secret:read scope rather than project:read",
+	{"project.secret.read", http.MethodGet, "/api/v1/projects/{id}/secrets/{key}"}:                        "gated by project:secret:read scope rather than project:read",
+	{"artifact.list", http.MethodGet, "/api/v1/artifacts"}:                                                "gated per row by project:artifact:read scope (requires mine=1), not project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}"}:                                           "gated by project:artifact:read scope rather than project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}/files/{path}"}:                              "gated by project:artifact:read scope rather than project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}:               "gated by project:artifact:read scope rather than project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}/versions/{seq}/archive"}:                    "gated by project:artifact:read scope rather than project:read",
+	{"artifact.review.draft.read", http.MethodGet, "/api/v1/artifacts/{id}/review-draft"}:                 "gated by project:artifact:read/create scope rather than project:read",
+	{"artifact.review.request.list", http.MethodGet, "/api/v1/artifacts/{id}/review-requests"}:            "gated by project:artifact:read scope rather than project:read",
+	{"artifact.version.read", http.MethodGet, "/api/v1/artifacts/{id}/versions"}:                          "gated by project:artifact:read scope rather than project:read",
+	{"artifact.version.read", http.MethodGet, "/api/v1/artifacts/{id}/versions/{seq}"}:                    "gated by project:artifact:read scope rather than project:read",
+	{"inbox.capabilities.read", http.MethodGet, "/api/v1/messaging/capabilities"}:                         "static self-service messaging capability discovery",
+	{"inbox.conversation.list", http.MethodGet, "/api/v1/conversations"}:                                  "caller's own inbox conversations (group rows require project:read separately)",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}"}:                      "participant-scoped direct conversation owned by the calling agent",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages"}:             "participant-scoped direct conversation messages owned by the calling agent",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages/{messageId}"}: "participant-scoped direct conversation message owned by the calling agent",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/watch"}:                "participant-scoped direct conversation watch owned by the calling agent",
+	{"agent.message.target.resolve", http.MethodGet, "/api/v1/messaging/targets/resolve"}:                 "gated by cross-project messaging setting and authorizeAgentMessage, not project:read",
+	{"chat.attachment.probe", http.MethodGet, "/api/v1/chat/attachments"}:                                 "static self-service chat attachment capability probe",
 	{"user.self.profile", http.MethodGet, "/api/v1/auth/me"}:                                              "caller self-profile endpoint",
-	{"hub.experiments.read", http.MethodGet, "/api/v1/experiments"}:                                       "hub-level experiment flag discovery",
-	{"hub.profiling.read", http.MethodGet, "/api/v1/profiling"}:                                           "hub-level profiling status discovery",
-	{"hub.injectedskills.read", http.MethodGet, "/api/v1/hub/settings/injected-skills"}:                   "hub-level injected skills settings",
-	{"hub.conduitgrantkeys.read", http.MethodGet, "/api/v1/conduit/grant-keys"}:                           "hub-level conduit grant public keys",
-	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts"}:                                 "requires scope query parameter (400) before authorization",
+	{"hub.experiments.read", http.MethodGet, "/api/v1/experiments"}:                                       "hub-level experiment flag discovery for any signed-in identity",
+	{"hub.profiling.read", http.MethodGet, "/api/v1/profiling"}:                                           "hub-level profiling status discovery for any signed-in identity",
+	{"hub.injectedskills.read", http.MethodGet, "/api/v1/hub/settings/injected-skills"}:                   "hub-level injected skills settings for any signed-in identity",
+	{"hub.conduitgrantkeys.read", http.MethodGet, "/api/v1/conduit/grant-keys"}:                           "hub-level conduit grant public keys for any signed-in identity",
+	{"hub.triggerpresets.read", http.MethodGet, "/api/v1/trigger-presets"}:                                "hub-level trigger presets discovery, not a project read",
+	{"env.hub.read", http.MethodGet, "/api/v1/env/{key}"}:                                                 "hub-level env key lookup, not a project read",
 	{"secret.hub.read", http.MethodGet, "/api/v1/secrets"}:                                                "hub-level secret listing, not a project read",
-	{"agent.delegation.list", http.MethodGet, "/api/v1/agents/{id}/delegations"}:                          "agent self-service listing its own delegations",
-	{"agent.delegation.read", http.MethodGet, "/api/v1/agents/{id}/delegations/{grantId}"}:                "agent self-service reading its own delegation grant",
+	{"secret.hub.read", http.MethodGet, "/api/v1/secrets/{key}"}:                                          "hub-level secret key lookup, not a project read",
+	{"agent.delegation.list", http.MethodGet, "/api/v1/agents/{id}/delegations"}:                          "agent self-service listing only its own delegations",
+	{"agent.delegation.list", http.MethodGet, "/api/v1/users/me/delegations"}:                             "user-only self delegations endpoint (refuses all agent tokens regardless of scope)",
+	{"agent.delegation.read", http.MethodGet, "/api/v1/agents/{id}/delegations/{grantId}"}:                "agent self-service reading only its own delegation grant",
+}
+
+// agentProjectReadFixturePending lists catalogued GET entry points that cannot
+// reach a positive control in the generic bearer-matrix fixture (for example,
+// behind a default-off experiment or requiring specialized execution fixtures).
+// They are NOT counted as enforced and are staleness-checked so any route that
+// begins passing the positive control must be promoted out of this list.
+var agentProjectReadFixturePending = map[liveInventoryKey]string{
+	{"schedule.event.read", http.MethodGet, "/api/v1/projects/{projectId}/scheduled-events/{id}/output"}: "requires an exec-type scheduled event with captured output and live agent:attach on the target agent",
+	{"project.messagepolicy.read", http.MethodGet, "/api/v1/projects/{id}/message-policies"}:             "answers 404 while hub.message_policies experiment is off in the bearer-matrix fixture",
+	{"project.messagepolicy.read", http.MethodGet, "/api/v1/projects/{id}/message-policies/{policyId}"}:  "answers 404 while hub.message_policies experiment is off in the bearer-matrix fixture",
+	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts/{id}"}:                           "top-level lookup uses an unseeded SA ID in the live-inventory fixture (404 before auth)",
+}
+
+// agentProjectReadPositiveAdmitted reports whether rec represents a valid
+// positive control for an agent carrying ScopeProjectRead: either 2xx, or the
+// exact post-auth 5xx documented in bearerMatrixPositiveServerErrors (for
+// example 501 on log routes when no dispatcher or log-query service is
+// configured in the test server), never carrying an authz error code.
+func agentProjectReadPositiveAdmitted(key liveInventoryKey, rec *httptest.ResponseRecorder) bool {
+	if rec.Code >= 200 && rec.Code < 300 {
+		return true
+	}
+	if want, ok := bearerMatrixPositiveServerErrors[key]; ok && rec.Code == want.Status {
+		return !bearerMatrixAuthzErrorCodes[bearerMatrixErrorCode(rec)]
+	}
+	return false
+}
+
+// agentProjectReadRefusedByScope reports whether rec is a specific refusal
+// attributable to missing ScopeProjectRead:
+//   - HTTP 403 with error.code == "forbidden" and a scope/permission denial
+//     message ("Missing required scope: project:read" from checkAgentReadScope,
+//     or "Insufficient permissions" from the authz kernel's project.read check), or
+//   - HTTP 404 on inbox.conversation.resolve, which masks denied project
+//     conversation lookups as not_found (paired with a 200 positive control).
+func agentProjectReadRefusedByScope(key liveInventoryKey, rec *httptest.ResponseRecorder) bool {
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return false
+	}
+	if key.OperationID == "inbox.conversation.resolve" && rec.Code == http.StatusNotFound && resp.Error.Code == ErrCodeNotFound {
+		return true
+	}
+	if rec.Code != http.StatusForbidden || resp.Error.Code != ErrCodeForbidden {
+		return false
+	}
+	return strings.Contains(resp.Error.Message, string(ScopeProjectRead)) ||
+		strings.Contains(resp.Error.Message, "Insufficient permissions")
 }
 
 // TestAgentProjectReadScopeMatrix_CatalogEntryPoints drives real agent JWTs
 // through every catalogued GET entry point that admits PrincipalAgent with
-// CredentialAgentJWT (deny-by-default). Every entry point not listed in
-// agentProjectReadScopeExemptions must refuse a same-project agent token
-// lacking ScopeProjectRead (403 or 404). Every exemption is checked for
-// staleness against the live catalog and live refusal behavior.
+// CredentialAgentJWT (deny-by-default).
+//
+// The admitting token carries ScopesForRole(AgentRoleFull) (which includes
+// ScopeProjectRead); the refused token carries the exact same bundle minus
+// ScopeProjectRead. Every non-exempt, non-fixture-pending entry point must:
+//  1. Pass a positive control with ScopeProjectRead (2xx, or its documented
+//     post-auth 5xx in bearerMatrixPositiveServerErrors), and
+//  2. Be refused specifically by the scope/permission check without
+//     ScopeProjectRead.
+//
+// Both agentProjectReadScopeExemptions and agentProjectReadFixturePending are
+// checked for staleness against the live catalog and live handler behavior.
 func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 	m := newBearerMatrixFixture(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
 
-	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
-	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+	// Seed agent-owned schedule, scheduled event, webhook endpoint, trigger,
+	// and trigger event so row-owned read routes have real positive controls.
+	agentAttribution := store.InitiatorAttribution{
+		InitiatorPrincipalKind:  "agent",
+		InitiatorPrincipalID:    m.ids.agent,
+		InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+		AttributionVersion:      1,
+		AuthorizationRevision:   1,
+	}
+
+	agentSchedID := tid("aprm-sched")
+	require.NoError(t, m.store.CreateSchedule(ctx, &store.Schedule{
+		ID: agentSchedID, ProjectID: m.ids.project, Name: "aprm-schedule",
+		CronExpr: "0 0 * * *", EventType: "message",
+		Payload: `{"agentId":"` + m.ids.agent + `","message":"ping"}`,
+		Status:  store.ScheduleStatusActive, CreatedBy: m.ids.agent,
+		InitiatorAttribution: agentAttribution,
+		CreatedAt:            now, UpdatedAt: now,
+	}))
+	m.ids.schedule = agentSchedID
+
+	agentEvtID := tid("aprm-evt")
+	require.NoError(t, m.store.CreateScheduledEvent(ctx, &store.ScheduledEvent{
+		ID: agentEvtID, ProjectID: m.ids.project, EventType: "message",
+		FireAt: now.Add(time.Hour), Payload: `{"agentId":"` + m.ids.agent + `","message":"ping"}`,
+		Status: store.ScheduledEventPending, CreatedBy: m.ids.agent,
+		InitiatorAttribution: agentAttribution, CreatedAt: now,
+	}))
+	m.ids.scheduledEvent = agentEvtID
+
+	agentEpID := tid("aprm-wh")
+	require.NoError(t, m.store.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{
+		ID: agentEpID, ProjectID: m.ids.project, Name: "aprm-webhook-ep",
+		Status: store.WebhookEndpointStatusActive, SignatureMode: store.WebhookSignatureModeScionV1,
+		SecretVersion: 1, OwnerPrincipalKind: "agent", OwnerPrincipalID: m.ids.agent,
+		OwnerCredentialKind: store.InitiatorCredentialKindAgent,
+		CreatedBy:           m.ids.agent, CreatedAt: now, UpdatedAt: now,
+	}))
+	m.ids.webhookEndpoint = agentEpID
+
+	agentTrigID := tid("aprm-trig")
+	require.NoError(t, m.store.CreateTrigger(ctx, &store.Trigger{
+		ID: agentTrigID, ProjectID: m.ids.project, Name: "aprm-trigger",
+		Status: store.TriggerStatusActive, StatusReason: store.TriggerStatusReasonNone,
+		SourceKind: store.TriggerSourceKindWebhook, SourceID: agentEpID,
+		MatchTypes: []string{"webhook.received"}, MatchDialect: "cel",
+		ActionType: "message", ActionPayload: `{"agentId":"` + m.ids.agent + `","message":"hi"}`,
+		SubjectDialect: "cel", SubjectMode: store.TriggerSubjectModeNew,
+		CreatedBy:            m.ids.agent,
+		InitiatorAttribution: agentAttribution,
+		CreatedAt:            now, UpdatedAt: now,
+	}))
+	m.ids.trigger = agentTrigID
+
+	agentTrigEvtID := tid("aprm-trigevt")
+	require.NoError(t, m.store.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID: agentTrigEvtID, ProjectID: m.ids.project,
+		SourceKind: store.TriggerSourceKindWebhook, SourceID: agentEpID,
+		Type: "webhook.received", Subject: "webhook:" + agentEpID,
+		DedupKey: "aprm-trigger-event-dedup", OccurredAt: now, ReceivedAt: now,
+		Attributes: map[string]string{"endpoint_name": "aprm-webhook-ep"},
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Payload:    `{"ok":true}`, PayloadBytes: 11,
+		Status: store.TriggerEventStatusProcessed, CreatedAt: now,
+	}))
+	m.ids.triggerEvent = agentTrigEvtID
+
+	fullScopes := ScopesForRole(AgentRoleFull)
+	var withoutScopes []AgentTokenScope
+	for _, sc := range fullScopes {
+		if sc != ScopeProjectRead {
+			withoutScopes = append(withoutScopes, sc)
+		}
+	}
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, withoutScopes)
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, fullScopes)
+
+	// Per-route request helper that supplies project scope query params for
+	// top-level /gcp-service-accounts so its project-scoped branch is enforced.
+	send := func(e bearerMatrixEntry, token string) *httptest.ResponseRecorder {
+		key := e.key()
+		if key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/gcp-service-accounts" {
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/gcp-service-accounts?scope=project&scopeId="+m.ids.project, nil, token)
+		}
+		return m.request(t, e, token)
+	}
 
 	seen := map[liveInventoryKey]bool{}
 	enforced := 0
 	exempted := 0
+	fixturePending := 0
+
 	for _, e := range bearerMatrixEntries() {
 		ep := e.EntryPoint
 		if ep.Method != http.MethodGet || !specAdmitsAgentJWT(e.Spec) {
@@ -1379,33 +1553,45 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 		seen[key] = true
 		label := string(e.Spec.ID) + " " + ep.Method + " " + ep.Pattern
 
-		recWithout := m.request(t, e, withoutScope)
+		recWithout := send(e, withoutScope)
+		recWith := send(e, withScope)
+
 		if reason, ok := agentProjectReadScopeExemptions[key]; ok {
 			if strings.TrimSpace(reason) == "" {
 				t.Errorf("exemption %v has an empty reason", key)
 			}
-			if bearerMatrixRefused(ep.Method, recWithout.Code) {
-				t.Errorf("stale exemption %s: agent token without %s is already refused (%d); remove it from agentProjectReadScopeExemptions",
-					label, ScopeProjectRead, recWithout.Code)
+			if _, dup := agentProjectReadFixturePending[key]; dup {
+				t.Errorf("key %v appears in both agentProjectReadScopeExemptions and agentProjectReadFixturePending", key)
+			}
+			if agentProjectReadRefusedByScope(key, recWithout) && agentProjectReadPositiveAdmitted(key, recWith) {
+				t.Errorf("stale exemption %s: route enforces %s (without=%d, with=%d); remove from agentProjectReadScopeExemptions",
+					label, ScopeProjectRead, recWithout.Code, recWith.Code)
 			}
 			exempted++
 			continue
 		}
 
-		if !bearerMatrixRefused(ep.Method, recWithout.Code) {
-			t.Errorf("%s: agent token without %s got %d, want %s (or add a justified entry to agentProjectReadScopeExemptions): %s",
-				label, ScopeProjectRead, recWithout.Code, bearerMatrixRefusal(ep.Method), recWithout.Body.String())
+		if reason, ok := agentProjectReadFixturePending[key]; ok {
+			if strings.TrimSpace(reason) == "" {
+				t.Errorf("fixture-pending entry %v has an empty reason", key)
+			}
+			if agentProjectReadPositiveAdmitted(key, recWith) {
+				t.Errorf("stale fixture-pending %s: positive control succeeded (with=%d); promote out of agentProjectReadFixturePending",
+					label, recWith.Code)
+			}
+			fixturePending++
+			continue
 		}
 
-		// For operations whose base permission is project.read (except
-		// project.secret.read, which additionally requires project:secret:read),
-		// verify that carrying ScopeProjectRead is not refused.
-		if e.Spec.BasePermission == "project.read" && e.Spec.ID != "project.secret.read" {
-			recWith := m.request(t, e, withScope)
-			if recWith.Code == http.StatusUnauthorized || recWith.Code == http.StatusForbidden || recWith.Code == http.StatusNotFound {
-				t.Errorf("%s: agent token with %s got %d, want admitted (not 401/403/404): %s",
-					label, ScopeProjectRead, recWith.Code, recWith.Body.String())
-			}
+		// Enforced row: must pass BOTH positive control (with project:read) and
+		// specific scope refusal (without project:read).
+		if !agentProjectReadPositiveAdmitted(key, recWith) {
+			t.Errorf("%s: positive control with %s got %d, want 2xx or documented post-auth 5xx (add fixture/override or move to agentProjectReadFixturePending): %s",
+				label, ScopeProjectRead, recWith.Code, recWith.Body.String())
+		}
+		if !agentProjectReadRefusedByScope(key, recWithout) {
+			t.Errorf("%s: agent token without %s got %d (%s), want scope/permission refusal (or add a policy-justified entry to agentProjectReadScopeExemptions): %s",
+				label, ScopeProjectRead, recWithout.Code, bearerMatrixErrorCode(recWithout), recWithout.Body.String())
 		}
 		enforced++
 	}
@@ -1415,11 +1601,16 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 			t.Errorf("stale exemption %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
 		}
 	}
+	for key := range agentProjectReadFixturePending {
+		if !seen[key] {
+			t.Errorf("stale fixture-pending entry %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
+		}
+	}
 
 	if enforced == 0 {
 		t.Fatal("matrix exercised no catalog entry points enforcing agent project:read")
 	}
-	t.Logf("agent project:read scope matrix: enforced=%d exempted=%d", enforced, exempted)
+	t.Logf("agent project:read scope matrix: enforced=%d exempted=%d fixture_pending=%d", enforced, exempted, fixturePending)
 }
 
 // TestProjectMetricsRoutes_AgentProjectReadScope verifies that the three
