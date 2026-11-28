@@ -25,6 +25,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
+import {
+  fetchProjectGitHub,
+  getProjectGitHubVisibility,
+  isProjectGitHubVisible,
+  PROJECT_GITHUB_VISIBILITY_EVENT,
+  type ProjectGitHubVisibilityDetail,
+} from '../../client/project-github.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts-flag.js';
 import {
   INBOX_SUMMARY_CHANGED_EVENT,
@@ -147,6 +154,18 @@ const ADMIN_SUPERADMIN_ITEMS: NavItem[] = [
   { path: '/admin/maintenance', label: 'Maintenance', icon: 'wrench-adjustable' },
 ];
 
+/** Extract a project ID from a dashboard project path (`/projects/:id/...`), excluding `/projects/new`. */
+function projectIdFromNavPath(path: string): string | null {
+  const pathname = path.split(/[?#]/, 1)[0];
+  const m = pathname.match(/^\/projects\/([^/]+)/);
+  if (!m || m[1] === 'new') return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+}
+
 @customElement('scion-nav')
 export class ScionNav extends LitElement {
   /**
@@ -184,6 +203,13 @@ export class ScionNav extends LitElement {
   /** Tracks the user ID for which admin capabilities were last checked. */
   private adminCheckUserId: string | null = null;
 
+  /** Project ID for which the contextual GitHub nav entry is visible, or null. */
+  @state()
+  private githubNavProjectId: string | null = null;
+
+  /** Tracks the last project ID checked for GitHub nav visibility. */
+  private githubCheckProjectId: string | null = null;
+
   private readonly onFeatureFlagsChanged = (): void => {
     if (isInboxDashboardEnabled()) {
       ensureInboxSummaryStarted(this.user?.id || undefined);
@@ -195,10 +221,20 @@ export class ScionNav extends LitElement {
     this.requestUpdate();
   };
 
+  private readonly onProjectGitHubVisibility = (e: Event): void => {
+    const detail = (e as CustomEvent<ProjectGitHubVisibilityDetail>).detail;
+    if (!detail) return;
+    const activeProjectId = projectIdFromNavPath(this.currentPath);
+    if (activeProjectId && detail.projectId === activeProjectId) {
+      this.githubNavProjectId = detail.visible ? activeProjectId : null;
+    }
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
     window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.onInboxSummaryChanged);
+    window.addEventListener(PROJECT_GITHUB_VISIBILITY_EVENT, this.onProjectGitHubVisibility);
     if (isInboxDashboardEnabled()) {
       ensureInboxSummaryStarted(this.user?.id || undefined);
     }
@@ -207,7 +243,18 @@ export class ScionNav extends LitElement {
   override disconnectedCallback(): void {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
     window.removeEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.onInboxSummaryChanged);
+    window.removeEventListener(PROJECT_GITHUB_VISIBILITY_EVENT, this.onProjectGitHubVisibility);
     super.disconnectedCallback();
+  }
+
+  override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
+    if (changedProperties.has('currentPath')) {
+      const projectId = projectIdFromNavPath(this.currentPath);
+      if (projectId !== this.githubCheckProjectId) {
+        this.githubNavProjectId =
+          projectId && getProjectGitHubVisibility(projectId) ? projectId : null;
+      }
+    }
   }
 
   override updated(changedProperties: Map<PropertyKey, unknown>): void {
@@ -216,6 +263,36 @@ export class ScionNav extends LitElement {
       if (isInboxDashboardEnabled() && this.user?.id) {
         ensureInboxSummaryStarted(this.user.id);
       }
+    }
+    if (changedProperties.has('currentPath')) {
+      void this.checkProjectGitHubNav();
+    }
+  }
+
+  private async checkProjectGitHubNav(): Promise<void> {
+    const projectId = projectIdFromNavPath(this.currentPath);
+    if (projectId === this.githubCheckProjectId) return;
+    this.githubCheckProjectId = projectId;
+    if (!projectId) return;
+
+    const known = getProjectGitHubVisibility(projectId);
+    if (known !== undefined) {
+      this.githubNavProjectId = known ? projectId : null;
+      return;
+    }
+
+    // Only fetch directly from nav when on the GitHub subpage itself; other
+    // project pages (detail, settings) resolve visibility when the project has
+    // a git remote and broadcast via PROJECT_GITHUB_VISIBILITY_EVENT so
+    // hub-managed projects without a remote make zero extra requests.
+    const pathname = this.currentPath.split(/[?#]/, 1)[0];
+    if (!pathname.match(/^\/projects\/[^/]+\/github$/)) {
+      return;
+    }
+
+    const info = await fetchProjectGitHub(projectId);
+    if (this.githubCheckProjectId === projectId && isProjectGitHubVisible(info)) {
+      this.githubNavProjectId = projectId;
     }
   }
 
@@ -561,6 +638,20 @@ export class ScionNav extends LitElement {
             </div>
           `
         )}
+        ${this.githubNavProjectId
+          ? html`
+              <div class="nav-section project-section" data-testid="nav-project-section">
+                <div class="nav-section-title">Project</div>
+                <ul class="nav-list">
+                  ${this.renderNavItem({
+                    path: `/projects/${encodeURIComponent(this.githubNavProjectId)}/github`,
+                    label: 'GitHub',
+                    icon: 'github',
+                  })}
+                </ul>
+              </div>
+            `
+          : nothing}
         ${this.adminStatus && (isSuperAdmin || visibleAdminItems.length > 0)
           ? html`
               <div class="nav-section admin-section">

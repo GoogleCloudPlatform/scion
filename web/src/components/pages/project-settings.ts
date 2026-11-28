@@ -26,6 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type {
   PageData,
   Project,
+  ProjectGitHubInfo,
   Template,
   RuntimeBroker,
   BrokerProfile,
@@ -111,7 +112,12 @@ import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
-import '../shared/project-github-card.js';
+import {
+  fetchProjectGitHub,
+  isProjectGitHubConnected,
+  isProjectGitHubVisible,
+  setProjectGitHubVisibility,
+} from '../../client/project-github.js';
 import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -457,6 +463,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private gcpServiceAccounts: GCPServiceAccount[] = [];
+
+  @state()
+  private projectGitHub: ProjectGitHubInfo | null = null;
 
   // Runtime Brokers (providers)
   @state()
@@ -881,6 +890,29 @@ export class ScionPageProjectSettings extends LitElement {
         border: 1px solid var(--scion-warning-border, #fcd34d);
       }
 
+      .github-settings-link-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        font-size: 0.875rem;
+        color: var(--scion-text);
+      }
+
+      .github-settings-link-row sl-icon {
+        color: var(--scion-text-muted);
+      }
+
+      .github-settings-link-row a {
+        color: var(--scion-primary);
+        text-decoration: none;
+        font-weight: 500;
+      }
+
+      .github-settings-link-row a:hover {
+        text-decoration: underline;
+      }
+
       /* Runtime Brokers tab */
       .broker-list {
         display: flex;
@@ -1064,6 +1096,12 @@ export class ScionPageProjectSettings extends LitElement {
       dispatchPageTitle(this, 'Settings', this.project.name || this.projectId);
       // The template/harness-config import forms prefill their URL from the
       // project's git remote (passed as the gitRemote property).
+      if (this.project.gitRemote) {
+        void this.loadProjectGitHubSummary();
+      } else {
+        this.projectGitHub = null;
+        setProjectGitHubVisibility(this.projectId, false);
+      }
       // Load access boundaries affecting this project
       void this.loadBoundaries();
     } catch (err) {
@@ -2765,11 +2803,45 @@ export class ScionPageProjectSettings extends LitElement {
     `;
   }
 
+  private async loadProjectGitHubSummary(): Promise<void> {
+    const projectId = this.projectId;
+    const info = await fetchProjectGitHub(projectId);
+    if (!this.isConnected || this.projectId !== projectId) return;
+    this.projectGitHub = info;
+  }
+
   private renderGitHubAppSection() {
-    if (!this.project?.gitRemote) return '';
-    return html`<scion-project-github-card
-      .projectId=${this.projectId}
-    ></scion-project-github-card>`;
+    const info = this.projectGitHub;
+    if (!isProjectGitHubVisible(info)) return '';
+    const connected = isProjectGitHubConnected(info);
+    const repo =
+      info!.remote.owner && info!.remote.repo ? `${info!.remote.owner}/${info!.remote.repo}` : '';
+    const href = `/projects/${encodeURIComponent(this.projectId)}/github`;
+
+    return html`
+      <div class="section" data-testid="project-settings-github-link">
+        <div class="github-settings-link-row">
+          <sl-icon name="github"></sl-icon>
+          ${connected
+            ? html`
+                <span
+                  >GitHub: connected to <code>${repo}</code> —
+                  <a href=${href} data-testid="project-settings-github-manage-link"
+                    >Manage →</a
+                  ></span
+                >
+              `
+            : html`
+                <span
+                  >GitHub: not connected —
+                  <a href=${href} data-testid="project-settings-github-connect-link"
+                    >Connect →</a
+                  ></span
+                >
+              `}
+        </div>
+      </div>
+    `;
   }
 
   private renderConfigSection() {

@@ -124,6 +124,11 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { replaceSearch } from '../../client/navigation.js';
+import {
+  fetchProjectGitHub,
+  isProjectGitHubVisible,
+  setProjectGitHubVisibility,
+} from '../../client/project-github.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import {
@@ -602,6 +607,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   @state()
   private triggersEnabled = false;
+
+  @state()
+  private projectGitHubVisible = false;
 
   @state()
   private messagePoliciesEnabled = false;
@@ -1957,6 +1965,20 @@ export class ScionPageProjectDetail extends LitElement {
     ) {
       void this.autoDiscoverGitHubApp();
     }
+
+    if (this.project.gitRemote) {
+      void this.loadProjectGitHubVisibility();
+    } else {
+      this.projectGitHubVisible = false;
+      setProjectGitHubVisibility(this.projectId, false);
+    }
+  }
+
+  private async loadProjectGitHubVisibility(): Promise<void> {
+    const projectId = this.projectId;
+    const info = await fetchProjectGitHub(projectId);
+    if (!this.isConnected || this.projectId !== projectId) return;
+    this.projectGitHubVisible = isProjectGitHubVisible(info);
   }
 
   private async loadMetricsSummary(): Promise<void> {
@@ -3391,6 +3413,20 @@ export class ScionPageProjectDetail extends LitElement {
                           >${this.waitingOnYouDecisionsCount}</sl-badge
                         >`
                       : nothing}
+                  </sl-button>
+                </a>
+              `
+            : nothing}
+          ${this.projectGitHubVisible
+            ? html`
+                <a
+                  href="/projects/${encodeURIComponent(this.projectId)}/github"
+                  style="text-decoration: none;"
+                  data-github-link
+                >
+                  <sl-button size="small" data-github-button>
+                    <sl-icon slot="prefix" name="github"></sl-icon>
+                    GitHub
                   </sl-button>
                 </a>
               `

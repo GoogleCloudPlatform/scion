@@ -432,6 +432,9 @@ export class ScionApp extends LitElement {
     if (path.match(/^\/projects\/[^/]+\/schedules$/)) {
       return 'Schedules';
     }
+    if (path.match(/^\/projects\/[^/]+\/github$/)) {
+      return 'GitHub';
+    }
     if (path.match(/^\/projects\/[^/]+\/triggers$/)) {
       return triggersEnabled() ? 'Triggers' : 'Page Not Found';
     }
