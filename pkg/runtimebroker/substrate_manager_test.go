@@ -34,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // substrateEgressCall records one CreateActorEgressPolicy request, keyed by
@@ -157,7 +157,9 @@ func (f *fakeSubstrateControlClient) CreateActor(ctx context.Context, in *ateapi
 func (f *fakeSubstrateControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapipb.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
 	var patterns []string
 	for _, rule := range in.GetEgressPolicy().GetRules() {
-		patterns = append(patterns, rule.GetHostnames().GetPatterns()...)
+		patterns = append(patterns, rule.GetHttp().GetHostnames()...)
+		patterns = append(patterns, rule.GetHttps().GetHostnames()...)
+		patterns = append(patterns, rule.GetTlsPassthrough().GetHostnames()...)
 	}
 	f.recorder.record(in.GetActor().GetName(), patterns)
 	return &ateapipb.EgressPolicy{}, nil
@@ -294,7 +296,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"router_endpoint": "https://atenet-router.ate-system.svc",
 					"egress_allow": []
 				}
 			},
@@ -302,7 +304,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"router_endpoint": "https://atenet-router.ate-system.svc",
 					"egress_allow": ["*.nip.io"]
 				}
 			}
@@ -364,7 +366,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	// broker would build it from settings at startup.
 	defaultRT, err := runtime.NewSubstrateRuntime(&config.V1SubstrateConfig{
 		APIEndpoint:    "api.ate-system.svc:443",
-		RouterEndpoint: "http://atenet-router.ate-system.svc:80",
+		RouterEndpoint: "https://atenet-router.ate-system.svc",
 		EgressAllow:    []string{},
 	})
 	if err != nil {
@@ -471,7 +473,7 @@ func TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused(t *testing.
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "attacker.net:443",
-					"router_endpoint": "http://attacker.net:80",
+					"router_endpoint": "https://attacker.net",
 					"egress_allow": ["` + maliciousWildcard + `"]
 				}
 			}

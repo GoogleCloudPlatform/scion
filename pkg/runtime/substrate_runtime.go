@@ -37,7 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -303,16 +303,26 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		TokenAudience:      sc.TokenAudience,
 		CAFile:             sc.CAFile,
 		ClusterTrustBundle: sc.ClusterTrustBundle,
+		ClientCertFile:     sc.APIClientCertFile,
 	})
 	if err != nil {
 		return nil, err
 	}
+	routerTLS, err := substrate.NewRouterTLSSource(ctx, k8sClient.Clientset, &sc)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 
 	return &SubstrateRuntime{
-		cfg:            sc,
-		client:         substrate.NewControlClient(conn),
-		conn:           conn,
-		router:         substrate.NewRouterClient(sc.RouterEndpoint),
+		cfg:    sc,
+		client: substrate.NewControlClient(conn),
+		conn:   conn,
+		router: substrate.NewRouterClientWithOptions(substrate.RouterOptions{
+			Endpoint:        sc.RouterEndpoint,
+			ConnectEndpoint: sc.RouterConnectEndpoint,
+			TLS:             routerTLS,
+		}),
 		k8sClient:      k8sClient.Clientset,
 		now:            time.Now,
 		sleep:          time.Sleep,
@@ -453,7 +463,10 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 	// Step 3: content-addressed template, created + waited-ready if new.
 	templateName := substrateTemplateName(cfg.Image, r.cfg, cfg.Resources)
-	tmpl := buildActorTemplate(atespace, templateName, cfg.Image, r.cfg, cfg.Resources)
+	tmpl, err := buildActorTemplate(atespace, templateName, cfg.Image, r.cfg, cfg.Resources)
+	if err != nil {
+		return "", err
+	}
 	if err := ensureActorTemplate(ctx, r.client, atespace, templateName, tmpl, templateReadyTimeout(r.cfg), r.sleep); err != nil {
 		return "", r.redact(cfg, err)
 	}
@@ -485,11 +498,15 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		defer cancel()
 		_, _ = r.client.DeleteActorEgressPolicy(cleanupCtx, &ateapipb.DeleteActorEgressPolicyRequest{
 			Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+			Name:  substrateEgressPolicyName,
 		})
 		_, _ = r.client.DeleteActor(cleanupCtx, &ateapipb.DeleteActorRequest{
-			Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
-			AnyState: true,
+			Actor:   &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+			Options: deleteOptionsForUID(actorUID),
 		})
+		if r.router != nil {
+			r.router.DropActor(atespace, actorName)
+		}
 	}
 
 	// Step 5: egress policy. (r.cfg was already validated at the top of
@@ -501,21 +518,29 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: resolve egress hosts for %s: %w", id, err))
 	}
-	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, hostnames)); err != nil {
+	policy, err := buildEgressPolicy(atespace, actorName, hostnames, cfg.TrustedHubEndpoint, r.cfg)
+	if err != nil {
+		cleanup()
+		return "", r.redact(cfg, fmt.Errorf("substrate: build egress policy for %s: %w", id, err))
+	}
+	if _, err := r.client.CreateActorEgressPolicy(ctx, policy); err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: create egress policy for %s: %w", id, err))
 	}
 
 	// Step 6: resume, then wait RUNNING.
-	if _, err := r.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
+	resumed, err := r.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
-	}); err != nil {
+	})
+	if err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: resume actor %s: %w", id, err))
 	}
-	if err := r.waitRunning(ctx, atespace, actorName); err != nil {
-		cleanup()
-		return "", r.redact(cfg, err)
+	if resumed.GetActor().GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
+		if err := r.waitRunning(ctx, atespace, actorName); err != nil {
+			cleanup()
+			return "", r.redact(cfg, err)
+		}
 	}
 
 	// Step 7: wait for the control server to be awaiting bootstrap.
@@ -642,9 +667,28 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 	return generateControlToken()
 }
 
+// substrateEgressPolicyName is the only permitted EgressPolicy resource
+// name (Substrate v1 validates it on every egress-policy RPC).
+const substrateEgressPolicyName = "default"
+
+// substrateListPageSize is the ListActors page size (Substrate caps it at
+// 1000).
+const substrateListPageSize = 1000
+
+// deleteOptionsForUID returns DeleteActor preconditions naming uid, or nil
+// (no precondition) when uid is unknown.
+func deleteOptionsForUID(uid string) *ateapipb.DeleteOptions {
+	if uid == "" {
+		return nil
+	}
+	return &ateapipb.DeleteOptions{Uid: uid}
+}
+
 // Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
-// (ignoring NotFound), then DeleteActor(any_state=true), then drop the
-// in-memory control token (and label record, best effort).
+// (ignoring NotFound), then DeleteActor (which terminates a running actor
+// in any state on Substrate v1; with the actor's UID as a precondition when
+// known), then drop the in-memory control token (and label record, best
+// effort).
 // P4: enforce ref.RunID (ptone/scion#2550). Today the actor name is reused
 // across runs, so this still targets whatever actor holds the name.
 func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
@@ -661,13 +705,14 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 
 	if _, err := r.client.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+		Name:  substrateEgressPolicyName,
 	}); err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("substrate: delete egress policy for %s: %w", id, err)
 	}
 
 	deletedActor, err := r.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
-		Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
-		AnyState: true,
+		Actor:   &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+		Options: deleteOptionsForUID(uid),
 	})
 	if err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("substrate: delete actor %s: %w", id, err)
@@ -689,16 +734,19 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 		delete(substrateAgentRecords, uid)
 	}
 	substrateAgentStateMu.Unlock()
+	if r.router != nil {
+		r.router.DropActor(atespace, actorName)
+	}
 	return nil
 }
 
-// Stop is the same as Delete: nothing here suspends to a DATA
-// snapshot yet, and faking a "stopped" state that just left the actor
+// Stop is the same as Delete: nothing here suspends with MEMORY
+// fidelity yet, and faking a "stopped" state that just left the actor
 // running (or claiming a durable stop that instead discarded the actor's
 // state) would both be dishonest about what happened. See
 // substrate-runtime.md §4's Stop row.
 //
-// TODO: SuspendActor with DATA scope instead, once resume-from-
+// TODO: SuspendActor with MEMORY fidelity instead, once resume-from-
 // suspend and the $HOME durableDir layout (substrate-runtime.md §11) land, so Stop
 // keeps the workspace and frees the worker rather than deleting the actor.
 //
@@ -772,7 +820,9 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		if page >= maxActorListPages {
 			return nil, fmt.Errorf("substrate: list actors: exceeded %d pages", maxActorListPages)
 		}
-		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{PageToken: pageToken})
+		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{
+			Options: &ateapipb.ListOptions{PageSize: substrateListPageSize, PageToken: pageToken},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("substrate: list actors: %w", err)
 		}
@@ -959,7 +1009,10 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		if page >= maxRecordlessActorListPages {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: exceeded %d pages", atespace, maxRecordlessActorListPages)
 		}
-		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, PageToken: pageToken})
+		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{
+			Atespace: atespace,
+			Options:  &ateapipb.ListOptions{PageSize: substrateListPageSize, PageToken: pageToken},
+		})
 		if err != nil {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: %w", atespace, err)
 		}
@@ -1006,11 +1059,11 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// or not the actor's DELETING state itself ever resolves. The
 			// proto documents no transition out of DELETING back to a live
 			// state either: RevertActor, the one RPC that returns an actor
-			// to a pre-delete state, only accepts CRASHED/RUNNING/PAUSED
-			// actors (third_party/ateapipb/ateapi.proto:46-47), and a
+			// to a pre-delete state, only accepts CRASHED/RUNNING/SUSPENDED
+			// actors (third_party/ateapipb/ateapi.proto), and a
 			// deleted actor simply stops being listed (there is no
 			// ACTOR_STATE_DELETED for it to sit in). ActorStatus.state is
-			// also `+k8s:required` (proto:537), so a listed actor's state is
+			// also `+k8s:required` in ateapi.proto, so a listed actor's state is
 			// never zero-valued/unknown here. DELETING actors are observed
 			// either to finish deleting or to stay stuck; none returns to a
 			// live state.
@@ -1095,9 +1148,9 @@ func substratePhase(s ateapipb.ActorState) string {
 		return "provisioning"
 	case ateapipb.ActorState_ACTOR_STATE_RUNNING:
 		return "running"
-	case ateapipb.ActorState_ACTOR_STATE_SUSPENDING, ateapipb.ActorState_ACTOR_STATE_PAUSING:
+	case ateapipb.ActorState_ACTOR_STATE_SUSPENDING:
 		return "stopping"
-	case ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED:
+	case ateapipb.ActorState_ACTOR_STATE_SUSPENDED:
 		return "stopped"
 	case ateapipb.ActorState_ACTOR_STATE_CRASHED:
 		return "error"

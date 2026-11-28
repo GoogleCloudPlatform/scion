@@ -24,11 +24,13 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -78,7 +80,7 @@ const substrateWakeupProbeTimeoutSeconds = 120
 // bootstrapped actor ("running" or "init-failed"). It gates each wakeup on
 // substrate-serve actually serving: the probe is polled on every wakeup,
 // including a cold boot, and a miss within the timeout crashes the actor
-// (ateapi.proto, ContainerWakeupProbe). The golden actor's cold boot is
+// (ateapi.proto, WakeupProbe). The golden actor's cold boot is
 // gated the same way, so an image whose entrypoint exits fails template
 // creation rather than producing a golden that cannot be restored.
 // Substrate's API guide further states that when every container declares
@@ -87,9 +89,9 @@ const substrateWakeupProbeTimeoutSeconds = 120
 //
 // A fresh value on every call, so no caller can mutate a shared probe and
 // change what substrateTemplateName hashes without changing its input.
-func substrateWakeupProbe() *ateapipb.ContainerWakeupProbe {
-	return &ateapipb.ContainerWakeupProbe{
-		HttpGet: &ateapipb.HTTPGetAction{
+func substrateWakeupProbe() *ateapipb.WakeupProbe {
+	return &ateapipb.WakeupProbe{
+		HttpGet: &ateapipb.HttpGetAction{
 			Path: substrateHealthzPath,
 			Port: substrateServePort,
 		},
@@ -130,55 +132,50 @@ const defaultTemplateReadyTimeout = 10 * time.Minute
 // while waiting for the golden snapshot.
 const templateReadyPollInterval = 5 * time.Second
 
+// substrateDefaultMemoryLimit is the actor memory limit used when neither
+// resources.limits.memory nor resources.requests.memory is set. Substrate v1
+// requires both a CPU and a memory limit on every ActorTemplate.
+const substrateDefaultMemoryLimit = "4Gi"
+
+// substrateDefaultCPULimit is the actor CPU limit used when neither
+// resources.limits.cpu nor resources.requests.cpu is set (matching
+// config.BuiltinDefaultResources).
+const substrateDefaultCPULimit = "2"
+
 // substrateTemplateName computes the content-addressed ActorTemplate name
 // (substrate-runtime.md §3). Same inputs always produce the same name,
 // so concurrent Runs for the same effective template converge on one
 // CreateActorTemplate instead of racing to create distinct ones.
 //
 // The hash covers every input that changes what buildActorTemplate
-// produces: image digest, sandbox class, sandbox config name, worker
-// selector, snapshot storage location, the *effective* resources (resolved
-// against config.BuiltinDefaultResources when resources is nil — hashing
-// the nil pointer as "" while buildActorTemplate substitutes a real default
-// would let a change to that default silently reuse the old golden
-// template), the hardcoded snapshot scope, the container's added
-// capabilities, the entrypoint version, the container's wakeup probe,
-// and the conditional
-// egress_trust_bundle input (appended only when non-empty) — every
-// template-content input listed in substrate-runtime.md §3. All of these
-// are template content, so changing any of them in settings — or in this
-// runtime's own code, for the capability set — must not silently reuse a
-// stale golden template.
+// produces: image digest, worker selector, snapshot storage location, the
+// *effective* resource limits (resolved the same way buildActorTemplate
+// resolves them, so a change to a default never silently reuses an old
+// golden template), the snapshot fidelity and golden-snapshot mode, the
+// container's added capabilities, the entrypoint version, the container's
+// wakeup probe, and the conditional egress_trust_bundle input (appended
+// only when non-empty) — every template-content input listed in
+// substrate-runtime.md §3. All of these are template content, so changing
+// any of them in settings — or in this runtime's own code — must not
+// silently reuse a stale golden template.
 func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
-	effectiveResources := resources
-	if effectiveResources == nil {
-		effectiveResources = config.BuiltinDefaultResources()
-	}
-
 	h := sha256.New()
 	// hash.Hash.Write never returns an error (see the hash.Hash doc
 	// comment), so the error from Fprintf is deliberately discarded rather
 	// than checked.
-	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+	_, _ = fmt.Fprintf(h, "v1|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 		imageDigest,
-		sc.SandboxClass,
-		sc.SandboxConfigName,
 		workerSelectorCacheKey(sc.WorkerSelector),
 		sc.SnapshotStorage,
-		resourcesCacheKey(effectiveResources),
-		"DATA", // on_pause/on_commit scope, hardcoded
+		substrateLimitsCacheKey(resources),
+		ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED,
 		strings.Join(substrateContainerCapabilitiesAdd, ","),
 		substrateServeEntrypointVersion,
 		substrateWakeupProbeCacheKey(),
 	)
 	// EgressTrustBundle is appended as its own hash-input segment ONLY when
-	// set, rather than always written as an extra "%s" field (which would be
-	// "" on every existing plain install and still change the hash from
-	// what it was before this field existed). This is deliberate: an unset
-	// EgressTrustBundle must keep producing the exact template name it
-	// always has, so existing templates and golden snapshots on plain
-	// installs are reused unchanged; setting it must produce a new name,
-	// since buildActorTemplate's output genuinely differs (a system-info
+	// set: buildActorTemplate's output genuinely differs (a system-info
 	// volume, a mount, and five Env vars that were not there before).
 	if sc.EgressTrustBundle != "" {
 		_, _ = fmt.Fprintf(h, "|%s", sc.EgressTrustBundle)
@@ -211,34 +208,67 @@ func workerSelectorCacheKey(m map[string]string) string {
 	return b.String()
 }
 
-// resourcesCacheKey renders a *api.ResourceSpec into a stable string for
-// substrateTemplateName's hash input.
-func resourcesCacheKey(r *api.ResourceSpec) string {
-	if r == nil {
-		return ""
+// substrateLimitsCacheKey renders the effective template limits for
+// substrateTemplateName's hash input. An unparsable quantity hashes as its
+// raw text; buildActorTemplate rejects it before any template is created.
+func substrateLimitsCacheKey(resources *api.ResourceSpec) string {
+	limits, err := substrateTemplateLimits(resources)
+	if err != nil {
+		cpu, mem := substrateLimitQuantities(resources)
+		return fmt.Sprintf("limits(cpu=%s,mem=%s)", cpu, mem)
 	}
-	return fmt.Sprintf("req(cpu=%s,mem=%s)limit(cpu=%s,mem=%s)disk=%s",
-		r.Requests.CPU, r.Requests.Memory, r.Limits.CPU, r.Limits.Memory, r.Disk)
+	return fmt.Sprintf("limits(cpu_m=%d,mem_b=%d)", limits.GetCpuMillicores(), limits.GetMemoryBytes())
 }
 
-// substrateSandboxClass maps the config string ("gvisor"/"microvm", default
-// gvisor) to the proto enum.
-func substrateSandboxClass(name string) ateapipb.SandboxClass {
-	switch name {
-	case "microvm":
-		return ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM
-	default:
-		return ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR
+// substrateLimitQuantities picks the CPU and memory quantity strings a
+// template is sized by: the limit when set, else the request, else the
+// substrate default.
+func substrateLimitQuantities(resources *api.ResourceSpec) (cpu, mem string) {
+	if resources != nil {
+		cpu, mem = resources.Limits.CPU, resources.Limits.Memory
+		if cpu == "" {
+			cpu = resources.Requests.CPU
+		}
+		if mem == "" {
+			mem = resources.Requests.Memory
+		}
 	}
+	if cpu == "" {
+		cpu = substrateDefaultCPULimit
+	}
+	if mem == "" {
+		mem = substrateDefaultMemoryLimit
+	}
+	return cpu, mem
+}
+
+// substrateTemplateLimits converts resources into Substrate v1's required
+// template limits (cpu_millicores and memory_bytes, both > 0).
+func substrateTemplateLimits(resources *api.ResourceSpec) (*ateapipb.Resources, error) {
+	cpuText, memText := substrateLimitQuantities(resources)
+	cpu, err := resource.ParseQuantity(cpuText)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: invalid CPU quantity %q: %w", cpuText, err)
+	}
+	mem, err := resource.ParseQuantity(memText)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: invalid memory quantity %q: %w", memText, err)
+	}
+	cpuMilli, memBytes := cpu.MilliValue(), mem.Value()
+	if cpuMilli <= 0 || memBytes <= 0 {
+		return nil, fmt.Errorf("substrate: actor CPU (%q) and memory (%q) limits must both be greater than zero", cpuText, memText)
+	}
+	if cpuMilli > 999999 {
+		return nil, fmt.Errorf("substrate: actor CPU limit %q exceeds Substrate's maximum of 999999 millicores", cpuText)
+	}
+	return &ateapipb.Resources{CpuMillicores: cpuMilli, MemoryBytes: memBytes}, nil
 }
 
 // substrateTrustBundleMountPath is the fixed, non-secret mount path for the
 // projected trust-bundle system-info volume. Kept as a constant, not derived
 // from sc, because the bundle's consumers (buildActorTemplate's own Env
 // values below, and every doc/support reference) all need the same literal
-// path — see docs/egress-trust-bundle.md (agent-substrate/substrate
-// d277088b) and demos/egress/egress-mitm-template.yaml.tmpl, which this
-// mirrors exactly.
+// path.
 const substrateTrustBundleMountPath = "/run/ate"
 
 // substrateTrustBundleFileName is the projected file's name within the
@@ -252,28 +282,24 @@ const substrateTrustBundleFileName = "trust-bundle.pem"
 const substrateTrustBundleFile = substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName
 
 // buildActorTemplate constructs the ActorTemplate for CreateActorTemplate
-// (substrate-runtime.md §3). Env carries no secrets and no per-agent
-// config, ever (substrate-runtime.md §3; that is pushed after the actor starts, via
-// POST /scion/v1/bootstrap) — the only Env this function ever sets is the
-// fixed set of CA-bundle paths below, and only when
-// sc.EgressTrustBundle is non-empty.
-func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) *ateapipb.ActorTemplate {
-	if resources == nil {
-		resources = config.BuiltinDefaultResources()
-	}
-
-	var limits []*ateapipb.Limits
-	if resources.Limits.CPU != "" {
-		limits = append(limits, &ateapipb.Limits{Name: "cpu", Quantity: resources.Limits.CPU})
-	}
-	if resources.Limits.Memory != "" {
-		limits = append(limits, &ateapipb.Limits{Name: "memory", Quantity: resources.Limits.Memory})
+// (substrate-runtime.md §3), shaped for Substrate v1: template-level
+// resource limits (required), MEMORY snapshot fidelity with golden
+// snapshots enabled, and no sandbox config (the WorkerPool selected by
+// worker_selector supplies the sandbox class).
+//
+// Env carries no secrets and no per-agent config, ever (substrate-runtime.md
+// §3; that is pushed after the actor starts, via POST /scion/v1/bootstrap) —
+// the only Env this function ever sets is the fixed set of CA-bundle paths
+// below, and only when sc.EgressTrustBundle is non-empty.
+func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) (*ateapipb.ActorTemplate, error) {
+	limits, err := substrateTemplateLimits(resources)
+	if err != nil {
+		return nil, err
 	}
 
 	// env, volumes, and volumeMounts for the projected egress-gateway trust
 	// bundle — added only when sc.EgressTrustBundle is set (opt-in, default
-	// off). Off must stay byte-identical to before this field existed: no
-	// system-info volume, no /run/ate mount, Env nil.
+	// off). Off adds no system-info volume, no /run/ate mount and no Env.
 	var trustBundleEnv []*ateapipb.EnvVar
 	var trustBundleVolumes []*ateapipb.Volume
 	var trustBundleMounts []*ateapipb.VolumeMount
@@ -285,8 +311,8 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 					DataSources: []*ateapipb.SystemInfoDataSource{
 						{
 							TrustBundle: &ateapipb.TrustBundleDataSource{
-								Name: sc.EgressTrustBundle,
-								Path: substrateTrustBundleFileName,
+								Names: []string{sc.EgressTrustBundle},
+								Path:  substrateTrustBundleFileName,
 							},
 						},
 					},
@@ -298,29 +324,14 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		}
 		// NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, SSL_CERT_FILE, CURL_CA_BUNDLE,
 		// and SSL_CERT_DIR are all fixed, non-secret paths into the
-		// projected bundle — never per-agent config or a secret, so setting
-		// them here does not weaken the "Env carries no secrets" invariant
-		// above. The names come from substrateenv.TrustBundleVarNames, the
-		// single source of truth shared with pkg/sciontool/substrate's
-		// runExec (which passes exactly the subset of these names that are
-		// actually set into its exec-invoked commands' own environment
-		// explicitly, since that environment is built from scratch rather
-		// than inherited) — see that package's doc comment.
+		// projected bundle — never per-agent config or a secret. The names
+		// come from substrateenv.TrustBundleVarNames, the single source of
+		// truth shared with pkg/sciontool/substrate's runExec.
 		//
-		// SSL_CERT_DIR=/run/ate is set deliberately, not left at its
-		// default. SSL_CERT_DIR makes the gateway CA exclusive for Go and Python
-		// `ssl` (crypto/x509's SystemCertPool and OpenSSL's default-path
-		// lookup both replace their default directory list with it); it is
-		// additive or ignored for curl, git, and Node — see
-		// deploy/substrate/README.md's egress_trust_bundle section for why
-		// (Debian's curl/git are built with a compiled-in CApath and never
-		// consult SSL_CERT_DIR; Node doesn't read it at all). What it buys:
-		// sciontool's own Go client trusts only the gateway CA, so a hub
-		// status report succeeding is positive proof for Go, and a path
-		// that bypasses the gateway fails closed rather than silently
-		// trusting public roots. The cost: if the hub is ever reached
-		// without the gateway re-originating the connection, status
-		// reports fail TLS.
+		// SSL_CERT_DIR=/run/ate is set deliberately: it makes the gateway CA
+		// exclusive for Go and Python `ssl`, so a path that bypasses the
+		// gateway fails closed rather than silently trusting public roots
+		// (see deploy/substrate/README.md's egress_trust_bundle section).
 		trustBundleEnv = make([]*ateapipb.EnvVar, 0, len(substrateenv.TrustBundleVarNames))
 		for _, name := range substrateenv.TrustBundleVarNames {
 			value := substrateTrustBundleFile
@@ -331,6 +342,18 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		}
 	}
 
+	snapshotConfig := &ateapipb.SnapshotConfig{
+		PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		GoldenSnapshotConfig: &ateapipb.GoldenSnapshotConfig{
+			Mode: ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED,
+		},
+	}
+	if sc.SnapshotStorage != "" {
+		// Accepted by Substrate only with its PerTemplateSnapshotLocation
+		// preview gate; unset uses the ate-api server's --snapshot-location.
+		snapshotConfig.StorageLocation = sc.SnapshotStorage
+	}
+
 	tmpl := &ateapipb.ActorTemplate{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: templateName},
 		Containers: []*ateapipb.Container{
@@ -338,84 +361,59 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				Name:  "scion-agent",
 				Image: imageDigest,
 				// Absolute, never a bare name: this is PID 1's own launch
-				// argv, resolved by whatever mechanism starts the
-				// container's entrypoint — not something this codebase's
-				// own rootexec.Resolve (fixed system directories, verified
-				// by fd-walk) has any chance to guard, since it runs before
-				// this binary's own code executes at all. A bare
-				// "sciontool" would be looked up against the container's
-				// PATH, which includes the workload-owned npm-global
-				// directory ahead of any trusted system directory — see
-				// the rootexec package doc comment for the general shape
-				// of that hazard. /usr/local/bin/sciontool is where the
-				// image installs it (image-build/scion-base/Dockerfile).
+				// argv, resolved before this binary's own code executes at
+				// all. A bare "sciontool" would be looked up against the
+				// container's PATH, which includes the workload-owned
+				// npm-global directory ahead of any trusted system directory
+				// — see the rootexec package doc comment.
+				// /usr/local/bin/sciontool is where the image installs it
+				// (image-build/scion-base/Dockerfile).
 				Command: []string{"/usr/local/bin/sciontool", "substrate-serve"},
 				Env:     trustBundleEnv, // no secrets, ever (substrate-runtime.md §3); only fixed CA-bundle paths when egress_trust_bundle is set
 				VolumeMounts: append([]*ateapipb.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
 				}, trustBundleMounts...),
 				// Substrate always starts the actor process as UID 0 / GID 0
-				// (ContainerSpec has no user field — agent-substrate/substrate
-				// internal/ocispec/ocispec.go) with a minimal default
-				// capability set (AUDIT_WRITE, KILL, NET_BIND_SERVICE —
-				// cmd/atelet/oci.go) that does not include any of
+				// with a minimal default capability set (AUDIT_WRITE, KILL,
+				// NET_BIND_SERVICE) that does not include any of
 				// substratecaps.Required. scion never runs the harness or
 				// exec as root, and dropping from root to the scion user —
-				// via the supervisor's own syscall.Credential drop
-				// (pkg/sciontool/supervisor/supervisor.go's Run, ~lines
-				// 113-150) and the exec control-plane endpoint's own
-				// syscall.Credential drop (pkg/sciontool/substrate's
-				// runExec, used for `sciontool substrate-serve exec`) — as
-				// well as RunInit's own chowns of the log file and
-				// workspace immediately after that drop, all need
-				// capabilities this default set doesn't grant. See
-				// substratecaps.Required for exactly which ones and the
-				// evidence behind each — the same capabilities Docker's
-				// default set already grants, which is why this only
-				// surfaces on Substrate. These are added here, not assumed
-				// from a container default, so they apply inside the gVisor
-				// sentry the actor runs in; a direct credential drop grants
-				// the dropped-to process none of them, so nothing
-				// scion-owned ever runs privileged.
+				// via the supervisor's and the exec endpoint's own
+				// syscall.Credential drops — as well as RunInit's chowns
+				// right after that drop, all need capabilities this default
+				// set doesn't grant. See substratecaps.Required for exactly
+				// which ones and why; all four are inside Substrate v1's
+				// capability allowlist. A direct credential drop grants the
+				// dropped-to process none of them, so nothing scion-owned
+				// ever runs privileged.
 				SecurityContext: &ateapipb.SecurityContext{
 					Capabilities: &ateapipb.Capabilities{
 						// Clone, not the package-level slice itself: any
 						// caller that mutated tmpl...Capabilities.Add in
 						// place would otherwise corrupt
 						// substrateContainerCapabilitiesAdd for every future
-						// template built in this process, silently changing
-						// what substrateTemplateName hashes without changing
-						// the hash input's own value.
+						// template built in this process.
 						Add: slices.Clone(substrateContainerCapabilitiesAdd),
 					},
 				},
-				Resources: &ateapipb.Resources{Limits: limits},
 				// Gates every wakeup, including the golden actor's first
 				// boot, on substrate-serve answering healthz. See
-				// substrateWakeupProbe for what it checks and
-				// substrateWakeupProbeTimeoutSeconds for the timing.
+				// substrateWakeupProbe.
 				WakeupProbe: substrateWakeupProbe(),
 			},
 		},
 		Volumes: append([]*ateapipb.Volume{
 			{Name: "workspace", DurableDir: &ateapipb.DurableDirVolumeSource{}},
 		}, trustBundleVolumes...),
-		SnapshotsConfig: &ateapipb.SnapshotsConfig{
-			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-			StorageLocation: sc.SnapshotStorage,
-		},
-		SandboxConfig: &ateapipb.SandboxConfig{
-			SandboxClass: substrateSandboxClass(sc.SandboxClass),
-			ConfigName:   sc.SandboxConfigName,
-		},
+		SnapshotConfig: snapshotConfig,
+		Resources:      &ateapipb.ResourceRequirements{Limits: limits},
 	}
 
 	if len(sc.WorkerSelector) > 0 {
 		tmpl.WorkerSelector = &ateapipb.Selector{MatchLabels: sc.WorkerSelector}
 	}
 
-	return tmpl
+	return tmpl, nil
 }
 
 // templateReadyTimeout resolves V1SubstrateConfig.TemplateReadyTimeout,

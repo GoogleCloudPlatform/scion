@@ -676,7 +676,7 @@ func getHealthz(ctx context.Context, router *substrate.RouterClient, atespace, a
 	ctx, cancel := context.WithTimeout(ctx, healthzRequestTimeout)
 	defer cancel()
 
-	resp, err := router.Do(ctx, atespace, actorName, http.MethodGet, substrateHealthzPath, nil, nil)
+	resp, err := router.Do(ctx, atespace, actorName, substrateServePort, http.MethodGet, substrateHealthzPath, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -848,9 +848,9 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 		return fmt.Errorf("substrate: marshal bootstrap request: %w", err)
 	}
 
-	resp, err := router.Do(ctx, atespace, actorName, http.MethodPost, substrateBootstrapPath, bytes.NewReader(body), map[string]string{
-		"Authorization": "Bearer " + nonce,
-		"Content-Type":  "application/json",
+	resp, err := router.Do(ctx, atespace, actorName, substrateServePort, http.MethodPost, substrateBootstrapPath, bytes.NewReader(body), http.Header{
+		"Authorization": []string{"Bearer " + nonce},
+		"Content-Type":  []string{"application/json"},
 	})
 	if err != nil {
 		return fmt.Errorf("substrate: POST bootstrap to %s/%s: %w", atespace, actorName, err)
@@ -946,9 +946,9 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 		return out, fmt.Errorf("substrate: marshal exec request: %w", err)
 	}
 
-	resp, err := router.Do(ctx, atespace, actorName, http.MethodPost, substrateExecPath, bytes.NewReader(body), map[string]string{
-		"Authorization": "Bearer " + controlToken,
-		"Content-Type":  "application/json",
+	resp, err := router.Do(ctx, atespace, actorName, substrateServePort, http.MethodPost, substrateExecPath, bytes.NewReader(body), http.Header{
+		"Authorization": []string{"Bearer " + controlToken},
+		"Content-Type":  []string{"application/json"},
 	})
 	if err != nil {
 		return out, fmt.Errorf("substrate: POST exec to %s/%s: %w", atespace, actorName, err)

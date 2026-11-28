@@ -70,13 +70,35 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       egress_trust_bundle: egress-mitm.ate.dev
 `)
 
 	cmd := configValidateCmd
 	err := cmd.RunE(cmd, nil)
 	require.NoError(t, err, "a documented egress_trust_bundle value should validate cleanly via `scion config validate`")
+}
+
+func TestConfigValidateCmd_SubstrateRouterTLSFieldsValid(t *testing.T) {
+	writeGlobalSettingsForValidate(t, `
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "https://atenet-router.ate-system.svc"
+      ca_file: "/run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem"
+      router_ca_file: "/run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem"
+      router_client_cert_file: "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+      router_server_name: "atenet-router.ate-system.svc"
+      router_connect_endpoint: "atenet-router.ate-system.svc:8444"
+      api_client_cert_file: "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+`)
+
+	cmd := configValidateCmd
+	err := cmd.RunE(cmd, nil)
+	require.NoError(t, err, "documented router and ateapi TLS fields should validate cleanly via `scion config validate`")
 }
 
 func TestConfigValidateCmd_SubstrateBogusKeyFails(t *testing.T) {
@@ -87,7 +109,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       bogus_field: "nope"
 `)
 
@@ -105,7 +127,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       egress_trust_bundle: some-other-bundle
 `)
 

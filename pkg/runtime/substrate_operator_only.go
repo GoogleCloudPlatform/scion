@@ -134,8 +134,8 @@ func ValidateOperatorOnlySubstrateProfile(effectiveVS *config.VersionedSettings,
 		return fmt.Errorf(
 			"substrate runtime %q (profile %q) is not defined identically in operator (global) settings: "+
 				"project or repo settings may only select an operator-defined substrate profile by name, "+
-				"never define or override its runtime block (api/router endpoints, CA/trust bundle, "+
-				"token_audience, egress_allow) — move this definition to the operator's own global settings",
+				"never define or override its runtime block (api/router endpoints, CA/trust bundle/client certs, "+
+				"router TLS overrides, token_audience, egress_allow) — move this definition to the operator's own global settings",
 			runtimeKey, effectiveProfile)
 	}
 	return nil

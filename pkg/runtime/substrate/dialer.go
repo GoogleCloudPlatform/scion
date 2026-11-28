@@ -19,19 +19,17 @@
 //
 //   - an in-cluster gRPC connection to the ateapi Control service,
 //     authenticated with a TokenRequest-minted ServiceAccount token
-//     refreshed before it expires, with TLS verified against a configured
-//     CA (never InsecureSkipVerify);
-//   - a plain HTTP client for calling an actor's control server through
-//     Substrate's inbound atenet-router, using the ate-target-actor header.
+//     refreshed before it expires, with TLS 1.3 verified against the
+//     servicedns ClusterTrustBundles or a configured CA, reloaded on
+//     rotation (never InsecureSkipVerify; see tlssource.go);
+//   - the mTLS TLS source used to reach actors through Substrate's inbound
+//     atenet-router, using the ate-target-actor header.
 package substrate
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -63,18 +61,29 @@ const serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccou
 // DialerConfig configures Dial.
 type DialerConfig struct {
 	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
-	// "api.ate-system.svc:443". Required.
+	// "api.ate-system.svc:443". Required. Dialed as "dns:///<endpoint>"
+	// with round_robin across the headless Service's pods unless it already
+	// carries a gRPC scheme ("dns:///...", "passthrough:///...").
 	APIEndpoint string
 	// TokenAudience is the audience requested for the TokenRequest used to
 	// authenticate to ateapi. Defaults to DefaultTokenAudience when empty.
 	TokenAudience string
 	// CAFile is a path to a PEM CA bundle used to verify ateapi's serving
-	// certificate. Used when ClusterTrustBundle is empty.
+	// certificate (e.g. the projected /run/servicedns-ca/trust-bundle.pem),
+	// re-read when its content changes. Used when ClusterTrustBundle is
+	// empty. When both are empty, every ClusterTrustBundle with signer
+	// ServiceDNSSignerName and label CanaryingLabel=CanaryingLive is pooled.
 	CAFile string
-	// ClusterTrustBundle names a certificates.k8s.io/v1beta1
-	// ClusterTrustBundle object whose trust bundle verifies ateapi's serving
-	// certificate. Takes precedence over CAFile when both are set.
+	// ClusterTrustBundle names a ClusterTrustBundle object
+	// (certificates.k8s.io/v1, falling back to v1beta1) whose trust bundle
+	// verifies ateapi's serving certificate. Takes precedence over CAFile.
 	ClusterTrustBundle string
+	// ClientCertFile is an optional PEM credential bundle (certificate chain
+	// and private key in one file, e.g. the podidentity
+	// credential-bundle.pem) presented to ateapi for mTLS. Re-read on every
+	// handshake. When ateapi accepts the certificate, it authenticates the
+	// caller by the certificate's SPIFFE ID and ignores the bearer token.
+	ClientCertFile string
 	// ServerName overrides the TLS ServerName sent in the handshake.
 	// Defaults to the host portion of APIEndpoint.
 	ServerName string
@@ -89,47 +98,6 @@ type DialerConfig struct {
 	// ServiceAccount to have RBAC permission to create tokens for itself
 	// (deploy/substrate/broker.yaml grants this).
 	ServiceAccountName string
-}
-
-// serverTLSConfig builds the *tls.Config used to verify ateapi's (or the
-// router's) serving certificate against the configured CA.
-// InsecureSkipVerify is never set, even implicitly: a cfg with neither
-// ClusterTrustBundle nor CAFile is a configuration error, not a fallback to
-// an unverified connection.
-func serverTLSConfig(ctx context.Context, k8sClient kubernetes.Interface, cfg DialerConfig) (*tls.Config, error) {
-	pool := x509.NewCertPool()
-
-	switch {
-	case cfg.ClusterTrustBundle != "":
-		ctb, err := k8sClient.CertificatesV1beta1().ClusterTrustBundles().Get(ctx, cfg.ClusterTrustBundle, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("substrate: get ClusterTrustBundle %q: %w", cfg.ClusterTrustBundle, err)
-		}
-		if !pool.AppendCertsFromPEM([]byte(ctb.Spec.TrustBundle)) {
-			return nil, fmt.Errorf("substrate: ClusterTrustBundle %q contains no valid certificates", cfg.ClusterTrustBundle)
-		}
-	case cfg.CAFile != "":
-		pem, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("substrate: read ca_file %q: %w", cfg.CAFile, err)
-		}
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("substrate: ca_file %q contains no valid certificates", cfg.CAFile)
-		}
-	default:
-		return nil, fmt.Errorf("substrate: one of cluster_trust_bundle or ca_file must be configured; InsecureSkipVerify is not supported")
-	}
-
-	serverName := cfg.ServerName
-	if serverName == "" {
-		serverName = hostOnly(cfg.APIEndpoint)
-	}
-
-	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    pool,
-		ServerName: serverName,
-	}, nil
 }
 
 // hostOnly strips a ":port" suffix from a host:port endpoint, returning the

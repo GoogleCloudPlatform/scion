@@ -31,7 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // fakeSubstrateControlClient is a minimal, package-local
@@ -190,8 +190,7 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	defer actorServer.Close()
 
 	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{
-		SnapshotStorage:   "gs://bucket/prefix/",
-		SandboxConfigName: "gvisor-default",
+		SnapshotStorage: "gs://bucket/prefix/",
 	})
 
 	const agentSlug = "sb-smoke-2"

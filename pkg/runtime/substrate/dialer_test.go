@@ -19,17 +19,25 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/peer"
+
 	authv1 "k8s.io/api/authentication/v1"
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -75,88 +83,73 @@ func TestHostOnly(t *testing.T) {
 	}
 }
 
-func TestServerTLSConfig_CAFile(t *testing.T) {
-	caPEM := generateTestCAPEM(t)
-	dir := t.TempDir()
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, caPEM, 0644); err != nil {
+func TestDialTarget(t *testing.T) {
+	cases := map[string]string{
+		"api.ate-system.svc:443":                 "dns:///api.ate-system.svc:443",
+		" api.ate-system.svc:443 ":               "dns:///api.ate-system.svc:443",
+		"dns:///api.ate-system.svc:443":          "dns:///api.ate-system.svc:443",
+		"dns://10.0.0.10/api.ate-system.svc:443": "dns://10.0.0.10/api.ate-system.svc:443",
+		"passthrough:///api.ate-system.svc:443":  "passthrough:///api.ate-system.svc:443",
+		"127.0.0.1:8443":                         "dns:///127.0.0.1:8443",
+	}
+	for in, want := range cases {
+		if got := dialTarget(in); got != want {
+			t.Errorf("dialTarget(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDial_UsesDNSTargetAndCAFile(t *testing.T) {
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, generateTestCAPEM(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	client := kubefake.NewClientset()
-	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", CAFile: caFile}
-
-	tlsCfg, err := serverTLSConfig(context.Background(), client, cfg)
-	if err != nil {
-		t.Fatalf("serverTLSConfig() error = %v", err)
-	}
-	if tlsCfg.RootCAs == nil {
-		t.Fatal("serverTLSConfig() RootCAs is nil")
-	}
-	if tlsCfg.ServerName != "api.ate-system.svc" {
-		t.Errorf("ServerName = %q, want api.ate-system.svc", tlsCfg.ServerName)
-	}
-	if tlsCfg.InsecureSkipVerify { //nolint:staticcheck // explicitly asserting this is never set
-		t.Error("InsecureSkipVerify must never be true")
-	}
-}
-
-func TestServerTLSConfig_ClusterTrustBundle(t *testing.T) {
-	caPEM := generateTestCAPEM(t)
-	client := kubefake.NewClientset(&certsv1beta1.ClusterTrustBundle{
-		ObjectMeta: metav1.ObjectMeta{Name: "ate-root"},
-		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(caPEM)},
-	})
-
-	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", ClusterTrustBundle: "ate-root"}
-	tlsCfg, err := serverTLSConfig(context.Background(), client, cfg)
-	if err != nil {
-		t.Fatalf("serverTLSConfig() error = %v", err)
-	}
-	if tlsCfg.RootCAs == nil {
-		t.Fatal("serverTLSConfig() RootCAs is nil")
-	}
-}
-
-func TestServerTLSConfig_ClusterTrustBundlePreferredOverCAFile(t *testing.T) {
-	// When both are set, ClusterTrustBundle wins. Give the CAFile a path
-	// that does not exist — if the function fell back to CAFile it would
-	// fail to read it, so success here proves ClusterTrustBundle was used.
-	caPEM := generateTestCAPEM(t)
-	client := kubefake.NewClientset(&certsv1beta1.ClusterTrustBundle{
-		ObjectMeta: metav1.ObjectMeta{Name: "ate-root"},
-		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(caPEM)},
-	})
-
 	cfg := DialerConfig{
 		APIEndpoint:        "api.ate-system.svc:443",
-		ClusterTrustBundle: "ate-root",
-		CAFile:             "/nonexistent/ca.pem",
+		CAFile:             caFile,
+		Namespace:          "scion",
+		ServiceAccountName: "scion-substrate-broker",
 	}
-	if _, err := serverTLSConfig(context.Background(), client, cfg); err != nil {
-		t.Fatalf("serverTLSConfig() error = %v, want ClusterTrustBundle to take precedence over the unreadable CAFile", err)
+	conn, err := Dial(context.Background(), kubefake.NewClientset(), cfg)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
 	}
-}
-
-func TestServerTLSConfig_NeitherConfigured(t *testing.T) {
-	client := kubefake.NewClientset()
-	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443"}
-	_, err := serverTLSConfig(context.Background(), client, cfg)
-	if err == nil {
-		t.Fatal("serverTLSConfig() expected an error when no CA source is configured, got nil")
+	defer func() { _ = conn.Close() }()
+	if got, want := conn.Target(), "dns:///api.ate-system.svc:443"; got != want {
+		t.Errorf("conn.Target() = %q, want %q", got, want)
 	}
 }
 
-func TestServerTLSConfig_EmptyCAFileContents(t *testing.T) {
-	dir := t.TempDir()
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, []byte("not a certificate"), 0644); err != nil {
+func TestDial_DoesNotDoublePrefixScheme(t *testing.T) {
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, generateTestCAPEM(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client := kubefake.NewClientset()
-	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", CAFile: caFile}
-	if _, err := serverTLSConfig(context.Background(), client, cfg); err == nil {
-		t.Fatal("serverTLSConfig() expected an error for a CA file with no valid certificates, got nil")
+	cfg := DialerConfig{
+		APIEndpoint:        "dns:///api.ate-system.svc:443",
+		CAFile:             caFile,
+		Namespace:          "scion",
+		ServiceAccountName: "scion-substrate-broker",
+	}
+	conn, err := Dial(context.Background(), kubefake.NewClientset(), cfg)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if got, want := conn.Target(), "dns:///api.ate-system.svc:443"; got != want {
+		t.Errorf("conn.Target() = %q, want %q", got, want)
+	}
+}
+
+func TestDial_RequiresEndpointAndCA(t *testing.T) {
+	if _, err := Dial(context.Background(), kubefake.NewClientset(), DialerConfig{}); err == nil {
+		t.Error("Dial() with no api_endpoint = nil error, want one")
+	}
+	// No CA file, no named bundle, and no matching ClusterTrustBundle in
+	// the cluster: there is nothing to verify ateapi against.
+	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", Namespace: "scion", ServiceAccountName: "broker"}
+	if _, err := Dial(context.Background(), kubefake.NewClientset(), cfg); err == nil {
+		t.Error("Dial() with no CA source = nil error, want one")
 	}
 }
 
@@ -253,4 +246,147 @@ func TestTokenSource_EmptyTokenIsError(t *testing.T) {
 
 func tokenName(n int) string {
 	return "tok-" + string(rune('0'+n))
+}
+
+// TestSourceCredentials_GRPCHandshakePerConnection drives a real gRPC TLS
+// handshake through sourceCredentials: TLS 1.3 against a server whose cert
+// chains to the source's CA, with the source consulted on each new
+// connection (so a rotated CA reaches new connections).
+func TestSourceCredentials_GRPCHandshakePerConnection(t *testing.T) {
+	ca := newTestCA(t, "servicedns")
+	serverCert, _ := ca.issue(t, "api", []string{"api.ate-system.svc"}, false)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverCert},
+	})))
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	writeFile(t, caFile, ca.pem)
+	base, err := NewServerTLSSource(context.Background(), nil, DialerConfig{APIEndpoint: "api.ate-system.svc:443", CAFile: caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	src := TLSConfigFunc(func(ctx context.Context) (*tls.Config, error) {
+		calls.Add(1)
+		return base(ctx)
+	})
+
+	check := func() {
+		t.Helper()
+		conn, err := grpc.NewClient("passthrough:///"+lis.Addr().String(),
+			grpc.WithTransportCredentials(newSourceCredentials(src)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{}); err != nil {
+			t.Fatalf("Health.Check over sourceCredentials: %v", err)
+		}
+	}
+	check()
+	check()
+	if got := calls.Load(); got < 2 {
+		t.Errorf("TLS source consulted %d times for 2 connections, want once per handshake", got)
+	}
+
+	// A client trusting a different CA must fail the handshake.
+	otherFile := filepath.Join(t.TempDir(), "other.pem")
+	writeFile(t, otherFile, newTestCA(t, "other").pem)
+	other, err := NewServerTLSSource(context.Background(), nil, DialerConfig{APIEndpoint: "api.ate-system.svc:443", CAFile: otherFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := grpc.NewClient("passthrough:///"+lis.Addr().String(), grpc.WithTransportCredentials(newSourceCredentials(other)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{}); err == nil {
+		t.Error("Health.Check against a server signed by an untrusted CA succeeded")
+	}
+}
+
+// TestSourceCredentials_ClientCertMTLS verifies that DialerConfig.ClientCertFile
+// presents the client certificate during gRPC TLS 1.3 mTLS handshakes and
+// reloads it when rotated on disk.
+func TestSourceCredentials_ClientCertMTLS(t *testing.T) {
+	serverCA, clientCA := newTestCA(t, "servicedns"), newTestCA(t, "podidentity")
+	serverCert, _ := serverCA.issue(t, "api", []string{"api.ate-system.svc"}, false)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenCN := make(chan string, 4)
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{serverCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    poolOf(clientCA),
+		})),
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			if p, ok := peer.FromContext(ctx); ok {
+				if ti, ok := p.AuthInfo.(credentials.TLSInfo); ok && len(ti.State.PeerCertificates) > 0 {
+					seenCN <- ti.State.PeerCertificates[0].Subject.CommonName
+				}
+			}
+			return handler(ctx, req)
+		}),
+	)
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	writeFile(t, caFile, serverCA.pem)
+	bundleFile := filepath.Join(dir, "client.pem")
+	_, b1 := clientCA.issue(t, "broker-v1", nil, true)
+	writeFile(t, bundleFile, b1)
+
+	src, err := NewServerTLSSource(context.Background(), nil, DialerConfig{
+		APIEndpoint:    "api.ate-system.svc:443",
+		CAFile:         caFile,
+		ClientCertFile: bundleFile,
+	})
+	if err != nil {
+		t.Fatalf("NewServerTLSSource() error = %v", err)
+	}
+
+	callAndReadCN := func() string {
+		t.Helper()
+		conn, err := grpc.NewClient("passthrough:///"+lis.Addr().String(),
+			grpc.WithTransportCredentials(newSourceCredentials(src)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{}); err != nil {
+			t.Fatalf("Health.Check over mTLS: %v", err)
+		}
+		return <-seenCN
+	}
+
+	if got := callAndReadCN(); got != "broker-v1" {
+		t.Errorf("first handshake client CN = %q, want broker-v1", got)
+	}
+	_, b2 := clientCA.issue(t, "broker-v2", nil, true)
+	writeFile(t, bundleFile, b2)
+	if got := callAndReadCN(); got != "broker-v2" {
+		t.Errorf("second handshake client CN = %q, want rotated broker-v2", got)
+	}
 }

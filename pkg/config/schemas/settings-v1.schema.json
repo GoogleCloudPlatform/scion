@@ -644,18 +644,18 @@
           "description": "Substrate-specific settings when type is \"substrate\".",
           "properties": {
             "api_endpoint": { "type": "string", "description": "ateapi Control gRPC endpoint, e.g. \"api.ate-system.svc:443\"." },
-            "router_endpoint": { "type": "string", "description": "atenet-router inbound endpoint, e.g. \"http://atenet-router.ate-system.svc:80\"." },
+            "router_endpoint": { "type": "string", "description": "atenet-router HTTPS (mTLS) base URL reaching actor port 80, e.g. \"https://atenet-router.ate-system.svc\"." },
             "token_audience": { "type": "string", "description": "TokenRequest audience for ateapi auth. Defaults to \"api.ate-system.svc\"." },
-            "ca_file": { "type": "string", "description": "Path to a PEM CA bundle verifying the ateapi Control gRPC dial. Used when cluster_trust_bundle is empty." },
-            "cluster_trust_bundle": { "type": "string", "description": "Name of a certificates.k8s.io ClusterTrustBundle verifying the ateapi Control gRPC dial. Takes precedence over ca_file." },
-            "sandbox_class": { "type": "string", "enum": ["gvisor", "microvm"], "default": "gvisor" },
-            "sandbox_config_name": { "type": "string", "description": "Name of the Substrate SandboxConfig CRD instance used by actor templates." },
+            "ca_file": { "type": "string", "description": "Path to a PEM CA bundle verifying ateapi (and atenet-router when router_ca_file is empty), re-read when its content changes. Used when cluster_trust_bundle is empty." },
+            "cluster_trust_bundle": { "type": "string", "description": "Name of a certificates.k8s.io ClusterTrustBundle verifying ateapi (and atenet-router when router_ca_file is empty), refreshed periodically. Takes precedence over ca_file." },
+            "sandbox_class": { "type": "string", "enum": ["gvisor", "microvm"], "description": "Deprecated and rejected: Substrate v1 selects the sandbox class through the WorkerPool's spec.sandboxClasses; pin the pool with worker_selector." },
+            "sandbox_config_name": { "type": "string", "description": "Deprecated and rejected: Substrate v1 takes the SandboxConfig from the WorkerPool's spec.sandboxClasses[].configRef; pin the pool with worker_selector." },
             "worker_selector": {
               "type": "object",
               "additionalProperties": { "type": "string" },
               "description": "matchLabels copied into the ActorTemplate's workerSelector."
             },
-            "snapshot_storage": { "type": "string", "description": "Object-storage base URI for actor snapshots, e.g. \"gs://bucket/prefix/\"." },
+            "snapshot_storage": { "type": "string", "description": "Object-storage base URI for actor snapshots, e.g. \"gs://bucket/prefix/\". Sent as the template's snapshot_config.storage_location, which Substrate v1 accepts only with its PerTemplateSnapshotLocation preview gate; leave empty to use the ate-api server's --snapshot-location." },
             "egress_allow": {
               "type": "array",
               "items": { "type": "string" },
@@ -666,7 +666,12 @@
               "enum": ["", "egress-mitm.ate.dev"],
               "description": "Name of a Substrate trust bundle to project into every actor so it can validate the egress gateway's own TLS certificate. Required iff the cluster runs the sdsmint egress gateway and the actor makes any HTTPS/TLS request; setting it on a plain (non-sdsmint) install breaks every actor. Empty (the default) is off. The only value Substrate currently supports is \"egress-mitm.ate.dev\" (see V1SubstrateConfig.EgressTrustBundle and ValidateEgressTrustBundle)."
             },
-            "template_ready_timeout": { "type": "string", "description": "Go duration string bounding how long Run waits for a new ActorTemplate's golden snapshot. Defaults to 10m." }
+            "template_ready_timeout": { "type": "string", "description": "Go duration string bounding how long Run waits for a new ActorTemplate's golden snapshot. Defaults to 10m." },
+            "router_ca_file": { "type": "string", "description": "PEM CA bundle verifying the atenet-router serving certificate. Defaults to the ateapi trust source." },
+            "router_client_cert_file": { "type": "string", "description": "PEM credential bundle presented to atenet-router for mTLS. Defaults to \"/run/podidentity.podcert.ate.dev/credential-bundle.pem\"." },
+            "router_server_name": { "type": "string", "description": "TLS server name verified on atenet-router. Defaults to router_endpoint's host." },
+            "router_connect_endpoint": { "type": "string", "description": "atenet-router CONNECT-over-TLS host:port for actor ports other than 80. Defaults to router_endpoint's host on port 8444." },
+            "api_client_cert_file": { "type": "string", "description": "Optional PEM credential bundle presented to ateapi for mTLS. TokenRequest RBAC remains required because substrate.Dial attaches per-RPC ServiceAccount bearer credentials alongside mTLS." }
           },
           "additionalProperties": false
         },
