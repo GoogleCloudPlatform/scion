@@ -17,16 +17,28 @@
 package commands
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"gopkg.in/yaml.v3"
 )
+
+type parsedSeedContext struct {
+	Version    int    `yaml:"version"`
+	CurrentHub string `yaml:"current_hub"`
+	Hubs       map[string]*struct {
+		Endpoint string `yaml:"endpoint"`
+	} `yaml:"hubs"`
+}
 
 func TestIsShellExecContainer(t *testing.T) {
 	idleReady := `{"strategy":"idle"}`
@@ -43,7 +55,7 @@ func TestIsShellExecContainer(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "SCION_HARNESS=shell",
+			name: "SCION_HARNESS=shell (READY absent, old-broker fallback)",
 			env:  map[string]string{"SCION_HARNESS": "shell"},
 			want: true,
 		},
@@ -53,7 +65,7 @@ func TestIsShellExecContainer(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "SCION_HARNESS=claude",
+			name: "SCION_HARNESS=claude (READY absent)",
 			env:  map[string]string{"SCION_HARNESS": "claude"},
 			want: false,
 		},
@@ -68,8 +80,18 @@ func TestIsShellExecContainer(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "SCION_HARNESS=claude wins when set even with idle ready",
+			name: "READY idle + SCION_HARNESS=claude => true (READY wins)",
 			env:  map[string]string{"SCION_HARNESS": "claude", state.HarnessReadyEnv: idleReady},
+			want: true,
+		},
+		{
+			name: "READY delay + SCION_HARNESS=shell => false (READY wins)",
+			env:  map[string]string{"SCION_HARNESS": "shell", state.HarnessReadyEnv: delayReady},
+			want: false,
+		},
+		{
+			name: "READY malformed + SCION_HARNESS=shell => false (fails closed)",
+			env:  map[string]string{"SCION_HARNESS": "shell", state.HarnessReadyEnv: "not-json"},
 			want: false,
 		},
 		{
@@ -85,8 +107,23 @@ func TestIsShellExecContainer(t *testing.T) {
 			if tc.env != nil {
 				getenv = func(k string) string { return tc.env[k] }
 			}
-			if got := isShellExecContainer(getenv); got != tc.want {
+			got := isShellExecContainer(getenv)
+			if got != tc.want {
 				t.Errorf("isShellExecContainer() = %v, want %v", got, tc.want)
+			}
+
+			// Equivalence invariant: isShellExecContainer and control.ExecEnabled
+			// (with hub.command_requests) must agree on every input class.
+			if tc.env != nil {
+				execEnv := func(k string) string {
+					if k == control.EnvHubExperiments {
+						return control.ExperimentCommandRequests
+					}
+					return tc.env[k]
+				}
+				if execGot := control.ExecEnabled(execEnv); execGot != got {
+					t.Errorf("predicate mismatch: isShellExecContainer=%v, control.ExecEnabled=%v", got, execGot)
+				}
 			}
 		})
 	}
@@ -204,7 +241,7 @@ func TestSeedShellCLIContext(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var parsed shellSeedCLIContext
+		var parsed parsedSeedContext
 		if err := yaml.Unmarshal(data, &parsed); err != nil {
 			t.Fatalf("unmarshal seeded context.yaml: %v", err)
 		}
@@ -229,7 +266,7 @@ func TestSeedShellCLIContext(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var parsed shellSeedCLIContext
+		var parsed parsedSeedContext
 		if err := yaml.Unmarshal(data, &parsed); err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +384,7 @@ func TestRunInit_ShellIsolationOrderingAndBehavior(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "agent-shell-1")
 	t.Setenv("SCION_CLI_MODE", "agent")
 	t.Setenv("SCION_AUTH_TOKEN", "should-not-leak")
-	t.Setenv("SCION_AUTO_EXPOSE", "true")
+	t.Setenv(autoexpose.EnvAutoExposePorts, "true")
 	t.Setenv("USER_CUSTOM_VAR", "keep-this")
 
 	// Snapshot state immediately before sup.Run is launched.
@@ -391,7 +428,7 @@ func TestRunInit_ShellIsolationOrderingAndBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read seeded context.yaml: %v", err)
 	}
-	var parsed shellSeedCLIContext
+	var parsed parsedSeedContext
 	if err := yaml.Unmarshal(ctxBytes, &parsed); err != nil {
 		t.Fatalf("unmarshal seeded context.yaml: %v", err)
 	}
@@ -420,6 +457,90 @@ func TestRunInit_ShellIsolationOrderingAndBehavior(t *testing.T) {
 	if !sawUserVar {
 		t.Error("shell workload lost non-SCION USER_CUSTOM_VAR")
 	}
+}
+
+// TestRunInit_ShellIsolationSkipsDelegationAndAutoexpose verifies O1
+// (ptone/scion#9743): with a configured hub client and auto-expose enabled,
+// shellIsolation skips both startDelegationHelper (no delegation socket exists
+// while the workload runs) and autoexpose. A non-shell control verifies both
+// start under the same setup, so removing either !shellIsolation guard fails
+// this test.
+func TestRunInit_ShellIsolationSkipsDelegationAndAutoexpose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	runCase := func(t *testing.T, harness string) (sawSocket bool, logOutput string) {
+		t.Helper()
+		// Keep path short so Unix domain socket bind stays well under 108 bytes.
+		agentHome, err := os.MkdirTemp("/tmp", "scion-iso-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(agentHome) })
+
+		setupRunInitAsRootlessScion(t, agentHome)
+		t.Cleanup(hub.SetTokenHome(agentHome))
+		readLog := captureSciontoolLog(t)
+
+		origExitCodePath := harnessExitCodePath
+		harnessExitCodePath = filepath.Join(t.TempDir(), "no-harness-exit-code")
+		t.Cleanup(func() { harnessExitCodePath = origExitCodePath })
+		origTrigger := limitsTriggerPath
+		limitsTriggerPath = filepath.Join(t.TempDir(), "limits-exceeded")
+		t.Cleanup(func() { limitsTriggerPath = origTrigger })
+
+		// Provide a token file so hub.NewClient() is configured and RunInit
+		// enters the post-start hub block (autoexpose + startDelegationHelper).
+		scionDir := filepath.Join(agentHome, ".scion")
+		if err := os.MkdirAll(scionDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scionDir, hub.TokenFile), []byte("test-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Setenv("SCION_HARNESS", harness)
+		t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+		t.Setenv("SCION_AGENT_ID", "agent-test-1")
+		t.Setenv(autoexpose.EnvAutoExposePorts, "true")
+
+		sockPath := delegationSocketPath()
+		marker := filepath.Join(t.TempDir(), "saw-socket")
+		// Wait past RunInit's 100ms immediate-exit check + hub post-start setup,
+		// then check whether the delegation socket exists.
+		script := `i=0; while [ $i -lt 15 ]; do if [ -S "$1" ]; then touch "$2"; break; fi; sleep 0.1; i=$((i+1)); done`
+		code := RunInit([]string{"sh", "-c", script, "sh", sockPath, marker},
+			InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
+		if code != 0 {
+			t.Fatalf("RunInit(%s) = %d, want 0", harness, code)
+		}
+		_, statErr := os.Stat(marker)
+		return statErr == nil, readLog()
+	}
+
+	t.Run("shell container skips delegation helper and autoexpose", func(t *testing.T) {
+		sawSocket, logOut := runCase(t, "shell")
+		if sawSocket {
+			t.Error("delegation socket existed during shell container run; startDelegationHelper must be skipped under shellIsolation")
+		}
+		if strings.Contains(logOut, "Started auto-expose port scanner") {
+			t.Errorf("autoexpose started under shellIsolation:\n%s", logOut)
+		}
+	})
+
+	t.Run("control: non-shell container starts delegation helper and autoexpose", func(t *testing.T) {
+		sawSocket, logOut := runCase(t, "claude")
+		if !sawSocket {
+			t.Errorf("expected delegation socket during non-shell control run; log:\n%s", logOut)
+		}
+		if !strings.Contains(logOut, "Started auto-expose port scanner") {
+			t.Errorf("expected autoexpose to start in non-shell control run; log:\n%s", logOut)
+		}
+	})
 }
 
 // TestRunInit_NonShellKeepsEnvFileAndScionEnv verifies A10: non-shell (LLM)

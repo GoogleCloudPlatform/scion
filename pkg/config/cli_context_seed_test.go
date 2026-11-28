@@ -12,20 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build unix
-
 package config
 
 import (
 	"testing"
 
-	sciontoolcmd "github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/clicontextseed"
 )
 
 // TestShellCLIContextSeed_MatchesCLIContextSchema is the §4.4 schema-drift
-// guard (ptone/scion#9743): sciontool's plain-endpoint context.yaml seed must
-// parse cleanly with parseCLIContext and produce CurrentHubEntry().Endpoint ==
-// NormalizeEndpoint(rawEndpoint) with the same derived hub nickname.
+// guard (ptone/scion#9743): the plain-endpoint context.yaml seed rendered by
+// pkg/config/clicontextseed must parse cleanly with parseCLIContext and produce
+// CurrentHubEntry().Endpoint == NormalizeEndpoint(rawEndpoint) with the same
+// derived hub nickname.
 func TestShellCLIContextSeed_MatchesCLIContextSchema(t *testing.T) {
 	endpoints := []string{
 		"https://hub.example.com",
@@ -36,14 +35,14 @@ func TestShellCLIContextSeed_MatchesCLIContextSchema(t *testing.T) {
 
 	for _, raw := range endpoints {
 		t.Run(raw, func(t *testing.T) {
-			data, err := sciontoolcmd.RenderShellCLIContextYAML(raw)
+			data, err := clicontextseed.Render(clicontextseed.Options{Endpoint: raw})
 			if err != nil {
-				t.Fatalf("RenderShellCLIContextYAML(%q): %v", raw, err)
+				t.Fatalf("clicontextseed.Render(%q): %v", raw, err)
 			}
 
 			c, err := parseCLIContext(data)
 			if err != nil {
-				t.Fatalf("parseCLIContext failed on sciontool seed for %q:\n%s\nerr: %v", raw, data, err)
+				t.Fatalf("parseCLIContext failed on seed for %q:\n%s\nerr: %v", raw, data, err)
 			}
 			if c.Version != CLIContextVersion {
 				t.Errorf("Version = %d, want %d", c.Version, CLIContextVersion)

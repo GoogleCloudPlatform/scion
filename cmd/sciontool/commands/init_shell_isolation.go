@@ -22,11 +22,10 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/config/hubname"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/clicontextseed"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
-	"gopkg.in/yaml.v3"
 )
 
 // beforeSupervisorRunForTest, when non-nil, fires synchronously in runInit
@@ -35,42 +34,17 @@ import (
 // production.
 var beforeSupervisorRunForTest func(cfg supervisor.Config)
 
-// shellContextSeedVersion matches config.CLIContextVersion (context.yaml v1).
-const shellContextSeedVersion = 1
-
-// shellSeedCLIContext is the minimal plain-endpoint context.yaml schema seeded
-// into a fresh shell execution container home before the workload starts.
-// Kept in sync with pkg/config.CLIContext via the schema-drift guard test in
-// pkg/config.
-type shellSeedCLIContext struct {
-	Version    int                           `yaml:"version"`
-	CurrentHub string                        `yaml:"current_hub"`
-	Hubs       map[string]*shellSeedHubEntry `yaml:"hubs"`
-}
-
-type shellSeedHubEntry struct {
-	Endpoint string `yaml:"endpoint"`
-}
-
 // shellContextSeedChown is the fd-based chown callback used when seeding
 // context.yaml. Replaced only in unit tests so ownership handoff can be
 // verified without CAP_CHOWN.
 var shellContextSeedChown = dirfd.Fchown
 
 // isShellExecContainer reports whether PID 1 is running inside a shell
-// execution container (ptone/scion#9743). It reads PID 1's broker-set
-// environment: true when SCION_HARNESS is "shell", or when SCION_HARNESS is
-// unset and SCION_HARNESS_READY declares ReadyStrategyIdle (mirroring
-// control.ExecEnabled's fallback). Evaluate once early in runInit and pass
-// explicitly.
+// execution container (ptone/scion#9743), delegating to the canonical
+// state.IsShellExecContainerEnv predicate shared with control.ExecEnabled.
+// Evaluate once early in runInit and pass explicitly.
 func isShellExecContainer(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	if strings.TrimSpace(getenv("SCION_HARNESS")) != "" {
-		return state.IsShellHarnessEnv(getenv)
-	}
-	return state.ReadySpecIsIdle(getenv)
+	return state.IsShellExecContainerEnv(getenv)
 }
 
 // removeEnvFileNoFollow unlinks <agentHome>/.scion/scion-env through a
@@ -98,28 +72,6 @@ func removeEnvFileNoFollow(agentHome string) error {
 	return nil
 }
 
-// RenderShellCLIContextYAML renders the plain-endpoint context.yaml bytes for
-// rawEndpoint using hubname.NormalizeEndpoint and hubname.DeriveHubName.
-func RenderShellCLIContextYAML(rawEndpoint string) ([]byte, error) {
-	endpoint := hubname.NormalizeEndpoint(rawEndpoint)
-	if endpoint == "" {
-		return nil, errors.New("empty hub endpoint")
-	}
-	nick := hubname.DeriveHubName(endpoint)
-	doc := shellSeedCLIContext{
-		Version:    shellContextSeedVersion,
-		CurrentHub: nick,
-		Hubs: map[string]*shellSeedHubEntry{
-			nick: {Endpoint: endpoint},
-		},
-	}
-	data, err := yaml.Marshal(&doc)
-	if err != nil {
-		return nil, fmt.Errorf("marshal context.yaml seed: %w", err)
-	}
-	return data, nil
-}
-
 // seedShellCLIContext writes <agentHome>/.scion/context.yaml with the
 // container's hub endpoint (SCION_HUB_ENDPOINT, falling back to SCION_HUB_URL)
 // if and only if the file does not already exist. Writes use dirfd no-follow +
@@ -138,7 +90,7 @@ func seedShellCLIContext(agentHome string, uid, gid int, getenv func(string) str
 		return nil
 	}
 
-	data, err := RenderShellCLIContextYAML(rawEndpoint)
+	data, err := clicontextseed.Render(clicontextseed.Options{Endpoint: rawEndpoint})
 	if err != nil {
 		return err
 	}

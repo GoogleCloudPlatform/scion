@@ -1204,7 +1204,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// ~/.scion/context.yaml if absent so `scion hub auth login` / `scion login`
 		// discovers the Hub with zero flags. Both run before sup.Run.
 		if err := removeEnvFileNoFollow(agentHome); err != nil {
-			log.Error("Failed to remove scion-env file: %v", err)
+			log.Warn("Failed to remove stale scion-env file (interactive zsh sessions may re-source SCION_* control variables from ~/.scion/scion-env): %v", err)
 		}
 		if err := seedShellCLIContext(agentHome, targetUID, targetGID, os.Getenv); err != nil {
 			log.Error("Failed to seed CLI context: %v", err)

@@ -166,6 +166,21 @@ func ReadySpecIsIdle(getenv func(string) string) bool {
 	return err == nil && spec.Strategy == ReadyStrategyIdle
 }
 
+// IsShellExecContainerEnv reports whether the container environment describes
+// a shell execution container. It keys on the broker-written
+// SCION_HARNESS_READY signal (ReadySpecIsIdle) whenever present so start-env
+// SCION_HARNESS cannot spoof or weaken shell-ness, falling back to
+// IsShellHarnessEnv only when SCION_HARNESS_READY is absent (older brokers).
+func IsShellExecContainerEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	if strings.TrimSpace(getenv(HarnessReadyEnv)) != "" {
+		return ReadySpecIsIdle(getenv)
+	}
+	return IsShellHarnessEnv(getenv)
+}
+
 // LivenessHarnessRootDepthEnv names the environment variable a harness
 // config sets (in its env map) when the harness's TUI is not the direct
 // child of the agent window's wrapper: it is how many process levels below
