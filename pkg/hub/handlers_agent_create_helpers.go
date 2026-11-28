@@ -2013,10 +2013,12 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
-		// Check raw-token budget admission before tearing down the existing
+		// Check raw-token budget exhaustion before tearing down the existing
 		// provisioning row or its secrets so a budget refusal does not lose them.
+		// Harness-dependent unmeasured policy is evaluated by the fall-through
+		// create path against the new request's resolved config.
 		if !req.ProvisionOnly {
-			if err := s.checkTokenBudgetAdmission(ctx, existingAgent, project); err != nil {
+			if err := s.checkTokenBudgetExhaustionOnly(ctx, existingAgent, project); err != nil {
 				if !writeTokenBudgetAdmissionError(w, err) {
 					writeErrorFromErr(w, err, "")
 				}

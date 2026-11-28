@@ -75,17 +75,21 @@ func (s *Server) resolveAdmissionBillingUserID(ctx context.Context, agent *store
 // resolveAgentHarnessCoverage resolves the agent's harness config usage.yaml
 // live capability and maps it to the P2 measurement_status vocabulary
 // ("unknown" when usage.yaml is absent/unparsable, distinct from explicit
-// "unmeasured" / source: none).
-func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.Agent) (harnessConfig, coverageStatus string, capKind usageCapabilityKind) {
+// "unmeasured" / source: none). Store/infrastructure lookup errors are returned
+// so admission callers can surface a 5xx instead of a misleading 403 policy refusal.
+func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.Agent) (harnessConfig, coverageStatus string, capKind usageCapabilityKind, err error) {
 	if agent == nil {
-		return "", "unknown", usageCapUnknown
+		return "", "unknown", usageCapUnknown, nil
 	}
 	harnessConfig = strings.TrimSpace(agent.HarnessConfig)
 	if harnessConfig == "" && agent.AppliedConfig != nil {
 		harnessConfig = strings.TrimSpace(agent.AppliedConfig.HarnessConfig)
 	}
 	memo := newUsageCapabilityMemo(ctx, s)
-	usageCap := memo.resolve(agent.ProjectID, harnessConfig)
+	usageCap, err := memo.resolveWithErr(agent.ProjectID, harnessConfig)
+	if err != nil {
+		return harnessConfig, "unknown", usageCapUnknown, fmt.Errorf("resolve harness usage capability %q: %w", harnessConfig, err)
+	}
 	capKind = classifyUsageLiveCapability(usageCap)
 	switch capKind {
 	case usageCapFull:
@@ -99,7 +103,7 @@ func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.A
 	default:
 		coverageStatus = "unknown"
 	}
-	return harnessConfig, coverageStatus, capKind
+	return harnessConfig, coverageStatus, capKind, nil
 }
 
 // checkTokenBudgetAdmission enforces raw-token budget admission and
@@ -111,6 +115,20 @@ func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.A
 // exempt from both budget_exhausted and budget_unmeasured (D8).
 // Never blocks stop, suspend, delete, or message delivery to running agents.
 func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Agent, project *store.Project) error {
+	return s.checkTokenBudgetAdmissionOpts(ctx, agent, project, true)
+}
+
+// checkTokenBudgetExhaustionOnly checks only raw-token budget exhaustion
+// (skipping the harness-dependent usage.unmeasured_policy check). Used by the
+// env-gather Branch-3 pre-teardown gate so a recreate that switches from an
+// unmeasured harness to a measured one is not prematurely refused against the
+// old provisioning row's harness config; the subsequent create path runs the
+// full admission check against the new request's resolved config.
+func (s *Server) checkTokenBudgetExhaustionOnly(ctx context.Context, agent *store.Agent, project *store.Project) error {
+	return s.checkTokenBudgetAdmissionOpts(ctx, agent, project, false)
+}
+
+func (s *Server) checkTokenBudgetAdmissionOpts(ctx context.Context, agent *store.Agent, project *store.Project, checkUnmeasured bool) error {
 	if !s.tokenBudgetsEnabled() || agent == nil || agent.ProjectID == "" {
 		return nil
 	}
@@ -144,10 +162,10 @@ func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Age
 	}
 
 	// Check project usage.unmeasured_policy=deny only when not already
-	// exhausted and an active non-zero token cap applies (reusing
-	// status.HasActiveCap from the evaluation pass above).
+	// exhausted and an active blocking (pause_new/suspend_and_pause),
+	// non-overridden, >0 token cap applies (D9).
 	// A stale meter alone never blocks admission.
-	needUnmeasuredCheck := !status.Exhausted && status.HasActiveCap
+	needUnmeasuredCheck := checkUnmeasured && !status.Exhausted && status.HasActiveCap
 	if needUnmeasuredCheck {
 		if project == nil && s.store != nil {
 			if p, perr := s.store.GetProject(ctx, agent.ProjectID); perr == nil {
@@ -160,8 +178,10 @@ func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Age
 		return nil
 	}
 
-	harnessConfig, coverageStatus, capKind := s.resolveAgentHarnessCoverage(ctx, agent)
+	harnessConfig, coverageStatus, capKind, covErr := s.resolveAgentHarnessCoverage(ctx, agent)
 	if status.Exhausted {
+		// coverageStatus is informational on 429 budget_exhausted; keep "unknown"
+		// rather than masking a real budget exhaustion refusal with a lookup error.
 		return &TokenBudgetAdmissionError{
 			HTTPStatus: http.StatusTooManyRequests,
 			Code:       api.LaunchCodeBudgetExhausted,
@@ -177,6 +197,9 @@ func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Age
 				"coverageStatus": coverageStatus,
 			},
 		}
+	}
+	if covErr != nil {
+		return covErr
 	}
 	if capKind == usageCapUnmeasured || capKind == usageCapUnknown || capKind == usageCapCallsOnly {
 		return &TokenBudgetAdmissionError{

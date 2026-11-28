@@ -752,16 +752,19 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 		if err != nil {
 			return nil, err
 		}
-		if st != nil {
-			hasActiveCap = true
-		}
-		if st == nil || st.State != store.UsageBudgetStateExhausted {
+		if st == nil {
 			continue
 		}
 		if !matchesAction(action) {
 			continue
 		}
 		if st.OverrideUntil != nil && st.OverrideUntil.After(now) {
+			continue
+		}
+		// Only blocking (action-matching), non-overridden, >0 caps count as an
+		// active cap for usage.unmeasured_policy=deny (D9).
+		hasActiveCap = true
+		if st.State != store.UsageBudgetStateExhausted {
 			continue
 		}
 		return &BudgetExhaustionStatus{

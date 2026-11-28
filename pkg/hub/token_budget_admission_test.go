@@ -783,11 +783,28 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC(hc), proj), "without active cap, %s must be allowed", hc)
 	}
 
-	// Add an active non-zero project token cap.
+	// D9 (O3): A notify_only-only cap does NOT count as an active blocking cap
+	// for usage.unmeasured_policy=deny -> unmeasured harnesses are still ALLOWED.
+	notifyOnlyProj := &store.Project{
+		ID:          uuid.NewString(),
+		Name:        "notify-only-unmeas",
+		Slug:        "notify-only-unmeas-" + uuid.NewString()[:8],
+		Annotations: map[string]string{projectSettingUsageUnmeasuredPolicy: UsageUnmeasuredPolicyDeny},
+	}
+	require.NoError(t, s.CreateProject(ctx, notifyOnlyProj))
 	createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
+		store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, notifyOnlyProj.ID, 10000, store.TokenActionNotifyOnly)
+	require.NoError(t, srv.checkTokenBudgetAdmission(ctx, &store.Agent{
+		ID:            uuid.NewString(),
+		ProjectID:     notifyOnlyProj.ID,
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "hc-unmeasured"},
+	}, notifyOnlyProj), "D9: notify_only-only cap must admit unmeasured harness under deny")
+
+	// Add an active non-zero blocking (pause_new) project token cap.
+	dayDef := createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
 		store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, proj.ID, 10000, store.TokenActionPauseNew)
 
-	// Under deny + active cap: unmeasured, unknown, and calls_only are REFUSED with 403 budget_unmeasured.
+	// Under deny + active blocking cap: unmeasured, unknown, and calls_only are REFUSED with 403 budget_unmeasured.
 	for _, tc := range []struct {
 		hc           string
 		wantCoverage string
@@ -804,6 +821,71 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 		assert.Equal(t, tc.hc, bErr.Details["harnessConfig"])
 		assert.Equal(t, tc.wantCoverage, bErr.Details["coverageStatus"])
 	}
+
+	// O4: End-to-end HTTP launch test for 403 budget_unmeasured (POST /projects/{id}/agents).
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents", CreateAgentRequest{
+		Name:          "http-unmeasured-blocked",
+		HarnessConfig: "hc-unmeasured",
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, "HTTP create of unmeasured harness under deny must return 403: %s", rec.Body.String())
+	code, _, details := decodeAPIErrorEnvelope(t, rec.Body.Bytes())
+	assert.Equal(t, api.LaunchCodeBudgetUnmeasured, code)
+	assert.Equal(t, UsageUnmeasuredPolicyDeny, details["policy"])
+	assert.Equal(t, "hc-unmeasured", details["harnessConfig"])
+	assert.Equal(t, MeasurementStatusUnmeasured, details["coverageStatus"])
+
+	// O2: Env-gather Branch-3 recreate switching from old hc-unmeasured -> new hc-measured
+	// must NOT be prematurely refused by the pre-teardown exhaustion-only gate.
+	provSwitchAg := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "env-gather-switch-hc",
+		Name:          "env-gather-switch-hc",
+		ProjectID:     proj.ID,
+		Phase:         string(state.PhaseProvisioning),
+		HarnessConfig: "hc-unmeasured",
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "hc-unmeasured"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, provSwitchAg))
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents", CreateAgentRequest{
+		Name:          provSwitchAg.Name,
+		GatherEnv:     true,
+		HarnessConfig: "hc-measured",
+	})
+	require.NotEqual(t, http.StatusForbidden, rec.Code, "O2: env-gather recreate to measured harness must not be refused 403: %s", rec.Body.String())
+	assert.True(t, rec.Code == http.StatusCreated || rec.Code == http.StatusAccepted,
+		"expected 201/202 for env-gather recreate to measured harness, got %d: %s", rec.Code, rec.Body.String())
+
+	// D9 (O3): An active override on the only blocking cap lifts the unmeasured refusal too.
+	dayStart, _ := utcDayWindow(now)
+	ovState, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: dayDef.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           proj.ID,
+		WindowStartUTC:    dayStart,
+	})
+	require.NoError(t, err)
+	futureOv := now.Add(time.Hour)
+	ovState.OverrideUntil = &futureOv
+	ovState, err = s.CompareAndSwapUsageBudgetState(ctx, ovState.StateVersion, ovState)
+	require.NoError(t, err)
+	require.NoError(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC("hc-unmeasured"), proj),
+		"D9: overridden blocking cap must not trigger budget_unmeasured")
+	// Clear override so subsequent assertions see the active blocking cap again.
+	ovState.OverrideUntil = nil
+	_, err = s.CompareAndSwapUsageBudgetState(ctx, ovState.StateVersion, ovState)
+	require.NoError(t, err)
+
+	// Nit 6: Infrastructure/store error during harness capability lookup surfaces
+	// as a non-TokenBudgetAdmissionError (5xx), NOT a 403 budget_unmeasured.
+	faultySrv := &Server{
+		store:                &errHarnessConfigStore{Store: s, err: errors.New("db connection reset")},
+		experiments:          srv.experiments,
+		tokenBudgetEvaluator: srv.TokenBudgetEvaluator(),
+	}
+	lookupErr := faultySrv.checkTokenBudgetAdmission(ctx, agentWithHC("hc-measured"), proj)
+	require.Error(t, lookupErr)
+	var notPolicyErr *TokenBudgetAdmissionError
+	assert.False(t, errors.As(lookupErr, &notPolicyErr), "Nit 6: store error must not masquerade as 403 budget_unmeasured, got %v", lookupErr)
 
 	// Measured and partial harnesses are ALLOWED under deny + active cap.
 	for _, hc := range []string{"hc-measured", "hc-partial"} {
@@ -1246,6 +1328,70 @@ func TestTokenBudgetAdmission_ReincarnateWorkerRecheck(t *testing.T) {
 	got, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.NotEqual(t, string(state.PhaseRunning), got.Phase, "agent must remain stopped after worker budget refusal")
+}
+
+// errHarnessConfigStore injects a store error on GetHarnessConfigBySlug (Nit 6).
+type errHarnessConfigStore struct {
+	store.Store
+	err error
+}
+
+func (e *errHarnessConfigStore) GetHarnessConfigBySlug(context.Context, string, string, string) (*store.HarnessConfig, error) {
+	return nil, e.err
+}
+
+// transientBudgetCounterStore injects a transient store error on
+// SumUsageScopeCounterTokens once armed, without reassigning srv.store (O1).
+type transientBudgetCounterStore struct {
+	store.Store
+	armed atomic.Bool
+}
+
+func (f *transientBudgetCounterStore) SumUsageScopeCounterTokens(ctx context.Context, scopeKind, scopeID string, start, end time.Time) (int64, error) {
+	if f.armed.Load() {
+		return 0, errors.New("transient budget store blip")
+	}
+	return f.Store.SumUsageScopeCounterTokens(ctx, scopeKind, scopeID, start, end)
+}
+
+func TestTokenBudgetAdmission_ReincarnateWorkerTransientErrorDoesNotStrand(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	baseDisp := newReincarnateTestDispatcher()
+	srv, s, proj, brk := setupReincarnateTestServer(t, baseDisp)
+	setTokenBudgetExperimentsForTest(t, srv, true, true, true)
+	srv.reconcileTokenBudgets(ctx)
+	eval := srv.TokenBudgetEvaluator()
+	eval.nowFn = func() time.Time { return now }
+
+	createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
+		store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, proj.ID, 500, store.TokenActionPauseNew)
+
+	faultyEvalStore := &transientBudgetCounterStore{Store: eval.store}
+	eval.store = faultyEvalStore
+
+	// Arm the transient store fault during DispatchAgentStop (after the HTTP
+	// handler gate has already admitted the reincarnation).
+	disp := &exhaustOnStopDispatcher{
+		reincarnateTestDispatcher: baseDisp,
+		onStop: func() {
+			faultyEvalStore.armed.Store(true)
+		},
+	}
+	srv.SetDispatcher(disp)
+
+	agent := newReincarnateTestAgent(t, s, proj, brk, nil)
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{Image: "patched-image:v9"})
+	require.Equal(t, http.StatusAccepted, rec.Code, "handler must admit while under cap: %s", rec.Body.String())
+
+	settled := waitForReincarnationSettled(t, s, agent.ID)
+	assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State, "O1: transient error must not strand agent stopped: %s", settled.Error)
+	assert.GreaterOrEqual(t, eval.EvalErrors(), int64(1), "O1: transient error must be counted on evaluator")
+
+	stops, reprovisions, starts := dispatcherCalls(baseDisp)
+	assert.Equal(t, 1, stops)
+	assert.Equal(t, 1, reprovisions)
+	assert.Equal(t, 1, starts, "O1: agent must proceed to DispatchAgentStart despite transient store error")
 }
 
 // ingestGroupTokensForAdmissionTest ingests a usage event attributed to
