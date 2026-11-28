@@ -33,7 +33,8 @@ export class ScionMarkdownPreview extends LitElement {
 
   /**
    * Show only images served by this page's origin (relative, same-origin
-   * and data: images); others are replaced by their alt text.
+   * and data: images); off-origin http(s) images are replaced by openable
+   * links (or plain text if nested in a link or using another scheme).
    */
   @property({ type: Boolean, attribute: 'same-origin-images' })
   sameOriginImages = false;

@@ -385,7 +385,7 @@ export class ScionChatInteragentMarker extends LitElement {
   private async renderMarkdownBody(text: string): Promise<HTMLElement | null> {
     try {
       const renderer = await getMarkdownRenderer();
-      const fragment = renderer.renderFragment(text);
+      const fragment = renderer.renderFragment(text, { sameOriginImagesOnly: true });
       if (fragment.hasChildNodes()) {
         const content = document.createElement('div');
         content.className = 'ia-full-body';

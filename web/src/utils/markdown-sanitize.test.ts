@@ -94,14 +94,27 @@ describe('renderFragment removes disallowed markup', () => {
     expect(fragment.querySelector('img')?.getAttribute('src')).toBe('/x.png');
   });
 
-  it('drops disallowed images the same way with the image rule on', () => {
+  it('replaces disallowed off-origin images safely with links or plain text', () => {
     const fragment = renderer.renderFragment(
-      '<img src="https://elsewhere.example/a.png" onerror="alert(1)" alt="alt"><img src="/x.png" onerror="alert(1)">',
+      '<img src="https://elsewhere.example/a.png" onerror="alert(1)" alt="alt">' +
+        '<img srcset="https://elsewhere.example/hi.png 2x" alt="hi">' +
+        '<img srcset="javascript:alert(1) 2x" alt="bad">' +
+        '<img src="/x.png" onerror="alert(1)">',
       { sameOriginImagesOnly: true }
     );
     expect(disallowedLeft(fragment)).toEqual([]);
     expect(Array.from(fragment.querySelectorAll('img')).map((i) => i.getAttribute('src'))).toEqual([
       '/x.png',
     ]);
+    const links = Array.from(fragment.querySelectorAll('a'));
+    expect(links.map((a) => [a.getAttribute('href'), a.textContent])).toEqual([
+      ['https://elsewhere.example/a.png', 'alt'],
+      ['https://elsewhere.example/hi.png', 'hi'],
+    ]);
+    for (const a of links) {
+      expect(a.getAttribute('target')).toBe('_blank');
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer');
+    }
+    expect(fragment.textContent).toContain('bad');
   });
 });
