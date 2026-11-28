@@ -432,33 +432,6 @@ func routeMetadataKeys(t *testing.T) map[string]bool {
 	return keys
 }
 
-// catalogAndExemptionPatterns returns the combined set of path patterns from
-// all catalog entry points and all entry-point exemptions. For catalog entry
-// points, only the Pattern (without method prefix) is used.
-func catalogAndExemptionPatterns() map[string]bool {
-	patterns := make(map[string]bool)
-
-	for _, spec := range Catalog {
-		for _, ep := range spec.EntryPoints {
-			patterns[ep.Pattern] = true
-			// Also add method-qualified pattern for matching route-metadata
-			// keys that use "METHOD /path" format.
-			if ep.Method != "" {
-				patterns[ep.Method+" "+ep.Pattern] = true
-			}
-		}
-	}
-	for _, ex := range EntryPointExemptions {
-		// Store both the raw pattern and the path-only form.
-		patterns[ex.Pattern] = true
-		pat := ex.Pattern
-		if idx := strings.Index(pat, " "); idx >= 0 {
-			patterns[pat[idx+1:]] = true
-		}
-	}
-	return patterns
-}
-
 // normalizeTrailingSlash converts a route-metadata trailing-slash pattern
 // to the base prefix for matching. "/api/v1/agents/" → "/api/v1/agents/".
 // Non-trailing-slash patterns are returned as-is.
@@ -469,26 +442,37 @@ func normalizeTrailingSlash(pattern string) (base string, hasTrailingSlash bool)
 	return pattern, false
 }
 
-// TestEntryPointsCoverRouteMetadata verifies every route-metadata entry is
-// covered by either a catalog entry-point pattern or an EntryPointExemption
-// pattern. This is the R2 automated bidirectional reconciliation gate.
+// TestEntryPointsCoverRouteMetadata verifies every route-metadata entry and
+// every concrete sub-route dispatched under covered trailing-slash prefixes
+// (artifacts, agents, projects) is covered by a catalog entry point, an
+// EntryPointExemption, or (for sub-routes) PendingBearerDispositions. This is
+// the R2 automated bidirectional reconciliation gate.
 //
-// Route-metadata trailing-slash patterns (e.g., "/api/v1/agents/") are
-// covered when any catalog or exemption pattern starts with the same prefix
-// (e.g., "/api/v1/agents/{id}", "/api/v1/agents/{id}/attach"). This accounts
-// for the parameterized-vs-trailing-slash difference documented in F-AF1-01.
+// Route-metadata trailing-slash patterns are checked with owner-scoped and
+// method-aware matching so a more-specific route or a different HTTP method
+// never masks an uncovered prefix, and concrete sub-routes under covered
+// prefixes are verified individually so one covered operation under a prefix
+// (e.g. GET /api/v1/artifacts/{id}) never hides uncovered sibling operations
+// (ptone/scion#4883).
 func TestEntryPointsCoverRouteMetadata(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
-	covered := catalogAndExemptionPatterns()
+	cov := newRouteCoverageSet(Catalog, EntryPointExemptions, PendingBearerDispositions)
 
-	uncoveredRoutes := findUncoveredRoutes(routeKeys, covered)
+	uncoveredRoutes := findUncoveredRoutes(routeKeys, cov)
 	if len(uncoveredRoutes) > 0 {
 		t.Errorf("route-metadata entries not covered by any catalog operation or exemption (%d/%d):\n  %s",
 			len(uncoveredRoutes), len(routeKeys), strings.Join(uncoveredRoutes, "\n  "))
 	}
 
-	t.Logf("route-metadata reconciliation: %d routes, %d covered, %d catalog+exemption patterns",
-		len(routeKeys), len(routeKeys)-len(uncoveredRoutes), len(covered))
+	subRoutes := discoverPrefixSubRoutes(t, findRepoRoot(t))
+	uncoveredSubRoutes := findUncoveredSubRoutes(subRoutes, cov)
+	if len(uncoveredSubRoutes) > 0 {
+		t.Errorf("sub-routes under covered prefixes with no catalog entry, exemption, or pending entry (%d/%d):\n  %s",
+			len(uncoveredSubRoutes), len(subRoutes), strings.Join(uncoveredSubRoutes, "\n  "))
+	}
+
+	t.Logf("route-metadata reconciliation: %d routes (%d covered), %d prefix sub-routes (%d covered)",
+		len(routeKeys), len(routeKeys)-len(uncoveredRoutes), len(subRoutes), len(subRoutes)-len(uncoveredSubRoutes))
 }
 
 // TestStaleExemptionDetection verifies that no exemption pattern references a
@@ -777,44 +761,6 @@ func TestGenerateCoverageReport(t *testing.T) {
 // gate tests and the proof tests. Each proof test injects a violation into
 // production-derived data and calls the same helper that the gate test uses.
 // ---------------------------------------------------------------------------
-
-// findUncoveredRoutes returns route-metadata keys not covered by any catalog
-// entry-point or exemption pattern. Used by TestEntryPointsCoverRouteMetadata
-// and TestProofUnclassifiedEntryPointDetected.
-func findUncoveredRoutes(routeKeys map[string]bool, covered map[string]bool) []string {
-	var uncovered []string
-	for route := range routeKeys {
-		// For method-prefixed routes ("GET /api/v1/foo"), check
-		// both the full key and the path-only form.
-		pathOnly := stripMethodPrefix(route)
-
-		base, hasSuffix := normalizeTrailingSlash(pathOnly)
-		if hasSuffix {
-			found := false
-			// Check trailing-slash match against covered patterns.
-			if covered[base] || covered[route] {
-				found = true
-			}
-			if !found {
-				for pat := range covered {
-					patPath := stripMethodPrefix(pat)
-					if strings.HasPrefix(patPath, base) {
-						found = true
-						break
-					}
-				}
-			}
-			if !found {
-				uncovered = append(uncovered, route)
-			}
-		} else {
-			if !covered[route] && !covered[pathOnly] {
-				uncovered = append(uncovered, route)
-			}
-		}
-	}
-	return uncovered
-}
 
 // knownNonRouteExemptions lists exemption patterns that are valid but do not
 // correspond to routeMetadataTable keys (OIDC, agent identity token).
@@ -1380,14 +1326,14 @@ func TestCatalogBasePermissionSemanticsAssertive(t *testing.T) {
 // derived route keys and calls findUncoveredRoutes.
 func TestProofUnclassifiedEntryPointDetected(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
-	covered := catalogAndExemptionPatterns()
+	cov := newRouteCoverageSet(Catalog, EntryPointExemptions, PendingBearerDispositions)
 
 	// Inject a fake route into production-derived data
 	fakeRoute := "/api/v1/proof/unclassified-route"
 	routeKeys[fakeRoute] = true
 
 	// Call the same production helper used by TestEntryPointsCoverRouteMetadata
-	uncovered := findUncoveredRoutes(routeKeys, covered)
+	uncovered := findUncoveredRoutes(routeKeys, cov)
 
 	found := false
 	for _, u := range uncovered {
