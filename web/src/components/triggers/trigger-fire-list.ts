@@ -210,6 +210,10 @@ export class ScionTriggerFireList extends LitElement {
     return found ? found.name : triggerId.slice(0, 8);
   }
 
+  private isNotifyFire(fire: TriggerFire): boolean {
+    return fire.actionType === 'notify' || (fire.actionIndex !== undefined && fire.actionIndex < 0);
+  }
+
   private filteredFires(): TriggerFire[] {
     const q = this.filterReason.trim().toLowerCase();
     if (!q) return this.fires;
@@ -397,47 +401,58 @@ export class ScionTriggerFireList extends LitElement {
                     </tr>
                   </thead>
                   <tbody>
-                    ${visibleFires.map(
-                      (fire) => html`
+                    ${visibleFires.map((fire) => {
+                      const isNotify = this.isNotifyFire(fire);
+                      return html`
                         <tr data-fire-row=${fire.id}>
                           <td title=${formatInstantWithZone(fire.startedAt)}>
                             ${formatRelative(fire.startedAt)}
                           </td>
                           <td>
                             <div>${this.triggerNameFor(fire.triggerId)}</div>
-                            ${fire.actionType
+                            ${isNotify
                               ? html`
-                                  <div class="muted">
-                                    ${fire.actionType}${fire.actionIndex !== undefined
-                                      ? ` #${fire.actionIndex + 1}`
-                                      : ''}
+                                  <div class="muted" data-fire-action-label=${fire.id}>
+                                    notification (agent sink)
                                   </div>
                                 `
-                              : nothing}
+                              : fire.actionType
+                                ? html`
+                                    <div class="muted" data-fire-action-label=${fire.id}>
+                                      ${fire.actionType}${fire.actionIndex !== undefined
+                                        ? ` #${fire.actionIndex + 1}`
+                                        : ''}
+                                    </div>
+                                  `
+                                : nothing}
                           </td>
                           <td>
-                            <button
-                              type="button"
-                              class="link-btn"
-                              data-inspect-event=${fire.eventId}
-                              @click=${() => {
-                                this.dispatchEvent(
-                                  new CustomEvent<{ eventId: string }>('inspect-event', {
-                                    detail: { eventId: fire.eventId },
-                                    bubbles: true,
-                                    composed: true,
-                                  })
-                                );
-                              }}
-                            >
-                              ${fire.eventId.slice(0, 8)}
-                            </button>
+                            ${isNotify
+                              ? html`<span class="muted" data-fire-no-event=${fire.id}>—</span>`
+                              : html`
+                                  <button
+                                    type="button"
+                                    class="link-btn"
+                                    data-inspect-event=${fire.eventId}
+                                    @click=${() => {
+                                      this.dispatchEvent(
+                                        new CustomEvent<{ eventId: string }>('inspect-event', {
+                                          detail: { eventId: fire.eventId },
+                                          bubbles: true,
+                                          composed: true,
+                                        })
+                                      );
+                                    }}
+                                  >
+                                    ${fire.eventId.slice(0, 8)}
+                                  </button>
+                                `}
                           </td>
                           <td>${this.renderStatusDetails(fire)}</td>
                           <td>${this.renderOutcome(fire)}</td>
                         </tr>
-                      `
-                    )}
+                      `;
+                    })}
                   </tbody>
                 </table>
               </div>

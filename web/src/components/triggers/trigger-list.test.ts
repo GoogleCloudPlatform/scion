@@ -579,4 +579,257 @@ describe('scion-trigger-list', () => {
       expectedRevision: 7,
     });
   });
+
+  it('round-trips notify settings on create and PATCH (edit, clear agent, outcomes) and omits notify when unchanged', async () => {
+    const stored: TriggerDefinition = {
+      id: 'tr-notify',
+      projectId: 'proj-1',
+      name: 'deploy-rule',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: { types: ['webhook.received'], rules: [] },
+      actions: [{ type: 'message', agentId: 'ag-1', message: 'hello' }],
+      subject: { mode: 'new' },
+      notify: {
+        onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+        userNotice: false,
+        agentId: 'ag-2',
+        agentName: 'triage-agent',
+      },
+      status: 'active',
+      authorizationRevision: 5,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T05:00:00Z',
+      updatedAt: '2026-11-28T05:00:00Z',
+    };
+
+    const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST' || init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          requests.push({
+            method: init.method,
+            body: JSON.parse(rawBody) as Record<string, unknown>,
+          });
+          return Promise.resolve(jsonResponse(stored, init.method === 'POST' ? 201 : 200));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [stored], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    el.agents = [
+      { id: 'ag-1', name: 'ops-agent' },
+      { id: 'ag-2', name: 'triage-agent' },
+    ];
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Create with custom notify (userNotice false, agent ag-2, skipped enabled).
+    el.openCreateDialog('webhook');
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'deploy-rule';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const srcInput = el.shadowRoot?.querySelector('[data-trigger-source-id]') as HTMLInputElement;
+    srcInput.value = 'ep-1';
+    srcInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+
+    const createNotifyEditor = el.shadowRoot?.querySelector('scion-trigger-notify-editor');
+    createNotifyEditor?.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+            userNotice: false,
+            agentId: 'ag-2',
+            agentName: 'triage-agent',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[0]?.method).toBe('POST');
+    expect(requests[0]?.body['notify']).toEqual({
+      onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+      userNotice: false,
+      agentId: 'ag-2',
+      agentName: 'triage-agent',
+    });
+
+    // 2. Open edit dialog: stored values are hydrated into notify editor.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-notify"]') as HTMLElement).click();
+    await el.updateComplete;
+    const editNotifyEditor = el.shadowRoot?.querySelector(
+      'scion-trigger-notify-editor'
+    ) as HTMLElement & {
+      notify: { onOutcomes?: string[]; userNotice?: boolean; agentId?: string; agentName?: string };
+    };
+    expect(editNotifyEditor.notify).toEqual({
+      onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+      userNotice: false,
+      agentId: 'ag-2',
+      agentName: 'triage-agent',
+    });
+
+    // 3. Rename only -> PATCH must NOT include notify.
+    const editName = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    editName.value = 'deploy-rule-v2';
+    editName.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[1]?.method).toBe('PATCH');
+    expect(requests[1]?.body).toEqual({
+      name: 'deploy-rule-v2',
+      expectedRevision: 5,
+    });
+
+    // 4. Clear agent, re-enable userNotice, remove skipped -> PATCH sends explicit empty agentId/agentName.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-notify"]') as HTMLElement).click();
+    await el.updateComplete;
+    const patchNotifyEditor = el.shadowRoot?.querySelector('scion-trigger-notify-editor');
+    patchNotifyEditor?.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused'],
+            userNotice: true,
+            agentId: '',
+            agentName: '',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[2]?.method).toBe('PATCH');
+    expect(requests[2]?.body).toEqual({
+      expectedRevision: 5,
+      notify: {
+        onOutcomes: ['failed', 'refused'],
+        userNotice: true,
+        agentId: '',
+        agentName: '',
+      },
+    });
+  });
+
+  it('shows hub notify refusal inline and keeps the dialog open', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: 'forbidden',
+                  message: 'caller is not allowed to message agent restricted-agent',
+                },
+              },
+              403
+            )
+          );
+        }
+        return Promise.resolve(jsonResponse({ triggers: [], totalCount: 0 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    el.agents = [{ id: 'ag-restricted', name: 'restricted-agent' }];
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    el.openCreateDialog('webhook');
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'forbidden-notify-rule';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const srcInput = el.shadowRoot?.querySelector('[data-trigger-source-id]') as HTMLInputElement;
+    srcInput.value = 'ep-1';
+    srcInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+
+    const notifyEditor = el.shadowRoot?.querySelector('scion-trigger-notify-editor');
+    notifyEditor?.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused', 'expired'],
+            userNotice: true,
+            agentId: 'ag-restricted',
+            agentName: 'restricted-agent',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot?.querySelector('[data-trigger-dialog]');
+    expect(dialog?.hasAttribute('open')).toBe(true);
+    const errAlert = el.shadowRoot?.querySelector('[data-trigger-form-error]');
+    expect(errAlert?.textContent).toContain(
+      'caller is not allowed to message agent restricted-agent'
+    );
+  });
+
+  it('renders notify editor read-only for rules with read-only action types', async () => {
+    const readonlyRule: TriggerDefinition = {
+      ...execTrigger,
+      notify: {
+        onOutcomes: ['failed', 'refused'],
+        userNotice: true,
+        agentId: 'ag-1',
+        agentName: 'ops-agent',
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ triggers: [readonlyRule], totalCount: 1 }))
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    el.agents = [{ id: 'ag-1', name: 'ops-agent' }];
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-exec"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    const notifyEditor = el.shadowRoot?.querySelector(
+      'scion-trigger-notify-editor'
+    ) as HTMLElement & { readonly: boolean; updateComplete: Promise<boolean> };
+    expect(notifyEditor).toBeTruthy();
+    expect(notifyEditor.readonly).toBe(true);
+    await notifyEditor.updateComplete;
+    expect(
+      notifyEditor.shadowRoot?.querySelector('[data-notify-user-notice]')?.hasAttribute('disabled')
+    ).toBe(true);
+    expect(
+      notifyEditor.shadowRoot?.querySelector('[data-notify-agent-select]')?.hasAttribute('disabled')
+    ).toBe(true);
+  });
 });

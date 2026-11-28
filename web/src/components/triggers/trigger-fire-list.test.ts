@@ -176,4 +176,84 @@ describe('scion-trigger-fire-list', () => {
     expect(el.shadowRoot?.querySelector('[data-fire-row="f-fresh"]')).toBeTruthy();
     expect(el.shadowRoot?.querySelector('[data-fire-row="f-stale"]')).toBeNull();
   });
+
+  it('renders notify agent-sink rows as notification without an event link while preserving status and reason', async () => {
+    const fires = [
+      {
+        id: 'f-notify-ok',
+        triggerId: 'tr-1',
+        eventId: 'bucket-uuid-no-event-row-1',
+        projectId: 'proj-1',
+        actionType: 'notify',
+        actionIndex: -1,
+        status: 'fired',
+        resultRef: 'msg-123',
+        startedAt: '2026-11-28T10:00:00Z',
+      },
+      {
+        id: 'f-notify-fail',
+        triggerId: 'tr-1',
+        eventId: 'bucket-uuid-no-event-row-2',
+        projectId: 'proj-1',
+        actionType: 'notify',
+        actionIndex: -1,
+        status: 'refused',
+        error: 'author no longer permitted to message agent ops-agent',
+        startedAt: '2026-11-28T09:50:00Z',
+      },
+      {
+        id: 'f-normal',
+        triggerId: 'tr-1',
+        eventId: 'ev-real-1234',
+        projectId: 'proj-1',
+        actionType: 'message',
+        actionIndex: 0,
+        status: 'failed',
+        error: 'target offline',
+        startedAt: '2026-11-28T09:40:00Z',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ fires, totalCount: fires.length }))
+    );
+
+    const el = document.createElement('scion-trigger-fire-list') as ScionTriggerFireList;
+    el.projectId = 'proj-1';
+    const inspected: string[] = [];
+    el.addEventListener('inspect-event', (e) => {
+      inspected.push((e as CustomEvent<{ eventId: string }>).detail.eventId);
+    });
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // Notify rows render as "notification (agent sink)", never "notify #0".
+    const notifyLabelOk = el.shadowRoot?.querySelector('[data-fire-action-label="f-notify-ok"]');
+    expect(notifyLabelOk?.textContent?.trim()).toBe('notification (agent sink)');
+    expect(el.shadowRoot?.textContent).not.toContain('notify #0');
+
+    // Notify rows have no event link / inspect button and never trigger event lookups.
+    const notifyRowOk = el.shadowRoot?.querySelector('[data-fire-row="f-notify-ok"]');
+    expect(notifyRowOk?.querySelector('[data-inspect-event]')).toBeNull();
+    expect(notifyRowOk?.querySelector('[data-fire-no-event="f-notify-ok"]')).toBeTruthy();
+
+    const notifyRowFail = el.shadowRoot?.querySelector('[data-fire-row="f-notify-fail"]');
+    expect(notifyRowFail?.querySelector('[data-inspect-event]')).toBeNull();
+    expect(notifyRowFail?.querySelector('[data-fire-status="refused"]')).toBeTruthy();
+    expect(
+      notifyRowFail?.querySelector('[data-fire-error="f-notify-fail"]')?.textContent
+    ).toContain('author no longer permitted to message agent ops-agent');
+
+    // Normal action row still renders actionIndex + 1 and clickable event link.
+    const normalLabel = el.shadowRoot?.querySelector('[data-fire-action-label="f-normal"]');
+    expect(normalLabel?.textContent?.trim()).toBe('message #1');
+    const normalEventBtn = el.shadowRoot?.querySelector(
+      '[data-inspect-event="ev-real-1234"]'
+    ) as HTMLButtonElement;
+    expect(normalEventBtn).toBeTruthy();
+    normalEventBtn.click();
+    expect(inspected).toEqual(['ev-real-1234']);
+  });
 });

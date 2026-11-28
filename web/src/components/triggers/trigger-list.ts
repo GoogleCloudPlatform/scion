@@ -39,6 +39,7 @@ import {
   type TriggerActionSpec,
   type TriggerDefinition,
   type TriggerMatchRuleSpec,
+  type TriggerNotifySpec,
   type TriggerRenderResponse,
   type TriggerRenderSlotResult,
   type TriggerRuleRowError,
@@ -53,8 +54,14 @@ import {
   type SourceIdMode,
 } from './source-extensions.js';
 import { createDefaultMessageAction } from './action-editor.js';
+import {
+  DEFAULT_NOTIFY_OUTCOMES,
+  createDefaultNotifySpec,
+  normalizeNotifySpec,
+} from './notify-editor.js';
 import './where-editor.js';
 import './action-editor.js';
+import './notify-editor.js';
 
 @customElement('scion-trigger-list')
 export class ScionTriggerList extends LitElement {
@@ -111,6 +118,7 @@ export class ScionTriggerList extends LitElement {
   @state() private formCoalesceWindow = '';
   @state() private formMaxFiresPerMinute = '';
   @state() private formMaxConcurrentDispatches = '';
+  @state() private formNotify: TriggerNotifySpec = createDefaultNotifySpec();
   @state() private formAuthoringPane: 'form' | 'cel' = 'cel';
   @state() private formAuthoringValid = true;
   @state() private formAuthoringErrors: string[] = [];
@@ -371,6 +379,7 @@ export class ScionTriggerList extends LitElement {
     this.formCoalesceWindow = '';
     this.formMaxFiresPerMinute = '';
     this.formMaxConcurrentDispatches = '';
+    this.formNotify = createDefaultNotifySpec();
     this.formPresetId = presetId;
     this.formError = null;
     this.whereRowErrors = {};
@@ -417,6 +426,7 @@ export class ScionTriggerList extends LitElement {
     this.formMaxConcurrentDispatches = tr.maxConcurrentDispatches
       ? String(tr.maxConcurrentDispatches)
       : '';
+    this.formNotify = normalizeNotifySpec(tr.notify);
     this.formPresetId = '';
     this.formError = null;
     this.whereRowErrors = {};
@@ -568,7 +578,42 @@ export class ScionTriggerList extends LitElement {
       body['maxConcurrentDispatches'] = nextConc;
     }
 
+    const hasReadOnly = this.formActions.some((a) => this.isReadOnlyActionType(a.type));
+    if (!hasReadOnly) {
+      const nextNotify = normalizeNotifySpec(this.formNotify);
+      const origNotify = normalizeNotifySpec(orig.notify);
+      if (!canonicalDeepEqual(nextNotify, origNotify)) {
+        body['notify'] = this.buildNotifyPayload(this.formNotify, true);
+      }
+    }
+
     return body;
+  }
+
+  /**
+   * Builds a Hub-compatible TriggerNotifySpec / TriggerNotifyPatchSpec payload.
+   * On PATCH, explicit empty strings for agentId/agentName clear the stored agent sink.
+   */
+  private buildNotifyPayload(spec: TriggerNotifySpec, forPatch: boolean): Record<string, unknown> {
+    const normalized = normalizeNotifySpec(spec);
+    const outcomes =
+      normalized.onOutcomes && normalized.onOutcomes.length > 0
+        ? [...normalized.onOutcomes]
+        : [...DEFAULT_NOTIFY_OUTCOMES];
+    const payload: Record<string, unknown> = {
+      onOutcomes: outcomes,
+      userNotice: normalized.userNotice !== false,
+    };
+    const agentId = (normalized.agentId ?? '').trim();
+    const agentName = (normalized.agentName ?? '').trim();
+    if (forPatch) {
+      payload['agentId'] = agentId;
+      payload['agentName'] = agentName;
+    } else {
+      if (agentId) payload['agentId'] = agentId;
+      if (agentName) payload['agentName'] = agentName;
+    }
+    return payload;
   }
 
   /**
@@ -668,6 +713,8 @@ export class ScionTriggerList extends LitElement {
       ) {
         body['maxConcurrentDispatches'] = maxConc;
       }
+
+      body['notify'] = this.buildNotifyPayload(this.formNotify, false);
     }
 
     this.saving = true;
@@ -824,6 +871,17 @@ export class ScionTriggerList extends LitElement {
       if (found) return `webhook: ${found.name}`;
     }
     return `${source.kind}: ${source.id}`;
+  }
+
+  private formatNotifySummary(notify?: TriggerNotifySpec): string {
+    const norm = normalizeNotifySpec(notify);
+    const parts: string[] = [];
+    parts.push(`User notice: ${norm.userNotice !== false ? 'on' : 'off'}`);
+    if (norm.agentName || norm.agentId) {
+      parts.push(`Agent: ${norm.agentName || norm.agentId}`);
+    }
+    parts.push(`On: ${(norm.onOutcomes ?? DEFAULT_NOTIFY_OUTCOMES).join(', ')}`);
+    return parts.join(' · ');
   }
 
   private renderSlotPreview(label: string, slot: TriggerRenderSlotResult | undefined) {
@@ -1033,6 +1091,12 @@ export class ScionTriggerList extends LitElement {
                                         : nothing}
                                     </div>
                                   </div>
+                                  <div>
+                                    <div class="detail-label">Notify on Failure</div>
+                                    <div class="rule-meta" data-trigger-notify-summary=${tr.id}>
+                                      ${this.formatNotifySummary(tr.notify)}
+                                    </div>
+                                  </div>
                                 </div>
                               </td>
                             </tr>
@@ -1067,7 +1131,7 @@ export class ScionTriggerList extends LitElement {
         <div class="dialog-form">
           ${this.formError
             ? html`
-                <sl-alert variant="danger" open>
+                <sl-alert variant="danger" open data-trigger-form-error>
                   <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
                   ${this.formError}
                 </sl-alert>
@@ -1313,6 +1377,16 @@ export class ScionTriggerList extends LitElement {
               }}
             ></sl-input>
           </div>
+
+          <div class="section-divider">Notify on Failure</div>
+          <scion-trigger-notify-editor
+            .notify=${this.formNotify}
+            .agents=${this.agents}
+            .readonly=${this.formActions.some((a) => this.isReadOnlyActionType(a.type))}
+            @notify-changed=${(e: CustomEvent<{ notify: TriggerNotifySpec }>) => {
+              this.formNotify = e.detail.notify;
+            }}
+          ></scion-trigger-notify-editor>
           ${formExt &&
           this.formAuthoringPane === 'form' &&
           !this.formAuthoringValid &&
