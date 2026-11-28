@@ -215,6 +215,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_preview.go:resolveSinglePrincipal:GetEffectiveGroupsForAgent":            "preview: selects principals a constraint would narrow",
 	"handlers_agent_message_mode.go:handleSetMessageMode:GetProjectMembership":                  "narrowing: denies project admins (D7); can only refuse, never grant",
 	"quota.go:resolveEffectiveLimitWithSource:GetUserGroups":                                    "restriction: quota limits by group",
+	"quota.go:loadSubjectBindings:GetUserGroups":                                                "restriction: token budget limits by group",
 	"membership_loss.go:membershipExpiryScan:ListAllRoleBindings":                               "revocation: finds expired bindings to process membership loss",
 	"handlers_groups.go:authorizeGroupMemberGrant:GetGroupMembership":                           "group governance: the caller's group role (not a role binding); the grant itself goes through CanDelegate with the grantee",
 	"handlers_groups.go:removeGroupMember:GetGroupMembership":                                   "group governance: the caller's group role for a removal",
