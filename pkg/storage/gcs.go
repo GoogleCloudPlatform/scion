@@ -16,11 +16,14 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -548,6 +551,136 @@ func (s *GCSStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Object
 	}, nil
 }
 
+// gcsMaxComposeSources is the GCS API limit on source objects per Compose call.
+const gcsMaxComposeSources = 32
+
+// Compose implements Composer using GCS object composition. When len(srcs)
+// exceeds GCS's 32-source limit, Compose runs a tree compose using temporary
+// intermediate objects and deletes all intermediates before returning.
+func (s *GCSStorage) Compose(ctx context.Context, dst string, srcs []string, opts UploadOptions) (*Object, error) {
+	dstClean := strings.TrimPrefix(dst, "/")
+	if dstClean == "" || len(srcs) == 0 {
+		return nil, ErrInvalidPath
+	}
+	current := make([]string, len(srcs))
+	for i, src := range srcs {
+		srcClean := strings.TrimPrefix(src, "/")
+		if srcClean == "" {
+			return nil, ErrInvalidPath
+		}
+		current[i] = srcClean
+	}
+
+	if len(current) <= gcsMaxComposeSources {
+		attrs, err := s.composeBatch(ctx, dstClean, current, &opts)
+		if err != nil {
+			return nil, err
+		}
+		return gcsAttrsToObject(dstClean, attrs), nil
+	}
+
+	var randBuf [8]byte
+	if _, err := rand.Read(randBuf[:]); err != nil {
+		return nil, fmt.Errorf("failed to generate compose token: %w", err)
+	}
+	runID := hex.EncodeToString(randBuf[:])
+
+	// Place intermediates alongside the first source (e.g. under
+	// uploads-staging/{hub}/{sid}/) so a crash before cleanup is still caught
+	// by both the session sweeper and the staging bucket lifecycle rule.
+	interDir := path.Dir(current[0])
+	if interDir == "." || interDir == "/" {
+		interDir = path.Dir(dstClean)
+	}
+
+	var intermediates []string
+	defer func() {
+		if len(intermediates) == 0 {
+			return
+		}
+		cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, name := range intermediates {
+			_ = s.bucket.Object(name).Delete(cleanCtx)
+		}
+	}()
+
+	for level := 0; len(current) > gcsMaxComposeSources; level++ {
+		next := make([]string, 0, (len(current)+gcsMaxComposeSources-1)/gcsMaxComposeSources)
+		for batchIdx, start := 0, 0; start < len(current); batchIdx, start = batchIdx+1, start+gcsMaxComposeSources {
+			end := start + gcsMaxComposeSources
+			if end > len(current) {
+				end = len(current)
+			}
+			batch := current[start:end]
+			if len(batch) == 1 {
+				next = append(next, batch[0])
+				continue
+			}
+			leaf := fmt.Sprintf(".compose-%s-l%d-b%d", runID, level, batchIdx)
+			interName := leaf
+			if interDir != "" && interDir != "." && interDir != "/" {
+				interName = interDir + "/" + leaf
+			}
+			intermediates = append(intermediates, interName)
+			if _, err := s.composeBatch(ctx, interName, batch, nil); err != nil {
+				return nil, err
+			}
+			next = append(next, interName)
+		}
+		current = next
+	}
+
+	attrs, err := s.composeBatch(ctx, dstClean, current, &opts)
+	if err != nil {
+		return nil, err
+	}
+	return gcsAttrsToObject(dstClean, attrs), nil
+}
+
+func (s *GCSStorage) composeBatch(ctx context.Context, dstPath string, srcs []string, opts *UploadOptions) (*storage.ObjectAttrs, error) {
+	handles := make([]*storage.ObjectHandle, len(srcs))
+	for i, src := range srcs {
+		handles[i] = s.bucket.Object(src)
+	}
+	c := s.bucket.Object(dstPath).ComposerFrom(handles...)
+	if opts != nil {
+		if opts.ContentType != "" {
+			c.ContentType = opts.ContentType
+		}
+		if opts.CacheControl != "" {
+			c.CacheControl = opts.CacheControl
+		}
+		if opts.ContentDisposition != "" {
+			c.ContentDisposition = opts.ContentDisposition
+		}
+		if len(opts.Metadata) > 0 {
+			c.Metadata = opts.Metadata
+		}
+	}
+	attrs, err := c.Run(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to compose objects into %s: %w", dstPath, err)
+	}
+	return attrs, nil
+}
+
+func gcsAttrsToObject(name string, attrs *storage.ObjectAttrs) *Object {
+	return &Object{
+		Name:        name,
+		Size:        attrs.Size,
+		ContentType: attrs.ContentType,
+		ETag:        attrs.Etag,
+		Created:     attrs.Created,
+		Updated:     attrs.Updated,
+		Metadata:    attrs.Metadata,
+		Generation:  attrs.Generation,
+	}
+}
+
 // Close releases any resources held by the storage client.
 func (s *GCSStorage) Close() error {
 	return s.client.Close()
@@ -565,5 +698,8 @@ func isGCSPreconditionFailed(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed
 }
 
-// Ensure GCSStorage implements Storage interface.
-var _ Storage = (*GCSStorage)(nil)
+// Ensure GCSStorage implements Storage and Composer interfaces.
+var (
+	_ Storage  = (*GCSStorage)(nil)
+	_ Composer = (*GCSStorage)(nil)
+)
