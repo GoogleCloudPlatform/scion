@@ -726,15 +726,19 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		_, active := f.srv.githubCooldown().Active(githubfetch.AnonScope)
 		assert.True(t, active, "rate limit must activate shared cooldown for anon scope")
 
-		// Second anonymous create during cooldown -> skipped with 0 new outbound calls
+		// Second anonymous create during cooldown (at +30s, inside both memo and 120s cooldown) -> skipped with 0 new outbound calls
 		clockMu.Lock()
-		now = now.Add(60 * time.Second)
+		now = now.Add(30 * time.Second)
 		clockMu.Unlock()
 		rec2 := f.create(t, map[string]any{"name": "ag-rl-2", "task": "t", "template": "my-tmpl"})
 		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
 		assert.Equal(t, 1, fg.callCount(), "drift must skip while credential scope is cooling down")
 
-		// Now configure a project PAT (different credential scope): must NOT be blocked by anon cooldown
+		// Now advance past 60s scope memo TTL (still inside 120s anon cooldown) and configure a project PAT:
+		// must NOT be blocked by anon cooldown
+		clockMu.Lock()
+		now = now.Add(30 * time.Second)
+		clockMu.Unlock()
 		f.srv.SetSecretBackend(&importCredSecretBackend{
 			scope:     secret.ScopeProject,
 			projectID: f.project.ID,
@@ -747,7 +751,7 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		assert.Len(t, resp3.Warnings, 1, "different credential scope must not be blocked by anon cooldown")
 		assert.Greater(t, fg.callCount(), 1)
 
-		// Remove PAT (back to anon) and advance past 120s Retry-After -> anon retries
+		// Remove PAT (back to anon) and advance past both 60s memo TTL and 120s Retry-After -> anon retries
 		f.srv.SetSecretBackend(nil)
 		clockMu.Lock()
 		now = now.Add(61 * time.Second)
@@ -998,17 +1002,31 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		callsWithPAT := fg.callCount()
 		assert.Equal(t, 3, callsWithPAT)
 
-		// 2. Remove PAT and create again immediately (within 60s TTL):
+		// 2. A second anonymous project on the same repo within the 60s TTL:
 		// must NOT reuse PAT-scoped cache; must hit fake anonymously (404 -> fail-open, no warning)
-		f.srv.SetSecretBackend(nil)
-		rec2 := f.create(t, map[string]any{"name": "ag-anon-2", "task": "t", "template": "priv-tmpl"})
-		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
-		var resp2 CreateAgentResponse
-		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
-		assert.Empty(t, resp2.Warnings, "anonymous scope must not reuse PAT-scoped drift cache entry")
+		projB := &store.Project{
+			ID:        api.NewUUID(),
+			Name:      "anon-proj",
+			Slug:      "anon-proj",
+			GitRemote: "https://github.com/o/r.git",
+		}
+		require.NoError(t, f.s.CreateProject(context.Background(), projB))
+		tmplB := &store.Template{
+			ID:           api.NewUUID(),
+			Name:         "priv-tmpl",
+			Slug:         "priv-tmpl",
+			Scope:        store.TemplateScopeProject,
+			ScopeID:      projB.ID,
+			SourceURL:    "https://github.com/o/r/tree/main/.scion/templates/my-tmpl",
+			SourceCommit: commitOld,
+		}
+		targetB := f.srv.resolveTemplateDriftTarget(projB, tmplB)
+		require.NotNil(t, targetB)
+		warnB := f.srv.checkTemplateDrift(context.Background(), projB, tmplB, targetB, "ag-anon-2")
+		assert.Empty(t, warnB, "anonymous scope must not reuse PAT-scoped drift cache entry")
 		assert.Greater(t, fg.callCount(), callsWithPAT, "anonymous check must miss PAT cache and query GitHub")
 		reqs := fg.snapshotReqs()
-		assert.Empty(t, reqs[len(reqs)-1].auth, "post-PAT-removal request must be anonymous")
+		assert.Empty(t, reqs[len(reqs)-1].auth, "anonymous project request must be anonymous")
 	})
 
 	t.Run("branch-key scope isolation even when anonymous commit tree is pre-cached", func(t *testing.T) {
@@ -1045,7 +1063,7 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		})
 		seedDriftTemplate(t, f, "branch-iso-tmpl", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
 
-		// 1. PAT check populates PAT-scoped branch entry and warns
+		// 1. PAT check on project A populates PAT-scoped branch entry and warns
 		rec1 := f.create(t, map[string]any{"name": "ag-biso-1", "task": "t", "template": "branch-iso-tmpl"})
 		require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
 		var resp1 CreateAgentResponse
@@ -1053,13 +1071,27 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		assert.Len(t, resp1.Warnings, 1)
 		callsWithPAT := fg.callCount()
 
-		// 2. Remove PAT: anonymous check must miss PAT's branch entry and re-resolve anonymously
-		f.srv.SetSecretBackend(nil)
-		rec2 := f.create(t, map[string]any{"name": "ag-biso-2", "task": "t", "template": "branch-iso-tmpl"})
-		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
-		var resp2 CreateAgentResponse
-		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
-		assert.Empty(t, resp2.Warnings, "anonymous scope must not reuse PAT branch cache entry")
+		// 2. Anonymous check on project B must miss PAT's branch entry and re-resolve anonymously
+		projB := &store.Project{
+			ID:        api.NewUUID(),
+			Name:      "biso-anon-proj",
+			Slug:      "biso-anon-proj",
+			GitRemote: "https://github.com/o/r.git",
+		}
+		require.NoError(t, f.s.CreateProject(context.Background(), projB))
+		tmplB := &store.Template{
+			ID:           api.NewUUID(),
+			Name:         "branch-iso-tmpl",
+			Slug:         "branch-iso-tmpl",
+			Scope:        store.TemplateScopeProject,
+			ScopeID:      projB.ID,
+			SourceURL:    "https://github.com/o/r/tree/main/.scion/templates/my-tmpl",
+			SourceCommit: commitOld,
+		}
+		targetB := f.srv.resolveTemplateDriftTarget(projB, tmplB)
+		require.NotNil(t, targetB)
+		warnB := f.srv.checkTemplateDrift(context.Background(), projB, tmplB, targetB, "ag-biso-2")
+		assert.Empty(t, warnB, "anonymous scope must not reuse PAT branch cache entry")
 		assert.Greater(t, fg.callCount(), callsWithPAT, "anonymous check must re-resolve ref anonymously")
 		reqs := fg.snapshotReqs()
 		assert.Empty(t, reqs[len(reqs)-1].auth)
@@ -1158,6 +1190,166 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		assert.Len(t, resp2.Warnings, 1)
 		assert.Equal(t, int64(1), mintCount.Load(), "warm drift cache hit must not mint another App token")
 		assert.Equal(t, callsAfterFirst, fg.callCount(), "warm drift cache hit must not make GitHub API calls")
+
+		// 3. Refused project B on the same installation (7201) and repo (o/r)
+		// must NEVER read project A's app:7201 cache entries.
+		fg.mu.Lock()
+		fg.override = func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return true
+			}
+			return false
+		}
+		fg.mu.Unlock()
+
+		projB := &store.Project{
+			ID:                   api.NewUUID(),
+			Name:                 "refused-app-proj",
+			Slug:                 "refused-app-proj",
+			GitRemote:            "https://github.com/o/r.git",
+			GitHubInstallationID: ptrInt64(installID),
+		}
+		require.NoError(t, f.s.CreateProject(context.Background(), projB))
+		tmplB := &store.Template{
+			ID:           api.NewUUID(),
+			Name:         "app-tmpl",
+			Slug:         "app-tmpl",
+			Scope:        store.TemplateScopeProject,
+			ScopeID:      projB.ID,
+			SourceURL:    "https://github.com/o/r/tree/main/.scion/templates/my-tmpl",
+			SourceCommit: commitOld,
+		}
+		targetB := f.srv.resolveTemplateDriftTarget(projB, tmplB)
+		require.NotNil(t, targetB)
+		warnB := f.srv.checkTemplateDrift(context.Background(), projB, tmplB, targetB, "ag-refused-b")
+		assert.Empty(t, warnB, "refused project B must never read authorized project A's app:7201 cache entries")
+		assert.Greater(t, fg.callCount(), callsAfterFirst, "refused project B must miss app:7201 cache and query anonymously")
+		reqsAfterB := fg.snapshotReqs()
+		assert.Empty(t, reqsAfterB[len(reqsAfterB)-1].auth)
+	})
+
+	t.Run("App unconfigured with installation ID and GITHUB_TOKEN caches under secret scope with zero extra lookups", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		var clockMu sync.Mutex
+		clock := func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		}
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		// Installation ID set on project, but AppID is 0 (App not configured).
+		f.project.GitHubInstallationID = ptrInt64(8801)
+		require.NoError(t, f.s.UpdateProject(context.Background(), f.project))
+
+		credBackend := &importCredSecretBackend{
+			scope:     secret.ScopeProject,
+			projectID: f.project.ID,
+			values:    map[string]string{"GITHUB_TOKEN": "ghp_fallback_when_app_unconfigured"},
+		}
+		f.srv.SetSecretBackend(credBackend)
+		seedDriftTemplate(t, f, "unconf-app-tmpl", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
+
+		// 1. Cold create resolves GITHUB_TOKEN, caches under secret scope (not app:8801), and warns
+		rec1 := f.create(t, map[string]any{"name": "ag-unconf-1", "task": "t", "template": "unconf-app-tmpl"})
+		require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Len(t, resp1.Warnings, 1)
+		callsAfter1 := fg.callCount()
+		secretGetsAfter1 := credBackend.gets
+		assert.Greater(t, secretGetsAfter1, 0)
+
+		// Verify no cache entry was stored under app:8801
+		f.srv.templateDrift.mu.Lock()
+		for k := range f.srv.templateDrift.branchItems {
+			assert.NotEqual(t, "app:8801", k.scope, "fallback credential result must never be stored under app:<id>")
+		}
+		for k := range f.srv.templateDrift.commitItems {
+			assert.NotEqual(t, "app:8801", k.scope, "fallback credential commit tree must never be stored under app:<id>")
+		}
+		f.srv.templateDrift.mu.Unlock()
+
+		// 2. Second create within 60s TTL: 0 API calls and 0 extra credential resolutions
+		clockMu.Lock()
+		now = now.Add(20 * time.Second)
+		clockMu.Unlock()
+		rec2 := f.create(t, map[string]any{"name": "ag-unconf-2", "task": "t", "template": "unconf-app-tmpl"})
+		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Len(t, resp2.Warnings, 1)
+		assert.Equal(t, callsAfter1, fg.callCount(), "second create within TTL must make 0 GitHub API calls")
+		assert.Equal(t, secretGetsAfter1, credBackend.gets, "second create within TTL must make 0 extra credential resolutions")
+	})
+
+	t.Run("App association refused or mint error memoizes fallback scope with zero extra mints, API calls, or Warns", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		var clockMu sync.Mutex
+		clock := func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		}
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		var resourceBuf bytes.Buffer
+		f.srv.resourceLog = slog.New(slog.NewTextHandler(&resourceBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+		// App configured with AppID != 0, installation ID set, no valid association -> mint fails and falls back to GITHUB_TOKEN
+		f.srv.mu.Lock()
+		f.srv.config.GitHubAppConfig.AppID = 999
+		f.srv.mu.Unlock()
+		f.project.GitHubInstallationID = ptrInt64(9901)
+		require.NoError(t, f.s.UpdateProject(context.Background(), f.project))
+		f.srv.SetSecretBackend(&importCredSecretBackend{
+			scope:     secret.ScopeProject,
+			projectID: f.project.ID,
+			values:    map[string]string{"GITHUB_TOKEN": "ghp_fallback_after_refusal"},
+		})
+		seedDriftTemplate(t, f, "refused-app-tmpl", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
+
+		// 1. Cold create: mint fails once (1 Warn), falls back to GITHUB_TOKEN, caches under secret scope, warns
+		rec1 := f.create(t, map[string]any{"name": "ag-ref-1", "task": "t", "template": "refused-app-tmpl"})
+		require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Len(t, resp1.Warnings, 1)
+		assert.Equal(t, 1, strings.Count(resourceBuf.String(), "GitHub App token mint failed"))
+		callsAfter1 := fg.callCount()
+
+		// Verify fallback result is never stored under app:9901
+		f.srv.templateDrift.mu.Lock()
+		for k := range f.srv.templateDrift.branchItems {
+			assert.NotEqual(t, "app:9901", k.scope)
+		}
+		for k := range f.srv.templateDrift.commitItems {
+			assert.NotEqual(t, "app:9901", k.scope)
+		}
+		f.srv.templateDrift.mu.Unlock()
+
+		// 2. Warm create within 60s TTL: 0 extra mints, 0 API calls, 0 additional Warns
+		clockMu.Lock()
+		now = now.Add(20 * time.Second)
+		clockMu.Unlock()
+		rec2 := f.create(t, map[string]any{"name": "ag-ref-2", "task": "t", "template": "refused-app-tmpl"})
+		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Len(t, resp2.Warnings, 1)
+		assert.Equal(t, callsAfter1, fg.callCount(), "warm create within TTL must make 0 GitHub API calls")
+		assert.Equal(t, 1, strings.Count(resourceBuf.String(), "GitHub App token mint failed"), "warm create within TTL must not log additional mint-failure Warns")
 	})
 }
 

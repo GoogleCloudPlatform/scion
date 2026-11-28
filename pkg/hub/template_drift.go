@@ -62,6 +62,21 @@ type templateDriftBranchEntry struct {
 	expiresAt    time.Time
 }
 
+// templateDriftCredScopeKey memoizes the actual Credential.EffectiveScope()
+// returned by Server.githubCredential per (projectID, owner, repo) for the
+// branch TTL. It is strictly per-project so one project's authorization result
+// is never reused for another project.
+type templateDriftCredScopeKey struct {
+	projectID string
+	owner     string // lowercased
+	repo      string // lowercased
+}
+
+type templateDriftCredScopeEntry struct {
+	scope     string
+	expiresAt time.Time
+}
+
 // templateDriftChecker caches GitHub ref and folder tree-SHA lookups for the
 // Hub-side template drift check at agent creation. Its zero value is ready for
 // use. Rate-limit cooldowns use the Hub's shared githubfetch.Cooldown
@@ -75,6 +90,9 @@ type templateDriftChecker struct {
 
 	// Ref resolution + folder tree-SHA TTL cache (60s TTL).
 	branchItems map[templateDriftKey]templateDriftBranchEntry
+
+	// Per-project memo of actual resolved Credential.EffectiveScope() (60s TTL).
+	credScopes map[templateDriftCredScopeKey]templateDriftCredScopeEntry
 
 	// Optional test seams; nil/zero select production defaults.
 	client   *githubfetch.Client
@@ -197,6 +215,54 @@ func (c *templateDriftChecker) setBranchTreeSHA(key templateDriftKey, commitSHA,
 	}
 }
 
+func (c *templateDriftChecker) getCredScope(key templateDriftCredScopeKey, now time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.credScopes[key]
+	if !ok {
+		return "", false
+	}
+	if !now.Before(entry.expiresAt) {
+		delete(c.credScopes, key)
+		return "", false
+	}
+	return entry.scope, true
+}
+
+func (c *templateDriftChecker) putCredScope(key templateDriftCredScopeKey, scope string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.credScopes == nil {
+		c.credScopes = make(map[templateDriftCredScopeKey]templateDriftCredScopeEntry)
+	}
+	if len(c.credScopes) >= templateDriftBranchMax {
+		for k, v := range c.credScopes {
+			if !now.Before(v.expiresAt) {
+				delete(c.credScopes, k)
+			}
+		}
+		if len(c.credScopes) >= templateDriftBranchMax {
+			var oldestKey templateDriftCredScopeKey
+			var oldestTime time.Time
+			first := true
+			for k, v := range c.credScopes {
+				if first || v.expiresAt.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = v.expiresAt
+					first = false
+				}
+			}
+			if !first {
+				delete(c.credScopes, oldestKey)
+			}
+		}
+	}
+	c.credScopes[key] = templateDriftCredScopeEntry{
+		scope:     scope,
+		expiresAt: now.Add(templateDriftBranchTTL),
+	}
+}
+
 func (s *Server) templateDriftLimits() githubfetch.Limits {
 	budget := s.templateDrift.effectiveBudget()
 	return githubfetch.Limits{
@@ -311,10 +377,24 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 		Repo:    src.Repo,
 		Quiet:   true,
 	}
-	// Compute the principal scope cheaply (no GitHub App token mint) so warm
-	// drift cache hits and active cooldowns never trigger token minting.
-	scope := s.githubCredentialScope(ctx, credReq)
+	scopeKey := templateDriftCredScopeKey{
+		projectID: project.ID,
+		owner:     ownerLower,
+		repo:      repoLower,
+	}
 	now := s.templateDrift.clock()
+
+	var (
+		cred        githubfetch.Credential
+		hasResolved bool
+	)
+	scope, hasScope := s.templateDrift.getCredScope(scopeKey, now)
+	if !hasScope {
+		cred = s.githubCredential(ctx, credReq)
+		hasResolved = true
+		scope = cred.EffectiveScope()
+		s.templateDrift.putCredScope(scopeKey, scope, now)
+	}
 
 	branchKey := templateDriftKey{
 		owner:     ownerLower,
@@ -374,21 +454,23 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 			return ""
 		}
 
-		// Resolve the full credential (including App token mint if applicable)
-		// only when an outbound GitHub API call is actually required.
-		cred := s.githubCredential(ctx, credReq)
-		if actualScope := cred.EffectiveScope(); actualScope != scope {
-			// App token minting fell through to a fallback credential (or anon);
-			// re-scope keys and cooldown check to the actual credential used.
-			scope = actualScope
-			branchKey.scope = scope
-			hasBranch = false
-			branchTree = ""
-			if _, cooling := s.githubCooldown().Active(scope); cooling {
-				s.agentLifecycleLog.Debug("template drift check skipped (rate-limit cooldown)",
-					"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
-					"owner", src.Owner, "repo", src.Repo)
-				return ""
+		// Resolve the full credential if we came from a scope memo hit and now
+		// need to make an outbound GitHub API call.
+		if !hasResolved {
+			cred = s.githubCredential(ctx, credReq)
+			actualScope := cred.EffectiveScope()
+			s.templateDrift.putCredScope(scopeKey, actualScope, s.templateDrift.clock())
+			if actualScope != scope {
+				scope = actualScope
+				branchKey.scope = scope
+				hasBranch = false
+				branchTree = ""
+				if _, cooling := s.githubCooldown().Active(scope); cooling {
+					s.agentLifecycleLog.Debug("template drift check skipped (rate-limit cooldown)",
+						"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
+						"owner", src.Owner, "repo", src.Repo)
+					return ""
+				}
 			}
 		}
 

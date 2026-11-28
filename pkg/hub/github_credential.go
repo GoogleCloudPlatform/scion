@@ -86,58 +86,6 @@ type ghCredRequest struct {
 	Quiet     bool         // log credential selection at Debug instead of Info (e.g. per-agent-create drift checks)
 }
 
-// githubCredentialScope returns the effective cache/cooldown scope that
-// githubCredential would produce for r without minting a GitHub App
-// installation token or logging credential selection. Callers with an
-// in-process cache (such as template drift) use this to probe caches and
-// cooldowns cheaply before resolving a full credential on a miss.
-func (s *Server) githubCredentialScope(ctx context.Context, r ghCredRequest) string {
-	if r.Owner == "" || r.Repo == "" {
-		return githubfetch.AnonScope
-	}
-
-	switch r.Scope {
-	case store.TemplateScopeProject:
-		if r.ScopeID == "" {
-			return githubfetch.AnonScope
-		}
-		if val, _ := s.ghConventionCredential(ctx, secret.ScopeProject, r.ScopeID, r.Owner, r.Repo); val != "" {
-			return s.secretCredentialScope(val)
-		}
-		project, err := s.store.GetProject(ctx, r.ScopeID)
-		if err == nil && project != nil && project.GitHubInstallationID != nil {
-			return "app:" + strconv.FormatInt(*project.GitHubInstallationID, 10)
-		}
-		if val := s.credentialForImport(ctx, secret.ScopeProject, r.ScopeID, ghauth.DefaultKey); val != "" {
-			return s.secretCredentialScope(val)
-		}
-		return githubfetch.AnonScope
-	case store.TemplateScopeGlobal:
-		return s.scopedGitHubCredentialScope(ctx, secret.ScopeHub, s.HubID(), r.Owner, r.Repo)
-	case store.TemplateScopeUser:
-		user := r.Requester
-		if user == nil {
-			user = GetUserIdentityFromContext(ctx)
-		}
-		if r.ScopeID == "" || user == nil || user.ID() != r.ScopeID {
-			return githubfetch.AnonScope
-		}
-		return s.scopedGitHubCredentialScope(ctx, secret.ScopeUser, r.ScopeID, r.Owner, r.Repo)
-	}
-	return githubfetch.AnonScope
-}
-
-func (s *Server) scopedGitHubCredentialScope(ctx context.Context, credScope, scopeID, owner, repo string) string {
-	val, _ := s.ghConventionCredential(ctx, credScope, scopeID, owner, repo)
-	if val == "" {
-		val = s.credentialForImport(ctx, credScope, scopeID, ghauth.DefaultKey)
-	}
-	if val == "" {
-		return githubfetch.AnonScope
-	}
-	return s.secretCredentialScope(val)
-}
-
 // githubCredential resolves the GitHub credential and principal scope for a
 // Hub fetch following the unified precedence:
 //
