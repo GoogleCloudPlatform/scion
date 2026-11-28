@@ -29,6 +29,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
+const renderFragmentSpy = vi.fn();
+
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
 // links — without pulling the real parser into the test.
@@ -42,7 +44,8 @@ vi.mock('../../../utils/markdown.js', () => {
     getMarkdownRenderer: () =>
       Promise.resolve({
         render,
-        renderFragment: (markdown: string) => {
+        renderFragment: (markdown: string, options?: unknown) => {
+          renderFragmentSpy(markdown, options);
           const tpl = document.createElement('template');
           tpl.innerHTML = render(markdown);
           return tpl.content;
@@ -2392,5 +2395,52 @@ describe('scion-chat-message code block copy (ptone/scion#7555)', () => {
     expect(writeText).toHaveBeenCalledWith('make fixture');
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(btn.textContent).toBe('Copy');
+  });
+});
+
+describe('scion-chat-message hub-only images', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    apiFetchMock.mockReset();
+    renderFragmentSpy.mockReset();
+    vi.stubGlobal('IntersectionObserver', undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+  });
+
+  it('passes sameOriginImagesOnly: true when rendering a message body', async () => {
+    await mount('Hello ![ext](https://elsewhere.example/a.png)');
+    expect(renderFragmentSpy).toHaveBeenCalledWith(
+      'Hello ![ext](https://elsewhere.example/a.png)',
+      { sameOriginImagesOnly: true }
+    );
+  });
+
+  it('passes same-origin-images to scion-markdown-preview for inline markdown attachments', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      new Response('# Title\n\n![ext](https://elsewhere.example/a.png)', { status: 200 })
+    );
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'See notes';
+    el.attachmentRefs = [
+      {
+        id: 'att-md-1',
+        name: 'notes.md',
+        mime: 'text/markdown',
+        size: 50,
+      } satisfies AttachmentRefInfo,
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      const preview = el.shadowRoot?.querySelector('scion-markdown-preview');
+      expect(preview).not.toBeNull();
+      expect(preview?.hasAttribute('same-origin-images')).toBe(true);
+    });
   });
 });

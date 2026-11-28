@@ -1097,6 +1097,7 @@ export class ScionChatFilePreview extends LitElement {
     if (state.isMarkdown && !this.showSource) {
       return html`<scion-markdown-preview
         .content=${state.content ?? ''}
+        same-origin-images
       ></scion-markdown-preview>`;
     }
     if (state.artifact?.htmlView) {

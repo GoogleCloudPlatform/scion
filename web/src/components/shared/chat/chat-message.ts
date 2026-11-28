@@ -3991,7 +3991,7 @@ export class ScionChatMessage extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      const fragment = renderer.renderFragment(body);
+      const fragment = renderer.renderFragment(body, { sameOriginImagesOnly: true });
       // gs:// links are gated on the message being agent-sent — a user-sent
       // message never links, however the body happens to be spelled.
       const codeSpans = codeSpanMentionsEnabled();
@@ -5093,7 +5093,10 @@ export class ScionChatMessage extends LitElement {
     if (state.status === 'error') {
       return html`<div class="preview-placeholder error">${state.error}</div>`;
     }
-    return html`<scion-markdown-preview .content=${state.text ?? ''}></scion-markdown-preview>`;
+    return html`<scion-markdown-preview
+      .content=${state.text ?? ''}
+      same-origin-images
+    ></scion-markdown-preview>`;
   }
 
   /**

@@ -330,7 +330,9 @@ describe('scion-chat-file-preview', () => {
     el.target = MD_ATTACHMENT;
     await settle(el);
 
-    expect(dialog(el)?.querySelector('scion-markdown-preview')).not.toBeNull();
+    const mdPreview = dialog(el)?.querySelector('scion-markdown-preview');
+    expect(mdPreview).not.toBeNull();
+    expect(mdPreview?.hasAttribute('same-origin-images')).toBe(true);
     const toggle = dialog(el)
       ?.querySelector('sl-button sl-icon[name="code"]')
       ?.closest('sl-button');
@@ -1236,7 +1238,9 @@ describe('scion-chat-file-preview', () => {
     el.target = { ...MD_ATTACHMENT, id: 'att-md-2' };
     await settle(el);
 
-    expect(dialog(el)?.querySelector('scion-markdown-preview')).not.toBeNull();
+    const mdPreview = dialog(el)?.querySelector('scion-markdown-preview');
+    expect(mdPreview).not.toBeNull();
+    expect(mdPreview?.hasAttribute('same-origin-images')).toBe(true);
   });
 
   it('does not show Copy for a markdown target before Source is toggled on', async () => {
@@ -1334,7 +1338,9 @@ describe('scion-chat-file-preview gcs target', () => {
     el.target = GCS_MD_TARGET;
     await settle(el);
 
-    expect(dialog(el)?.querySelector('scion-markdown-preview')).not.toBeNull();
+    const mdPreview = dialog(el)?.querySelector('scion-markdown-preview');
+    expect(mdPreview).not.toBeNull();
+    expect(mdPreview?.hasAttribute('same-origin-images')).toBe(true);
     expect(dialog(el)?.textContent).toContain('Source');
   });
 

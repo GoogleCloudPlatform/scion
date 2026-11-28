@@ -279,6 +279,24 @@ describe('chat message markup boundary', () => {
     expect(content?.querySelector('a[href="https://example.com/docs"]')?.getAttribute('rel')).toBe(
       'noopener noreferrer'
     );
+    // Off-origin images in chat messages are replaced by alt text (ptone/scion#6676).
+    expect(content?.querySelector('img')).toBeNull();
+    expect(content?.textContent).toContain('logo');
+    expect(flagged()).toEqual([]);
+  });
+
+  it('keeps hub-served and data images in chat messages while dropping external hosts', async () => {
+    const el = await mount(
+      '![remote alt](https://elsewhere.example/tracker.png) ![hub](/api/v1/chat/attachments/a1) ![inline](data:image/png;base64,AA==)'
+    );
+
+    const content = el.shadowRoot?.querySelector('.md-content');
+    const imgs = Array.from(content?.querySelectorAll('img') ?? []).map((img) =>
+      img.getAttribute('src')
+    );
+    expect(imgs).toEqual(['/api/v1/chat/attachments/a1', 'data:image/png;base64,AA==']);
+    expect(content?.textContent).toContain('remote alt');
+    expect(content?.innerHTML).not.toContain('elsewhere.example');
     expect(flagged()).toEqual([]);
   });
 
