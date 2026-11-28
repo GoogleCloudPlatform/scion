@@ -70,7 +70,7 @@ permissions:
 jobs:
   windows:
     name: Windows build and test (allowlist)
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: windows-latest
     timeout-minutes: 45
     env:

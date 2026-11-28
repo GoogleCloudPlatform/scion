@@ -35,6 +35,13 @@ on:
       - 'deploy/helm/scion-hub/**'
       - '.github/workflows/chart-ci.yml'
 
+# One run per PR: a new push cancels the superseded run. Outside pull_request the
+# group is the unique run_id, so main pushes, workflow_run and workflow_dispatch runs
+# (docs deploys) are never cancelled or dropped as pending (see ci.yml).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
