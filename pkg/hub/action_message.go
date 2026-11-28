@@ -469,6 +469,13 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 				return out, nil
 			}
 		}
+		if req.NoWake {
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusSkipped,
+				Error:         "target not running",
+				TargetAgentID: agent.ID,
+			}, nil
+		}
 		slog.Warn("Scheduler: scheduled message target is not running",
 			"eventID", fireID,
 			"scheduleID", scheduleID,
