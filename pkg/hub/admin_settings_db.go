@@ -110,6 +110,10 @@ type ServerConfigDBResponse struct {
 	// AgentLimits holds Hub-level run-limit ceilings (DB-only opsettings
 	// section agent_limits). Omitted when no ceilings are configured.
 	AgentLimits *opsettings.AgentLimitsSettings `json:"agent_limits,omitempty"`
+
+	// Artifacts holds Hub-level artifact service settings (DB-only opsettings
+	// section artifacts). Omitted when no overrides are configured.
+	Artifacts *opsettings.ArtifactsSettings `json:"artifacts,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -151,6 +155,12 @@ type ServerConfigUpdateDBRequest struct {
 	// AgentLimits updates the DB-only agent_limits operational settings section
 	// (run-limit ceilings). Omitted = unchanged; empty object or null = clear.
 	AgentLimits *opsettings.AgentLimitsSettings `json:"agent_limits,omitempty"`
+
+	// Artifacts updates the DB-only artifacts operational settings section
+	// (retention, share-link TTLs, size/file limits, remote images). Omitted =
+	// unchanged; sent fields merge onto the current row (null clears a field
+	// to its compiled default); top-level null clears all overrides.
+	Artifacts *opsettings.ArtifactsSettings `json:"artifacts,omitempty"`
 }
 
 // handleGetServerConfigDB handles GET /api/v1/admin/server-config
@@ -245,6 +255,14 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
 	if al := ops.AgentLimits(); !al.IsEmpty() {
 		resp.AgentLimits = &al
+	}
+	if raw, ok := ops.rawSection("artifacts"); ok && len(bytes.TrimSpace(raw)) > 0 {
+		var art opsettings.ArtifactsSettings
+		if err := json.Unmarshal(raw, &art); err != nil {
+			slog.Warn("GET server-config: failed to parse stored artifacts section", "error", err)
+		} else if art != (opsettings.ArtifactsSettings{}) {
+			resp.Artifacts = &art
+		}
 	}
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
@@ -1811,6 +1829,20 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		sectionDocs[opsettings.AgentLimitsSectionName] = rawDoc
 	}
 
+	// artifacts: DB-only Layer-1 section (no KoanfPaths). When present in the
+	// request body, merge sent fields onto the current row (null clears a field
+	// back to its compiled default; top-level null clears all overrides).
+	if rawArt, ok := findRawSectionFold(topFP, "artifacts"); ok {
+		merged, rev, err := mergeArtifactsSectionOnCurrent(r.Context(), ops, req.Artifacts, rawArt)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build artifacts document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["artifacts"] = merged
+		mergedBaseRevs["artifacts"] = rev
+	}
+
 	// GCP permission-check section: carry an omitted key forward from the
 	// current row, skip the write when the applied values would not
 	// change, and refuse a change the transition rules do not allow.
@@ -2038,7 +2070,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				limits.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
 			}
 			largest := max(limits.EffectiveMaxWorkspaceFileSize(), limits.EffectiveMaxAttachmentSize())
-			if art := ops.Artifacts(); art.MaxFileBytes > largest {
+			art := ops.Artifacts()
+			if artDoc, ok := sectionDocs["artifacts"]; ok {
+				if parsed, err := opsettings.ParseArtifactsDoc(artDoc); err == nil {
+					art = parsed
+				}
+			}
+			if art.MaxFileBytes > largest {
 				largest = art.MaxFileBytes
 			}
 			if warn := cfg.PendingBytesWarning(largest); warn != "" {
@@ -3952,11 +3990,100 @@ func tokenRefusedServerConfigKeys(rawBody []byte) []string {
 		if len(l.path) > 0 && l.path[0] == "expected_revisions" {
 			continue
 		}
+		if len(l.path) > 0 && l.path[0] == "artifacts" && serverConfigTokenSections["artifacts"] == settingsTokenConfiguration {
+			continue
+		}
 		if serverConfigKeyTokenClass(serverConfigBodyKoanfKey(l.path)) != settingsTokenConfiguration {
 			refused[strings.Join(l.path, ".")] = true
 		}
 	}
 	return sortedSettingsKeys(refused)
+}
+
+// findRawSectionFold looks up a top-level section key in fp case-insensitively
+// (matching encoding/json's struct field decoding).
+func findRawSectionFold(fp *fieldPresence, name string) (json.RawMessage, bool) {
+	if fp == nil {
+		return nil, false
+	}
+	if raw, ok := fp.raw[name]; ok {
+		return raw, true
+	}
+	for k, raw := range fp.raw {
+		if strings.EqualFold(k, name) {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
+// mergeArtifactsSectionOnCurrent merges the sent fields of the DB-only
+// "artifacts" section onto the current stored row. A top-level null
+// (reqArtifacts == nil) clears the entire section to {}. Otherwise, each
+// present field in rawArtifacts either replaces the stored value (when
+// non-nil) or removes the key (when null, restoring the compiled default).
+// Returns the merged JSON document and the base revision read from the store
+// (0 when no row exists).
+func mergeArtifactsSectionOnCurrent(ctx context.Context, ops *OperationalSettings, reqArtifacts *opsettings.ArtifactsSettings, rawArtifacts json.RawMessage) (json.RawMessage, int64, error) {
+	base := map[string]json.RawMessage{}
+	var baseRev int64
+	row, err := ops.store.GetHubSetting(ctx, "artifacts")
+	switch {
+	case err == nil:
+		baseRev = row.Revision
+		if len(bytes.TrimSpace(row.Value)) > 0 {
+			if unmarshalErr := json.Unmarshal(row.Value, &base); unmarshalErr != nil {
+				// Stored row is malformed; start from empty so an admin save
+				// can overwrite and repair it.
+				base = map[string]json.RawMessage{}
+			}
+		}
+	case errors.Is(err, store.ErrNotFound):
+		baseRev = 0
+	default:
+		return nil, 0, fmt.Errorf("reading artifacts section: %w", err)
+	}
+
+	if reqArtifacts == nil {
+		return json.RawMessage(`{}`), baseRev, nil
+	}
+
+	var sent map[string]json.RawMessage
+	if err := json.Unmarshal(rawArtifacts, &sent); err != nil {
+		return nil, 0, fmt.Errorf("decoding artifacts object: %w", err)
+	}
+	if len(sent) > 0 {
+		nextBytes, err := json.Marshal(reqArtifacts)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshaling artifacts settings: %w", err)
+		}
+		var next map[string]json.RawMessage
+		if err := json.Unmarshal(nextBytes, &next); err != nil {
+			return nil, 0, fmt.Errorf("decoding marshaled artifacts settings: %w", err)
+		}
+		artType := reflect.TypeOf(opsettings.ArtifactsSettings{})
+		for k := range sent {
+			f, ok := structFieldByJSONName(artType, k)
+			if !ok {
+				continue
+			}
+			canon := strings.Split(f.Tag.Get("json"), ",")[0]
+			if val, present := next[canon]; present {
+				base[canon] = val
+			} else {
+				delete(base, canon)
+			}
+		}
+	}
+
+	if len(base) == 0 {
+		return json.RawMessage(`{}`), baseRev, nil
+	}
+	out, err := json.Marshal(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshaling merged artifacts settings: %w", err)
+	}
+	return out, baseRev, nil
 }
 
 // tokenRefusedProjectDefaultsKeys returns, sorted, the body keys of a

@@ -234,6 +234,26 @@ interface V1ServerHubUploadsConfig {
 }
 
 /**
+ * Hub-level artifact service settings (DB-only Layer-1 section `artifacts`).
+ * Omitted keys use their compiled defaults; null clears a stored key.
+ */
+interface ArtifactsSettings {
+  enabled?: boolean | null;
+  max_file_bytes?: number | null;
+  max_bundle_bytes?: number | null;
+  max_files?: number | null;
+  default_retention_days?: number | null;
+  link_default_ttl_hours?: number | null;
+  link_max_ttl_hours?: number | null;
+  gc_grace_hours?: number | null;
+  remote_images_enabled?: boolean | null;
+  remote_image_max_count?: number | null;
+  remote_image_max_bytes?: number | null;
+  remote_image_fetch_timeout_s?: number | null;
+  remote_image_total_budget_s?: number | null;
+}
+
+/**
  * The hub's own metrics and trace export switches
  * (server.hub.observability, ptone/scion#4914). Absent means unset: the
  * hub keeps the rule that applied before the switch existed. null in a save
@@ -514,6 +534,8 @@ interface ServerConfigResponse {
 
   agent_limits?: { max_turns?: number; max_model_calls?: number; max_duration?: string };
 
+  artifacts?: ArtifactsSettings;
+
   // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
   // True on workstation hubs: Layer-0 and file-only settings are editable and
@@ -766,6 +788,21 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'agent_limits.max_turns': 'Agent Limit Ceilings: Max Turns',
   'agent_limits.max_model_calls': 'Agent Limit Ceilings: Max Model Calls',
   'agent_limits.max_duration': 'Agent Limit Ceilings: Max Duration',
+  // artifacts section
+  artifacts: 'Artifacts',
+  'artifacts.enabled': 'Artifacts: Enabled',
+  'artifacts.default_retention_days': 'Artifacts: Default Retention (days)',
+  'artifacts.gc_grace_hours': 'Artifacts: Blob GC Grace Period (hours)',
+  'artifacts.link_default_ttl_hours': 'Artifacts: Default Share Link TTL (hours)',
+  'artifacts.link_max_ttl_hours': 'Artifacts: Max Share Link TTL (hours)',
+  'artifacts.max_file_bytes': 'Artifacts: Max File Size (bytes)',
+  'artifacts.max_bundle_bytes': 'Artifacts: Max Bundle Size (bytes)',
+  'artifacts.max_files': 'Artifacts: Max Files Per Version',
+  'artifacts.remote_images_enabled': 'Artifacts: Fetch Remote Images',
+  'artifacts.remote_image_max_count': 'Artifacts: Max Remote Images Per Version',
+  'artifacts.remote_image_max_bytes': 'Artifacts: Max Remote Image Size (bytes)',
+  'artifacts.remote_image_fetch_timeout_s': 'Artifacts: Remote Image Fetch Timeout (seconds)',
+  'artifacts.remote_image_total_budget_s': 'Artifacts: Remote Image Total Budget (seconds)',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -1047,6 +1084,230 @@ function hubUploadsFrom(uploads?: V1ServerHubUploadsConfig): Record<HubUploadFie
     }
   }
   return out;
+}
+
+type ArtifactFieldKey = keyof ArtifactsSettings;
+
+interface ArtifactFieldSpec {
+  key: ArtifactFieldKey;
+  label: string;
+  kind: 'bool' | 'int';
+  defaultLabel: string;
+  placeholder?: string;
+  hint: string;
+  min?: number;
+  max?: number;
+}
+
+/**
+ * Editable fields of the DB-only `artifacts` section (matching
+ * `opsettings.ArtifactsSettings` and its compiled defaults).
+ */
+const ARTIFACT_FIELDS: readonly ArtifactFieldSpec[] = [
+  {
+    key: 'enabled',
+    label: 'Artifact Service',
+    kind: 'bool',
+    defaultLabel: 'Enabled (default)',
+    hint: 'Hub-level switch for the artifact service on top of the hub.artifacts experiment (default enabled).',
+  },
+  {
+    key: 'default_retention_days',
+    label: 'Default Retention (days)',
+    kind: 'int',
+    defaultLabel: '0 — keep forever (default)',
+    placeholder: '0',
+    hint: 'Days to keep newly created artifacts when no expiry is set. 0 keeps forever; leave empty for default (0). Applies going forward only — existing artifacts with no expiry are unaffected.',
+    min: 0,
+  },
+  {
+    key: 'gc_grace_hours',
+    label: 'Blob GC Grace Period (hours)',
+    kind: 'int',
+    defaultLabel: '168 h / 7 days (default)',
+    placeholder: '168',
+    hint: 'Hours unreferenced blobs are kept before garbage collection (≥ 24; default 168 / 7 days).',
+    min: 24,
+  },
+  {
+    key: 'link_default_ttl_hours',
+    label: 'Default Share Link TTL (hours)',
+    kind: 'int',
+    defaultLabel: '168 h / 7 days (default)',
+    placeholder: '168',
+    hint: 'Default lifetime for share links without an explicit expiry (≥ 1, ≤ Max Share Link TTL; default 168).',
+    min: 1,
+  },
+  {
+    key: 'link_max_ttl_hours',
+    label: 'Max Share Link TTL (hours)',
+    kind: 'int',
+    defaultLabel: '720 h / 30 days (default)',
+    placeholder: '720',
+    hint: 'Maximum lifetime allowed for share links (≥ Default Share Link TTL; default 720).',
+    min: 1,
+  },
+  {
+    key: 'max_file_bytes',
+    label: 'Max File Size (bytes)',
+    kind: 'int',
+    defaultLabel: '32 MiB (default)',
+    placeholder: '33554432',
+    hint: 'Maximum size of a single file in an artifact version (≥ 1, ≤ Max Bundle Size; default 32 MiB).',
+    min: 1,
+  },
+  {
+    key: 'max_bundle_bytes',
+    label: 'Max Bundle Size (bytes)',
+    kind: 'int',
+    defaultLabel: '256 MiB (default)',
+    placeholder: '268435456',
+    hint: 'Maximum total size of all files in one artifact version (≥ Max File Size; default 256 MiB).',
+    min: 1,
+  },
+  {
+    key: 'max_files',
+    label: 'Max Files Per Version',
+    kind: 'int',
+    defaultLabel: '200 (default)',
+    placeholder: '200',
+    hint: 'Maximum number of files in one artifact version (≥ 1; default 200).',
+    min: 1,
+  },
+  {
+    key: 'remote_images_enabled',
+    label: 'Fetch Remote Images',
+    kind: 'bool',
+    defaultLabel: 'Enabled (default)',
+    hint: 'Fetch remote images referenced by markdown artifacts at publish time (default enabled).',
+  },
+  {
+    key: 'remote_image_max_count',
+    label: 'Max Remote Images Per Version',
+    kind: 'int',
+    defaultLabel: '32 (default)',
+    placeholder: '32',
+    hint: 'Maximum remote images fetched for one version (≥ 1, ≤ Max Files; default 32).',
+    min: 1,
+  },
+  {
+    key: 'remote_image_max_bytes',
+    label: 'Max Remote Image Size (bytes)',
+    kind: 'int',
+    defaultLabel: '5 MiB (default)',
+    placeholder: '5242880',
+    hint: 'Maximum size of one fetched remote image (≥ 1, ≤ Max File Size; default 5 MiB).',
+    min: 1,
+  },
+  {
+    key: 'remote_image_fetch_timeout_s',
+    label: 'Remote Image Fetch Timeout (seconds)',
+    kind: 'int',
+    defaultLabel: '10 s (default)',
+    placeholder: '10',
+    hint: 'Per-image fetch timeout in seconds (1–60, ≤ Total Budget; default 10).',
+    min: 1,
+    max: 60,
+  },
+  {
+    key: 'remote_image_total_budget_s',
+    label: 'Remote Image Total Budget (seconds)',
+    kind: 'int',
+    defaultLabel: '30 s (default)',
+    placeholder: '30',
+    hint: 'Total time budget for fetching all remote images in one version (1–60, ≥ Fetch Timeout; default 30).',
+    min: 1,
+    max: 60,
+  },
+];
+
+function emptyArtifactsSettings(): Record<ArtifactFieldKey, string> {
+  return {
+    enabled: '',
+    max_file_bytes: '',
+    max_bundle_bytes: '',
+    max_files: '',
+    default_retention_days: '',
+    link_default_ttl_hours: '',
+    link_max_ttl_hours: '',
+    gc_grace_hours: '',
+    remote_images_enabled: '',
+    remote_image_max_count: '',
+    remote_image_max_bytes: '',
+    remote_image_fetch_timeout_s: '',
+    remote_image_total_budget_s: '',
+  };
+}
+
+function artifactsSettingsFrom(art?: ArtifactsSettings): Record<ArtifactFieldKey, string> {
+  const out = emptyArtifactsSettings();
+  if (!art) return out;
+  for (const field of ARTIFACT_FIELDS) {
+    const val = art[field.key];
+    if (field.kind === 'bool' && typeof val === 'boolean') {
+      out[field.key] = val ? 'true' : 'false';
+    } else if (field.kind === 'int' && typeof val === 'number' && Number.isFinite(val)) {
+      out[field.key] = String(val);
+    }
+  }
+  return out;
+}
+
+/**
+ * Validates edited `artifacts` fields against the same range and cross-field
+ * rules enforced by `opsettings.ArtifactsSettings.Resolve`.
+ */
+function validateArtifactsSettings(values: Record<ArtifactFieldKey, string>): string[] {
+  const errors: string[] = [];
+  const parsed: Partial<Record<ArtifactFieldKey, number>> = {};
+
+  for (const field of ARTIFACT_FIELDS) {
+    if (field.kind !== 'int') continue;
+    const raw = values[field.key].trim();
+    if (raw === '') continue;
+    const num = Number(raw);
+    if (!Number.isInteger(num)) {
+      errors.push(`${field.label} must be a whole number.`);
+      continue;
+    }
+    if (field.min !== undefined && num < field.min) {
+      errors.push(`${field.label} must be at least ${field.min}.`);
+      continue;
+    }
+    if (field.max !== undefined && num > field.max) {
+      errors.push(`${field.label} must be at most ${field.max}.`);
+      continue;
+    }
+    parsed[field.key] = num;
+  }
+
+  const maxFile = parsed.max_file_bytes ?? 33554432;
+  const maxBundle = parsed.max_bundle_bytes ?? 268435456;
+  if (maxFile > maxBundle) {
+    errors.push('Max File Size cannot exceed Max Bundle Size.');
+  }
+
+  const linkDefault = parsed.link_default_ttl_hours ?? 168;
+  const linkMax = parsed.link_max_ttl_hours ?? 720;
+  if (linkDefault > linkMax) {
+    errors.push('Default Share Link TTL cannot exceed Max Share Link TTL.');
+  }
+
+  const maxFiles = parsed.max_files ?? 200;
+  if (parsed.remote_image_max_count !== undefined && parsed.remote_image_max_count > maxFiles) {
+    errors.push('Max Remote Images Per Version cannot exceed Max Files Per Version.');
+  }
+  if (parsed.remote_image_max_bytes !== undefined && parsed.remote_image_max_bytes > maxFile) {
+    errors.push('Max Remote Image Size cannot exceed Max File Size.');
+  }
+
+  const fetchTimeout = parsed.remote_image_fetch_timeout_s ?? 10;
+  const totalBudget = parsed.remote_image_total_budget_s ?? 30;
+  if (totalBudget < fetchTimeout) {
+    errors.push('Remote Image Total Budget cannot be less than Remote Image Fetch Timeout.');
+  }
+
+  return errors;
 }
 
 /**
@@ -1536,6 +1797,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Empty string = unset (hub default). Sent only when changed; cleared = null.
   @state() private hubUploads: Record<HubUploadFieldKey, string> = emptyHubUploads();
   private loadedHubUploads: Record<HubUploadFieldKey, string> = emptyHubUploads();
+
+  // ── Hub artifacts (DB-only Layer-1 section `artifacts`) ──
+  // Empty string = unset (compiled default). Sent only when changed; cleared = null.
+  @state() private artifactsSettings: Record<ArtifactFieldKey, string> = emptyArtifactsSettings();
+  private loadedArtifactsSettings: Record<ArtifactFieldKey, string> = emptyArtifactsSettings();
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   // Warnings the last save returned (accepted values worth a look, such
@@ -2624,6 +2890,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.hubUploads = hubUploadsFrom(data.server?.hub?.uploads);
     this.loadedHubUploads = { ...this.hubUploads };
 
+    // Hub artifacts (DB-only Layer-1 section) — absent means unset (compiled defaults).
+    this.artifactsSettings = artifactsSettingsFrom(data.artifacts);
+    this.loadedArtifactsSettings = { ...this.artifactsSettings };
+
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
       ? stripRemovedStorageOverrides(
@@ -3465,12 +3735,45 @@ export class ScionPageAdminServerConfig extends LitElement {
         payload.expected_revisions = dirty.expectedRevisions;
       }
     }
-    // agent_limits is DB-only with no KoanfPaths, so it is attached after
-    // dirtySectionsPayload (which would otherwise drop an empty clear and omit
-    // its expected_revisions entry).
+    // agent_limits and artifacts are DB-only with no KoanfPaths, so they are
+    // attached after dirtySectionsPayload (which would otherwise drop empty
+    // clears and omit their expected_revisions entries).
     this.addAgentLimitsToPayload(payload);
+    this.addArtifactsToPayload(payload);
     if (this.layer0Editable) mergePayload(payload, this.buildLayer0Payload());
     return payload;
+  }
+
+  private addArtifactsToPayload(payload: Record<string, unknown>): void {
+    const block: Record<string, unknown> = {};
+    for (const field of ARTIFACT_FIELDS) {
+      const cur = this.artifactsSettings[field.key].trim();
+      const prev = this.loadedArtifactsSettings[field.key].trim();
+      if (cur === prev) continue;
+      if (cur === '') {
+        block[field.key] = null;
+      } else if (field.kind === 'bool') {
+        block[field.key] = cur === 'true';
+      } else {
+        const parsed = Number(cur);
+        block[field.key] = Number.isFinite(parsed) ? Math.trunc(parsed) : cur;
+      }
+    }
+    if (Object.keys(block).length === 0) return;
+    payload.artifacts = block;
+    const expectedRevisions =
+      (payload.expected_revisions as Record<string, number> | undefined) ?? {};
+    expectedRevisions.artifacts = this.loadedRevisions['artifacts'] ?? 0;
+    payload.expected_revisions = expectedRevisions;
+  }
+
+  private get artifactsValidationErrors(): string[] {
+    if (this.settingsTier !== 'db') return [];
+    return validateArtifactsSettings(this.artifactsSettings);
+  }
+
+  private get hasArtifactsErrors(): boolean {
+    return this.artifactsValidationErrors.length > 0;
   }
 
   /**
@@ -4697,6 +5000,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                   (${this.resourceQuantityIssues.errors.map((e) => e.path).join(', ')}).
                 </div>`
               : nothing}
+            ${this.hasArtifactsErrors
+              ? html`<div class="error artifacts-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the Artifacts settings errors on the Hub Server tab before
+                  saving.
+                </div>`
+              : nothing}
             <div class="actions">
               <sl-button
                 variant="primary"
@@ -4704,7 +5013,8 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ?disabled=${this.hasHarnessConfigErrors ||
                 this.hasResourceQuantityErrors ||
                 this.hasPlacementErrors ||
-                this.hasBrokerInstanceErrors}
+                this.hasBrokerInstanceErrors ||
+                this.hasArtifactsErrors}
                 @click=${() => {
                   void this.handleSave();
                 }}
@@ -6003,9 +6313,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderStartTimings()}
       </div>
 
-      ${this.renderHubUploadsSection()} ${this.renderHubObservabilitySection()}
-      ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
-      ${this.renderCrossProjectMessagingSection()}
+      ${this.renderHubUploadsSection()} ${this.renderArtifactsSection()}
+      ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
+      ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
       <scion-admin-chat-retention></scion-admin-chat-retention>
       <scion-admin-decision-retention></scion-admin-decision-retention>
     `;
@@ -6089,6 +6399,84 @@ export class ScionPageAdminServerConfig extends LitElement {
                       }}
                     ></sl-input>`
                 )}
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Hub artifact service settings (DB-only Layer-1 section `artifacts`).
+   */
+  private renderArtifactsSection(): ReturnType<typeof html> | typeof nothing {
+    if (this.settingsTier !== 'db') return nothing;
+    const validationErrors = this.artifactsValidationErrors;
+    return html`
+      <div class="section" data-section="artifacts">
+        ${this.renderSectionHeader('Artifacts', 'artifacts')} ${this.renderSectionMeta('artifacts')}
+        <p class="hint" style="margin: 0 0 1rem 0;">
+          Artifact retention, share link lifetimes, size limits, and remote image fetching. Leave a
+          field empty to use the hub default. Changes apply live without restart. Retention changes
+          apply going forward only: existing artifacts with no expiry are unaffected.
+        </p>
+        ${validationErrors.length > 0
+          ? html`
+              <sl-alert
+                variant="danger"
+                open
+                data-artifacts-validation-error
+                style="margin-bottom: 1rem;"
+              >
+                <ul style="margin: 0; padding-left: 1.25rem;">
+                  ${validationErrors.map((msg) => html`<li>${msg}</li>`)}
+                </ul>
+              </sl-alert>
+            `
+          : nothing}
+        <div class="form-grid">
+          ${ARTIFACT_FIELDS.map((field) => {
+            const fullKey = `artifacts.${field.key}`;
+            const val = this.artifactsSettings[field.key];
+            return html`
+              <div class="form-field">
+                ${field.kind === 'bool'
+                  ? html`
+                      <sl-select
+                        data-field=${fullKey}
+                        label=${field.label}
+                        value=${val}
+                        @sl-change=${(e: Event): void => {
+                          this.artifactsSettings = {
+                            ...this.artifactsSettings,
+                            [field.key]: (e.target as HTMLSelectElement).value,
+                          };
+                        }}
+                      >
+                        <sl-option value="">${field.defaultLabel}</sl-option>
+                        <sl-option value="true">Enabled</sl-option>
+                        <sl-option value="false">Disabled</sl-option>
+                      </sl-select>
+                    `
+                  : html`
+                      <sl-input
+                        data-field=${fullKey}
+                        label=${field.label}
+                        type="number"
+                        min=${field.min !== undefined ? String(field.min) : nothing}
+                        max=${field.max !== undefined ? String(field.max) : nothing}
+                        value=${val}
+                        placeholder=${field.placeholder ?? nothing}
+                        @sl-input=${(e: Event): void => {
+                          this.artifactsSettings = {
+                            ...this.artifactsSettings,
+                            [field.key]: (e.target as HTMLInputElement).value,
+                          };
+                        }}
+                      ></sl-input>
+                    `}
+                <span class="hint">${field.hint}</span>
               </div>
             `;
           })}
