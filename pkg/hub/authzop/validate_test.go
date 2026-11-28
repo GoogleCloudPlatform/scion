@@ -1200,7 +1200,7 @@ func TestRenderMarkdown_SmokeSections(t *testing.T) {
 
 	checks := []string{
 		"# Authorization Operation Catalog",
-		"**Operations:** 1",
+		"## Table of Contents",
 		"## test.authority",
 		"**Domain:** test",
 		"### Entry Points",
@@ -1224,12 +1224,42 @@ func TestRenderMarkdown_SmokeSections(t *testing.T) {
 			t.Errorf("missing %q in output", want)
 		}
 	}
+	if strings.Contains(out, "**Operations:**") {
+		t.Error("output should not contain global **Operations:** count header")
+	}
 }
 
 func TestRenderMarkdown_Empty(t *testing.T) {
 	out := RenderMarkdown(nil)
-	if !strings.Contains(out, "**Operations:** 0") {
-		t.Error("empty catalog should show 0")
+	if !strings.Contains(out, "# Authorization Operation Catalog") {
+		t.Error("empty catalog should still render title")
+	}
+	if !strings.Contains(out, "## Table of Contents") {
+		t.Error("empty catalog should still render table of contents heading")
+	}
+	if strings.Contains(out, "**Operations:**") {
+		t.Error("empty catalog should not contain global **Operations:** count header")
+	}
+}
+
+func TestRenderMarkdown_NoGlobalCountHeader(t *testing.T) {
+	one := RenderMarkdown([]OperationSpec{validSpec()})
+	two := RenderMarkdown([]OperationSpec{validSpec(), validAuthoritySpec()})
+
+	if strings.Contains(one, "**Operations:**") || strings.Contains(two, "**Operations:**") {
+		t.Fatal("rendered catalog must not include a global **Operations:** count header")
+	}
+
+	// Preamble before the Table of Contents must be identical regardless of
+	// operation count so concurrent PRs adding operations do not conflict on
+	// the header.
+	preambleOne, _, okOne := strings.Cut(one, "## Table of Contents")
+	preambleTwo, _, okTwo := strings.Cut(two, "## Table of Contents")
+	if !okOne || !okTwo {
+		t.Fatal("expected Table of Contents heading in rendered output")
+	}
+	if preambleOne != preambleTwo {
+		t.Errorf("catalog preamble changed when adding an operation:\none:\n%s\ntwo:\n%s", preambleOne, preambleTwo)
 	}
 }
 

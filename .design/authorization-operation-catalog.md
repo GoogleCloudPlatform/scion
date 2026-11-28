@@ -2,8 +2,6 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 476
-
 ## Table of Contents
 
 - [agent.lifecycle.create](#agentlifecyclecreate) — Create an agent in a project

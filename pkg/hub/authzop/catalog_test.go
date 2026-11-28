@@ -15,6 +15,8 @@
 package authzop
 
 import (
+	"flag"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -27,6 +29,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
+
+var updateCatalogReport = flag.Bool("update", false, "regenerate .design/authorization-operation-catalog.md")
 
 // ---------------------------------------------------------------------------
 // Core catalog structural validation
@@ -1057,35 +1061,142 @@ func findEnclosingFunc(fset *token.FileSet, file *ast.File, pos token.Pos) strin
 // Generated report staleness gate
 // ---------------------------------------------------------------------------
 
+const regenerateCatalogCmd = "go test -buildvcs=false ./pkg/hub/authzop/... -run TestCatalogReportStaleness -update"
+
+// checkCatalogReportStaleness compares the checked-in catalog report at
+// reportPath against generated. When update is false, it never modifies
+// reportPath and returns a descriptive error with a concise diff summary and
+// regeneration instructions on mismatch or missing file. When update is true,
+// it writes generated to reportPath.
+func checkCatalogReportStaleness(reportPath, generated string, update bool) error {
+	if update {
+		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+			return fmt.Errorf("cannot create catalog report directory: %w", err)
+		}
+		if err := os.WriteFile(reportPath, []byte(generated), 0644); err != nil {
+			return fmt.Errorf("cannot write catalog report: %w", err)
+		}
+		return nil
+	}
+
+	existing, err := os.ReadFile(reportPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("catalog report %s does not exist; regenerate with:\n  %s", reportPath, regenerateCatalogCmd)
+		}
+		return fmt.Errorf("cannot read catalog report: %w", err)
+	}
+
+	if string(existing) != generated {
+		return fmt.Errorf("catalog report %s is stale (%s).\nRegenerate with:\n  %s",
+			reportPath, summarizeLineDiff(string(existing), generated), regenerateCatalogCmd)
+	}
+	return nil
+}
+
+// summarizeLineDiff returns a compact description of the first line where
+// existing and generated differ, plus line counts, without dumping the full
+// document.
+func summarizeLineDiff(existing, generated string) string {
+	gotLines := strings.Split(existing, "\n")
+	wantLines := strings.Split(generated, "\n")
+	limit := min(len(gotLines), len(wantLines))
+	for i := range limit {
+		if gotLines[i] != wantLines[i] {
+			return fmt.Sprintf("first difference at line %d (checked-in %d lines, generated %d lines):\n  checked-in: %q\n  generated:  %q",
+				i+1, len(gotLines), len(wantLines), gotLines[i], wantLines[i])
+		}
+	}
+	return fmt.Sprintf("line count mismatch at line %d (checked-in %d lines, generated %d lines)",
+		limit+1, len(gotLines), len(wantLines))
+}
+
 // TestCatalogReportStaleness verifies the generated catalog report matches
-// the checked-in version. If no report is checked in yet, this test creates
-// the baseline.
+// the checked-in version without mutating tracked files. Pass -update to
+// regenerate .design/authorization-operation-catalog.md intentionally.
 func TestCatalogReportStaleness(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	reportPath := filepath.Join(repoRoot, ".design", "authorization-operation-catalog.md")
 
 	generated := RenderMarkdown(Catalog)
-
-	existing, err := os.ReadFile(reportPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// First generation — write the baseline
-			if err := os.WriteFile(reportPath, []byte(generated), 0644); err != nil {
-				t.Fatalf("cannot write catalog report: %v", err)
-			}
-			t.Logf("generated initial catalog report at %s", reportPath)
-			return
-		}
-		t.Fatalf("cannot read catalog report: %v", err)
+	if err := checkCatalogReportStaleness(reportPath, generated, *updateCatalogReport); err != nil {
+		t.Fatal(err)
 	}
+}
 
-	if string(existing) != generated {
-		// Update the file so the diff is visible in git
-		if err := os.WriteFile(reportPath, []byte(generated), 0644); err != nil {
-			t.Logf("WARNING: could not update catalog report: %v", err)
+// TestCheckCatalogReportStaleness_DoesNotMutateOnFailure verifies that the
+// staleness check fails cleanly without rewriting or creating the file when
+// update is false, and writes the file when update is true.
+func TestCheckCatalogReportStaleness_DoesNotMutateOnFailure(t *testing.T) {
+	generated := RenderMarkdown([]OperationSpec{validSpec()})
+
+	t.Run("stale file fails without rewriting", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "authorization-operation-catalog.md")
+		stale := "# Authorization Operation Catalog\n\n**Operations:** 999\n"
+		if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
+			t.Fatal(err)
 		}
-		t.Error("catalog report is stale — regenerated. Run 'go test ./pkg/hub/authzop/...' and commit the updated report.")
-	}
+
+		err := checkCatalogReportStaleness(p, generated, false)
+		if err == nil {
+			t.Fatal("expected staleness error, got nil")
+		}
+		if !strings.Contains(err.Error(), "first difference at line") {
+			t.Errorf("expected diff summary in error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), regenerateCatalogCmd) {
+			t.Errorf("expected regeneration command in error, got: %v", err)
+		}
+
+		after, readErr := os.ReadFile(p)
+		if readErr != nil {
+			t.Fatalf("read file after check: %v", readErr)
+		}
+		if string(after) != stale {
+			t.Errorf("staleness check mutated file on disk:\ngot:  %q\nwant: %q", string(after), stale)
+		}
+	})
+
+	t.Run("missing file fails without creating", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "missing.md")
+
+		err := checkCatalogReportStaleness(p, generated, false)
+		if err == nil {
+			t.Fatal("expected missing-file error, got nil")
+		}
+		if !strings.Contains(err.Error(), regenerateCatalogCmd) {
+			t.Errorf("expected regeneration command in error, got: %v", err)
+		}
+		if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+			t.Errorf("staleness check created missing file (stat err: %v)", statErr)
+		}
+	})
+
+	t.Run("matching file passes", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "authorization-operation-catalog.md")
+		if err := os.WriteFile(p, []byte(generated), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := checkCatalogReportStaleness(p, generated, false); err != nil {
+			t.Fatalf("expected matching file to pass, got: %v", err)
+		}
+	})
+
+	t.Run("update mode writes generated file", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "nested", "authorization-operation-catalog.md")
+		if err := checkCatalogReportStaleness(p, generated, true); err != nil {
+			t.Fatalf("expected update mode to succeed, got: %v", err)
+		}
+
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read updated file: %v", err)
+		}
+		if string(got) != generated {
+			t.Error("updated file content does not match generated output")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
