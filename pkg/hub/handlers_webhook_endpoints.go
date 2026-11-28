@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -165,6 +166,20 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 
+		// Baseline agent floor (Stage 2 §4.3, ptone/scion#8065):
+		// Agent callers below baseline (e.g. readonly, which lacks
+		// agentAuthoringFloorScope) are refused on routes that create or widen
+		// trigger/endpoint authority:
+		//   - POST   /webhook-endpoints              (create, incl. --to-self & unbound)
+		//   - POST   /webhook-endpoints/{id}/rotate-secret (mint/rotate secret)
+		//   - PATCH  /webhook-endpoints/{id}         (checked in updateWebhookEndpoint:
+		//                                             non-disable PATCHes require baseline;
+		//                                             disable-only PATCH reduces authority
+		//                                             and stays at project:read)
+		// Reads (GET list/get) and DELETE (reduces authority) stay at project:read.
+		if (authoring || subAction == "rotate-secret") && !checkAgentAuthoringFloor(w, r) {
+			return
+		}
 		if authoring && !authorizeDeferredAuthoringCredential(w, r) {
 			return
 		}
@@ -831,8 +846,42 @@ func (s *Server) getWebhookEndpoint(w http.ResponseWriter, r *http.Request, proj
 	writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(r.Context(), *ep))
 }
 
+// isWebhookEndpointDisableOnlyPatch reports whether req solely disables the
+// endpoint (status == "disabled" with every other field omitted). Disabling
+// only reduces authority, so a below-baseline agent that owns an endpoint may
+// disable it without ScopeAgentNotify; any other PATCH (including re-enabling
+// or mutating description/auth/limits/binding) requires the baseline floor.
+func isWebhookEndpointDisableOnlyPatch(req *UpdateWebhookEndpointRequest) bool {
+	if req == nil || req.Status == nil {
+		return false
+	}
+	if strings.TrimSpace(*req.Status) != store.WebhookEndpointStatusDisabled {
+		return false
+	}
+	stripped := *req
+	stripped.Status = nil
+	return reflect.ValueOf(stripped).IsZero()
+}
+
 func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID, endpointID string) {
 	ctx := r.Context()
+
+	var (
+		req        UpdateWebhookEndpointRequest
+		reqDecoded bool
+	)
+	if requireAgentAuthoringFloor(GetAgentIdentityFromContext(ctx)) != nil {
+		if !readTriggerRequestJSON(w, r, &req) {
+			return
+		}
+		reqDecoded = true
+		if !isWebhookEndpointDisableOnlyPatch(&req) {
+			if !checkAgentAuthoringFloor(w, r) {
+				return
+			}
+		}
+	}
+
 	ep, ok := s.loadWebhookEndpointForProject(w, r, projectID, endpointID)
 	if !ok {
 		return
@@ -841,9 +890,10 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	var req UpdateWebhookEndpointRequest
-	if !readTriggerRequestJSON(w, r, &req) {
-		return
+	if !reqDecoded {
+		if !readTriggerRequestJSON(w, r, &req) {
+			return
+		}
 	}
 
 	var (
