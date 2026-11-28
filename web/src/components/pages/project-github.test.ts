@@ -44,6 +44,12 @@ import type { ScionPageProjectDetail } from './project-detail.js';
 import type { ScionPageProjectSettings } from './project-settings.js';
 import type { ScionApp } from '../app-shell.js';
 
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: vi.fn(),
+}));
+
+import { showConfirm } from '../shared/confirm-dialog.js';
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -699,5 +705,205 @@ describe('Project GitHub page shell (M1.5)', () => {
     expect(
       settingsHidden.shadowRoot?.querySelector('[data-testid="project-settings-github-link"]')
     ).toBeNull();
+  });
+
+  it('updates header and tab enablement when binding and removing on the Connection tab (github-info-changed round trip)', async () => {
+    vi.mocked(showConfirm).mockResolvedValue(true);
+    let currentInfo = makeProjectGitHub({
+      association: {
+        installation_id: null,
+        account_login: '',
+        basis: null,
+        write_allowed: false,
+        authorized: false,
+        verified: true,
+        error_code: '',
+        reason: '',
+      },
+      status: null,
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (init?.method === 'PUT' && path.includes('/github-installation')) {
+          currentInfo = makeProjectGitHub();
+          return Promise.resolve(jsonResponse({ project_id: 'proj-gh-1', installation_id: 4412 }));
+        }
+        if (init?.method === 'DELETE' && path.includes('/github-installation')) {
+          currentInfo = makeProjectGitHub({
+            association: {
+              installation_id: null,
+              account_login: '',
+              basis: null,
+              write_allowed: false,
+              authorized: false,
+              verified: true,
+              error_code: '',
+              reason: '',
+            },
+            status: null,
+          });
+          return Promise.resolve(jsonResponse({ status: 'removed' }));
+        }
+        if (path.includes('/api/v1/github-app/installations')) {
+          return Promise.resolve(
+            jsonResponse({
+              installations: [
+                {
+                  installation_id: 4412,
+                  account_login: 'acme',
+                  account_type: 'Organization',
+                  app_id: 1,
+                  status: 'active',
+                },
+              ],
+              total: 1,
+            })
+          );
+        }
+        if (path.endsWith('/api/v1/projects/proj-gh-1/github')) {
+          return Promise.resolve(jsonResponse(currentInfo));
+        }
+        return Promise.resolve(jsonResponse(GITHUB_PROJECT));
+      })
+    );
+
+    const el = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('[data-testid="github-tabs"]')).not.toBeNull();
+    });
+    await el.updateComplete;
+
+    const root = el.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="github-tab-agent-access"]')?.hasAttribute('disabled')
+    ).toBe(true);
+    expect(root.querySelector('[data-testid="github-header-connection"]')?.textContent).toContain(
+      'Not connected'
+    );
+
+    // Click Bind installation inside the Connection panel's card
+    const connCard = root.querySelector(
+      '[data-testid="github-panel-connection"] scion-project-github-card'
+    ) as HTMLElement;
+    await vi.waitFor(() => {
+      expect(
+        connCard.shadowRoot?.querySelector('[data-testid="github-bind-button"]')
+      ).not.toBeNull();
+    });
+    (
+      connCard.shadowRoot!.querySelector('[data-testid="github-bind-button"]') as HTMLElement
+    ).click();
+
+    // Header transitions to Connected and Agent access tab becomes enabled
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector('[data-testid="github-tab-agent-access"]')?.hasAttribute('disabled')
+      ).toBe(false);
+      expect(
+        root.querySelector('[data-testid="github-header-connection"]')?.textContent?.trim()
+      ).toBe('Connected');
+    });
+
+    // Click Remove inside the Connection panel's card -> returns to Connection & disables Agent access
+    await vi.waitFor(() => {
+      expect(
+        connCard.shadowRoot?.querySelector('[data-testid="github-remove-button"]')
+      ).not.toBeNull();
+    });
+    (
+      connCard.shadowRoot!.querySelector('[data-testid="github-remove-button"]') as HTMLElement
+    ).click();
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector('[data-testid="github-tab-agent-access"]')?.hasAttribute('disabled')
+      ).toBe(true);
+      expect(
+        root.querySelector('[data-testid="github-tab-connection"]')?.hasAttribute('active')
+      ).toBe(true);
+      expect(
+        root.querySelector('[data-testid="github-header-connection"]')?.textContent?.trim()
+      ).toBe('Not connected');
+    });
+  });
+
+  it('makes zero GET /github requests for a project without a git remote (detail, settings, and nav)', async () => {
+    const noRemoteProject = {
+      id: 'proj-no-remote',
+      name: 'Hub Workspace',
+      slug: 'hub-workspace',
+      status: 'active',
+      _capabilities: { actions: ['read', 'update', 'manage'] },
+    };
+
+    class MockEventSource {
+      addEventListener(): void {}
+      removeEventListener(): void {}
+      close(): void {}
+    }
+    vi.stubGlobal('EventSource', MockEventSource);
+
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn().mockImplementation((url: string | URL | Request) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      requestedUrls.push(path);
+      if (path.includes('/settings/resolved')) {
+        return Promise.resolve(jsonResponse({ project: {}, settings: {} }));
+      }
+      if (path.includes('/agents')) {
+        return Promise.resolve(jsonResponse({ agents: [] }));
+      }
+      if (path.match(/\/api\/v1\/projects\/proj-no-remote(\?.*)?$/)) {
+        return Promise.resolve(jsonResponse(noRemoteProject));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // 1. Project Detail page
+    window.history.replaceState({}, '', '/projects/proj-no-remote');
+    const detail = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    detail.projectId = 'proj-no-remote';
+    document.body.appendChild(detail);
+    await vi.waitFor(() => {
+      expect(detail.shadowRoot?.textContent).toContain('Hub Workspace');
+    });
+    await flushMicrotasks();
+    await detail.updateComplete;
+    expect(detail.shadowRoot?.querySelector('[data-github-link]')).toBeNull();
+    detail.remove();
+
+    // 2. Project Settings page
+    const settings = document.createElement(
+      'scion-page-project-settings'
+    ) as ScionPageProjectSettings;
+    settings.projectId = 'proj-no-remote';
+    document.body.appendChild(settings);
+    await vi.waitFor(() => {
+      expect(settings.shadowRoot?.textContent).toContain('Hub Workspace Settings');
+    });
+    await flushMicrotasks();
+    await settings.updateComplete;
+    expect(
+      settings.shadowRoot?.querySelector('[data-testid="project-settings-github-link"]')
+    ).toBeNull();
+    settings.remove();
+
+    // 3. Sidebar nav on project detail path
+    resetProjectGitHubRequestsForTests();
+    const nav = document.createElement('scion-nav') as ScionNav;
+    nav.currentPath = '/projects/proj-no-remote';
+    document.body.appendChild(nav);
+    await nav.updateComplete;
+    await flushMicrotasks();
+    await nav.updateComplete;
+    expect(nav.shadowRoot?.querySelector('[data-testid="nav-project-section"]')).toBeNull();
+    nav.remove();
+
+    expect(requestedUrls.filter((u) => u.includes('/github'))).toEqual([]);
   });
 });

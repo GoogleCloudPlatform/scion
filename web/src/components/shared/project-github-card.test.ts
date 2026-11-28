@@ -483,4 +483,48 @@ describe('Project GitHub App card (M1.1)', () => {
     expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain('#5512');
     expect(boundBodies).toEqual([{ installation_id: 5512 }]);
   });
+
+  it('renders section="permissions" and section="connection" from pre-supplied .info without fetching /github', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Agent access tab: section="permissions" with pre-supplied .info
+    const permCard = document.createElement('scion-project-github-card') as ScionProjectGithubCard;
+    permCard.projectId = 'proj-gh-1';
+    permCard.section = 'permissions';
+    permCard.info = makeProjectGitHub();
+    document.body.appendChild(permCard);
+    await permCard.updateComplete;
+
+    const permRoot = permCard.shadowRoot!;
+    expect(permRoot.querySelector('[data-testid="github-permissions-section"]')).not.toBeNull();
+    expect(permRoot.querySelector('[data-testid="github-permissions-table"]')).not.toBeNull();
+    expect(permRoot.querySelector('[data-testid="github-bind-button"]')).toBeNull();
+    expect(permRoot.querySelector('[data-testid="github-check-button"]')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    permCard.remove();
+
+    // Connection tab: section="connection" with pre-supplied .info
+    const connCard = document.createElement('scion-project-github-card') as ScionProjectGithubCard;
+    connCard.projectId = 'proj-gh-1';
+    connCard.section = 'connection';
+    connCard.info = makeProjectGitHub();
+    document.body.appendChild(connCard);
+    await connCard.updateComplete;
+
+    const connRoot = connCard.shadowRoot!;
+    expect(connRoot.querySelector('[data-testid="github-app-section"]')).not.toBeNull();
+    expect(connRoot.querySelector('[data-testid="github-bind-button"]')).not.toBeNull();
+    expect(connRoot.querySelector('[data-testid="github-check-button"]')).not.toBeNull();
+    expect(connRoot.querySelector('[data-testid="github-remove-button"]')).not.toBeNull();
+    expect(connRoot.querySelector('[data-testid="github-permissions-table"]')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
