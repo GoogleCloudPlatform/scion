@@ -369,7 +369,7 @@ func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func
 			addErr("list_jobs "+repo.String(), err)
 			if githubapp.IsRateLimited(err) {
 				rateLimited = true
-				stoppedAt = idx + 1
+				stoppedAt = idx
 				break
 			}
 			continue

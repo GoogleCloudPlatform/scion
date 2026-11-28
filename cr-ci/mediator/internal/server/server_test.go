@@ -1312,18 +1312,101 @@ func TestReconcile_SingleFlight(t *testing.T) {
 
 func TestReconcile_InProgressInQueuedRunIsGuarded(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
-	h.addSameRepoRun(10)
-	h.queued(100, 10)
-	// GitHub quirk: run.status stays "queued" while a job inside it is in_progress on cr-job-100.
+	t0 := h.clock.Now()
+	// Pass 1: fork run 12 has status="queued" (GitHub quirk) and holds an
+	// in_progress cr-ci job (matching its runner name so pass 1 marks run 12 as
+	// P0 without killing).
 	h.gh.AddRun(fakes.GitHubRun{
 		ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "queued",
-		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}},
+		CreatedAt: t0.Add(10 * time.Minute),
+		Jobs:      []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-120"}},
 	})
+	h.reconcile()
+
+	// Prepare pass 2 under budget pressure with older P2 runs and a hijack on cr-job-100 inside run 12.
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	for i := int64(1); i <= 5; i++ {
+		h.gh.AddRun(fakes.GitHubRun{
+			ID: i, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+			CreatedAt: t0.Add(time.Duration(i) * time.Second),
+			Jobs:      []fakes.GitHubJob{{ID: i * 10, Status: "queued", Labels: []string{"ubuntu-latest"}}},
+		})
+	}
+	h.gh.SetJob(12, fakes.GitHubJob{ID: 121, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.gh.RateLimitInitialRemaining = 400
+
+	p2Path := "/repos/" + testRepo + "/actions/runs/1/jobs"
+	p0Path := "/repos/" + testRepo + "/actions/runs/12/jobs"
+	p2Before := h.gh.Calls(p2Path)
+	p0Before := h.gh.Calls(p0Path)
+
 	res := h.reconcile()
+	if !res.BudgetStopped {
+		t.Errorf("BudgetStopped = false, want true under reserve")
+	}
+	if h.gh.Calls(p2Path) != p2Before {
+		t.Errorf("older P2 run 1 was listed under reserve: calls=%d, want %d", h.gh.Calls(p2Path), p2Before)
+	}
+	if h.gh.Calls(p0Path) != p0Before+1 {
+		t.Errorf("P0 queued run 12 was not listed under reserve: calls=%d, want %d", h.gh.Calls(p0Path), p0Before+1)
+	}
 	if res.HijacksKilled != 1 || h.activeFor("cr-job-100") != 0 {
-		t.Fatalf("result %+v; cr-job-100 active = %d, want hijack killed in queued run", res, h.activeFor("cr-job-100"))
+		t.Fatalf("result %+v; cr-job-100 active = %d, want hijack killed in queued P0 run", res, h.activeFor("cr-job-100"))
 	}
 	h.wantLog(logging.EventKillHijacked)
+}
+
+func TestReconcile_P0CarryOverAfterRateLimit(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	t0 := h.clock.Now()
+	// Pass 1: establish two P0 runs (100 and 101), both status="queued" with in_progress cr-ci jobs.
+	h.gh.AddRun(fakes.GitHubRun{
+		ID: 100, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+		CreatedAt: t0.Add(time.Minute),
+		Jobs:      []fakes.GitHubJob{{ID: 1000, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-1000", CreatedAt: t0}},
+	})
+	h.gh.AddRun(fakes.GitHubRun{
+		ID: 101, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+		CreatedAt: t0.Add(2 * time.Minute),
+		Jobs:      []fakes.GitHubJob{{ID: 1001, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-1001", CreatedAt: t0}},
+	})
+	h.reconcile()
+
+	// Pass 2: mutate both jobs so ListJobs returns 200 (counted), and rate-limit after the first ListJobs (run 100).
+	h.gh.SetJob(100, fakes.GitHubJob{ID: 1000, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-1000", CreatedAt: t0.Add(time.Second)})
+	h.gh.SetJob(101, fakes.GitHubJob{ID: 1001, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-1001", CreatedAt: t0.Add(time.Second)})
+	h.gh.ResetRateLimit()
+	h.gh.RateLimitMode = fakes.Secondary429
+	h.gh.RateLimitRetryAfter = 30 * time.Second
+	h.gh.RateLimitAfter = 1
+	h.reconcile()
+
+	// Pass 3: lift rate limit, advance clock past breaker, drop remaining below reserve, and add an older P2 run.
+	h.gh.ResetRateLimit()
+	h.clock.Add(time.Minute)
+	h.gh.AddRun(fakes.GitHubRun{
+		ID: 50, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+		CreatedAt: t0,
+		Jobs:      []fakes.GitHubJob{{ID: 500, Status: "queued", Labels: []string{"ubuntu-latest"}}},
+	})
+	h.gh.RateLimitInitialRemaining = 400
+
+	p0SecondPath := "/repos/" + testRepo + "/actions/runs/101/jobs"
+	p2Path := "/repos/" + testRepo + "/actions/runs/50/jobs"
+	p0SecondBefore := h.gh.Calls(p0SecondPath)
+	p2Before := h.gh.Calls(p2Path)
+
+	res := h.reconcile()
+	if !res.BudgetStopped {
+		t.Errorf("pass 3 BudgetStopped = false, want true")
+	}
+	if h.gh.Calls(p0SecondPath) != p0SecondBefore+1 {
+		t.Errorf("second P0 run 101 was not carried over after rate-limit stop: calls=%d, want %d", h.gh.Calls(p0SecondPath), p0SecondBefore+1)
+	}
+	if h.gh.Calls(p2Path) != p2Before {
+		t.Errorf("older P2 run 50 was listed under reserve: calls=%d, want %d", h.gh.Calls(p2Path), p2Before)
+	}
 }
 
 func TestOnQueued_UsesRunCache(t *testing.T) {

@@ -379,7 +379,7 @@ type rlResponseWriter struct {
 func (rw *rlResponseWriter) WriteHeader(code int) {
 	if !rw.wroteHeader {
 		rw.wroteHeader = true
-		rw.g.recordResponse(rw.ResponseWriter.Header(), rw.path, code)
+		rw.g.recordResponse(rw.Header(), rw.path, code)
 	}
 	rw.ResponseWriter.WriteHeader(code)
 }

@@ -390,14 +390,14 @@ func (c *Client) getCached(ctx context.Context, r Repo, path string, out any) er
 	if err != nil {
 		return fmt.Errorf("github %s %s: %w", http.MethodGet, stripQuery(path), err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	now := c.now()
 	c.recordRateLimit(id, resp.Header, now)
 
 	if resp.StatusCode == http.StatusNotModified && prevBody != nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodySize))
-		c.touchETag(cacheKey, resp.Header.Get("ETag"), now)
+		c.touchETag(cacheKey, prevETag, resp.Header.Get("ETag"), now)
 		if err := json.Unmarshal(prevBody, out); err != nil {
 			return fmt.Errorf("github %s %s: %w", http.MethodGet, stripQuery(path), errDecode)
 		}
@@ -426,12 +426,12 @@ func (c *Client) getCached(ctx context.Context, r Repo, path string, out any) er
 	return nil
 }
 
-func (c *Client) touchETag(key, newETag string, now time.Time) {
+func (c *Client) touchETag(key, prevETag, newETag string, now time.Time) {
 	c.etagMu.Lock()
 	defer c.etagMu.Unlock()
 	if e, ok := c.etags[key]; ok {
 		e.used = now
-		if newETag != "" {
+		if newETag != "" && e.etag == prevETag {
 			e.etag = newETag
 		}
 		c.etagList.MoveToFront(e.elem)
