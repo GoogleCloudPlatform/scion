@@ -461,6 +461,8 @@ func TestAgentD6Restrictions_ReimportOverrideAndCreateOnly(t *testing.T) {
 		assert.Equal(t, "sha256:original", got.ContentHash)
 
 		// Human user can still override sourceUrl as before.
+		prevClient := srv.templateGitHubClient
+		t.Cleanup(func() { srv.templateGitHubClient = prevClient })
 		srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{
 			body: buildAgentTestTarGz(t, map[string]string{
 				"repo-main/templates/existing-tmpl/scion-agent.yaml": "schema_version: \"1\"\nharness: claude\n",
