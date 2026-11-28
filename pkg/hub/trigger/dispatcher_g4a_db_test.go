@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -326,9 +327,10 @@ func TestDispatcher_StaleEventRefusal(t *testing.T) {
 	}
 }
 
-func TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress(t *testing.T) {
+func TestDispatcher_SubjectModeReuse_FreshUnboundClaimDefersAndDelivers(t *testing.T) {
 	ctx := context.Background()
 	entClient := enttest.NewClient(t)
+	t.Logf("dialect=%s", entClient.Driver().Dialect())
 	cs := entadapter.NewCompositeStore(entClient)
 	projID := seedProjectForDispatch(t, cs)
 
@@ -342,13 +344,11 @@ func TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress(t *testing
 	tr.SubjectMode = store.TriggerSubjectModeReuse
 	require.NoError(t, cs.CreateTrigger(ctx, tr))
 
-	// Seed a fresh unbound active claim (another replica mid-create, < 5 min old).
-	const subject = "github:octo/repo#55"
-	_, existing, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
-	require.NoError(t, err)
-	require.Nil(t, existing)
-
-	core := &g4aTestCore{}
+	core := &g4aTestCore{
+		renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+			return "reuse-body-" + req.Event.ID, nil, nil
+		},
+	}
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Core:          core,
 		Store:         cs,
@@ -357,49 +357,168 @@ func TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress(t *testing
 	})
 	require.NoError(t, err)
 
-	// 1. While unbound claim is fresh (< 5 min), reuse skips with "subject dispatch in progress".
-	ev1 := uuid.NewString()
-	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
-		ID:         ev1,
-		ProjectID:  projID,
-		SourceKind: store.TriggerSourceKindGitHub,
-		SourceID:   "1001",
-		Type:       "github.issue_comment.created",
-		Subject:    subject,
-		DedupKey:   "del-inprog-1",
-		OccurredAt: now,
-		ReceivedAt: now,
-		Status:     store.TriggerEventStatusPending,
-	}))
+	mkEv := func(subject, dedup string) string {
+		id := uuid.NewString()
+		require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "1001",
+			Type:       "github.issue_comment.created",
+			Subject:    subject,
+			DedupKey:   dedup,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Status:     store.TriggerEventStatusPending,
+		}))
+		return id
+	}
+
+	// Subcase A: fresh unbound claim -> defers non-terminally with RetryAt,
+	// continues deferring while bound agent is in flight, then delivers reuse
+	// message once the bound agent is running (never skipped).
+	const subjA = "github:octo/repo#55"
+	claimA, existing, err := claims.Claim(ctx, tr.ID, 0, subjA, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, existing)
+
+	ev1 := mkEv(subjA, "del-inprog-a1")
+	firstDeferAt := now
 	res1 := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
-	assert.True(t, res1.Done)
+	assert.False(t, res1.Done, "fresh unbound claim must defer reuse fire instead of skipping")
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res1.RetryAt)
 	assert.Empty(t, core.firedRequests())
 
 	fires1, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: ev1}, store.ListOptions{Limit: 5})
 	require.NoError(t, err)
 	require.Len(t, fires1.Items, 1)
-	assert.Equal(t, store.TriggerFireStatusSkipped, fires1.Items[0].Status)
+	assert.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
 	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, fires1.Items[0].Error)
+	require.NotNil(t, fires1.Items[0].DeferredAt)
+	assert.Equal(t, firstDeferAt, fires1.Items[0].DeferredAt.UTC())
+	origFireID := fires1.Items[0].ID
 
-	// 2. Once unbound claim is abandoned (> 5 min old), reuse falls through to dispatch_agent Fire.
+	// Trigger counters must NOT increment while deferred.
+	trMid, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, trMid.FireCount)
+	assert.Equal(t, 0, trMid.ErrorCount)
+
+	// Claim binds to an in-flight (provisioning) agent -> continues deferring
+	// with ErrFireTargetAgentStillStarting and preserves original DeferredAt.
+	agA := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "bound-ag-a",
+		Name:      "bound-ag-a",
+		ProjectID: projID,
+		Phase:     "provisioning",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agA))
+	require.NoError(t, claims.Bind(ctx, claimA, agA.ID))
+
+	now = res1.RetryAt
+	res1InFlight := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.False(t, res1InFlight.Done)
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res1InFlight.RetryAt)
+	assert.Empty(t, core.firedRequests())
+
+	fires1Mid, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: ev1}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1Mid.Items, 1)
+	assert.Equal(t, origFireID, fires1Mid.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusDeferred, fires1Mid.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireTargetAgentStillStarting, fires1Mid.Items[0].Error)
+	require.NotNil(t, fires1Mid.Items[0].DeferredAt)
+	assert.Equal(t, firstDeferAt, fires1Mid.Items[0].DeferredAt.UTC(), "DeferredAt must stay anchored at first deferral")
+
+	// Agent reaches running -> re-handle promotes SAME fire row and delivers reuse message.
+	agA.Phase = "running"
+	require.NoError(t, cs.UpdateAgent(ctx, agA))
+	now = res1InFlight.RetryAt
+	res1Delivered := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.True(t, res1Delivered.Done)
+	assert.Zero(t, res1Delivered.RetryAt)
+
+	fired := core.firedRequests()
+	require.Len(t, fired, 1)
+	assert.Equal(t, store.TriggerActionMessage, fired[0].ActionType)
+	assert.Contains(t, fired[0].Payload, "reuse-body-"+ev1)
+	assert.Contains(t, fired[0].Payload, agA.ID)
+
+	fires1Done, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: ev1}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1Done.Items, 1)
+	assert.Equal(t, origFireID, fires1Done.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, fires1Done.Items[0].Status)
+	assert.Empty(t, fires1Done.Items[0].Error)
+	assert.Equal(t, agA.ID, fires1Done.Items[0].TargetAgentID)
+
+	// Subcase B: unbound claim released mid-wait -> re-handle dispatches anew.
+	const subjB = "github:octo/repo#56"
+	claimB, existingB, err := claims.Claim(ctx, tr.ID, 0, subjB, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, existingB)
+
+	ev2 := mkEv(subjB, "del-inprog-b1")
+	res2Defer := disp.HandleItem(ctx, makeEventItem(ev2, projID), nil)
+	assert.False(t, res2Defer.Done)
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res2Defer.RetryAt)
+
+	require.NoError(t, claims.Release(ctx, claimB))
+	now = res2Defer.RetryAt
+	res2Dispatch := disp.HandleItem(ctx, makeEventItem(ev2, projID), nil)
+	assert.True(t, res2Dispatch.Done)
+
+	fired = core.firedRequests()
+	require.Len(t, fired, 2)
+	assert.Equal(t, store.TriggerActionDispatchAgent, fired[1].ActionType)
+	assert.Equal(t, ev2, fired[1].Event.ID)
+
+	// Subcase C: bounded expiry (10 min from first deferral) -> finishes failed with closed reason.
+	const subjC = "github:octo/repo#57"
+	claimC1, _, err := claims.Claim(ctx, tr.ID, 0, subjC, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+
+	ev3 := mkEv(subjC, "del-inprog-c1")
+	res3Defer := disp.HandleItem(ctx, makeEventItem(ev3, projID), nil)
+	assert.False(t, res3Defer.Done)
+
+	// Refresh the unbound claim partway through so it stays fresh (< 5m) when 10m expires.
+	now = now.Add(6 * time.Minute)
+	require.NoError(t, claims.Release(ctx, claimC1))
+	_, _, err = claims.Claim(ctx, tr.ID, 0, subjC, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+
+	now = now.Add(4 * time.Minute) // total 10m since first deferral
+	res3Expire := disp.HandleItem(ctx, makeEventItem(ev3, projID), nil)
+	assert.True(t, res3Expire.Done)
+	assert.Zero(t, res3Expire.RetryAt)
+	require.Len(t, core.firedRequests(), 2, "expired deferral must not invoke core.Fire")
+
+	fires3, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: ev3}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires3.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFailed, fires3.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, fires3.Items[0].Error)
+
+	// Subcase D: abandoned unbound claim (> 5 min old) -> falls through to dispatch_agent immediately.
+	const subjD = "github:octo/repo#58"
+	_, _, err = claims.Claim(ctx, tr.ID, 0, subjD, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+
 	now = now.Add(trigger.AbandonedClaimTTL + time.Second)
-	ev2 := uuid.NewString()
-	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
-		ID:         ev2,
-		ProjectID:  projID,
-		SourceKind: store.TriggerSourceKindGitHub,
-		SourceID:   "1001",
-		Type:       "github.issue_comment.created",
-		Subject:    subject,
-		DedupKey:   "del-inprog-2",
-		OccurredAt: now,
-		ReceivedAt: now,
-		Status:     store.TriggerEventStatusPending,
-	}))
-	res2 := disp.HandleItem(ctx, makeEventItem(ev2, projID), nil)
-	assert.True(t, res2.Done)
-	require.Len(t, core.firedRequests(), 1)
-	assert.Equal(t, store.TriggerActionDispatchAgent, core.firedRequests()[0].ActionType)
+	ev4 := mkEv(subjD, "del-inprog-d1")
+	res4 := disp.HandleItem(ctx, makeEventItem(ev4, projID), nil)
+	assert.True(t, res4.Done)
+	require.Len(t, core.firedRequests(), 3)
+	assert.Equal(t, store.TriggerActionDispatchAgent, core.firedRequests()[2].ActionType)
+	assert.Equal(t, ev4, core.firedRequests()[2].Event.ID)
+
+	// Trigger counters: 4 terminal events (ev1 fired, ev2 fired, ev3 failed, ev4 fired) -> FireCount=4, ErrorCount=1.
+	trEnd, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 4, trEnd.FireCount)
+	assert.Equal(t, 1, trEnd.ErrorCount)
 }
 
 func TestDispatcher_CoalesceWindow_MidWindowEditToZeroPromotes(t *testing.T) {
@@ -705,6 +824,7 @@ func TestDispatcher_Reuse_DeferInFlightThenDeliver(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, fires1.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireTargetAgentStillStarting, fires1.Items[0].Error)
 	origFireID := fires1.Items[0].ID
 
 	// Deferred fire counts as live for subjectLive / skip.
@@ -737,6 +857,7 @@ func TestDispatcher_Reuse_DeferInFlightThenDeliver(t *testing.T) {
 	require.Len(t, fires2.Items, 1)
 	assert.Equal(t, origFireID, fires2.Items[0].ID)
 	assert.Equal(t, store.TriggerFireStatusFired, fires2.Items[0].Status)
+	assert.Empty(t, fires2.Items[0].Error)
 }
 
 func TestDispatcher_Reuse_DeferInFlightThenClaimReleasedDispatchesNew(t *testing.T) {
@@ -1450,4 +1571,542 @@ func TestDispatcher_Reuse_NonDispatchActionRunsOwnActionDespiteLiveClaim(t *test
 	assert.Equal(t, store.TriggerActionGitHubComment, fired[1].ActionType)
 	assert.Equal(t, commentPayload, fired[1].Payload)
 	assert.NotContains(t, fired[1].Payload, oldAg.ID, "old claimed agent must not be targeted or woken")
+}
+
+// TestDispatcher_SubjectModeReuse_LostClaimRaceDefersAndDelivers verifies Case 2
+// (ptone/scion#9135): two concurrent drainers/replicas handling two events on
+// the same subject both pass subjectLive with no claim and race Claim inside
+// dispatch_agent. Exactly one agent is created, the loser defers non-terminally
+// with RetryAt instead of skipping "subject busy", and on re-handle delivers
+// its event as a reuse message to the winner's agent.
+func TestDispatcher_SubjectModeReuse_LostClaimRaceDefersAndDelivers(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	t.Logf("dialect=%s", entClient.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	var clockMu sync.RWMutex
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+
+	claimsA := trigger.NewSubjectClaims(cs, cs, clock)
+	claimsB := trigger.NewSubjectClaims(cs, cs, clock)
+
+	tr := makeActiveTrigger(projID, "", "reuse-claim-race", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	const subject = "github:octo/repo#9135"
+	ev1 := uuid.NewString()
+	ev2 := uuid.NewString()
+	for i, evID := range []string{ev1, ev2} {
+		require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "1001",
+			Type:       "github.issue_comment.created",
+			Subject:    subject,
+			DedupKey:   fmt.Sprintf("del-race-%d", i),
+			OccurredAt: clock(),
+			ReceivedAt: clock(),
+			Status:     store.TriggerEventStatusPending,
+		}))
+	}
+
+	// Barrier synchronizes both replicas inside dispatch_agent right before
+	// claims.Claim so both observe claim==nil in subjectLive and genuinely race.
+	var arrived atomic.Int32
+	bothArrived := make(chan struct{})
+	var createdAgents atomic.Int32
+	var reuseDeliveries atomic.Int32
+	var mu sync.Mutex
+	var createdAgentID string
+	var reuseDeliveredEvents []string
+
+	makeCore := func(cl trigger.SubjectClaims) *g4aTestCore {
+		return &g4aTestCore{
+			renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+				return "race-reuse-" + req.Event.ID, nil, nil
+			},
+			fireFn: func(fctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+				if req.ActionType == store.TriggerActionMessage {
+					reuseDeliveries.Add(1)
+					mu.Lock()
+					reuseDeliveredEvents = append(reuseDeliveredEvents, req.Event.ID)
+					mu.Unlock()
+					return hubfire.FireOutcome{
+						Status:    hubfire.FireStatusFired,
+						ResultRef: "msg-" + req.Event.ID,
+					}
+				}
+				// Synchronize both dispatch_agent callers before atomic Claim.
+				if arrived.Add(1) == 2 {
+					close(bothArrived)
+				}
+				select {
+				case <-bothArrived:
+				case <-time.After(5 * time.Second):
+					return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "barrier timeout"}
+				}
+
+				claim, existing, cErr := cl.Claim(fctx, tr.ID, req.Event.Trigger.ActionIndex, req.Event.Trigger.FireSubject, req.Event.ID, req.Authority.FireID)
+				if cErr != nil {
+					return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: cErr.Error()}
+				}
+				if existing != nil {
+					// Exact contract of pkg/hub/action_dispatch_agent.go on lost Claim race.
+					return hubfire.FireOutcome{
+						Status: hubfire.FireStatusSkipped,
+						Error:  trigger.ErrFireSubjectBusy,
+					}
+				}
+				ag := &store.Agent{
+					ID:        uuid.NewString(),
+					Slug:      "race-ag-" + req.Event.ID[:8],
+					Name:      "race-ag-" + req.Event.ID[:8],
+					ProjectID: projID,
+					Phase:     "running",
+				}
+				if err := cs.CreateAgent(fctx, ag); err != nil {
+					_ = cl.Release(fctx, claim)
+					return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: err.Error()}
+				}
+				if err := cl.Bind(fctx, claim, ag.ID); err != nil {
+					return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: err.Error()}
+				}
+				createdAgents.Add(1)
+				mu.Lock()
+				createdAgentID = ag.ID
+				mu.Unlock()
+				return hubfire.FireOutcome{
+					Status:        hubfire.FireStatusFired,
+					ResultRef:     ag.ID,
+					TargetAgentID: ag.ID,
+				}
+			},
+		}
+	}
+
+	dispA, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          makeCore(claimsA),
+		Store:         cs,
+		SubjectClaims: claimsA,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+	dispB, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          makeCore(claimsB),
+		Store:         cs,
+		SubjectClaims: claimsB,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	var (
+		resA, resB durablequeue.Result
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resA = dispA.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	}()
+	go func() {
+		defer wg.Done()
+		resB = dispB.HandleItem(ctx, makeEventItem(ev2, projID), nil)
+	}()
+	wg.Wait()
+
+	// Exactly one replica won the Claim race (Done==true) and created one agent;
+	// the other lost and deferred non-terminally with RetryAt.
+	require.Equal(t, int32(1), createdAgents.Load(), "exactly one agent must be created across racing replicas")
+	require.NotEqual(t, resA.Done, resB.Done, "one replica must finish fired and the other must defer")
+
+	var (
+		loserEvID string
+		loserDisp *trigger.Dispatcher
+		loserRes  durablequeue.Result
+	)
+	if !resA.Done {
+		loserEvID, loserDisp, loserRes = ev1, dispA, resA
+	} else {
+		loserEvID, loserDisp, loserRes = ev2, dispB, resB
+	}
+	assert.Equal(t, clock().Add(trigger.ReuseDeferBackoff), loserRes.RetryAt)
+
+	loserFires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: loserEvID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, loserFires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusDeferred, loserFires.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, loserFires.Items[0].Error)
+	loserFireID := loserFires.Items[0].ID
+
+	// Advance clock to RetryAt and re-handle loser -> delivers as reuse message to winner's agent.
+	advance(trigger.ReuseDeferBackoff)
+	resRetry := loserDisp.HandleItem(ctx, makeEventItem(loserEvID, projID), nil)
+	assert.True(t, resRetry.Done)
+	assert.Zero(t, resRetry.RetryAt)
+
+	assert.Equal(t, int32(1), createdAgents.Load(), "re-handle must never create a second agent")
+	assert.Equal(t, int32(1), reuseDeliveries.Load(), "loser event must be delivered as a reuse message")
+	mu.Lock()
+	assert.Equal(t, []string{loserEvID}, reuseDeliveredEvents)
+	wantAgentID := createdAgentID
+	mu.Unlock()
+
+	allFires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, allFires.Items, 2)
+	for _, f := range allFires.Items {
+		assert.Equal(t, store.TriggerFireStatusFired, f.Status)
+		assert.Empty(t, f.Error)
+		assert.Equal(t, wantAgentID, f.TargetAgentID)
+		if f.EventID == loserEvID {
+			assert.Equal(t, loserFireID, f.ID, "deferred fire row must be promoted in place")
+		}
+	}
+
+	updatedTr, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, updatedTr.FireCount)
+	assert.Equal(t, 0, updatedTr.ErrorCount)
+}
+
+// TestDispatcher_SubjectModeReuse_CrashMidDeferralResumesExactlyOnce verifies
+// durable idempotency across crash/restart for both Case 1 (pre-reap concurrent
+// lost-lease re-handle) and Case 2 (post-reap revival after hub outage).
+func TestDispatcher_SubjectModeReuse_CrashMidDeferralResumesExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	t.Logf("dialect=%s", entClient.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	var clockMu sync.RWMutex
+	now := time.Date(2026, 11, 28, 13, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	tr := makeActiveTrigger(projID, "", "reuse-crash-idempotent", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	mkEv := func(subject, dedup string) string {
+		id := uuid.NewString()
+		require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "1001",
+			Type:       "github.issue_comment.created",
+			Subject:    subject,
+			DedupKey:   dedup,
+			OccurredAt: clock(),
+			ReceivedAt: clock(),
+			Status:     store.TriggerEventStatusPending,
+		}))
+		return id
+	}
+
+	// Subcase A: Case 1 deferred -> hub restarts -> two replicas concurrently
+	// re-handle the same event at RetryAt -> reuse message delivered exactly once.
+	const subjA = "github:octo/repo#9135-crash-a"
+	claimA, _, err := claims.Claim(ctx, tr.ID, 0, subjA, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+
+	evA := mkEv(subjA, "del-crash-a")
+	dispInitial, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          &g4aTestCore{},
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+	resDeferA := dispInitial.HandleItem(ctx, makeEventItem(evA, projID), nil)
+	assert.False(t, resDeferA.Done)
+
+	// Bind claim to running agent and advance to RetryAt.
+	agA := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "crash-ag-a",
+		Name:      "crash-ag-a",
+		ProjectID: projID,
+		Phase:     "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agA))
+	require.NoError(t, claims.Bind(ctx, claimA, agA.ID))
+	advance(trigger.ReuseDeferBackoff)
+
+	var deliveriesA atomic.Int32
+	newRestartDisp := func() *trigger.Dispatcher {
+		core := &g4aTestCore{
+			renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+				return "crash-resume-" + req.Event.ID, nil, nil
+			},
+			fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+				if req.ActionType == store.TriggerActionMessage {
+					deliveriesA.Add(1)
+				}
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-" + req.Authority.FireID}
+			},
+		}
+		d, dErr := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:          core,
+			Store:         cs,
+			SubjectClaims: claims,
+			Now:           clock,
+		})
+		require.NoError(t, dErr)
+		return d
+	}
+
+	dispR1 := newRestartDisp()
+	dispR2 := newRestartDisp()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_ = dispR1.HandleItem(ctx, makeEventItem(evA, projID), nil)
+	}()
+	go func() {
+		defer wg.Done()
+		_ = dispR2.HandleItem(ctx, makeEventItem(evA, projID), nil)
+	}()
+	wg.Wait()
+
+	assert.Equal(t, int32(1), deliveriesA.Load(), "concurrent crash-recovery re-handles must deliver reuse message exactly once")
+	firesA, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evA}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesA.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, firesA.Items[0].Status)
+	assert.Empty(t, firesA.Items[0].Error)
+
+	// Subcase B: Case 2 deferred -> hub down past lease -> maintenance reaps
+	// ("hub restarted during defer") -> claim binds -> fresh dispatcher revives
+	// SAME fire row and delivers reuse message exactly once.
+	const subjB = "github:octo/repo#9135-crash-b"
+	evB := mkEv(subjB, "del-crash-b")
+	lostRaceCore := &g4aTestCore{
+		fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			return hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: trigger.ErrFireSubjectBusy}
+		},
+	}
+	dispLost, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          lostRaceCore,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+	resDeferB := dispLost.HandleItem(ctx, makeEventItem(evB, projID), nil)
+	assert.False(t, resDeferB.Done)
+
+	firesBBefore, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evB}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesBBefore.Items, 1)
+	origFireIDB := firesBBefore.Items[0].ID
+
+	// Reap expired deferred fire during hub outage.
+	advance(trigger.ReuseDeferBackoff + trigger.FireLeaseHorizon + time.Minute)
+	reaped, err := cs.ReapExpiredTriggerFires(ctx, clock(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reaped)
+
+	// Winner's claim is now bound to a running agent.
+	agB := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "crash-ag-b",
+		Name:      "crash-ag-b",
+		ProjectID: projID,
+		Phase:     "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agB))
+	claimB, _, err := claims.Claim(ctx, tr.ID, 0, subjB, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.NoError(t, claims.Bind(ctx, claimB, agB.ID))
+
+	var deliveriesB atomic.Int32
+	reviveCore := &g4aTestCore{
+		renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+			return "revived-case2-" + req.Event.ID, nil, nil
+		},
+		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			if req.ActionType == store.TriggerActionMessage {
+				deliveriesB.Add(1)
+			}
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-" + req.Authority.FireID}
+		},
+	}
+	dispRevive, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          reviveCore,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	resRevive := dispRevive.HandleItem(ctx, makeEventItem(evB, projID), nil)
+	assert.True(t, resRevive.Done)
+	assert.Equal(t, int32(1), deliveriesB.Load())
+
+	// Second re-handle after completion is a no-op (event already processed).
+	resAgain := dispRevive.HandleItem(ctx, makeEventItem(evB, projID), nil)
+	assert.True(t, resAgain.Done)
+	assert.Equal(t, int32(1), deliveriesB.Load())
+
+	firesBAfter, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evB}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesBAfter.Items, 1)
+	assert.Equal(t, origFireIDB, firesBAfter.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, firesBAfter.Items[0].Status)
+	assert.Empty(t, firesBAfter.Items[0].Error)
+}
+
+// TestDispatcher_SubjectModeReuse_MultiActionP9DeferralDoesNotBlockSibling
+// verifies the P9 multi-action rule: subject claims and reuse deferrals are
+// scoped per (trigger, action_index, subject), so a deferred dispatch_agent at
+// action_index=0 never blocks a message sibling (action_index=1) or an
+// independent dispatch_agent sibling (action_index=2), and re-handling delivers
+// only the deferred row without double-firing siblings or double-counting.
+func TestDispatcher_SubjectModeReuse_MultiActionP9DeferralDoesNotBlockSibling(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	t.Logf("dialect=%s", entClient.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 28, 14, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	tr := makeActiveTrigger(projID, "", "reuse-p9-multi", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.ActionPayload = `{"template":"dev","task":"work-0","reuseMessage":"reused-0"}`
+	tr.Actions = []store.TriggerAction{
+		{Type: store.TriggerActionDispatchAgent, Payload: `{"template":"dev","task":"work-0","reuseMessage":"reused-0"}`},
+		{Type: store.TriggerActionMessage, Payload: `{"agentId":"observer-agent","message":"sibling notification"}`},
+		{Type: store.TriggerActionDispatchAgent, Payload: `{"template":"dev","task":"work-2","reuseMessage":"reused-2"}`},
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	// Seed a fresh unbound claim ONLY on action_index=0.
+	const subject = "github:octo/repo#9135-p9"
+	claim0, existing, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, existing)
+
+	core := &g4aTestCore{
+		renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+			return fmt.Sprintf("reused-idx%d-%s", req.Event.Trigger.ActionIndex, req.Event.ID), nil, nil
+		},
+	}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.issue_comment.created",
+		Subject:    subject,
+		DedupKey:   "del-p9-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	// Pass 1: action 0 defers; action 1 (message) and action 2 (dispatch_agent at idx 2) run immediately!
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.False(t, res1.Done)
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res1.RetryAt)
+
+	fired1 := core.firedRequests()
+	require.Len(t, fired1, 2, "siblings at action_index 1 and 2 must run immediately without waiting for action_index 0")
+	assert.Equal(t, 1, fired1[0].Event.Trigger.ActionIndex)
+	assert.Equal(t, store.TriggerActionMessage, fired1[0].ActionType)
+	assert.Equal(t, 2, fired1[1].Event.Trigger.ActionIndex)
+	assert.Equal(t, store.TriggerActionDispatchAgent, fired1[1].ActionType)
+
+	fires1, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 3)
+	byIdx1 := map[int]store.TriggerFire{}
+	for _, f := range fires1.Items {
+		byIdx1[f.ActionIndex] = f
+	}
+	assert.Equal(t, store.TriggerFireStatusDeferred, byIdx1[0].Status)
+	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, byIdx1[0].Error)
+	assert.Equal(t, store.TriggerFireStatusFired, byIdx1[1].Status)
+	assert.Equal(t, store.TriggerFireStatusFired, byIdx1[2].Status)
+
+	// Bind action 0's claim to a running agent and advance to RetryAt.
+	ag0 := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "p9-ag-0",
+		Name:      "p9-ag-0",
+		ProjectID: projID,
+		Phase:     "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag0))
+	require.NoError(t, claims.Bind(ctx, claim0, ag0.ID))
+	now = res1.RetryAt
+
+	// Pass 2: action 0 promotes and delivers reuse message; siblings 1 and 2 are NOT re-fired.
+	res2 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.True(t, res2.Done)
+	assert.Zero(t, res2.RetryAt)
+
+	fired2 := core.firedRequests()
+	require.Len(t, fired2, 3, "only deferred action 0 should fire on pass 2")
+	assert.Equal(t, 0, fired2[2].Event.Trigger.ActionIndex)
+	assert.Equal(t, store.TriggerActionMessage, fired2[2].ActionType)
+	assert.Contains(t, fired2[2].Payload, "reused-idx0-"+evID)
+	assert.Contains(t, fired2[2].Payload, ag0.ID)
+
+	fires2, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 3)
+	for _, f := range fires2.Items {
+		assert.Equal(t, store.TriggerFireStatusFired, f.Status)
+		assert.Empty(t, f.Error)
+	}
+
+	// Trigger FireCount must be 1 for the single matched event (not double-counted across passes).
+	updatedTr, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, updatedTr.FireCount)
+	assert.Equal(t, 0, updatedTr.ErrorCount)
 }

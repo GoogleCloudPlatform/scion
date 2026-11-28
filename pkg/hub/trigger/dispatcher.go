@@ -1351,15 +1351,21 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				}
 
 			case store.TriggerSubjectModeReuse:
-				// Stage 3 §6.2 (rev 1.16), §6.5 & action-arrays §3.2: reuse (claim
-				// lookup, deferral, wake delivery) applies only to dispatch_agent
-				// at its own action_index; a reuse on a dispatch action never blocks
-				// a message or other sibling action.
+				// Stage 3 §6.2 (rev 1.16), §6.5, action-arrays §3.2 & ptone/scion#9135:
+				// reuse (claim lookup, deferral, wake delivery) applies only to
+				// dispatch_agent at its own action_index; a reuse on a dispatch action
+				// never blocks a message or other sibling action.
 				if act.Type != store.TriggerActionDispatchAgent {
 					out = d.core.Fire(fireCtx, req)
 					break
 				}
 				_, claim, lErr := d.subjectLive(fireCtx, tr.ID, actionIdx, fireSubject, fire.ID, false)
+				var (
+					deferFire   bool
+					deferReason string
+					deferLog    string
+					deferAgent  string
+				)
 				switch {
 				case lErr != nil:
 					d.logger.Warn("trigger: subjectLive check failed for reuse",
@@ -1367,51 +1373,56 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
 				case claim != nil && claim.AgentID != "":
 					if reuseTargetLaunchInFlight(claim.Agent, claimNow) {
-						firstDeferred := claimNow
-						if fire.DeferredAt != nil && !fire.DeferredAt.IsZero() {
-							firstDeferred = fire.DeferredAt.UTC()
-							if claimNow.Sub(firstDeferred) >= ReuseDeferTimeout {
-								out = hubfire.FireOutcome{
-									Status: hubfire.FireStatusFailed,
-									Error:  ErrFireTargetAgentStillStarting,
-								}
-								break
-							}
-						}
-						retryAt := claimNow.Add(ReuseDeferBackoff)
-						if deadline := firstDeferred.Add(ReuseDeferTimeout); retryAt.After(deadline) {
-							retryAt = deadline
-						}
-						writeCtx, cancelWrite := storeWriteContext(ctx)
-						deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, retryAt, retryAt.Add(FireLeaseHorizon))
-						cancelWrite()
-						if dErr != nil {
-							cancelFire()
-							flushTrigCounters()
-							d.logger.Warn("trigger: failed to defer reuse fire for launching agent",
-								"triggerID", tr.ID, "actionIndex", actionIdx, "fireID", fire.ID, "agentID", claim.AgentID, "error", dErr)
-							return durablequeue.Result{Err: errors.New("trigger: defer fire failed")}
-						}
-						if deferred {
-							stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
-							if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
-								earliestRetryAt = retryAt
-							}
-						}
-						cancelFire()
-						continue
+						deferFire = true
+						deferReason = ErrFireTargetAgentStillStarting
+						deferLog = "trigger: failed to defer reuse fire for launching agent"
+						deferAgent = claim.AgentID
+						break
 					}
 					out = d.fireReuseMessage(fireCtx, req, claim.AgentID)
 					if out.TargetAgentID == "" {
 						out.TargetAgentID = claim.AgentID
 					}
 				case claim != nil && claim.AgentID == "":
-					out = hubfire.FireOutcome{
-						Status: hubfire.FireStatusSkipped,
-						Error:  ErrFireSubjectDispatchInProgress,
-					}
+					// Case 1 (ptone/scion#9135): fresh unbound claim (another replica
+					// mid-create). Defer non-terminally with RetryAt using the rev 1.16
+					// mechanism instead of skipping "subject dispatch in progress".
+					deferFire = true
+					deferReason = ErrFireSubjectDispatchInProgress
+					deferLog = "trigger: failed to defer reuse fire for in-progress dispatch"
 				default:
 					out = d.core.Fire(fireCtx, req)
+					// Case 2 (ptone/scion#9135): lost the atomic Claim race inside
+					// dispatch_agent's Fire ("subject busy"). Defer non-terminally with
+					// RetryAt so the next pass delivers to the winner's bound agent (or
+					// dispatches anew if the winner's claim was released).
+					if out.Status == hubfire.FireStatusSkipped && out.Error == ErrFireSubjectBusy {
+						deferFire = true
+						deferReason = ErrFireSubjectDispatchInProgress
+						deferLog = "trigger: failed to defer reuse fire after claim race"
+					}
+				}
+				if deferFire {
+					retryAt, timeoutOut, dErr := d.deferReuseFire(ctx, &fire, claimNow, deferReason, deferReason)
+					if dErr != nil {
+						cancelFire()
+						flushTrigCounters()
+						d.logger.Warn(deferLog,
+							"triggerID", tr.ID, "actionIndex", actionIdx, "fireID", fire.ID, "agentID", deferAgent, "error", dErr)
+						return durablequeue.Result{Err: errors.New("trigger: defer fire failed")}
+					}
+					if timeoutOut != nil {
+						out = *timeoutOut
+						break
+					}
+					if !retryAt.IsZero() {
+						stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
+						if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
+							earliestRetryAt = retryAt
+						}
+					}
+					cancelFire()
+					continue
 				}
 
 			default:
@@ -1538,6 +1549,42 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 // PreFireRefuser checks). Passive notification actions (message) return false.
 func ActionSubjectToPreFireGuards(actionType string) bool {
 	return actionType == store.TriggerActionDispatchAgent || actionType == store.TriggerActionGitHubComment
+}
+
+// deferReuseFire defers a reuse fire row non-terminally with bounded backoff
+// (ReuseDeferBackoff) and a bounded total wait (ReuseDeferTimeout) counted from
+// first deferral (Stage 3 §6.2 rev 1.16, ptone/scion#9135). When the total wait
+// has elapsed, it returns a terminal failed FireOutcome with timeoutReason.
+func (d *Dispatcher) deferReuseFire(
+	ctx context.Context,
+	fire *store.TriggerFire,
+	claimNow time.Time,
+	deferReason, timeoutReason string,
+) (retryAt time.Time, timeoutOut *hubfire.FireOutcome, err error) {
+	firstDeferred := claimNow
+	if fire.DeferredAt != nil && !fire.DeferredAt.IsZero() {
+		firstDeferred = fire.DeferredAt.UTC()
+		if claimNow.Sub(firstDeferred) >= ReuseDeferTimeout {
+			return time.Time{}, &hubfire.FireOutcome{
+				Status: hubfire.FireStatusFailed,
+				Error:  timeoutReason,
+			}, nil
+		}
+	}
+	nextRetry := claimNow.Add(ReuseDeferBackoff)
+	if deadline := firstDeferred.Add(ReuseDeferTimeout); nextRetry.After(deadline) {
+		nextRetry = deadline
+	}
+	writeCtx, cancelWrite := storeWriteContext(ctx)
+	deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, nextRetry, nextRetry.Add(FireLeaseHorizon), deferReason)
+	cancelWrite()
+	if dErr != nil {
+		return time.Time{}, nil, dErr
+	}
+	if !deferred {
+		return time.Time{}, nil, nil
+	}
+	return nextRetry, nil, nil
 }
 
 // reuseTargetLaunchInFlight reports whether agent a is in a launch state that

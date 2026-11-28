@@ -570,7 +570,7 @@ type TriggerStore interface {
 	ClaimTriggerFire(ctx context.Context, fire *TriggerFire) (claimed bool, existing *TriggerFire, err error)
 	ClaimTriggerFireSubjectSkip(ctx context.Context, fire *TriggerFire, skipError string, now time.Time) (claimed bool, skippedBusy bool, existing *TriggerFire, err error)
 	ClaimTriggerFireCoalescing(ctx context.Context, fire *TriggerFire, coalesceError string, now, notBefore time.Time) (claimed bool, promoted bool, superseded []TriggerFire, existing *TriggerFire, err error)
-	DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error)
+	DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time, errMsg string) (bool, error)
 	FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error)
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	ParkTriggerFireWaiting(ctx context.Context, id, projectID, targetAgentID, errMsg string, waitUntil time.Time, maxPerTarget, maxPerProject int) (parked bool, capExceeded bool, err error)

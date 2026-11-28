@@ -1095,3 +1095,183 @@ func TestTriggerG4a_Reuse_PatchedToMessageRunsOwnAction(t *testing.T) {
 	assert.Equal(t, targetAg.Slug, msgs[0].AgentID)
 	assert.Contains(t, msgs[0].Message, "own message action")
 }
+
+// TestTriggerG4a_Reuse_UnboundClaimAndLostClaimRaceDeferAndDeliver verifies
+// ptone/scion#9135 end-to-end through serverTriggerCore and fireTriggerDispatchAgent:
+//   - Case 1 (claim-to-bind window): an event arriving while an active unbound
+//     claim exists defers non-terminally with RetryAt and delivers the rendered
+//     reuseMessage once the claim binds to a running agent.
+//   - Case 2 (lost Claim race): an event whose subjectLive saw no claim (e.g.
+//     concurrent replica) loses the atomic Claim inside fireTriggerDispatchAgent
+//     ("subject busy"), defers non-terminally with RetryAt, and delivers the
+//     rendered reuseMessage on re-handle without creating a second agent.
+func TestTriggerG4a_Reuse_UnboundClaimAndLostClaimRaceDeferAndDeliver(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "s3-g4a-9135")
+	userCtx := f.userAuth(t, f.sched.creator)
+
+	ep := f.createEndpoint(t, userCtx, "reuse-9135-ep")
+	rec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:    "reuse-9135-trigger",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:   &TriggerMatchSpec{Types: []string{"webhook.pr_comment"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse},
+			Action: TriggerActionSpec{
+				Type:          store.TriggerActionDispatchAgent,
+				Task:          "Initial task for ${event.subject}",
+				AgentName:     "pr-9135-${event.id}",
+				ReuseMessage:  "Follow-up for ${event.id}",
+				UntrustedVars: []string{"event.subject"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var trigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trigResp))
+
+	var createCalls atomic.Int32
+	tracker := &reuseTrackingBrokerClient{
+		headlessGatherBrokerClient: f.client,
+		storeForUpd:                f.sched.store,
+		onBeforeCreate: func(_ *RemoteCreateAgentRequest) error {
+			createCalls.Add(1)
+			return nil
+		},
+	}
+	f.sched.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.sched.store, tracker, false, slog.Default()))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, clock)
+
+	dqStore := f.sched.store.(store.DurableQueueStore)
+	claimNextItem := func(owner string) durablequeue.Item {
+		t.Helper()
+		rows, err := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, owner, time.Now().UTC(), time.Now().UTC().Add(time.Minute), 1)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		r := rows[0]
+		return durablequeue.Item{
+			Seq: r.Seq, Kind: r.Kind, DedupKey: r.DedupKey,
+			ProjectID: r.ProjectID, Payload: []byte(r.Payload), Attempts: r.Attempts,
+		}
+	}
+
+	// --- Case 1: fresh unbound claim -> defer -> bind -> deliver ---
+	subj1 := "webhook:" + ep.ID + "/pr-case1"
+	unboundClaim, ex, err := claims.Claim(ctx, trigResp.ID, 0, subj1, api.NewUUID(), api.NewUUID())
+	require.NoError(t, err)
+	require.Nil(t, ex)
+
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-9135-c1", "pr_comment", "pr-case1", []byte(`{"n":1}`)).Code)
+	item1 := claimNextItem("case1-worker")
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	res1Defer := disp.HandleItem(ctx, item1, nil)
+	assert.False(t, res1Defer.Done, "Case 1 fresh unbound claim must defer")
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res1Defer.RetryAt)
+	assert.Equal(t, int32(0), createCalls.Load())
+
+	fires1, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trigResp.ID, EventID: item1.DedupKey}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, fires1.Items[0].Error)
+
+	// Bind the claim to a running agent and re-handle at RetryAt.
+	ag1 := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "case1-bound-ag",
+		Name:            "case1-bound-ag",
+		ProjectID:       f.sched.proj.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseRunning),
+		Activity:        string(state.ActivityWaitingForInput),
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, ag1))
+	require.NoError(t, claims.Bind(ctx, unboundClaim, ag1.ID))
+
+	now = res1Defer.RetryAt
+	res1Done := disp.HandleItem(ctx, item1, nil)
+	assert.True(t, res1Done.Done)
+	_, _ = dqStore.CompleteDurableItem(ctx, item1.Seq, "case1-worker")
+
+	msgs := tracker.messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, ag1.Slug, msgs[0].AgentID)
+	assert.Contains(t, msgs[0].Message, "Follow-up for "+item1.DedupKey)
+
+	// --- Case 2: lost Claim race inside real fireTriggerDispatchAgent -> defer -> deliver ---
+	// First dispatch creates a live bound agent for pr-case2.
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-9135-c2-winner", "pr_comment", "pr-case2", []byte(`{"n":2}`)).Code)
+	item2Win := claimNextItem("case2-winner")
+	resWin := disp.HandleItem(ctx, item2Win, nil)
+	require.True(t, resWin.Done)
+	_, _ = dqStore.CompleteDurableItem(ctx, item2Win.Seq, "case2-winner")
+	require.Equal(t, int32(1), createCalls.Load())
+
+	subj2 := "webhook:" + ep.ID + "/pr-case2"
+	winClaim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subj2)
+	require.NoError(t, err)
+	require.NotEmpty(t, winClaim.AgentID)
+	winAg, err := f.sched.store.GetAgent(ctx, winClaim.AgentID)
+	require.NoError(t, err)
+	winAg.Phase = string(state.PhaseRunning)
+	winAg.Activity = string(state.ActivityWaitingForInput)
+	require.NoError(t, f.sched.store.UpdateAgent(ctx, winAg))
+
+	// Now post a second event for pr-case2 and run a dispatcher with SubjectClaims=nil
+	// so subjectLive returns nil and enters real fireTriggerDispatchAgent, which runs
+	// atomic claims.Claim against the store, loses to winClaim, and returns
+	// FireStatusSkipped / ErrFireSubjectBusy. The dispatcher must defer it instead of skipping.
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-9135-c2-loser", "pr_comment", "pr-case2", []byte(`{"n":3}`)).Code)
+	item2Lose := claimNextItem("case2-loser")
+
+	dispBlind, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: nil, // forces default -> fireTriggerDispatchAgent -> Claim race loss
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	res2Defer := dispBlind.HandleItem(ctx, item2Lose, nil)
+	assert.False(t, res2Defer.Done, "Case 2 lost Claim race must defer instead of skipping")
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res2Defer.RetryAt)
+	assert.Equal(t, int32(1), createCalls.Load(), "lost Claim race must not create a second agent")
+
+	fires2, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trigResp.ID, EventID: item2Lose.DedupKey}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusDeferred, fires2.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, fires2.Items[0].Error)
+	c2FireID := fires2.Items[0].ID
+
+	// On re-handle at RetryAt with real SubjectClaims, the deferred fire promotes
+	// in place and delivers the rendered reuseMessage to winAg.
+	now = res2Defer.RetryAt
+	res2Done := disp.HandleItem(ctx, item2Lose, nil)
+	assert.True(t, res2Done.Done)
+	_, _ = dqStore.CompleteDurableItem(ctx, item2Lose.Seq, "case2-loser")
+	assert.Equal(t, int32(1), createCalls.Load(), "re-handle must reuse winner agent")
+
+	fires2Done, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trigResp.ID, EventID: item2Lose.DedupKey}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires2Done.Items, 1)
+	assert.Equal(t, c2FireID, fires2Done.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, fires2Done.Items[0].Status)
+	assert.Empty(t, fires2Done.Items[0].Error)
+
+	msgs = tracker.messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, winAg.Slug, msgs[1].AgentID)
+	assert.Contains(t, msgs[1].Message, "Follow-up for "+item2Lose.DedupKey)
+}

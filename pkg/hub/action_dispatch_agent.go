@@ -1274,13 +1274,15 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		fireSubject = ev.Trigger.FireSubject
 	}
 
-	// Subject claim (§5.3, §5.6): mode "new" never claims; mode "skip" claims
-	// atomically on the dispatcher's derived fire subject before render/create,
-	// skips "subject busy" if a live claim exists (lazily releasing a claim
-	// whose agent is terminal/deleted via Live), binds in commitAgentCreate's
-	// transaction, and releases explicitly only when no Bind committed. Once
-	// Bind commits, later create errors (including post-commit paths in
-	// createAgentHeadless where the agent row may survive:
+	// Subject claim (§5.3, §5.6): mode "new" never claims; modes "skip" and
+	// "reuse" claim atomically on the dispatcher's derived fire subject before
+	// render/create, returning skipped "subject busy" if a live claim exists
+	// (lazily releasing a claim whose agent is terminal/deleted via Live) — the
+	// dispatcher treats "subject busy" as a terminal skip for "skip" mode and
+	// defers non-terminally with RetryAt for "reuse" mode (ptone/scion#9135) —
+	// bind in commitAgentCreate's transaction, and release explicitly only when
+	// no Bind committed. Once Bind commits, later create errors (including
+	// post-commit paths in createAgentHeadless where the agent row may survive:
 	// ErrLaunchInvalidPhase, errStartingWrite, store.ErrClaimPredicate,
 	// errStartClaimLost) leave the bound claim to Live, hourly maintenance, and
 	// the agent deletion cascade.
@@ -1320,7 +1322,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			if existing != nil {
 				return hubfire.FireOutcome{
 					Status: hubfire.FireStatusSkipped,
-					Error:  "subject busy",
+					Error:  trigger.ErrFireSubjectBusy,
 				}, nil
 			}
 		}
