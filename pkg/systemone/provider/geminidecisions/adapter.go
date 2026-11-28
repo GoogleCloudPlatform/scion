@@ -63,6 +63,10 @@ const (
 	// MaxInputTokens is the documented Gemini Decision 1 context limit covering
 	// input and all questions (PV3 brief §1, §5.1).
 	MaxInputTokens = 262144
+
+	// KnownModelGeminiDecision1 is the primary documented Gemini Decisions model
+	// identifier (ai.google.dev gemini-api/docs/models/gemini-decision-1).
+	KnownModelGeminiDecision1 = "gemini-decision-1"
 )
 
 var confidenceMetricDecl = provider.MetricDecl{
@@ -86,6 +90,7 @@ var (
 	_ provider.InstanceValidator  = (*Adapter)(nil)
 	_ provider.DefaultSecretRefer = (*Adapter)(nil)
 	_ provider.SecretNamePolicy   = (*Adapter)(nil)
+	_ provider.ModelCatalog       = (*Adapter)(nil)
 )
 
 // New constructs a Gemini Decision 1 provider Adapter.
@@ -119,6 +124,19 @@ func (a *Adapter) DefaultSecretRefName() string {
 // gemini_decisions: ["GEMINI_API_KEY"] (PV3 Addendum F §F10).
 func (a *Adapter) AllowedSecretNames() []string {
 	return []string{provider.DefaultGeminiAPIKeySecretName}
+}
+
+// KnownModels returns a defensive copy of the static, provider-documented model
+// catalog for Gemini Decisions (ai.google.dev gemini-api/docs/models/gemini-decision-1).
+// It performs no I/O and requires no credentials.
+func (a *Adapter) KnownModels() []provider.ModelDecl {
+	return []provider.ModelDecl{
+		{
+			ID:          KnownModelGeminiDecision1,
+			DisplayName: "Gemini Decision 1",
+			Source:      provider.ModelSourceProviderDoc,
+		},
+	}
 }
 
 // ValidateInstance checks Gemini-specific instance configuration (requiring a

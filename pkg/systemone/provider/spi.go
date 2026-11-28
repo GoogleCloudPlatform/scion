@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -173,6 +174,10 @@ const (
 	// gemini_decisions api_key instances created without an inline API key
 	// (Addendum F §§F2, F4).
 	DefaultGeminiAPIKeySecretName = "GEMINI_API_KEY"
+
+	// ModelSourceProviderDoc marks a statically declared model identifier
+	// verified against the provider's primary documentation.
+	ModelSourceProviderDoc = metrics.SourceProviderDoc
 
 	maxSecretRefNameBytes = 128
 )
@@ -459,6 +464,82 @@ func AllowedSecretNamesFor(adapter Adapter) []string {
 		if !slices.Contains(out, name) {
 			out = append(out, name)
 		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ModelDecl describes a static, adapter-documented model identifier advertised
+// by an adapter implementing ModelCatalog. It carries documentation metadata
+// only; advertising a model does not verify account access or restrict custom
+// model IDs.
+type ModelDecl struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Source      string `json:"source"`
+}
+
+// ModelCatalog is an optional SPI-adjacent extension implemented by adapters
+// that document a static catalog of known model identifiers. Implementations
+// must be pure and side-effect free: no network I/O, no credentials, and no
+// live provider calls.
+type ModelCatalog interface {
+	KnownModels() []ModelDecl
+}
+
+func isValidCatalogString(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// KnownModelsFor returns a deduplicated defensive copy of the valid static
+// model declarations advertised by adapter's ModelCatalog, or nil when adapter
+// is nil, does not implement ModelCatalog, or declares no valid models.
+func KnownModelsFor(adapter Adapter) []ModelDecl {
+	if adapter == nil {
+		return nil
+	}
+	cat, ok := adapter.(ModelCatalog)
+	if !ok {
+		return nil
+	}
+	raw := cat.KnownModels()
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]ModelDecl, 0, len(raw))
+	for _, m := range raw {
+		id := strings.TrimSpace(m.ID)
+		if id == "" || !isValidCatalogString(id) {
+			continue
+		}
+		displayName := strings.TrimSpace(m.DisplayName)
+		if !isValidCatalogString(displayName) {
+			continue
+		}
+		source := strings.TrimSpace(m.Source)
+		if !isValidCatalogString(source) {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, ModelDecl{
+			ID:          id,
+			DisplayName: displayName,
+			Source:      source,
+		})
 	}
 	if len(out) == 0 {
 		return nil

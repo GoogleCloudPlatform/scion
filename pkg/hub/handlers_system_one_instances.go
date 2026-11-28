@@ -212,6 +212,14 @@ type SystemOneAdapterAuthModeDTO struct {
 	ScopesRequired        bool   `json:"scopesRequired,omitempty"`
 }
 
+// SystemOneKnownModelDTO describes one static, adapter-documented model
+// advertised on GET /api/v1/admin/system-one/adapters.
+type SystemOneKnownModelDTO struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+	Source      string `json:"source"`
+}
+
 // SystemOneAdapterCapabilityDTO is the non-secret capability metadata for a
 // registered System One provider adapter returned by
 // GET /api/v1/admin/system-one/adapters.
@@ -223,6 +231,7 @@ type SystemOneAdapterCapabilityDTO struct {
 	DefaultEndpoint      string                        `json:"defaultEndpoint,omitempty"`
 	ModelRequired        bool                          `json:"modelRequired"`
 	SupportsModelListing bool                          `json:"supportsModelListing"`
+	KnownModels          []SystemOneKnownModelDTO      `json:"knownModels,omitempty"`
 	AuthModes            []SystemOneAdapterAuthModeDTO `json:"authModes"`
 	AllowedSecretNames   []string                      `json:"allowedSecretNames,omitempty"`
 	DefaultSecretName    string                        `json:"defaultSecretName,omitempty"`
@@ -468,6 +477,16 @@ func (s *Server) handleAdminSystemOneAdapters(w http.ResponseWriter, r *http.Req
 			ModelRequired:        adapterRequiresModel(adapter, defaultEndpoint),
 			SupportsModelListing: supportsModelListing,
 			AuthModes:            authModes,
+		}
+		if knownModels := systemoneprovider.KnownModelsFor(adapter); len(knownModels) > 0 {
+			dto.KnownModels = make([]SystemOneKnownModelDTO, 0, len(knownModels))
+			for _, m := range knownModels {
+				dto.KnownModels = append(dto.KnownModels, SystemOneKnownModelDTO{
+					ID:          m.ID,
+					DisplayName: m.DisplayName,
+					Source:      m.Source,
+				})
+			}
 		}
 		if len(allowedSecretNames) > 0 {
 			dto.AllowedSecretNames = slices.Clone(allowedSecretNames)

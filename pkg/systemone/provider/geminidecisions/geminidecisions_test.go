@@ -44,6 +44,20 @@ func TestDefaultRegistry_RegistersGeminiDecisionsWithoutModelLister(t *testing.T
 	_, isLister := got.(provider.ModelLister)
 	assert.False(t, isLister, "gemini_decisions must not implement provider.ModelLister in PV3 (U-G1)")
 
+	catalog, isCatalog := got.(provider.ModelCatalog)
+	require.True(t, isCatalog, "gemini_decisions must implement optional provider.ModelCatalog")
+	known := catalog.KnownModels()
+	require.Equal(t, []provider.ModelDecl{
+		{
+			ID:          geminidecisions.KnownModelGeminiDecision1,
+			DisplayName: "Gemini Decision 1",
+			Source:      provider.ModelSourceProviderDoc,
+		},
+	}, known)
+	// KnownModels returns a defensive copy.
+	known[0].ID = "mutated"
+	assert.Equal(t, geminidecisions.KnownModelGeminiDecision1, catalog.KnownModels()[0].ID)
+
 	defaulter, isDefaulter := got.(provider.EndpointDefaulter)
 	require.True(t, isDefaulter, "gemini_decisions must implement optional provider.EndpointDefaulter")
 	assert.Equal(t, geminidecisions.DefaultEndpoint, defaulter.DefaultEndpoint())

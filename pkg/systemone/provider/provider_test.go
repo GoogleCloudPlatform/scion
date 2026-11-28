@@ -412,3 +412,42 @@ func TestValidateDistribution_SumToleranceFloatSlackBoundary(t *testing.T) {
 		})
 	}
 }
+
+type catalogAdapter struct {
+	stubAdapter
+	models []provider.ModelDecl
+}
+
+func (c *catalogAdapter) KnownModels() []provider.ModelDecl {
+	return c.models
+}
+
+func TestKnownModelsFor_FilteringDeduplicationAndDefensiveCopy(t *testing.T) {
+	assert.Nil(t, provider.KnownModelsFor(nil))
+	assert.Nil(t, provider.KnownModelsFor(&stubAdapter{name: "no-catalog"}))
+	assert.Nil(t, provider.KnownModelsFor(&catalogAdapter{stubAdapter: stubAdapter{name: "empty"}}))
+
+	src := []provider.ModelDecl{
+		{ID: "  model-a  ", DisplayName: " Model A ", Source: provider.ModelSourceProviderDoc},
+		{ID: "", DisplayName: "Blank", Source: provider.ModelSourceProviderDoc},
+		{ID: "   ", DisplayName: "Spaces", Source: provider.ModelSourceProviderDoc},
+		{ID: "bad\nid", DisplayName: "Bad ID", Source: provider.ModelSourceProviderDoc},
+		{ID: "bad-name", DisplayName: "Bad\x00Name", Source: provider.ModelSourceProviderDoc},
+		{ID: "bad-src", DisplayName: "Bad Src", Source: "provider\rdoc"},
+		{ID: "model-a", DisplayName: "Duplicate A", Source: provider.ModelSourceProviderDoc},
+		{ID: "model-b", Source: provider.ModelSourceProviderDoc},
+	}
+	a := &catalogAdapter{stubAdapter: stubAdapter{name: "with-catalog"}, models: src}
+
+	got := provider.KnownModelsFor(a)
+	require.Equal(t, []provider.ModelDecl{
+		{ID: "model-a", DisplayName: "Model A", Source: provider.ModelSourceProviderDoc},
+		{ID: "model-b", DisplayName: "", Source: provider.ModelSourceProviderDoc},
+	}, got)
+
+	// Mutating the returned slice does not affect subsequent calls.
+	got[0].ID = "mutated"
+	gotAgain := provider.KnownModelsFor(a)
+	require.Len(t, gotAgain, 2)
+	assert.Equal(t, "model-a", gotAgain[0].ID)
+}
