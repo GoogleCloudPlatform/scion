@@ -21,7 +21,7 @@ A trigger pipeline moves through five resources (defined in the [Glossary](/scio
 2. **Event** — an immutable inbox record (`trigger_events`) captured when a source delivers a verified request. Events are retained for 7 days and processed asynchronously through the Hub's durable queue (`trigger.event`).
 3. **Trigger** — a project-scoped rule attached to a source. It filters events by `types` and an optional ordered list of **rule elements** (`where`), optionally derives a concurrency **subject**, and executes one or more ordered **actions** under the authoring principal's recorded authority.
 4. **Action** — the operation performed when a trigger matches: `message` (deliver an event envelope to an agent), `dispatch_agent` (create and start an agent from a template), `exec` (run a command over Conduit), or `github.comment` (for GitHub App sources). A single trigger can run up to **8 ordered actions** per matched event.
-5. **Fire** — one execution attempt of one action of a trigger for a specific event (`trigger_fires`, unique per `(event_id, trigger_id, action_index)`). A fire moves from `firing` (or `waiting` when queued offline) to a terminal status: `fired`, `skipped`, `failed`, `refused`, or `expired`.
+5. **Fire** — one execution attempt of one action of a trigger for a specific event (`trigger_fires`, unique per `(event_id, trigger_id, action_index)`). A fire moves from a non-terminal status (`coalescing`, `deferred`, `firing`, or `waiting` when queued offline) to a terminal status: `fired`, `skipped`, `failed`, `refused`, or `expired`.
 
 ## Webhook Endpoints
 
@@ -33,7 +33,7 @@ Webhook endpoints are project-owned (`POST /api/v1/hooks/{id}`) and managed with
 scion trigger webhook create --name deploys --description "CI deploy callbacks"
 ```
 
-For HMAC endpoints (the default), the Hub generates a 32-byte base64url signing secret and prints it **once** in the creation output alongside the endpoint URL. Save the secret immediately; subsequent `get` and `list` calls never return it. Per-mode `curl` + `openssl` sender examples are available in `scion trigger webhook create --help` and in the Web UI's endpoint creation dialog.
+For HMAC endpoints (the default), the Hub generates a 32-byte base64url signing secret and prints it **once** in the creation output alongside the endpoint URL. Save the secret immediately; subsequent `get` and `list` calls never return it. Per-signature-mode `curl` + `openssl` sender examples are available in `scion trigger webhook create --help` and in the Web UI's endpoint creation dialog.
 
 ### Authentication modes (`--auth`)
 
@@ -143,7 +143,7 @@ Restoring a soft-deleted agent does not restore a deleted `agent`-lifetime endpo
 :::tip[Where is my JSON body?]
 Your verified JSON request body lives under **`event.payload.<path>`**—**not** `event.attributes.body...`.
 
-- `event.attributes` is a flat `map<string, string>` of transport metadata only (`endpoint_name`, `event`, `delivery`, `subject`, `signature_mode`, `content_type`, `payload_bytes`, `remote_ip`, plus `sender` for `hub_token`).
+- `event.attributes` is a flat `map<string, string>` of transport metadata only (including `endpoint_name`, `event`, `delivery`, `subject`, `signature_mode`, `content_type`, `payload_bytes`, `remote_ip`, `routing_hint_error`, `payload_ref`, and `sender` for `hub_token`).
 - Example for a nested JSON payload (such as a GitHub push):
   - CEL `--where`: `has(event.payload) && has(event.payload.head_commit) && event.payload.head_commit.message.contains("deploy")`
   - Template placeholder: `${event.payload.head_commit.id}`
@@ -165,7 +165,7 @@ Rules are **logically AND'd strictly in author order** with short-circuit evalua
 
 - **Put cheap deterministic CEL guards first** so inexpensive checks filter out non-matching events before heavier predicates run.
 - A rule element that evaluates to `false` stops evaluation immediately as a **silent non-match** (no fire row is recorded).
-- A rule element that evaluates to `Uncertain`, `Failed`, or runs out of the shared per-event evaluation budget (1 second across all candidate triggers and elements of an event) stops evaluation and records a `skipped` fire with a distinguishable reason (`rule uncertain`, `rule evaluation failed`, or `rule budget exhausted`). `Uncertain` and `Failed` never match.
+- A rule element that evaluates to `Uncertain`, `Failed`, fails re-compilation, or runs out of the shared per-event evaluation or compile budget (1 second across all candidate triggers and elements of an event) stops evaluation and records a `skipped` fire with a distinguishable reason (`rule uncertain`, `rule evaluation failed`, `rule budget exhausted`, `rule no longer compiles`, or `rule compile budget exhausted`). `Uncertain` and `Failed` never match.
 - Every recorded fire includes `matched_through` (`n/N`) and `decided_dialect` in `scion trigger history` (pass `--verbose` for the content-free per-element trace).
 - **Admitted dialects:** `cel` is admitted for the `trigger` consumer. Model-backed dialects such as `system_one` are refused at authoring (`dialect_not_allowed`) unless explicitly granted for the trigger consumer and allow-listed for the project.
 
@@ -178,7 +178,8 @@ CEL expressions are compiled at authoring time against:
 | `event.id`, `event.type`, `event.subject` | strings (for webhook events, `event.subject` is stored prefixed as `webhook:<endpoint-id>/<subject>`; the raw header/hint value is in `event.attributes.subject`) |
 | `event.source.kind`, `event.source.id` | strings |
 | `event.occurred_at`, `event.received_at` | timestamps |
-| `event.attributes` | `map<string, string>` (webhook keys: `endpoint_name`, `event`, `delivery`, `subject`, `signature_mode`, `content_type`, `payload_bytes`, `remote_ip`, and `sender` for `hub_token`) |
+| `event.attributes` | `map<string, string>` (webhook keys including `endpoint_name`, `event`, `delivery`, `subject`, `signature_mode`, `content_type`, `payload_bytes`, `remote_ip`, `routing_hint_error`, `payload_ref`, and `sender` for `hub_token`) |
+| `event.lists` | `map<string, list<string>>` (used by GitHub App triggers, e.g. `event.lists.labels`) |
 | `event.payload` | dynamic JSON map/value (**inline bodies ≤ 64 KiB only**; `has(event.payload)` is `false` for overflow bodies) |
 | `trigger.id`, `trigger.name`, `trigger.project_id` | strings |
 
@@ -226,7 +227,7 @@ scion trigger create --name ci-alerts --webhook deploys \
 ```
 
 - **Message templating:** `--message` supports the `${<path>}` / `${<path>?}` placeholder grammar described below. When untrusted placeholders are expanded, the delivered envelope includes `event.templated_vars` listing the **untrusted paths only** (never values). Passing `--plain` (no envelope framing) together with untrusted placeholders is refused (`400 plain_with_untrusted`).
-- **Offline queuing (`--offline queue`):** by default (`--offline skip`), a fire targeting a non-running agent (after any `--wake` attempt) is `skipped`. With `--offline queue`, if the target is in `suspended`, `stopped`, `provisioning`, `starting`, `created`, or `stopping` phase, the fire enters `waiting` and is retried with exponential backoff (30 s → 5 min cap) up to `--queue-ttl` (default `24h`, range `60s`–`48h`). When the target transitions into `running`, the Hub nudges its waiting fires for prompt delivery.
+- **Offline queuing (`--offline queue`):** by default (`--offline skip`), a fire targeting a non-running agent is `skipped` (except that an agent suspended by the Hub via idle-suspend is auto-woken automatically without `--wake` or the wake permission, and `--wake` attempts to resume other suspended targets first). With `--offline queue`, if the target is in `suspended`, `stopped`, `provisioning`, `starting`, `created`, or `stopping` phase, the fire enters `waiting` and is retried with exponential backoff (30 s → 5 min cap) up to `--queue-ttl` (default `24h`, range `60s`–`48h`). When the target transitions into `running`, the Hub nudges its waiting fires for prompt delivery.
   - Every retry re-runs full recorded-authority, standing, and live authorization checks. If the trigger is paused, deleted, or edited (`authorization_revision` changed), the waiting fire finishes `skipped` (`trigger changed`).
   - If the target enters `error` or `halted`, or is deleted, the waiting fire finishes `skipped`.
   - If `--queue-ttl` elapses before delivery, the fire finishes `expired` (`offline queue expired`), which counts as a trigger error and triggers failure notifications.
@@ -343,14 +344,14 @@ Editing `notify` settings bumps `authorization_revision`.
 
 ## Why Didn't My Rule Fire?
 
-Webhook events are recorded at ingress even when no trigger matches. Fire history (`scion trigger history`) shows only rules that matched (or recorded `skipped` on `Uncertain`, `Failed`, or budget exhaustion); a silent non-match leaves **no** fire history row (non-matches are not `skipped`).
+Webhook events are recorded at ingress even when no trigger matches. Fire history (`scion trigger history`) shows only rules that matched or recorded a `skipped` fire (such as `rule uncertain`, `rule evaluation failed`, `rule budget exhausted`, `rule no longer compiles`, or `rule compile budget exhausted`); a silent non-match leaves **no** fire history row (non-matches are not `skipped`).
 
 To debug why an event did not fire a rule:
 
 1. **Find the recorded event** in the Web UI's **Events** tab, with `scion trigger event list` and `scion trigger event get <event-id>`, or via `GET /api/v1/projects/{p}/trigger-events`.
 2. **Check `event.type` against `--type`:** sending `X-Scion-Event: deploy` sets `event.type` to `webhook.deploy`, which a default `webhook.received` rule does **not** match.
 3. **Check `event.subject`:** for webhook events, `event.subject` is stored prefixed as `webhook:<endpoint-id>/<subject>`, while the raw header or routing-hint value is in `event.attributes.subject`.
-4. **Preview template rendering** against the stored event with `scion trigger render <trigger-id-or-name> --event <event-id>` (or click **Preview** in the Web UI rule editor to render against the endpoint's latest event).
+4. **Preview template rendering** against the stored event with `scion trigger render <trigger-id-or-name> --event <event-id>`, or click the **Preview render** (eye) icon on the rule's row in the **Rules** tab, which renders against the latest event received on the trigger's source.
 
 Visibility into non-matching rule evaluations is tracked in `ptone/scion#9780`.
 
@@ -359,7 +360,7 @@ Visibility into non-matching rule evaluations is tracked in `ptone/scion#9780`.
 When `hub.triggers` is enabled, each project displays a **Triggers** button in its header linking to `/projects/{id}/triggers` with four tabs:
 
 - **Endpoints** — create endpoints (shows the one-time signing secret and sender example in a result dialog; secrets are never kept in component state), edit settings/bindings, disable/enable, rotate secrets, and delete (listing rules that will pause).
-- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, notify settings, and a **Preview** button calling `POST .../render` against the endpoint's latest event with untrusted values highlighted.
+- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, and notify settings. Each rule row also offers a **Preview render** (eye) icon that calls `POST .../render` against the latest event received on the trigger's source with untrusted values highlighted.
 - **Events** — browse received events filtered by endpoint, status, or time; inspect attributes, headers, `external_payload` (with download for overflow bodies), and resulting fires.
 - **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or time, linking to the event, created agent, or `waiting` deadline (`wait_until`).
 

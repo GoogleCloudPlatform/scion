@@ -21,7 +21,7 @@ Behind the `hub.triggers` [experiment](/scion/reference/experiments/) (alpha, of
 
 - **`--to-self` now binds with lifetime `agent` by default and `--message` is optional:** running `scion trigger webhook create --name <n> --to-self` inside an agent container now binds the endpoint to that agent with lifetime `agent` (deleted with the agent unless `--persistent` is passed) and defaults the trigger message to `Webhook event received.` when `--message` is omitted.
 - **Literal `${` in trigger message text must be escaped as `$${`:** `message` actions now parse `${<path>}` templates. Existing Stage 1 trigger messages containing a literal `${` are refused at fire time until escaped as `$${`.
-- **Downgrade floor raised (`nightly-20261128`):** Stage 2 raised `pkg/version.DowngradeFloor` to `nightly-20261128` for ordered `actions[]` per trigger (`trigger_fires.action_index` and per-action uniqueness/claims). Hubs running this release refuse downgrades to binaries older than `nightly-20261128`.
+- **Downgrade floor (`nightly-20261129` effective; Stage 2 minimum `nightly-20261128`):** Stage 2 ordered `actions[]` per trigger (`trigger_fires.action_index` and per-action uniqueness/claims) requires at least `nightly-20261128`; `pkg/version.DowngradeFloor` on `main` is currently `nightly-20261129`, so Hubs running this release refuse downgrades to binaries older than `nightly-20261129`.
 
 ## Secret type `variable` removed; `on_demand` secret type added
 

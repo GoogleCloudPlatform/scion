@@ -35,8 +35,8 @@ scion trigger webhook create --name ci-callbacks --to-self
 
 - The Hub prints the endpoint URL and a **one-time HMAC signing secret**. Hand
   the URL and secret to the external system—subsequent `get`/`list` calls never
-  show the secret again. Per-mode `curl` + `openssl` sender examples are in
-  `scion trigger webhook create --help`.
+  show the secret again. Per-signature-mode `curl` + `openssl` sender examples
+  are in `scion trigger webhook create --help`.
 - `--message` is optional for `--to-self` (defaults to `Webhook event received.`).
 - By default, `--to-self` binds with lifetime **`agent`**: when you are deleted
   (including soft delete), the endpoint, its secret, and your own triggers on it
@@ -146,10 +146,11 @@ When a `dispatch_agent` trigger creates you:
   expand `$SCION_TRIGGER_CONTEXT` unquoted in a shell. Never put secrets in
   `argv` (`commandSha256` is visible to trigger readers without `agent.attach`).
 - **Failure notifications:** triggers notify the creator (or your delegating
-  user, if they still hold `trigger.read`) by default on `failed`, `refused`,
-  and `expired` fires (`--notify-user`, `--notify-agent`, `--notify-on`), at
-  most once per `(trigger, sink, outcome, reason)` per fixed UTC hour bucket
-  (fires reaped after a Hub crash or cancelled by coalescing do not notify).
+  user) if that recipient still holds live `trigger.read` on the project, by
+  default on `failed`, `refused`, and `expired` fires (`--notify-user`,
+  `--notify-agent`, `--notify-on`), at most once per
+  `(trigger, sink, outcome, reason)` per fixed UTC hour bucket (fires reaped
+  after a Hub crash or cancelled by coalescing do not notify).
 
 ## What agents can and cannot author
 
