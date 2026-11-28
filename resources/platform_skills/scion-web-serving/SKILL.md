@@ -47,7 +47,11 @@ exposed (see Full apps: scion tunnel).
   suspended (including Scion's idle auto-suspend) or stopped, and the link then
   fails. While a person is using the link, signal
   `sciontool status blocked "<reason>"` rather than idle; after a resume, start
-  the service again and check the link before pointing anyone back to it.
+  the service again, run `scion expose <port> --label "<what it is>"` again
+  (the Hub drops exposed ports when the agent suspends or stops, unless
+  auto-expose registers them again), check the link, and confirm with
+  `scion expose --list` before pointing anyone back to it. The URL for the
+  same port is unchanged.
 
 ## What the proxy carries
 
