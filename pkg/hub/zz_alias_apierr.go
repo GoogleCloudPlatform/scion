@@ -168,6 +168,14 @@ func readJSON(p0 *http.Request, p1 interface{}) error {
 	return apierr.ReadJSON(p0, p1)
 }
 
+func decodeJSON(p0 http.ResponseWriter, p1 *http.Request, p2 interface{}) bool {
+	return apierr.DecodeJSON(p0, p1, p2)
+}
+
+func decodeJSONWithLimit(p0 http.ResponseWriter, p1 *http.Request, p2 int64, p3 string, p4 interface{}) bool {
+	return apierr.DecodeJSONWithLimit(p0, p1, p2, p3, p4)
+}
+
 func writeError(p0 http.ResponseWriter, p1 int, p2 string, p3 string, p4 map[string]interface{}) {
 	apierr.WriteError(p0, p1, p2, p3, p4)
 }

@@ -244,15 +244,13 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	// Limit request body size for both JSON and raw content paths.
-	r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
-
 	var req HarnessConfigFileWriteRequest
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
+		if !decodeJSONWithLimit(w, r, maxHarnessConfigFileSize+4096, "File too large for inline upload.", &req) {
 			return
 		}
 	} else {
+		r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
 		data, err := io.ReadAll(io.LimitReader(r.Body, maxHarnessConfigFileSize+1))
 		if err != nil {
 			BadRequest(w, "Failed to read request body")

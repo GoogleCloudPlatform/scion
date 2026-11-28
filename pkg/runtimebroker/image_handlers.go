@@ -103,8 +103,7 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ImagePullRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Image == "" {
@@ -129,8 +128,7 @@ func (s *Server) handleImageDeleteLocal(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req ImageDeleteRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Image == "" {

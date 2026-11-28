@@ -110,8 +110,7 @@ func (s *Server) handleWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req WorkspaceUploadRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -207,8 +206,7 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req WorkspaceApplyRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 

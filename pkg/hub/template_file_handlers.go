@@ -301,6 +301,13 @@ func (s *Server) streamTemplateObject(w http.ResponseWriter, r *http.Request, st
 	}
 }
 
+// maxTemplateFileJSONBodySize bounds inline JSON template file write bodies at
+// 16 MiB (same class as maxAgentCreateBodySize). Larger files should use the
+// raw binary upload path.
+const maxTemplateFileJSONBodySize = 16 << 20
+
+const templateFileJSONTooLargeMsg = "request body exceeds the 16 MiB maximum size"
+
 // handleTemplateFileWrite writes content to a template file.
 // Supports two modes:
 //   - JSON body (Content-Type: application/json): existing behavior with TemplateFileWriteRequest
@@ -324,8 +331,7 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 	}
 
 	var req TemplateFileWriteRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxTemplateFileJSONBodySize, templateFileJSONTooLargeMsg, &req) {
 		return
 	}
 
