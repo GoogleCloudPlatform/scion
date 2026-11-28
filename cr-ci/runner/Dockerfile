@@ -28,6 +28,11 @@ ARG GO_SHA256=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
 # repository's tests need git >= 2.48 (worktree --relative-paths); Ubuntu 24.04 ships 2.43.
 ARG GIT_VERSION=2.56.0
 ARG GIT_SHA256=26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
+# https://github.com/koalaman/shellcheck/releases (shellcheck-v<v>.linux.x86_64.tar.gz).
+# Ubuntu 24.04 apt ships 0.9.0, while ubuntu-latest (ubuntu-26.04) ships 0.11.0;
+# pinning 0.11.0 matches upstream CI (e.g. SC2329 vs 0.9.0's SC2317).
+ARG SHELLCHECK_VERSION=0.11.0
+ARG SHELLCHECK_SHA256=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
 # -------------------------------------------------------------------------------
 
 # --- Go toolchain (used by the golangci-lint build and copied into the image) ---
@@ -90,6 +95,8 @@ FROM ${UBUNTU_IMAGE}
 
 ARG ACTIONS_RUNNER_VERSION
 ARG ACTIONS_RUNNER_SHA256
+ARG SHELLCHECK_VERSION
+ARG SHELLCHECK_SHA256
 
 # RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh trap TERM/INT and forward SIGINT to the
 # runner's process group: a graceful job cancel when entrypoint.sh (PID 1) forwards
@@ -109,16 +116,17 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # call as if preinstalled, as they are on ubuntu-latest: make (build-and-test,
 # ent-generate-check, sqlite-nonhub-tests), procps (the build-and-test watchdog's ps,
 # pgrep, pkill; the lint sampler's free), python3 + python3-yaml (harness and cloud-init
-# checks, single-node tests), ripgrep, tmux (SCION_TEST_REQUIRE_TMUX) and shellcheck
-# (24.04's 0.9.0, the version upstream CI's shellcheck job gets from apt), and
+# checks, single-node tests), ripgrep, tmux (SCION_TEST_REQUIRE_TMUX), and
 # openssh-client (cmd's ssh tests run the ssh client). No gcc, no Docker, no sudo: no
 # routed job needs them, and they would widen what a job can do. git is NOT from apt
 # (24.04's is 2.43): it comes from the git stage below; libexpat1 is its runtime library
-# for http-push (libcurl and zlib come with curl and the base image).
+# for http-push (libcurl and zlib come with curl and the base image). shellcheck is also
+# NOT from apt (24.04's is 0.9.0): it is installed from the pinned release tarball below
+# to match ubuntu-latest's 0.11.0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl jq tar gzip unzip zstd libexpat1 \
-      make procps python3 python3-yaml ripgrep tmux shellcheck openssh-client \
+      make procps python3 python3-yaml ripgrep tmux openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root runner user. The runner, its work dir and all caches belong to it. uid 1001
@@ -147,6 +155,15 @@ RUN v=$(git --version | awk '{print $3}') \
 COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:${PATH}
 COPY --from=golangci-lint --chmod=0755 /out/golangci-lint /usr/local/bin/golangci-lint
+
+# shellcheck (pinned release tarball, matching ubuntu-latest's 0.11.0).
+RUN curl -fsSL -o /tmp/shellcheck.tgz \
+      "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz" \
+ && echo "${SHELLCHECK_SHA256}  /tmp/shellcheck.tgz" | sha256sum -c - \
+ && tar -C /tmp -xzf /tmp/shellcheck.tgz "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" \
+ && install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck \
+ && rm -rf /tmp/shellcheck.tgz "/tmp/shellcheck-v${SHELLCHECK_VERSION}" \
+ && shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION}"
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.

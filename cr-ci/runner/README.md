@@ -5,7 +5,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 
 | File | Purpose |
 | :--- | :--- |
-| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git (built from pinned source, >= 2.48), jq, curl, zstd, ca-certificates, and the tools routed CI jobs expect preinstalled (make, procps, python3 + python3-yaml, ripgrep, tmux, shellcheck 0.9.0, openssh-client); non-root `runner` user (uid 1001, `HOME=/home/runner`) |
+| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git (built from pinned source, >= 2.48), shellcheck (pinned release tarball), jq, curl, zstd, ca-certificates, and the tools routed CI jobs expect preinstalled (make, procps, python3 + python3-yaml, ripgrep, tmux, openssh-client); non-root `runner` user (uid 1001, `HOME=/home/runner`) |
 | [`entrypoint.sh`](entrypoint.sh) | PID 1: checks the volume at HOME, creates the work and cache directories on it, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
@@ -21,6 +21,7 @@ the values. Read them there.
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
 | `GIT_VERSION` / `GIT_SHA256` | git, `git-<v>.tar.xz`, built from source in the `git` stage (gcc only there) | `sha256sums.asc` in <https://mirrors.edge.kernel.org/pub/software/scm/git/>; also check the tarball against Junio C Hamano's `git-<v>.tar.sign` (key `96E07AF25771955980DAD10020D04E5A713660A7`). Must be 2.48 or newer: the build asserts it. git is built with `NO_RUST=YesPlease` (2.55+ builds Rust parts by default, which needs cargo); git 3.0 makes Rust mandatory, so a bump to 3.x must revisit the git stage |
+| `SHELLCHECK_VERSION` / `SHELLCHECK_SHA256` | ShellCheck, `shellcheck-v<v>.linux.x86_64.tar.gz` | <https://github.com/koalaman/shellcheck/releases> (compute `sha256sum` of the `.linux.x86_64.tar.gz` asset; keep in step with `ubuntu-latest`'s shellcheck version) |
 
 golangci-lint is not a download: the `golangci-lint` stage builds it with
 [`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins
@@ -446,6 +447,6 @@ covers:
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the
   mediator.
 
-Lint the script with `bash -n runner/entrypoint.sh` and both shellcheck runs in
+Lint the script with `bash -n runner/entrypoint.sh` and the shellcheck checks in
 [scripts/README.md, "Static checks"](../scripts/README.md#static-checks)
-(upstream CI's 0.9.0 invocation and 0.11.0 `--norc -x`).
+(upstream CI's 0.11.0 invocation and `--norc -x`).

@@ -1864,8 +1864,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The cr-ci runner image has no sudo and ships Ubuntu 24.04's shellcheck,
-      # the version apt installs here; install only when it is missing.
+      # The cr-ci runner image has no sudo and ships a pinned shellcheck matching
+      # ubuntu-latest; install via apt only when it is missing.
       - name: Install shellcheck
         run: |
           if ! command -v shellcheck >/dev/null; then
