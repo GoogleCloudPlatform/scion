@@ -26,6 +26,8 @@
  * either a component or a plain data module.
  */
 
+import { withDownloadParam } from './download-url.js';
+
 // ---------------------------------------------------------------------------
 // Recognized container-path pattern (moved from chat-message.ts's
 // ENTITY_PATTERNS file-path entry, and chat-thread.ts's parseContainerPath).
@@ -543,6 +545,16 @@ export function buildAttachmentApiUrl(id: string): string {
     throw new Error('buildAttachmentApiUrl: unsafe attachment id');
   }
   return buildAttachmentApiUrlPinOnly(id);
+}
+
+/**
+ * Build the forced-attachment download URL (`?download=1`) for a chat
+ * attachment, validating and pinning the route via {@link buildAttachmentApiUrl}
+ * so every download affordance forces `Content-Disposition: attachment` even
+ * across cross-origin object-storage redirects (ptone/scion#9913).
+ */
+export function buildAttachmentDownloadUrl(id: string): string {
+  return withDownloadParam(buildAttachmentApiUrl(id));
 }
 
 // ---------------------------------------------------------------------------

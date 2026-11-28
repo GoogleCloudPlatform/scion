@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -368,4 +370,50 @@ func TestLegacyAttachmentDownloadToken_MintedTokenThroughServer(t *testing.T) {
 		assert.Equal(t, missing.Body.String(), refused.Body.String(), name)
 	}
 	assert.Equal(t, http.StatusOK, f.session(t, f.admin, http.MethodGet, path, nil).Code, "the session is unchanged")
+}
+
+// TestLegacyAttachmentDownload_ForceDownloadParam verifies that the legacy
+// AttachmentStore fallback honors ?download=1 and ?download=true for image
+// attachments (which otherwise default to inline), ptone/scion#9913.
+func TestLegacyAttachmentDownload_ForceDownloadParam(t *testing.T) {
+	f := newChatFixture(t)
+
+	// Upload a PNG image through the legacy AttachmentStore path.
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreatePart(map[string][]string{
+		"Content-Disposition": {fmt.Sprintf(`form-data; name="files"; filename=%q`, "shot.png")},
+		"Content-Type":        {"image/png"},
+	})
+	require.NoError(t, err)
+	_, err = part.Write([]byte("\x89PNG\r\n\x1a\nfake-png-payload"))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	writerKey := f.mint(t, f.admin, hubBoundary(), "inbox:write")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/attachments", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+writerKey)
+	upRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(upRec, req)
+	require.Equal(t, http.StatusCreated, upRec.Code, upRec.Body.String())
+
+	var resp struct {
+		Attachments []attachmentUploadResult `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(upRec.Body.Bytes(), &resp))
+	require.Len(t, resp.Attachments, 1)
+	basePath := "/api/v1/chat/attachments/" + resp.Attachments[0].ID
+
+	// Default serves image inline.
+	inlineRec := f.session(t, f.admin, http.MethodGet, basePath, nil)
+	require.Equal(t, http.StatusOK, inlineRec.Code, inlineRec.Body.String())
+	assert.Contains(t, inlineRec.Header().Get("Content-Disposition"), "inline;")
+
+	// ?download=1 and ?download=true force attachment.
+	for _, q := range []string{"?download=1", "?download=true"} {
+		dlRec := f.session(t, f.admin, http.MethodGet, basePath+q, nil)
+		require.Equal(t, http.StatusOK, dlRec.Code, dlRec.Body.String())
+		assert.Contains(t, dlRec.Header().Get("Content-Disposition"), "attachment;", "query %s", q)
+	}
 }

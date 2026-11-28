@@ -717,3 +717,66 @@ func TestServeBoundAttachment_NilAttachmentNotFound(t *testing.T) {
 		t.Fatalf("nil attachment = %v, %d bytes written", out, rec.Body.Len())
 	}
 }
+
+// TestServeAttachment_ForceDownloadParam verifies that ?download=1 and
+// ?download=true force Content-Disposition: attachment on both local streaming
+// and object-storage signed-URL redirects for inline-safe media types
+// (ptone/scion#9913).
+func TestServeAttachment_ForceDownloadParam(t *testing.T) {
+	for _, objStore := range []bool{false, true} {
+		mode := "local"
+		if objStore {
+			mode = "object_store"
+		}
+		t.Run(mode, func(t *testing.T) {
+			f := newAttachmentFixture(t, objStore)
+			for _, tc := range []struct {
+				name string
+				mime string
+				body []byte
+			}{
+				{"notes.md", "text/markdown", []byte("# Notes\n")},
+				{"plain.txt", "text/plain", []byte("hello")},
+				{"shot.png", "image/png", pngBytes},
+			} {
+				id := f.upload(userU, tc.name, tc.mime, tc.body)
+				base := "/api/v1/chat/attachments/" + id
+				wantStatus := http.StatusOK
+				if objStore {
+					wantStatus = http.StatusFound
+				}
+
+				// Without ?download=1, inline-safe types serve inline.
+				out, rec := f.serve(&userU, base, id)
+				if out != ServeWritten || rec.Code != wantStatus {
+					t.Fatalf("%s inline: outcome %v status %d, want ServeWritten/%d", tc.name, out, rec.Code, wantStatus)
+				}
+				wantInline := "inline; filename=" + tc.name
+				if got := rec.Header().Get("Content-Disposition"); got != wantInline {
+					t.Errorf("%s inline: Content-Disposition = %q, want %q", tc.name, got, wantInline)
+				}
+
+				// With ?download=1 or ?download=true, every type forces attachment.
+				wantAttach := "attachment; filename=" + tc.name
+				for _, q := range []string{"?download=1", "?download=true"} {
+					out, rec := f.serve(&userU, base+q, id)
+					if out != ServeWritten || rec.Code != wantStatus {
+						t.Fatalf("%s%s: outcome %v status %d, want ServeWritten/%d", tc.name, q, out, rec.Code, wantStatus)
+					}
+					if got := rec.Header().Get("Content-Disposition"); got != wantAttach {
+						t.Errorf("%s%s: Content-Disposition = %q, want %q", tc.name, q, got, wantAttach)
+					}
+					if objStore {
+						rs := f.blobs.(*redirectingStorage)
+						rs.mu.Lock()
+						gotSigned := rs.last.ResponseContentDisposition
+						rs.mu.Unlock()
+						if gotSigned != wantAttach {
+							t.Errorf("%s%s: signed URL ResponseContentDisposition = %q, want %q", tc.name, q, gotSigned, wantAttach)
+						}
+					}
+				}
+			}
+		})
+	}
+}

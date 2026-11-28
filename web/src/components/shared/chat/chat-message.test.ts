@@ -554,24 +554,24 @@ describe('scion-chat-message attachment previews', () => {
       60
     );
     expect(dialog?.querySelector('sl-button[href]')?.getAttribute('href')).toBe(
-      '/api/v1/chat/attachments/att-expand'
+      '/api/v1/chat/attachments/att-expand?download=1'
     );
   });
 
-  it('offers a download link beside every preview', async () => {
-    respondWith('hello');
+  it('offers a forced-attachment download link beside every preview (including markdown)', async () => {
+    respondWith('# Hello\nworld');
     const el = await mountAttachments([
-      { id: 'att-dl', name: 'hello.txt', mime: 'text/plain', size: 5 },
+      { id: 'att-dl', name: 'notes.md', mime: 'text/markdown', size: 13 },
     ]);
 
     const download = el.shadowRoot?.querySelector(
       '.preview-actions sl-icon-button[name="download"]'
     );
-    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-dl');
-    expect(download?.getAttribute('download')).toBe('hello.txt');
+    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-dl?download=1');
+    expect(download?.getAttribute('download')).toBe('notes.md');
   });
 
-  it('leaves binary and oversized attachments as download chips', async () => {
+  it('leaves binary and oversized attachments as forced-attachment download chips', async () => {
     const el = await mountAttachments([
       { id: 'att-zip', name: 'bundle.zip', mime: 'application/zip', size: 1024 },
       { id: 'att-pdf', name: 'report.pdf', mime: 'application/pdf', size: 1024 },
@@ -579,7 +579,13 @@ describe('scion-chat-message attachment previews', () => {
     ]);
 
     expect(el.shadowRoot?.querySelectorAll('.attachment-preview')).toHaveLength(0);
-    expect(el.shadowRoot?.querySelectorAll('.download-chip')).toHaveLength(3);
+    const chips = el.shadowRoot?.querySelectorAll('.download-chip');
+    expect(chips).toHaveLength(3);
+    expect(Array.from(chips ?? []).map((c) => c.getAttribute('href'))).toEqual([
+      '/api/v1/chat/attachments/att-zip?download=1',
+      '/api/v1/chat/attachments/att-pdf?download=1',
+      '/api/v1/chat/attachments/att-huge?download=1',
+    ]);
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
@@ -626,7 +632,7 @@ describe('scion-chat-message attachment previews', () => {
     expect(actions).not.toBeNull();
 
     const download = actions?.querySelector('sl-icon-button[name="download"]');
-    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-img');
+    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-img?download=1');
     expect(download?.getAttribute('download')).toBe('shot.png');
 
     // The toolbar's expand opens the same overlay the thumbnail does.
