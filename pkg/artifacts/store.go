@@ -611,6 +611,11 @@ type Store interface {
 	// them.
 	ListLiveOwners(ctx context.Context, after *Owner, limit int) ([]Owner, error)
 
+	// ListLiveOwnedArtifacts returns up to limit live non-attachment artifacts
+	// owned by owner and homed in (scopeKind, scopeRef), ordered by id,
+	// strictly after afterID ("" = from the start).
+	ListLiveOwnedArtifacts(ctx context.Context, owner Owner, scopeKind, scopeRef, afterID string, limit int) ([]ArtifactRef, error)
+
 	// CountLiveOwners counts the distinct owners ListLiveOwners would
 	// return after after, without a limit.
 	CountLiveOwners(ctx context.Context, after *Owner) (int, error)

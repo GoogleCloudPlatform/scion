@@ -173,6 +173,7 @@ const (
 	logReasonTargetIneligible   = "target_ineligible"
 	logReasonRateLimited        = "rate_limited"
 	logReasonUnavailable        = "unavailable"
+	logReasonMovedOutOfProject  = "moved_out_of_project"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event
