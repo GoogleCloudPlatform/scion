@@ -18,7 +18,7 @@
  * Durable artifact review drafts journey (ptone/scion#7116, ptone/scion#8471),
  * in each engine:
  * - Context A (reviewer) opens Review mode, types marks, saves the draft
- *   (PUT /review-draft), verifies "Draft saved HH:MM", and closes the context.
+ *   (PUT /review-draft), verifies "Draft saved <date+time>", and closes the context.
  *   No version is published, no owner notification is emitted, and no draft
  *   data is stored in browser storage (C8).
  * - Context B (fresh browser context, simulating another device) enters Review
@@ -198,14 +198,16 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
     const saveDraftBtn = pageA.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
     const putDone = pageA.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
     );
     await saveDraftBtn.click();
     expect((await putDone).status()).toBe(200);
-    await expect(statusA).toContainText(/Draft saved \d{2}:\d{2}/, { timeout: 15_000 });
+    await expect(statusA).toContainText(/Draft saved [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}/, {
+      timeout: 15_000,
+    });
 
     savedDraftBody = await editorText(pageA);
     expect(savedDraftBody).toContain('Carefully.');
@@ -277,13 +279,13 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
     expect(await editorText(pageB)).toBe(savedDraftBody);
     await expect(
       pageB.locator('scion-page-artifact-detail .g-toolbar .draft-status')
-    ).toContainText(/Draft saved \d{2}:\d{2}/);
+    ).toContainText(/Draft saved [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}/);
 
     // Submit Review publishes v2 and conditionally deletes the draft.
     const submitBtn = pageB.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Submit Review',
     });
-    await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(submitBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
     const delDone = pageB.waitForResponse(
       (r) => r.request().method() === 'DELETE' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -347,7 +349,7 @@ test('two-context: Draft badge is private to the author and Discard from History
     const saveDraftBtn = page.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
     const putDone = page.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -485,7 +487,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     const saveDraftBtn = pageA.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
     const putDone = pageA.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -546,7 +548,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     const saveDraftBtn = pageB.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
     const putMoved = pageB.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -588,7 +590,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     const submitBtn = pageC.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Submit Review',
     });
-    await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(submitBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
     const delDone = pageC.waitForResponse(
       (r) => r.request().method() === 'DELETE' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -600,5 +602,77 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     expect(await currentText(a.id, 'plan.md')).toBe(v2DraftBody);
   } finally {
     await ctxC.close();
+  }
+});
+
+test('abandon review from sticky overflow menu deletes draft with ?rev= and exits Review mode', async ({
+  browser,
+}) => {
+  const a = await publish({
+    project,
+    title: 'Abandon from overflow menu',
+    entry: 'plan.md',
+    files: { 'plan.md': Buffer.from(DOC) },
+  });
+  const grant = await admin('POST', `/api/v1/artifacts/${a.id}/grants`, {
+    subjectKind: 'principal',
+    subjectRef: `user:${reviewerId}`,
+    permission: 'review',
+  });
+  expect([200, 201]).toContain(grant.status);
+
+  const ctx = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
+  try {
+    const page = await ctx.newPage();
+    collectPageErrors(page, errors);
+    await page.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
+    await startGraphicalReview(page);
+
+    const editor = page.locator('scion-review-editor .ProseMirror');
+    await editor.locator('p', { hasText: 'first paragraph' }).first().click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(' Will abandon.');
+
+    const saveDraftBtn = page.locator('scion-page-artifact-detail .edit-footer sl-button', {
+      hasText: 'Save Draft',
+    });
+    await expect(saveDraftBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
+    const putDone = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
+      { timeout: 30_000 }
+    );
+    await saveDraftBtn.click();
+    expect((await putDone).status()).toBe(200);
+
+    // Open real Shoelace overflow menu in sticky header and choose Abandon review.
+    const overflowBtn = page.locator(
+      'scion-page-artifact-detail .g-sticky .g-review-actions .review-actions-overflow-btn'
+    );
+    await expect(overflowBtn).toBeVisible({ timeout: 15_000 });
+    await overflowBtn.click();
+
+    const abandonItem = page.locator('scion-page-artifact-detail .abandon-review-menu-item');
+    await expect(abandonItem).toBeVisible({ timeout: 10_000 });
+    await abandonItem.click();
+
+    const confirmBtn = page.locator(
+      'scion-page-artifact-detail sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    );
+    await expect(confirmBtn).toBeVisible({ timeout: 10_000 });
+    const delDone = page.waitForResponse(
+      (r) => r.request().method() === 'DELETE' && r.url().includes('/review-draft?rev=1'),
+      { timeout: 30_000 }
+    );
+    await confirmBtn.click();
+    expect((await delDone).status()).toBe(204);
+
+    // Exited Review mode, Draft badge cleared, and header returns to "Review".
+    await expect(page.locator('scion-review-editor')).toHaveCount(0);
+    await expect(page.locator('scion-page-artifact-detail .review-draft-badge')).toHaveCount(0);
+    await expect(
+      page.locator('scion-page-artifact-detail .header-actions sl-button', { hasText: 'Review' })
+    ).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await ctx.close();
   }
 });

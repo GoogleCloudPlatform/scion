@@ -314,9 +314,15 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
     const stickySubmit = el.shadowRoot!.querySelector<HTMLElement>(
       '.g-sticky .g-review-actions sl-button.submit-review-btn'
     )!;
+    const stickyOverflowBtn = el.shadowRoot!.querySelector<HTMLElement>(
+      '.g-sticky .g-review-actions sl-icon-button.review-actions-overflow-btn'
+    )!;
 
     const footerCancel = el.shadowRoot!.querySelector<HTMLElement>(
       '.edit-footer sl-button.cancel-review-btn'
+    )!;
+    const footerAbandon = el.shadowRoot!.querySelector<HTMLElement>(
+      '.edit-footer sl-button.abandon-review-btn'
     )!;
     const footerSaveDraft = el.shadowRoot!.querySelector<HTMLElement>(
       '.edit-footer sl-button.save-draft-btn'
@@ -329,13 +335,17 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
     expect(stickyCancel).not.toBeNull();
     expect(stickySaveDraft).not.toBeNull();
     expect(stickySubmit).not.toBeNull();
+    expect(stickyOverflowBtn).not.toBeNull();
     expect(footerCancel).not.toBeNull();
+    expect(footerAbandon).not.toBeNull();
     expect(footerSaveDraft).not.toBeNull();
     expect(footerSubmit).not.toBeNull();
 
-    // Initial state: Cancel enabled; Save Draft and Submit Review disabled.
+    // Initial state: Cancel and Abandon enabled; Save Draft and Submit Review disabled.
     expect(stickyCancel.hasAttribute('disabled')).toBe(false);
+    expect(stickyOverflowBtn.hasAttribute('disabled')).toBe(false);
     expect(footerCancel.hasAttribute('disabled')).toBe(false);
+    expect(footerAbandon.hasAttribute('disabled')).toBe(false);
     expect(stickySaveDraft.hasAttribute('disabled')).toBe(true);
     expect(footerSaveDraft.hasAttribute('disabled')).toBe(true);
     expect(stickySubmit.hasAttribute('disabled')).toBe(true);
@@ -379,7 +389,9 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
     expect(stickySubmit.hasAttribute('loading')).toBe(true);
     expect(footerSubmit.hasAttribute('loading')).toBe(true);
     expect(stickyCancel.hasAttribute('disabled')).toBe(true);
+    expect(stickyOverflowBtn.hasAttribute('disabled')).toBe(true);
     expect(footerCancel.hasAttribute('disabled')).toBe(true);
+    expect(footerAbandon.hasAttribute('disabled')).toBe(true);
     expect(stickySaveDraft.hasAttribute('disabled')).toBe(true);
     expect(footerSaveDraft.hasAttribute('disabled')).toBe(true);
 
@@ -418,6 +430,35 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
     expect(el.shadowRoot!.querySelector('.g-sticky')).toBeNull();
   });
 
+  it('triggers the Abandon review confirmation dialog from the sticky header overflow menu', async () => {
+    const state: MockServerState = { draft: null, currentSeq: 1, requests: [] };
+    mockHub(state);
+    const el = await mountAndStartReview(true);
+
+    emitGraphicalEdit(el, MARKED_TEXT);
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>('.g-sticky .save-draft-btn')!.click();
+    await settle(el);
+    expect(state.draft?.rev).toBe(1);
+
+    const overflowMenu = el.shadowRoot!.querySelector<HTMLElement>(
+      '.g-sticky .g-review-actions .review-actions-overflow sl-menu'
+    )!;
+    expect(overflowMenu).not.toBeNull();
+    overflowMenu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item: { value: 'abandon' } } })
+    );
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog');
+    expect(dialog).not.toBeNull();
+    dialog!.querySelector<HTMLElement>('sl-button.draft-abandon-confirm')!.click();
+    await settle(el);
+
+    expect(state.draft).toBeNull();
+    expect(el.shadowRoot!.querySelector('.g-sticky')).toBeNull();
+  });
+
   it('keeps legacy Save review parity in sticky header when review drafts experiment is off', async () => {
     const state: MockServerState = { draft: null, currentSeq: 1, requests: [] };
     mockHub(state);
@@ -435,6 +476,8 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
 
     expect(stickyCancel).not.toBeNull();
     expect(el.shadowRoot!.querySelector('.g-sticky .save-draft-btn')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.g-sticky .review-actions-overflow')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.edit-footer .abandon-review-btn')).toBeNull();
     expect(stickySave.textContent).toContain('Save review');
     expect(stickySave.hasAttribute('disabled')).toBe(true);
     expect(footerSave.hasAttribute('disabled')).toBe(true);

@@ -38,6 +38,27 @@ import {
   formatDraftTime,
   type DraftSnapshot,
 } from './review-draft.js';
+import { formatInstant } from '../utils/time.js';
+
+describe('formatDraftTime', () => {
+  it('formats an ISO instant as compact date+time via formatInstant and returns empty on invalid input', () => {
+    const iso = '2026-11-27T23:45:00Z';
+    const formatted = formatDraftTime(iso);
+    expect(formatted).toBe(formatInstant(iso, 'datetime'));
+    expect(formatted).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}$/);
+    expect(formatDraftTime('not-a-date')).toBe('');
+    expect(
+      draftStatusText({
+        status: 'saved',
+        rev: 1,
+        savedAt: iso,
+        inFlight: false,
+        dirty: false,
+        conflict: null,
+      })
+    ).toBe(`Draft saved ${formatted}`);
+  });
+});
 
 describe('safeReviewDownloadName (C6)', () => {
   it('uses only the final path element and strips .md', () => {
@@ -490,6 +511,69 @@ describe('ReviewDraftController', () => {
     const loaded = await h.controller.resolveConflictLoad();
     expect(loaded?.body).toBe('Remote draft body');
     expect(h.controller.currentRev).toBe(5);
+
+    h.controller.dispose();
+  });
+
+  it('noteConflict routes an external 409 (e.g. Abandon DELETE) into the conflict model after quiesce', async () => {
+    const puts: PutReviewDraftRequest[] = [];
+    const h = makeHarness({
+      initialRev: 2,
+      initialSavedAt: '2026-11-21T17:55:00Z',
+      put: (_id, req) => {
+        puts.push(req);
+        return Promise.resolve({
+          rev: req.rev + 1,
+          savedAt: new Date(Date.now()).toISOString(),
+          currentSeq: 1,
+        });
+      },
+      get: () =>
+        Promise.resolve({
+          draft: {
+            rev: 3,
+            base: 1,
+            entry: 'plan.md',
+            body: 'Newer remote body',
+            note: 'Newer note',
+            carried: null,
+            savedAt: '2026-11-21T17:59:00Z',
+            createdAt: '2026-11-21T17:50:00Z',
+          },
+          currentSeq: 1,
+        }),
+    });
+
+    await h.controller.quiesce();
+    h.controller.noteConflict(new DraftConflictError('rev mismatch', 3, '2026-11-21T17:59:00Z', 1));
+
+    const snap = h.controller.getSnapshot();
+    expect(snap.status).toBe('conflict');
+    expect(snap.conflict).toEqual({
+      rev: 3,
+      savedAt: '2026-11-21T17:59:00Z',
+      base: 1,
+    });
+    expect(h.controller.canSaveNow).toBe(false);
+
+    // Calling resumeFromQuiesce() afterwards must not clear the conflict state.
+    h.controller.resumeFromQuiesce();
+    expect(h.controller.getSnapshot().status).toBe('conflict');
+
+    // Resolving via Load adopts the server's rev (3).
+    const loaded = await h.controller.resolveConflictLoad();
+    expect(loaded?.body).toBe('Newer remote body');
+    expect(h.controller.currentRev).toBe(3);
+    expect(h.controller.getSnapshot().status).toBe('saved');
+
+    // Resolving via Keep after another external 409 overwrites at the server's rev (4 -> 5).
+    await h.controller.quiesce();
+    h.controller.noteConflict(new DraftConflictError('rev mismatch', 4, '2026-11-21T18:01:00Z', 1));
+    expect(await h.controller.resolveConflictKeep()).toBe(true);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.rev).toBe(4);
+    expect(h.controller.currentRev).toBe(5);
+    expect(h.controller.getSnapshot().status).toBe('saved');
 
     h.controller.dispose();
   });

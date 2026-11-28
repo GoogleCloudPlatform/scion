@@ -46,6 +46,7 @@ import {
   type ReviewDraft,
   type ReviewDraftResponse,
 } from './artifacts.js';
+import { formatInstant } from '../utils/time.js';
 
 /** Default autosave delay after the first unsaved change (~30 s). */
 export const REVIEW_DRAFT_AUTOSAVE_MS = 30_000;
@@ -124,13 +125,9 @@ export interface ReviewDraftControllerOptions {
 
 const utf8Encoder = new TextEncoder();
 
-/** Formats an ISO timestamp as local 24-hour HH:MM for the status line. */
+/** Formats an ISO timestamp as compact date + 24-hour time (e.g. "Nov 27, 23:45") in the display timezone. */
 export function formatDraftTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
+  return formatInstant(iso, 'datetime');
 }
 
 /** Returns the status-line copy for a snapshot (empty before any save). */
@@ -143,8 +140,8 @@ export function draftStatusText(snapshot: DraftSnapshot): string {
     case 'saving':
       return 'Saving…';
     case 'saved': {
-      const hhmm = snapshot.savedAt ? formatDraftTime(snapshot.savedAt) : '';
-      return hhmm ? `Draft saved ${hhmm}` : 'Draft saved';
+      const formatted = snapshot.savedAt ? formatDraftTime(snapshot.savedAt) : '';
+      return formatted ? `Draft saved ${formatted}` : 'Draft saved';
     }
     case 'retrying':
       return 'Not saved: retrying';
@@ -405,6 +402,22 @@ export class ReviewDraftController {
     if (this.disposed || !this.submitting) return;
     this.submitting = false;
     this.notifyChange();
+  }
+
+  /**
+   * Records a 409 conflict surfaced outside `runSave` (for example from
+   * Abandon review's conditional DELETE) so the controller enters its normal
+   * conflict state and pauses autosave until the user resolves it.
+   */
+  noteConflict(err: DraftConflictError): void {
+    if (this.disposed) return;
+    this.clearAutosaveTimer();
+    this.clearRetryTimer();
+    this.submitting = false;
+    this.pausedReason = 'conflict';
+    this.conflict = { rev: err.rev, savedAt: err.savedAt, base: err.base };
+    this.status = 'conflict';
+    this.emit();
   }
 
   /**
