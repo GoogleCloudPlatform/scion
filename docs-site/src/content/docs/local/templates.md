@@ -154,6 +154,8 @@ When you do not pass `--harness-config`, Scion resolves it in this order:
 
 If a project default, template default, Hub default, or recorded harness-config is not a single path component, the Hub drops that value with a dispatch warning (`the <tier> harness config was ignored: it is not a harness-config name`) and falls through to the next tier.
 
+A Hub then looks the chosen name up among its harness configs. If the first match is archived or pending, the create fails with `400` naming the harness config, rather than falling through to another scope or to the Runtime Broker's own harness configs; see [Inactive Hub harness configs](/scion/reference/harness-settings/#inactive-hub-harness-configs).
+
 ## Template composition & inheritance
 
 Every non-`default` template automatically **inherits the `default` template as a base layer**. When an agent is provisioned, Scion builds a chain — `default` first, then your template — and layers them:
