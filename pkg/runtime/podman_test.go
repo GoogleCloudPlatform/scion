@@ -123,6 +123,23 @@ echo "$@"
 			t.Errorf("expected '--user scion' in exec output, got %q", out)
 		}
 	})
+
+	t.Run("rootless single-UID uses root user and /home/scion HOME", func(t *testing.T) {
+		rt := &PodmanRuntime{
+			Command:   mockPodman,
+			Rootless:  true,
+			SingleUID: true,
+		}
+
+		out, err := rt.Exec(context.Background(), "test-container", []string{"whoami"})
+		if err != nil {
+			t.Fatalf("runtime.Exec failed: %v", err)
+		}
+
+		if !strings.Contains(out, "-e HOME=/home/scion --user root") {
+			t.Errorf("expected '-e HOME=/home/scion --user root' in exec output, got %q", out)
+		}
+	})
 }
 
 func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
@@ -137,6 +154,13 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 		rt := &PodmanRuntime{Rootless: true}
 		if got := rt.ExecUser(); got != "scion" {
 			t.Errorf("expected 'scion', got %q", got)
+		}
+	})
+
+	t.Run("rootless single-UID returns root", func(t *testing.T) {
+		rt := &PodmanRuntime{Rootless: true, SingleUID: true}
+		if got := rt.ExecUser(); got != "root" {
+			t.Errorf("expected 'root', got %q", got)
 		}
 	})
 }
@@ -208,6 +232,38 @@ func TestPodmanRuntime_Run_RootlessKeepID(t *testing.T) {
 		out := runPodmanRecorded(t, false, config)
 		if strings.Contains(out, "--userns=keep-id") {
 			t.Errorf("did not expect '--userns=keep-id' in output, got %q", out)
+		}
+	})
+
+	t.Run("rootless single-UID omits --userns=keep-id and SCION_KEEPID_UID", func(t *testing.T) {
+		dir := t.TempDir()
+		mockPodman := filepath.Join(dir, "mock-podman")
+		argvFile := filepath.Join(dir, "argv")
+		script := "#!/bin/sh\necho \"$@\" > '" + argvFile + "'\necho " + mockPodmanID + "\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		rt := &PodmanRuntime{Command: mockPodman, Rootless: true, SingleUID: true}
+		cfg := RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+		}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("runtime.Run failed: %v", err)
+		}
+		argvBytes, err := os.ReadFile(argvFile)
+		if err != nil {
+			t.Fatalf("read argv: %v", err)
+		}
+		out := string(argvBytes)
+		if strings.Contains(out, "--userns=keep-id") {
+			t.Errorf("did not expect '--userns=keep-id' in single-UID output, got %q", out)
+		}
+		if strings.Contains(out, "SCION_KEEPID_UID") {
+			t.Errorf("did not expect 'SCION_KEEPID_UID' in single-UID output, got %q", out)
 		}
 	})
 }
@@ -903,4 +959,424 @@ func TestPodmanRuntime_Run_HostGatewayProbe(t *testing.T) {
 			t.Errorf("expected no re-probe on Run after NewPodmanRuntime, before=%q after=%q", string(beforeData), string(afterData))
 		}
 	})
+}
+
+func TestParsePodmanInfoJSON(t *testing.T) {
+	tests := []struct {
+		name          string
+		output        string
+		fallbackMajor int
+		want          podmanHostInfo
+	}{
+		{
+			name:          "rootful podman 5",
+			output:        `{"version":{"Version":"5.8.6"},"host":{"security":{"rootless":false},"pasta":{"executable":"/usr/bin/pasta"}}}`,
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: false, SingleUID: false, RootlessNetwork: ""},
+		},
+		{
+			name: "rootless multi-UID podman 5 prefers pasta",
+			output: `{"version":{"Version":"5.8.6"},"host":{"security":{"rootless":true},` +
+				`"idMappings":{"uidmap":[{"container_id":0,"host_id":1000,"size":1},{"container_id":1,"host_id":100000,"size":65536}],` +
+				`"gidmap":[{"container_id":0,"host_id":1000,"size":1},{"container_id":1,"host_id":100000,"size":65536}]},` +
+				`"pasta":{"executable":"/usr/bin/pasta"},"slirp4netns":{"executable":"/usr/bin/slirp4netns"}}}`,
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: true, SingleUID: false, RootlessNetwork: podmanRootlessNetPasta},
+		},
+		{
+			name: "rootless single-UID podman 5 with pasta",
+			output: `{"version":{"Version":"5.8.6"},"host":{"security":{"rootless":true},` +
+				`"idMappings":{"uidmap":[{"container_id":0,"host_id":100001,"size":1}],"gidmap":[{"container_id":0,"host_id":100001,"size":1}]},` +
+				`"pasta":{"executable":"/usr/bin/pasta"},"slirp4netns":{"executable":"/usr/bin/slirp4netns"}}}`,
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: true, SingleUID: true, RootlessNetwork: podmanRootlessNetPasta},
+		},
+		{
+			name: "rootless asymmetric single-GID triggers SingleUID",
+			output: `{"version":{"Version":"5.3.0"},"host":{"security":{"rootless":true},` +
+				`"idMappings":{"uidmap":[{"container_id":0,"host_id":1000,"size":1},{"container_id":1,"host_id":100000,"size":65536}],` +
+				`"gidmap":[{"container_id":0,"host_id":1000,"size":1}]},` +
+				`"pasta":{"executable":"/usr/bin/pasta"}}}`,
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: true, SingleUID: true, RootlessNetwork: podmanRootlessNetPasta},
+		},
+		{
+			name: "rootless podman 4 selects slirp4netns",
+			output: `{"version":{"Version":"4.9.3"},"host":{"security":{"rootless":true},` +
+				`"idMappings":{"uidmap":[{"container_id":0,"host_id":1000,"size":1},{"container_id":1,"host_id":100000,"size":65536}],` +
+				`"gidmap":[{"container_id":0,"host_id":1000,"size":1},{"container_id":1,"host_id":100000,"size":65536}]},` +
+				`"pasta":{"executable":"/usr/bin/pasta"},"slirp4netns":{"executable":"/usr/bin/slirp4netns"}}}`,
+			fallbackMajor: 4,
+			want:          podmanHostInfo{Rootless: true, SingleUID: false, RootlessNetwork: podmanRootlessNetSlirp4netns},
+		},
+		{
+			name: "rootless podman 5 without pasta falls back to slirp4netns",
+			output: `{"version":{"Version":"5.2.0"},"host":{"security":{"rootless":true},` +
+				`"slirp4netns":{"executable":"/usr/bin/slirp4netns"}}}`,
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: true, SingleUID: false, RootlessNetwork: podmanRootlessNetSlirp4netns},
+		},
+		{
+			name:          "leading warning line before JSON is tolerated",
+			output:        "WARN[0000] some warning\n" + `{"host":{"security":{"rootless":true},"idMappings":{"uidmap":[{"container_id":0,"host_id":501,"size":1}]},"pasta":{"executable":"/usr/bin/pasta"}}}`,
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: true, SingleUID: true, RootlessNetwork: podmanRootlessNetPasta},
+		},
+		{
+			name:          "legacy plain true mock fallback",
+			output:        "true\n",
+			fallbackMajor: 5,
+			want:          podmanHostInfo{Rootless: true, SingleUID: false, RootlessNetwork: ""},
+		},
+		{
+			name:          "legacy plain false mock fallback",
+			output:        "false\n",
+			fallbackMajor: 5,
+			want:          podmanHostInfo{},
+		},
+		{
+			name:          "malformed JSON fails safe",
+			output:        "{not-json",
+			fallbackMajor: 5,
+			want:          podmanHostInfo{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parsePodmanInfoJSON(tc.output, tc.fallbackMajor)
+			if got != tc.want {
+				t.Errorf("parsePodmanInfoJSON() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPodmanRuntime_Run_RootlessLoopback(t *testing.T) {
+	writeMock := func(t *testing.T, versionLine string) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		mockPodman := filepath.Join(dir, "mock-podman")
+		argvFile := filepath.Join(dir, "argv")
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"version\" ]; then exit 1; fi\n" +
+			"if [ \"$1\" = \"--version\" ]; then echo '" + versionLine + "'; exit 0; fi\n" +
+			"echo \"$@\" > '" + argvFile + "'\n" +
+			"echo " + mockPodmanID + "\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		return mockPodman, argvFile
+	}
+
+	baseCfg := func() RunConfig {
+		return RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+		}
+	}
+
+	t.Run("pasta enables map-host-loopback and pins host.containers.internal when TrustedHubEndpoint targets it", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.BrokerMode = true
+		cfg.TrustedHubEndpoint = "http://host.containers.internal:19810"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		out := string(argv)
+		if !strings.Contains(out, "--network pasta:--map-host-loopback,169.254.1.2") {
+			t.Errorf("expected pasta loopback network flag, got: %s", out)
+		}
+		if !strings.Contains(out, "--add-host host.containers.internal:169.254.1.2") {
+			t.Errorf("expected pinned host.containers.internal:169.254.1.2 add-host, got: %s", out)
+		}
+	})
+
+	t.Run("slirp4netns enables allow_host_loopback and maps host.containers.internal to 10.0.2.2", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 4.9.0")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetSlirp4netns,
+		}
+		cfg := baseCfg()
+		cfg.BrokerMode = true
+		cfg.TrustedHubEndpoint = "http://host.containers.internal:8080"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		out := string(argv)
+		if !strings.Contains(out, "--network slirp4netns:allow_host_loopback=true") {
+			t.Errorf("expected slirp4netns loopback network flag, got: %s", out)
+		}
+		if !strings.Contains(out, "--add-host host.containers.internal:10.0.2.2") {
+			t.Errorf("expected host.containers.internal:10.0.2.2 add-host, got: %s", out)
+		}
+	})
+
+	t.Run("slirp4netns on podman 4.3.1 preserves loopback intent when host-gateway is omitted", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 4.3.1")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetSlirp4netns,
+		}
+		cfg := baseCfg()
+		cfg.ExtraHosts = []string{"host.containers.internal:host-gateway"}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		out := string(argv)
+		if strings.Contains(out, "host-gateway") {
+			t.Errorf("expected host-gateway to be stripped on Podman 4.3.1, got: %s", out)
+		}
+		if !strings.Contains(out, "--network slirp4netns:allow_host_loopback=true") {
+			t.Errorf("expected slirp4netns loopback network flag, got: %s", out)
+		}
+		if !strings.Contains(out, "--add-host host.containers.internal:10.0.2.2") {
+			t.Errorf("expected host.containers.internal:10.0.2.2 add-host, got: %s", out)
+		}
+	})
+
+	t.Run("slirp4netns on podman 4.8.0 replaces host.containers.internal:host-gateway with 10.0.2.2", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 4.8.0")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetSlirp4netns,
+		}
+		cfg := baseCfg()
+		callerHosts := []string{"host.containers.internal:host-gateway"}
+		cfg.ExtraHosts = callerHosts
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if callerHosts[0] != "host.containers.internal:host-gateway" {
+			t.Errorf("caller ExtraHosts slice was mutated in place: got %q", callerHosts[0])
+		}
+		argv, _ := os.ReadFile(argvFile)
+		out := string(argv)
+		if strings.Contains(out, "host-gateway") {
+			t.Errorf("expected host-gateway placeholder to be replaced by 10.0.2.2 under slirp4netns, got: %s", out)
+		}
+		if strings.Count(out, "host.containers.internal:") != 1 || !strings.Contains(out, "--add-host host.containers.internal:10.0.2.2") {
+			t.Errorf("expected single host.containers.internal:10.0.2.2 entry, got: %s", out)
+		}
+	})
+
+	t.Run("unknown rootless network backend leaves NetworkMode unset", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: "",
+		}
+		cfg := baseCfg()
+		cfg.BrokerMode = true
+		cfg.TrustedHubEndpoint = "http://host.containers.internal:19810"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if strings.Contains(string(argv), "--network") {
+			t.Errorf("expected no --network flag when rootless network backend is unknown, got: %s", string(argv))
+		}
+	})
+
+	t.Run("slirp4netns preserves explicit IP mapping for host.containers.internal", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 4.9.0")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetSlirp4netns,
+		}
+		cfg := baseCfg()
+		cfg.ExtraHosts = []string{"host.containers.internal:10.9.8.7"}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		out := string(argv)
+		if !strings.Contains(out, "--add-host host.containers.internal:10.9.8.7") || strings.Contains(out, "10.0.2.2") {
+			t.Errorf("expected explicit IP 10.9.8.7 to be preserved without adding 10.0.2.2, got: %s", out)
+		}
+	})
+
+	t.Run("broker mode ignores untrusted Env host.containers.internal (least privilege)", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.BrokerMode = true
+		cfg.TrustedHubEndpoint = "https://hub.example.com"
+		cfg.Env = []string{"SCION_HUB_ENDPOINT=http://host.containers.internal:8080"}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if strings.Contains(string(argv), "--network") {
+			t.Errorf("broker mode must not open host loopback for untrusted Env, got: %s", string(argv))
+		}
+	})
+
+	t.Run("rejects lookalike hostname suffix spoofing", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.BrokerMode = true
+		cfg.TrustedHubEndpoint = "https://host.containers.internal.attacker.example"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if strings.Contains(string(argv), "--network") {
+			t.Errorf("lookalike hostname must not trigger loopback mapping, got: %s", string(argv))
+		}
+	})
+
+	t.Run("non-broker mode enables loopback when Env references host.containers.internal", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.Env = []string{"SCION_HUB_ENDPOINT=http://host.containers.internal:8080"}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if !strings.Contains(string(argv), "--network pasta:--map-host-loopback,169.254.1.2") {
+			t.Errorf("expected pasta loopback network flag in non-broker local mode, got: %s", string(argv))
+		}
+	})
+
+	t.Run("non-broker mode enables loopback when ResolvedAuth.EnvVars references host.containers.internal", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.ResolvedAuth = &api.ResolvedAuth{
+			EnvVars: map[string]string{"GOOGLE_CLOUD_ENDPOINT": "http://host.containers.internal:18420"},
+		}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if !strings.Contains(string(argv), "--network pasta:--map-host-loopback,169.254.1.2") {
+			t.Errorf("expected pasta loopback network flag for ResolvedAuth.EnvVars, got: %s", string(argv))
+		}
+	})
+
+	t.Run("explicit NetworkMode is never overridden", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        true,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.NetworkMode = "custom-net"
+		cfg.TrustedHubEndpoint = "http://host.containers.internal:8080"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		out := string(argv)
+		if !strings.Contains(out, "--network custom-net") || strings.Contains(out, "pasta:") {
+			t.Errorf("expected explicit NetworkMode to be preserved, got: %s", out)
+		}
+	})
+
+	t.Run("rootful mode does not inject rootless loopback flags", func(t *testing.T) {
+		mockPodman, argvFile := writeMock(t, "podman version 5.8.6")
+		rt := &PodmanRuntime{
+			Command:         mockPodman,
+			Rootless:        false,
+			RootlessNetwork: podmanRootlessNetPasta,
+		}
+		cfg := baseCfg()
+		cfg.TrustedHubEndpoint = "http://host.containers.internal:8080"
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		argv, _ := os.ReadFile(argvFile)
+		if strings.Contains(string(argv), "--network") {
+			t.Errorf("did not expect --network flag in rootful mode, got: %s", string(argv))
+		}
+	})
+}
+
+func TestNewPodmanRuntime_ProbesSingleUIDAndPasta(t *testing.T) {
+	dir := t.TempDir()
+	mockPodman := filepath.Join(dir, "mock-podman")
+	argvFile := filepath.Join(dir, "argv")
+	infoJSON := `{"version":{"Version":"5.8.6"},"host":{"security":{"rootless":true},"idMappings":{"uidmap":[{"container_id":0,"host_id":100001,"size":1}],"gidmap":[{"container_id":0,"host_id":100001,"size":1}]},"pasta":{"executable":"/usr/bin/pasta"}}}`
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then echo 'podman version 5.8.6'; exit 0; fi\n" +
+		"if [ \"$1\" = \"version\" ]; then echo '{\"Client\":{\"Version\":\"5.8.6\"}}'; exit 0; fi\n" +
+		"if [ \"$1\" = \"info\" ]; then echo '" + infoJSON + "'; exit 0; fi\n" +
+		"echo \"$@\" > '" + argvFile + "'\n" +
+		"echo " + mockPodmanID + "\n"
+	if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write mock podman: %v", err)
+	}
+
+	rt := NewPodmanRuntime(mockPodman)
+	pr, ok := rt.(*PodmanRuntime)
+	if !ok {
+		t.Fatalf("NewPodmanRuntime() = %T, want *PodmanRuntime", rt)
+	}
+	if !pr.Rootless || !pr.SingleUID || pr.RootlessNetwork != podmanRootlessNetPasta {
+		t.Fatalf("unexpected probed state: Rootless=%v SingleUID=%v RootlessNetwork=%q", pr.Rootless, pr.SingleUID, pr.RootlessNetwork)
+	}
+	if got := pr.ExecUser(); got != "root" {
+		t.Errorf("ExecUser() = %q, want %q", got, "root")
+	}
+	_, err := pr.Run(context.Background(), RunConfig{
+		Harness:            &harness.Generic{},
+		Name:               "test-agent",
+		UnixUsername:       "scion",
+		Image:              "scion-agent:latest",
+		Task:               "hello",
+		BrokerMode:         true,
+		TrustedHubEndpoint: "http://host.containers.internal:19810",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	out := string(argv)
+	if strings.Contains(out, "--userns=keep-id") || strings.Contains(out, "SCION_KEEPID_UID") {
+		t.Errorf("single-UID runtime must omit keep-id flags, got: %s", out)
+	}
+	if !strings.Contains(out, "--network pasta:--map-host-loopback,169.254.1.2") {
+		t.Errorf("expected pasta loopback network flag, got: %s", out)
+	}
 }

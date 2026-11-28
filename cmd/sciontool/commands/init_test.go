@@ -4067,3 +4067,39 @@ func TestScopedCredentialConfigArg_HostScoped(t *testing.T) {
 		t.Errorf("schemeless URL must scope to the https host, got %q", s)
 	}
 }
+
+func TestCloneUserIDs_SingleUIDNamespace(t *testing.T) {
+	origLookup, origMapped := scionUserLookup, setupHostUserIsUIDMapped
+	t.Cleanup(func() {
+		scionUserLookup = origLookup
+		setupHostUserIsUIDMapped = origMapped
+	})
+
+	scionUserLookup = func(name string) (*user.User, error) {
+		return &user.User{Username: name, Uid: "1000", Gid: "1000", HomeDir: "/home/scion"}, nil
+	}
+
+	t.Run("unmapped scion UID keeps 0:0 in single-UID rootless namespace", func(t *testing.T) {
+		setupHostUserIsUIDMapped = func(uid int) bool { return uid == 0 }
+		uid, gid := cloneUserIDs(0, 0)
+		if uid != 0 || gid != 0 {
+			t.Errorf("cloneUserIDs(0, 0) = (%d, %d), want (0, 0) when UID 1000 is unmapped", uid, gid)
+		}
+	})
+
+	t.Run("mapped scion UID falls back to 1000:1000", func(t *testing.T) {
+		setupHostUserIsUIDMapped = func(int) bool { return true }
+		uid, gid := cloneUserIDs(0, 0)
+		if uid != 1000 || gid != 1000 {
+			t.Errorf("cloneUserIDs(0, 0) = (%d, %d), want (1000, 1000) when UID 1000 is mapped", uid, gid)
+		}
+	})
+
+	t.Run("explicit non-zero UID passes through unchanged", func(t *testing.T) {
+		setupHostUserIsUIDMapped = func(int) bool { return false }
+		uid, gid := cloneUserIDs(1002, 1003)
+		if uid != 1002 || gid != 1003 {
+			t.Errorf("cloneUserIDs(1002, 1003) = (%d, %d), want (1002, 1003)", uid, gid)
+		}
+	})
+}

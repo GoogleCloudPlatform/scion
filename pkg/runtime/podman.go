@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -39,6 +41,16 @@ const (
 	podmanMinHostGatewayMajor = 4
 	podmanMinHostGatewayMinor = 7
 	podmanNativeHostAlias     = "host.containers.internal"
+
+	// Rootless Podman network backends that support host-loopback translation.
+	podmanRootlessNetPasta       = "pasta"
+	podmanRootlessNetSlirp4netns = "slirp4netns"
+
+	// Podman 5's pasta maps host.containers.internal to 169.254.1.2, and
+	// slirp4netns exposes the host loopback gateway at 10.0.2.2 when
+	// allow_host_loopback=true is enabled.
+	podmanPastaLoopbackAddr = "169.254.1.2"
+	podmanSlirpLoopbackAddr = "10.0.2.2"
 )
 
 // ErrPodmanHostGatewayUnsupported is returned (wrapped in a *LaunchFailure)
@@ -50,6 +62,15 @@ type PodmanRuntime struct {
 	Command  string
 	Host     string
 	Rootless bool // true when Podman is running in rootless mode
+	// SingleUID is true when rootless Podman has no subordinate UID/GID ranges
+	// (only container UID/GID 0 is mapped to the host user). In this mode
+	// --userns=keep-id:uid=1000,gid=1000 is rejected by Podman and exec must
+	// target container UID 0 ("root"), which maps directly to the host user.
+	SingleUID bool
+	// RootlessNetwork identifies the detected rootless networking backend
+	// ("pasta" on Podman 5+, "slirp4netns" on Podman 4.x or systems without
+	// pasta, or "" when unknown/rootful).
+	RootlessNetwork string
 
 	hostGatewayOnce      sync.Once
 	hostGatewaySupported bool
@@ -87,12 +108,15 @@ func NewPodmanRuntime(cmdOverride string) Runtime {
 		return &ErrorRuntime{Err: fmt.Errorf("podman version %s is below the minimum supported version 4.x", version)}
 	}
 
-	// Detect and store rootless mode
-	rootless := detectRootlessMode(command)
+	// Detect rootless mode, subordinate UID/GID availability, and rootless
+	// network backend in a single podman info probe.
+	hostInfo := probePodmanHostInfo(command, major)
 
 	rt := &PodmanRuntime{
-		Command:  command,
-		Rootless: rootless,
+		Command:         command,
+		Rootless:        hostInfo.Rootless,
+		SingleUID:       hostInfo.SingleUID,
+		RootlessNetwork: hostInfo.RootlessNetwork,
 	}
 	supported := probePodmanHostGateway(context.Background(), command, versionOutput)
 	rt.hostGatewayOnce.Do(func() {
@@ -232,7 +256,9 @@ func (r *PodmanRuntime) supportsHostGateway(ctx context.Context) bool {
 // filterPodmanExtraHosts checks config.ExtraHosts for "host-gateway" targets
 // and guards against Podman < 4.7 rejecting them. When Podman lacks support:
 //   - host.containers.internal:host-gateway is omitted with a warning, since
-//     Podman resolves host.containers.internal natively without --add-host.
+//     Podman populates host.containers.internal natively without --add-host
+//     (and rootless loopback routing is configured separately via
+//     applyPodmanRootlessLoopback when needed).
 //   - Any other <host>:host-gateway entry fails with a typed *LaunchFailure
 //     naming the minimum Podman version (4.7).
 func filterPodmanExtraHosts(ctx context.Context, extraHosts []string, supports func(context.Context) bool) ([]string, error) {
@@ -255,7 +281,7 @@ func filterPodmanExtraHosts(ctx context.Context, extraHosts []string, supports f
 			continue
 		}
 		if strings.EqualFold(name, podmanNativeHostAlias) {
-			runtimeLog().Warn("Omitting --add-host host.containers.internal:host-gateway: Podman < 4.7 does not support host-gateway and resolves host.containers.internal natively")
+			runtimeLog().Warn("Omitting --add-host host.containers.internal:host-gateway: Podman < 4.7 does not support host-gateway (Podman defines host.containers.internal natively; rootless loopback access is configured via the network backend)")
 			continue
 		}
 		return nil, newLaunchFailure(
@@ -287,35 +313,237 @@ func parseMajorVersion(version string) (int, error) {
 	return strconv.Atoi(parts[0])
 }
 
-// detectRootlessMode checks whether Podman is running in rootless mode.
-// Returns true when rootless, false otherwise.
-func detectRootlessMode(command string) bool {
-	out, err := exec.Command(command, "info", "--format", "{{.Host.Security.Rootless}}").Output()
-	if err != nil {
-		util.Debugf("podman: failed to detect rootless mode: %v", err)
+type podmanIDMapEntry struct {
+	ContainerID int `json:"container_id"`
+	HostID      int `json:"host_id"`
+	Size        int `json:"size"`
+}
+
+type podmanInfoJSON struct {
+	Version *struct {
+		Version string `json:"Version"`
+	} `json:"version"`
+	Host *struct {
+		Security *struct {
+			Rootless bool `json:"rootless"`
+		} `json:"security"`
+		IDMappings *struct {
+			UIDMap []podmanIDMapEntry `json:"uidmap"`
+			GIDMap []podmanIDMapEntry `json:"gidmap"`
+		} `json:"idMappings"`
+		Pasta *struct {
+			Executable string `json:"executable"`
+		} `json:"pasta"`
+		Slirp4netns *struct {
+			Executable string `json:"executable"`
+		} `json:"slirp4netns"`
+	} `json:"host"`
+}
+
+type podmanHostInfo struct {
+	Rootless        bool
+	SingleUID       bool
+	RootlessNetwork string
+}
+
+func hasSingleIDMapping(entries []podmanIDMapEntry) bool {
+	if len(entries) == 0 {
 		return false
 	}
-	rootless := strings.TrimSpace(string(out))
-	util.Debugf("podman: rootless mode = %s", rootless)
-	return rootless == "true"
+	total := 0
+	for _, e := range entries {
+		if e.Size > 0 {
+			total += e.Size
+		}
+	}
+	return total <= 1
+}
+
+// parsePodmanInfoJSON parses the output of "podman info --format json" (and
+// tolerates plain "true"/"false" output from legacy mocks). fallbackMajor is
+// used when the info payload omits version.Version.
+func parsePodmanInfoJSON(output string, fallbackMajor int) podmanHostInfo {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return podmanHostInfo{}
+	}
+	idx := strings.IndexByte(trimmed, '{')
+	if idx < 0 {
+		return podmanHostInfo{Rootless: trimmed == "true"}
+	}
+	var parsed podmanInfoJSON
+	if err := json.Unmarshal([]byte(trimmed[idx:]), &parsed); err != nil {
+		util.Debugf("podman: failed to parse info JSON: %v", err)
+		return podmanHostInfo{}
+	}
+	if parsed.Host == nil || parsed.Host.Security == nil || !parsed.Host.Security.Rootless {
+		return podmanHostInfo{}
+	}
+
+	info := podmanHostInfo{Rootless: true}
+	if parsed.Host.IDMappings != nil {
+		if hasSingleIDMapping(parsed.Host.IDMappings.UIDMap) || hasSingleIDMapping(parsed.Host.IDMappings.GIDMap) {
+			info.SingleUID = true
+		}
+	}
+
+	effectiveMajor := fallbackMajor
+	if parsed.Version != nil && strings.TrimSpace(parsed.Version.Version) != "" {
+		if maj, _, ok := parsePodmanMajorMinorVersion(parsed.Version.Version); ok {
+			effectiveMajor = maj
+		}
+	}
+
+	hasPasta := parsed.Host.Pasta != nil && strings.TrimSpace(parsed.Host.Pasta.Executable) != ""
+	hasSlirp := parsed.Host.Slirp4netns != nil && strings.TrimSpace(parsed.Host.Slirp4netns.Executable) != ""
+	switch {
+	case effectiveMajor >= 5 && hasPasta:
+		info.RootlessNetwork = podmanRootlessNetPasta
+	case hasSlirp:
+		info.RootlessNetwork = podmanRootlessNetSlirp4netns
+	case hasPasta:
+		info.RootlessNetwork = podmanRootlessNetPasta
+	}
+	return info
+}
+
+// probePodmanHostInfo queries "podman info --format json" (with a bounded
+// timeout matching probePodmanHostGateway) to detect rootless mode, single-UID
+// namespace constraints (no subordinate UID/GID allocation), and the available
+// rootless network backend.
+func probePodmanHostInfo(command string, fallbackMajor int) podmanHostInfo {
+	ctx, cancel := context.WithTimeout(context.Background(), podmanHostGatewayProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, command, "info", "--format", "json").Output()
+	if err != nil {
+		util.Debugf("podman: failed to probe host info: %v", err)
+		return podmanHostInfo{}
+	}
+	info := parsePodmanInfoJSON(string(out), fallbackMajor)
+	util.Debugf("podman: rootless=%v single_uid=%v rootless_network=%q", info.Rootless, info.SingleUID, info.RootlessNetwork)
+	return info
+}
+
+func urlOrHostMatches(raw, targetHost string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+	if u, err := url.Parse(trimmed); err == nil && u.Hostname() != "" {
+		return strings.EqualFold(u.Hostname(), targetHost)
+	}
+	if h, _, err := net.SplitHostPort(trimmed); err == nil {
+		return strings.EqualFold(h, targetHost)
+	}
+	return strings.EqualFold(trimmed, targetHost)
+}
+
+// needsPodmanRootlessLoopback reports whether a rootless Podman container
+// requires host loopback translation for host.containers.internal.
+//
+// In broker mode, only operator-controlled fields (TrustedHubEndpoint and
+// ExtraHosts) are consulted so untrusted template/creator environment entries
+// cannot widen host loopback reachability on a shared broker. Outside broker
+// mode (local workstation runs), config.Env and config.ResolvedAuth.EnvVars
+// URLs targeting host.containers.internal are also inspected.
+func needsPodmanRootlessLoopback(config RunConfig) bool {
+	if urlOrHostMatches(config.TrustedHubEndpoint, podmanNativeHostAlias) {
+		return true
+	}
+	for _, h := range config.ExtraHosts {
+		if name, _, ok := strings.Cut(h, ":"); ok && strings.EqualFold(strings.TrimSpace(name), podmanNativeHostAlias) {
+			return true
+		}
+	}
+	if !config.BrokerMode {
+		for _, entry := range config.Env {
+			_, val, ok := strings.Cut(entry, "=")
+			if ok && urlOrHostMatches(val, podmanNativeHostAlias) {
+				return true
+			}
+		}
+		if config.ResolvedAuth != nil {
+			for _, val := range config.ResolvedAuth.EnvVars {
+				if urlOrHostMatches(val, podmanNativeHostAlias) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ensurePodmanHostAliasExtraHost returns a copy of extraHosts with
+// host.containers.internal pinned to loopbackAddr. It replaces any
+// host-gateway placeholder (which resolves to the host's non-loopback NIC
+// under rootless pasta/slirp4netns) while preserving any explicit
+// operator-provided IP mapping without mutating the caller's slice.
+func ensurePodmanHostAliasExtraHost(extraHosts []string, loopbackAddr string) []string {
+	replaced := false
+	hasExplicitIP := false
+	res := make([]string, len(extraHosts), len(extraHosts)+1)
+	copy(res, extraHosts)
+	for i, h := range res {
+		name, target, ok := strings.Cut(h, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), podmanNativeHostAlias) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(target), "host-gateway") {
+			res[i] = podmanNativeHostAlias + ":" + loopbackAddr
+			replaced = true
+		} else {
+			hasExplicitIP = true
+		}
+	}
+	if !replaced && !hasExplicitIP {
+		res = append(res, podmanNativeHostAlias+":"+loopbackAddr)
+	}
+	return res
+}
+
+// applyPodmanRootlessLoopback enables host-loopback translation on rootless
+// Podman when the container targets host.containers.internal and no explicit
+// NetworkMode was configured.
+//
+// Under Podman 5's default pasta backend, --map-host-loopback,169.254.1.2 maps
+// 169.254.1.2 to host 127.0.0.1 and host.containers.internal is pinned to
+// 169.254.1.2 so resolution is consistent across Podman 5.x releases. Under
+// slirp4netns, allow_host_loopback=true exposes host loopback at 10.0.2.2 and
+// host.containers.internal is pinned to 10.0.2.2.
+func applyPodmanRootlessLoopback(config *RunConfig, rootless bool, rootlessNetwork string, wantLoopback bool) {
+	if !rootless || !wantLoopback || config.NetworkMode != "" {
+		return
+	}
+	switch rootlessNetwork {
+	case podmanRootlessNetPasta:
+		config.NetworkMode = "pasta:--map-host-loopback," + podmanPastaLoopbackAddr
+		config.ExtraHosts = ensurePodmanHostAliasExtraHost(config.ExtraHosts, podmanPastaLoopbackAddr)
+	case podmanRootlessNetSlirp4netns:
+		config.NetworkMode = "slirp4netns:allow_host_loopback=true"
+		config.ExtraHosts = ensurePodmanHostAliasExtraHost(config.ExtraHosts, podmanSlirpLoopbackAddr)
+	default:
+		runtimeLog().Warn("Rootless loopback routing requested for host.containers.internal, but no supported rootless network backend (pasta or slirp4netns) was detected",
+			"rootless_network", rootlessNetwork)
+	}
 }
 
 func (r *PodmanRuntime) Name() string {
 	return "podman"
 }
 
-// ExecUser implements Runtime. Always returns "scion" because sciontool
-// init drops privileges to the scion user (via SCION_HOST_UID) before
-// launching the tmux session — even in rootless mode. The exec user must
-// match the tmux socket owner (UID 1000 = scion), not the container's
-// initial PID 1 user.
+// ExecUser implements Runtime. Returns "scion" when sciontool init drops
+// privileges to the scion user (UID 1000) — both in rootful mode and in
+// rootless mode with subordinate UID/GID mappings (--userns=keep-id).
 //
-// The previous behaviour returned "root" for rootless podman, assuming
-// the host UID mapped to container UID 0 and no privilege drop occurred.
-// This was incorrect when the image starts as root (USER root) and
-// sciontool drops to scion, placing the tmux socket at /tmp/tmux-1000/
-// while the broker looked at /tmp/tmux-0/.
+// In single-UID rootless mode (no /etc/subuid or /etc/subgid range), container
+// UID 0 is the only mapped UID (mapped 1:1 to the unprivileged host user), so
+// sciontool init skips remapping and runs tmux as UID 0 (/tmp/tmux-0/). In
+// that case ExecUser returns "root" so podman exec targets the mapped UID and
+// matches the tmux socket owner.
 func (r *PodmanRuntime) ExecUser() string {
+	if r.Rootless && r.SingleUID {
+		return "root"
+	}
 	return "scion"
 }
 
@@ -347,11 +575,18 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	}
 	config.RuntimeName = r.Name()
 
+	// Capture host.containers.internal loopback intent before
+	// filterPodmanExtraHosts may drop host.containers.internal:host-gateway on
+	// Podman < 4.7.
+	wantLoopback := r.Rootless && config.NetworkMode == "" && needsPodmanRootlessLoopback(config)
+
 	extraHosts, err := filterPodmanExtraHosts(ctx, config.ExtraHosts, r.supportsHostGateway)
 	if err != nil {
 		return "", err
 	}
 	config.ExtraHosts = extraHosts
+
+	applyPodmanRootlessLoopback(&config, r.Rootless, r.RootlessNetwork, wantLoopback)
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
@@ -362,8 +597,9 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// so we don't use --init to avoid competing init processes.
 	newArgs := []string{"run", "-t"}
 
-	// In rootless mode, map the host user's UID into the container as UID
-	// 1000 (the scion user created in the Dockerfile). This ensures:
+	// In rootless mode with subordinate UID/GID ranges, map the host user's
+	// UID into the container as UID 1000 (the scion user created in the
+	// Dockerfile). This ensures:
 	//  1. Bind-mounted files have correct host-user ownership on both sides.
 	//  2. The process runs as the scion user (UID 1000) inside the container,
 	//     so harness config in /home/scion is accessible.
@@ -378,9 +614,16 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// container only shows the mapping to the immediate parent namespace
 	// (Podman's namespace), not the host — so init cannot derive this from
 	// the uid_map alone.
-	if r.Rootless {
+	//
+	// When SingleUID is true (no subordinate UID/GID allocation), UID 1000 is
+	// unmappable and Podman rejects --userns=keep-id:uid=1000,gid=1000.
+	// Omitting keep-id maps the host user 1:1 to container UID 0, and
+	// sciontool init's unmapped-UID fallback handles /home/scion cleanly.
+	if r.Rootless && !r.SingleUID {
 		newArgs = append(newArgs, "--userns=keep-id:uid=1000,gid=1000")
 		newArgs = append(newArgs, "-e", "SCION_KEEPID_UID=1000")
+	} else if r.Rootless && r.SingleUID {
+		util.Debugf("podman: single-UID rootless namespace detected; omitting --userns=keep-id and running as mapped container UID 0")
 	}
 
 	// Apply resource constraints from config.
@@ -389,7 +632,7 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// Podman cannot apply resource limits and rejects these flags, so the agent
 	// fails to start instead of falling back to an unlimited container. This is
 	// now reachable by default because config.BuiltinDefaultResources() supplies
-	// limits.cpu "2" for every agent. detectRootlessMode already gives us half
+	// limits.cpu "2" for every agent. probePodmanHostInfo already gives us half
 	// the signal; the fix is to also probe
 	// `podman info --format '{{.Host.CgroupsVersion}}'` at construction and skip
 	// these flags with a warning when limits are unsupported. Not implemented
@@ -596,6 +839,18 @@ func (r *PodmanRuntime) GetLogs(ctx context.Context, id string) (string, error) 
 	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
+// execUserArgs returns the podman exec flags to target the container's runtime
+// user. In single-UID rootless mode, container UID 0 ("root") maps to the
+// unprivileged host user while sciontool's supervisor runs the harness with
+// HOME=/home/scion; passing -e HOME=/home/scion prevents podman exec --user
+// root from defaulting HOME to /root and diverging from the harness home.
+func (r *PodmanRuntime) execUserArgs() []string {
+	if r.Rootless && r.SingleUID {
+		return []string{"-e", "HOME=/home/scion", "--user", r.ExecUser()}
+	}
+	return []string{"--user", r.ExecUser()}
+}
+
 func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	// We need to find the container first to handle names properly
 	agents, err := r.List(ctx, nil)
@@ -619,11 +874,13 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	// Ensure tmux uses the latest client's terminal size so the session
 	// redraws correctly on attach (handles containers started before the
 	// window-size option was added to session creation).
-	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
-		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
+	resizeArgs := append([]string{"exec"}, r.execUserArgs()...)
+	resizeArgs = append(resizeArgs, agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
+	_, _ = runSimpleCommand(ctx, r.Command, resizeArgs...)
 
 	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
-	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
+	args = append(args, r.execUserArgs()...)
+	return runInteractiveCommand(r.Command, append(args, agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -718,7 +975,9 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 			id = resolved
 		}
 	}
-	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
+	args := append([]string{"exec"}, r.execUserArgs()...)
+	args = append(args, id)
+	args = append(args, cmd...)
 	out, err := runCombinedCommand(ctx, r.Command, args...)
 	// A container removed after the lookup above must surface as
 	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
@@ -738,7 +997,9 @@ func (r *PodmanRuntime) ExecWithStdin(ctx context.Context, id string, cmd []stri
 			id = resolved
 		}
 	}
-	args := append([]string{"exec", "-i", "--user", r.ExecUser(), id}, cmd...)
+	args := append([]string{"exec", "-i"}, r.execUserArgs()...)
+	args = append(args, id)
+	args = append(args, cmd...)
 	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 

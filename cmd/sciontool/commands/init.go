@@ -4966,14 +4966,21 @@ func writeEnvFile(agentHome string, uid, gid int) {
 // cloneUserIDs returns the identity gitCloneWorkspace runs git as: uid/gid,
 // or the scion user when uid is 0 (broker running as root or no host UID
 // configured), so that cloned files are owned by the container user rather
-// than root.
+// than root. In a single-UID rootless user namespace where the scion UID is
+// not mapped, keep uid=0/gid=0 (which maps directly to the host user) so
+// chown and setuid do not fail with EINVAL.
 func cloneUserIDs(uid, gid int) (int, int) {
 	if uid != 0 {
 		return uid, gid
 	}
 	if scionUser, err := scionUserLookup("scion"); err == nil {
-		uid, _ = strconv.Atoi(scionUser.Uid)
-		gid, _ = strconv.Atoi(scionUser.Gid)
+		scionUID, _ := strconv.Atoi(scionUser.Uid)
+		scionGID, _ := strconv.Atoi(scionUser.Gid)
+		if !setupHostUserIsUIDMapped(scionUID) {
+			log.Info("scion user UID=%d is not mapped in the container user namespace (rootless single-UID); keeping UID=0 for git clone", scionUID)
+			return 0, 0
+		}
+		uid, gid = scionUID, scionGID
 		log.Info("Falling back to scion user UID=%d GID=%d for git clone", uid, gid)
 	}
 	return uid, gid
