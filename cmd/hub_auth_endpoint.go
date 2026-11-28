@@ -20,15 +20,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// hubAuthURLPrecedence documents the hub 'scion hub auth login' and
-// 'logout' use. It is the order every hub command uses (invocationHub), plus
-// the deprecated --hub-url alias of --hub.
+// hubAuthURLPrecedence documents the hub 'scion login', 'scion hub auth login',
+// and 'scion hub auth logout' use. It is the order every hub command uses
+// (invocationHub).
 const hubAuthURLPrecedence = `The hub is taken from, in order:
   1. the root --hub flag (a hub nickname or URL)
   2. the SCION_HUB_ENDPOINT environment variable, then SCION_HUB_URL
   3. the hub the current project directory is linked to ('scion hub link')
   4. the current hub ('scion use --hub <name>')
-This is the order every hub command uses. --hub-url is a deprecated alias of --hub.`
+This is the order every hub command uses.`
 
 // hubAuthURL returns the hub URL for 'hub auth login' and 'logout': the
 // deprecated --hub-url (a URL or a hub nickname), else the hub of this

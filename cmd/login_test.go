@@ -50,10 +50,65 @@ func TestLoginCommand_SharesRunEAndFlagsWithHubAuthLogin(t *testing.T) {
 
 	// Hidden deprecated --hub-url stays only on 'scion hub auth login'.
 	assert.Nil(t, top.Flags().Lookup("hub-url"), "top-level login must not carry deprecated --hub-url")
+	assert.NotContains(t, top.Long, "--hub-url", "top-level login help must not document --hub-url")
 	nestedHubURL := nested.Flags().Lookup("hub-url")
 	require.NotNil(t, nestedHubURL)
 	assert.True(t, nestedHubURL.Hidden)
 	assert.Equal(t, "use --hub", nestedHubURL.Deprecated)
+	assert.Contains(t, nested.Long, "--hub-url is a deprecated alias of --hub.")
+}
+
+func TestLoginNoBrowser(t *testing.T) {
+	orig := hubAuthNoBrowser
+	t.Cleanup(func() { hubAuthNoBrowser = orig })
+
+	t.Run("top-level login command", func(t *testing.T) {
+		hubAuthNoBrowser = false
+		c := newTopLevelLoginCommand()
+		assert.False(t, loginNoBrowser(c), "unset flag with false default")
+
+		require.NoError(t, c.Flags().Set("no-browser", "true"))
+		assert.True(t, loginNoBrowser(c), "--no-browser=true must override false default")
+
+		hubAuthNoBrowser = true
+		require.NoError(t, c.Flags().Set("no-browser", "false"))
+		assert.False(t, loginNoBrowser(c), "explicit --no-browser=false must override true default")
+
+		cUnset := newTopLevelLoginCommand()
+		assert.True(t, loginNoBrowser(cUnset), "unset flag falls back to hubAuthNoBrowser default")
+	})
+
+	t.Run("hub auth login command", func(t *testing.T) {
+		hubAuthNoBrowser = false
+		c := newHubLoginCommand("login")
+		assert.False(t, loginNoBrowser(c), "unset flag with false default")
+
+		require.NoError(t, c.Flags().Set("no-browser", "true"))
+		assert.True(t, loginNoBrowser(c), "--no-browser=true must override false default")
+
+		hubAuthNoBrowser = true
+		require.NoError(t, c.Flags().Set("no-browser", "false"))
+		assert.False(t, loginNoBrowser(c), "explicit --no-browser=false must override true default")
+
+		cUnset := newHubLoginCommand("login")
+		assert.True(t, loginNoBrowser(cUnset), "unset flag falls back to hubAuthNoBrowser default")
+	})
+
+	t.Run("command without --no-browser flag (scion use path)", func(t *testing.T) {
+		c := &cobra.Command{Use: "use"}
+		hubAuthNoBrowser = false
+		assert.False(t, loginNoBrowser(c), "absent flag falls back to false default")
+
+		hubAuthNoBrowser = true
+		assert.True(t, loginNoBrowser(c), "absent flag falls back to true default")
+	})
+
+	t.Run("nil command", func(t *testing.T) {
+		hubAuthNoBrowser = false
+		assert.False(t, loginNoBrowser(nil))
+		hubAuthNoBrowser = true
+		assert.True(t, loginNoBrowser(nil))
+	})
 }
 
 func TestLoginCommand_FlagsIsolatedFromHubAuthLogin(t *testing.T) {
@@ -78,7 +133,6 @@ func TestLoginCommand_FlagsIsolatedFromHubAuthLogin(t *testing.T) {
 	require.Error(t, err, "test server returns 404 for device flow")
 	assert.Contains(t, out.String(), "Authenticating with Hub at "+srv.URL)
 	assert.NotContains(t, out.String(), "stale-deprecated.example.test")
-	assert.False(t, hubAuthNoBrowser, "setting --no-browser on login command must not mutate global hubAuthNoBrowser")
 	noBrowserOnNested, getErr := hubAuthLoginCmd.Flags().GetBool("no-browser")
 	require.NoError(t, getErr)
 	assert.False(t, noBrowserOnNested, "setting --no-browser on login must not affect hub auth login")

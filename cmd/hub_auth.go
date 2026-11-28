@@ -33,7 +33,10 @@ import (
 )
 
 var (
-	hubAuthHubURL    string
+	hubAuthHubURL string
+	// hubAuthNoBrowser is a test seam for forcing device-flow login when
+	// --no-browser is not explicitly set on cmd (including commands without
+	// that flag, such as 'scion use').
 	hubAuthNoBrowser bool
 )
 
@@ -137,6 +140,12 @@ func init() {
 	// Hidden deprecated --hub-url stays only on 'scion hub auth login' (not
 	// carried onto the top-level 'scion login' alias); pflag prints the
 	// deprecation on stderr when it is used.
+	hubAuthLoginCmd.Long = strings.Replace(
+		hubAuthLoginCmd.Long,
+		hubAuthURLPrecedence,
+		hubAuthURLPrecedence+" --hub-url is a deprecated alias of --hub.",
+		1,
+	)
 	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Deprecated alias of --hub")
 	_ = hubAuthLoginCmd.Flags().MarkDeprecated("hub-url", "use --hub")
 }
@@ -148,12 +157,23 @@ func loginHubURLFlagValue(cmd *cobra.Command) string {
 	if cmd == nil {
 		return ""
 	}
-	if f := cmd.Flags().Lookup("hub-url"); f != nil {
-		if v, err := cmd.Flags().GetString("hub-url"); err == nil {
-			return v
+	v, _ := cmd.Flags().GetString("hub-url")
+	return v
+}
+
+// loginNoBrowser reports whether the login flow should skip opening a browser.
+// If cmd defines --no-browser and the caller explicitly set it, that flag value
+// wins; otherwise it falls back to the hubAuthNoBrowser default (used by tests
+// and by callers whose command has no --no-browser flag, such as 'scion use').
+func loginNoBrowser(cmd *cobra.Command) bool {
+	if cmd != nil {
+		if f := cmd.Flags().Lookup("no-browser"); f != nil && f.Changed {
+			if v, err := cmd.Flags().GetBool("no-browser"); err == nil {
+				return v
+			}
 		}
 	}
-	return ""
+	return hubAuthNoBrowser
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
@@ -195,15 +215,7 @@ func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubc
 		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}
 
-	noBrowser := hubAuthNoBrowser
-	if cmd != nil {
-		if f := cmd.Flags().Lookup("no-browser"); f != nil && f.Changed {
-			if v, err := cmd.Flags().GetBool("no-browser"); err == nil {
-				noBrowser = v
-			}
-		}
-	}
-	if noBrowser || util.IsHeadlessEnvironment() {
+	if loginNoBrowser(cmd) || util.IsHeadlessEnvironment() {
 		provider, err := resolveExplicitDeviceFlowProvider(cmd.Context(), client.Auth(), provider)
 		if err != nil {
 			return nil, err
@@ -231,10 +243,8 @@ func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.
 	return nil
 }
 
-// loginHubURLGivenExplicitly reports whether 'hub auth login' got its hub
-// as a URL in --hub-url or --hub (not as a nickname, and not from the
-// environment, a link entry or the current context). Only such a URL is
-// added to the hub list.
+// loginHubURLGivenExplicitly is a test seam delegating to
+// loginHubURLGivenExplicitlyFor with the package-level hubAuthHubURL.
 func loginHubURLGivenExplicitly() bool {
 	return loginHubURLGivenExplicitlyFor(hubAuthHubURL)
 }
@@ -296,6 +306,9 @@ var errHubAlreadyListed = errors.New("hub already registered")
 //     and one line says so. A current hub is never switched; when the hub
 //     is not the current hub, a hint says how to select it.
 //   - A hub from the environment: nothing (it is a one-off override).
+//
+// recordLoginHub is a test seam delegating to recordLoginHubWithFlag with the
+// package-level hubAuthHubURL.
 func recordLoginHub(out, stderr io.Writer, hubURL string) {
 	recordLoginHubWithFlag(out, stderr, hubURL, hubAuthHubURL)
 }
