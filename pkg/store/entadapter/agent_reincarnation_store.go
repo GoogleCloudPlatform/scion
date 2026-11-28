@@ -441,24 +441,25 @@ func (s *AgentReincarnationStore) LatestCompletedAgentReincarnationsAt(ctx conte
 	if len(agentIDs) == 0 {
 		return out, nil
 	}
-	rows, err := s.client.AgentReincarnation.Query().
+	var rows []struct {
+		AgentID string `json:"agent_id"`
+		Latest  string `json:"latest"`
+	}
+	err := s.client.AgentReincarnation.Query().
 		Where(
 			agentreincarnation.AgentIDIn(agentIDs...),
 			agentreincarnation.StateEQ(agentreincarnation.StateCompleted),
 			agentreincarnation.CompletedAtNotNil(),
 		).
-		Select(agentreincarnation.FieldAgentID, agentreincarnation.FieldCompletedAt).
-		All(ctx)
+		GroupBy(agentreincarnation.FieldAgentID).
+		Aggregate(ent.As(ent.Max(agentreincarnation.FieldCompletedAt), "latest")).
+		Scan(ctx, &rows)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	for _, r := range rows {
-		if r.CompletedAt == nil {
-			continue
-		}
-		ts := r.CompletedAt.UTC()
-		if prev, ok := out[r.AgentID]; !ok || ts.After(prev) {
-			out[r.AgentID] = ts
+		if ts := parseAggregateTime(r.Latest); !ts.IsZero() {
+			out[r.AgentID] = ts.UTC()
 		}
 	}
 	return out, nil

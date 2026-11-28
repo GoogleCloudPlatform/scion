@@ -125,7 +125,7 @@ export class ScionReincarnateDialog extends LitElement {
     }
   `;
 
-  protected override updated(changed: Map<string, unknown>): void {
+  protected override willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('open') && this.open) {
       this.selectedMode = 'now';
     }
