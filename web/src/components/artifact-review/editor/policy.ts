@@ -36,7 +36,7 @@ import {
 } from '@milkdown/prose/transform';
 
 import { cleanUnchanged } from './guard.js';
-import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
+import { COMMENT, isMine, isSubPair, markKeyOf, runKeyOf } from './schema.js';
 import { inlineContent, isExempt, trackTransaction } from './track.js';
 
 /** The hint shown when an edit is refused. */
@@ -199,7 +199,7 @@ export function touchesEarlier(doc: Node, from: number, to: number): boolean {
   const kb = runKeyOf(before.marks);
   const ka = runKeyOf(after.marks);
   if (!kb || !ka || isMine(before.marks) || isMine(after.marks)) return false;
-  return kb === ka || (kb === 'subOld' && ka === 'subNew');
+  return kb === ka || isSubPair(kb, ka);
 }
 
 /**

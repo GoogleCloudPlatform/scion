@@ -961,9 +961,74 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(internals.reviewNote).toBe('Byte-exact note');
     expect(internals.draftController?.currentRev).toBe(4);
 
-    // Fail-closed marks notice in graphical view (v3 §7.1).
-    const hint = el.shadowRoot!.querySelector('.hint-strip');
-    expect(hint?.textContent).toContain('read-only in the graphical view');
+    // Normal resume passes baseContent so own marks remain editable with no read-only hint.
+    expect(el.shadowRoot!.querySelector('.hint-strip')).toBeNull();
+    const editor = el.shadowRoot!.querySelector('scion-review-editor') as
+      | (HTMLElement & { baseContent?: string })
+      | null;
+    if (editor) {
+      expect(editor.baseContent).toBe(BASE_TEXT);
+    }
+  });
+
+  it('clears baseContent on 409 conflict load when loaded.base differs from the viewed version', async () => {
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+    };
+    const state: DraftServerState = {
+      draft: {
+        rev: 1,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    const chipMenu = el.shadowRoot!.querySelector('.draft-chip-menu sl-menu')!;
+    chipMenu.dispatchEvent(new CustomEvent('sl-select', { detail: { item: { value: 'resume' } } }));
+    await settle(el);
+
+    const internals = el as unknown as {
+      reviewBaseSeq: number | null;
+      resolveConflictLoad: () => Promise<void>;
+      draftController?: {
+        resolveConflictLoad: () => Promise<ReviewDraft | null>;
+      };
+    };
+    expect(internals.reviewBaseSeq).toBe(1);
+
+    // Simulate another device moving the draft to a newer base version (seq 2).
+    internals.draftController!.resolveConflictLoad = () =>
+      Promise.resolve({
+        rev: 2,
+        base: 2,
+        entry: 'plan.md',
+        body: 'Newer version body {++edit++}.\n',
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:10:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      });
+    await internals.resolveConflictLoad();
+    await settle(el);
+
+    expect(internals.reviewBaseSeq).toBe(2);
+    const editor = el.shadowRoot!.querySelector('scion-review-editor') as
+      | (HTMLElement & { baseContent?: string })
+      | null;
+    if (editor) {
+      expect(editor.baseContent).toBeUndefined();
+    }
   });
 
   it('discards a draft from the History chip with confirmation and DELETE ?rev=', async () => {

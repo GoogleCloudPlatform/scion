@@ -551,3 +551,44 @@ describe('code signature', () => {
     expect(backtickRuns('no ticks')).toBe('');
   });
 });
+
+describe('ownStarts ownership restoration and adjacent substitution boundary', () => {
+  it('sets mine: true only on marks and comments whose source starts are in ownStarts', () => {
+    const md = 'a {++earlier++}{++own++} b {==hl==}{>>old<<}{>>new<<} c {~~o~>n~~}\n';
+    const segs = parseCritic(md).filter((s) => s.kind !== 'text');
+    // Marks in order: ins(earlier), ins(own), hl, comment(old), comment(new), sub(o->n)
+    const ownStarts = new Set<number>([segs[1].start, segs[4].start, segs[5].start]);
+    const a = chooseAlphabet(md)!;
+    const doc = loadDoc(md, core.parse, core.schema, a, ownStarts)!;
+    const seen: string[] = [];
+    doc.descendants((n) => {
+      if (n.type.name === 'critic_comment') {
+        seen.push(`comment:${n.attrs.note}:${n.attrs.mine}`);
+        return false;
+      }
+      if (n.isText) {
+        const m = n.marks.find((x) => x.type.name.startsWith('critic_'));
+        if (m) seen.push(`${m.type.name}:${n.text}:${m.attrs.mine}`);
+      }
+      return true;
+    });
+    expect(seen).toEqual([
+      'critic_ins:earlier:false',
+      'critic_ins:own:true',
+      'critic_hl:hl:false',
+      'comment:old:false',
+      'comment:new:true',
+      'critic_sub_old:o:true',
+      'critic_sub_new:n:true',
+    ]);
+  });
+
+  it('keeps adjacent earlier subOld and own subNew as separate substitutions on saveDoc', () => {
+    const md = 'x {~~a~>~~}{~~~>b~~} y\n';
+    const segs = parseCritic(md).filter((s) => s.kind !== 'text');
+    const ownStarts = new Set<number>([segs[1].start]);
+    const a = chooseAlphabet(md)!;
+    const doc = loadDoc(md, core.parse, core.schema, a, ownStarts)!;
+    expect(saveDoc(doc, core.serialize, core.schema, a)).toBe(md);
+  });
+});

@@ -21,7 +21,7 @@ import { NodeSelection, TextSelection } from '@milkdown/prose/state';
 
 import { containerClass } from './policy.js';
 import type { HintKind } from './policy.js';
-import { COMMENT, MARKS, markKeyOf, runKeyOf } from './schema.js';
+import { COMMENT, MARKS, isSubPair, markKeyOf, runKeyOf } from './schema.js';
 import { SKIP_TRACK } from './track.js';
 import { sharedMarks } from './bridge.js';
 
@@ -93,7 +93,7 @@ export function afterRun(state: EditorState, pos: number): number {
   // At the seam between a highlight and its comment: after the comment.
   if (after.type.name === COMMENT && markKeyOf(before.marks) === 'hl') return pos + 1;
   const same = (a: string | null, b: string | null): boolean =>
-    !!a && !!b && (a === b || (a === 'subOld' && b === 'subNew'));
+    !!a && !!b && (a === b || isSubPair(a, b));
   let key = runKeyOf(before.marks);
   if (!same(key, runKeyOf(after.marks))) return pos;
   // The node after pos (the one containing it when pos is inside a text node).

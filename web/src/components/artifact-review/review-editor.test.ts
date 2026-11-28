@@ -297,3 +297,48 @@ describe('scion-review-editor review-change after an edit from a badge', () => {
     expect(changes.at(-1)).toBe('one two three\n');
   });
 });
+
+describe('scion-review-editor baseContent ownership restoration', () => {
+  it('shows OWN_COMMENT_HINT on restored own comments and EARLIER_COMMENT_HINT on earlier comments', async () => {
+    const el = document.createElement('scion-review-editor') as ScionReviewEditor;
+    el.baseContent = 'one two {>>earlier<<}\n';
+    el.content = 'one {==two==}{>>mine<<} {>>earlier<<}\n';
+    el.noteAuthor = 'Alice';
+    el.entryPath = 'doc.md';
+    document.body.append(el);
+    await el.updateComplete;
+    await el.ready;
+
+    const badges = controllerOf(el).view.dom.querySelectorAll('.critic-comment');
+    expect(badges).toHaveLength(2);
+
+    badges[0].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    await el.updateComplete;
+    const ownCard = el.shadowRoot!.querySelector('sl-popup .card');
+    expect(ownCard?.querySelector('.card-title')?.textContent).toContain('Comment 1 · You');
+    expect(ownCard?.querySelector('.card-hint')?.textContent).toBe(OWN_COMMENT_HINT);
+
+    badges[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    await el.updateComplete;
+    const earlierCard = el.shadowRoot!.querySelector('sl-popup .card');
+    expect(earlierCard?.querySelector('.card-title')?.textContent).toContain('Comment 2 · Alice');
+    expect(earlierCard?.querySelector('.card-hint')?.textContent).toBe(EARLIER_COMMENT_HINT);
+  });
+
+  it('emits unmarked-source hint when baseContent has marks and clean text changed', async () => {
+    const hints: string[] = [];
+    const el = document.createElement('scion-review-editor') as ScionReviewEditor;
+    el.baseContent = 'one {>>earlier<<} two\n';
+    el.content = 'one changed {>>earlier<<} two {++own++}\n';
+    el.entryPath = 'doc.md';
+    el.addEventListener('review-hint', (e) =>
+      hints.push((e as CustomEvent<{ kind: string }>).detail.kind)
+    );
+    document.body.append(el);
+    await el.updateComplete;
+    await el.ready;
+
+    expect(hints).toEqual(['unmarked-source']);
+    expect(el.hasOwnMarks()).toBe(false);
+  });
+});

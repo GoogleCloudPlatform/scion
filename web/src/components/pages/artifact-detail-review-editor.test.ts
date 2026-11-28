@@ -87,6 +87,7 @@ const TEXT = 'We ship in Q3.\n';
 /** Stand-in for <scion-review-editor>: records calls, returns a set text. */
 class FakeReviewEditor extends HTMLElement {
   content = '';
+  baseContent?: string;
   next: string | null = null;
   /** flush() reports that the document cannot be written. */
   unwritable = false;
@@ -1097,26 +1098,40 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeDefined();
   });
 
-  it('switching to Source with own suggestions says they become read-only in the graphical view', async () => {
+  it('passes baseContent across Source -> graphical round-trips with no read-only hint', async () => {
     mockFetch();
     const el = await mount(true);
     await startReview(el);
     const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
-    // Without own suggestions, no notice.
+    expect(editor.baseContent).toBe(TEXT);
+    editor.own = true;
     await chooseView(el, 'source');
     expect($(el, '.hint-strip')).toBeNull();
     await chooseView(el, 'graphical');
     const again = $<FakeReviewEditor>(el, 'scion-review-editor')!;
-    // Returning from Source opens the text in a new editor: ownership starts over.
     expect(again).not.toBe(editor);
-    again.own = true;
-    await chooseView(el, 'source');
+    expect(again.baseContent).toBe(TEXT);
+    expect($(el, '.hint-strip')).toBeNull();
+  });
+
+  it('shows the unmarked-source fallback hint with Open Source view', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-hint', {
+        detail: { kind: 'unmarked-source' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
     const strip = $(el, '.hint-strip')!;
     expect(strip.textContent).toContain(
-      "Suggestions you've made so far become read-only in the graphical view after you switch to Source."
+      'Existing marks are read-only in the graphical view while text outside marks has changed.'
     );
-    expect(strip.textContent).toContain('You can still change them there.');
-    expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeUndefined();
+    expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeDefined();
   });
 
   it('Ctrl+Alt+M comments in the source view', async () => {

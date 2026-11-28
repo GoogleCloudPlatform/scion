@@ -528,3 +528,131 @@ describe('composition and history', () => {
     expect(c.view.state.doc.eq(before)).toBe(true);
   });
 });
+
+describe('restoring own marks with load(md, base)', () => {
+  const owners = (c: ReviewController): string[] => {
+    const out: string[] = [];
+    c.view.state.doc.descendants((n) => {
+      if (n.type.name === 'critic_comment') out.push(`comment:${n.attrs.note}:${n.attrs.mine}`);
+      else if (n.isText) {
+        const m = n.marks.find((x) => x.type.name.startsWith('critic_'));
+        if (m) out.push(`${m.type.name}:${n.text}:${m.attrs.mine}`);
+      }
+      return true;
+    });
+    return out;
+  };
+
+  it('keeps own marks and comments editable after reload while earlier marks stay read-only', async () => {
+    const base = 'One {++alice++} two {==x==}{>>earlier<<} three.\n';
+    const { c, hints, answer } = await open(base);
+    type(c, 'mine', posOf(c, 'three', 5));
+    const p = posOf(c, 'two');
+    c.view.dispatch(c.view.state.tr.setSelection(TextSelection.create(c.view.state.doc, p, p + 3)));
+    answer.note = 'my note';
+    await c.comment();
+    const saved = c.flush()!;
+    expect(saved).toBe(
+      'One {++alice++} {==two==}{>>my note<<} {==x==}{>>earlier<<} three{++mine++}.\n'
+    );
+
+    // Simulate resume or Source -> Graphical round-trip with base.
+    expect(c.load(saved, base)).toBe(true);
+    expect(c.baseFailClosed).toBe(false);
+    expect(c.hasOwnMarks()).toBe(true);
+    expect(owners(c)).toEqual([
+      'critic_ins:alice:false',
+      'critic_hl:two:true',
+      'comment:my note:true',
+      'critic_hl:x:false',
+      'comment:earlier:false',
+      'critic_ins:mine:true',
+    ]);
+
+    // Own comment can be edited and saved (earlierKept excludes restored own marks).
+    const [ownComment, earlierComment] = comments(c);
+    expect(ownComment.mine).toBe(true);
+    expect(earlierComment.mine).toBe(false);
+    answer.note = 'updated note';
+    await c.editNote(ownComment.pos);
+    expect(hints).toEqual([]);
+    expect(c.flush()).toBe(
+      'One {++alice++} {==two==}{>>updated note<<} {==x==}{>>earlier<<} three{++mine++}.\n'
+    );
+
+    // Own insertion can be deleted.
+    const insPos = posOf(c, 'mine');
+    c.view.dispatch(c.view.state.tr.delete(insPos, insPos + 4));
+    expect(hints).toEqual([]);
+    expect(c.flush()).toBe(
+      'One {++alice++} {==two==}{>>updated note<<} {==x==}{>>earlier<<} three.\n'
+    );
+
+    // Earlier comment and earlier insertion remain read-only.
+    const [, earlierAfter] = comments(c);
+    await c.editNote(earlierAfter.pos);
+    const alicePos = posOf(c, 'alice');
+    c.view.dispatch(c.view.state.tr.delete(alicePos, alicePos + 1));
+    expect(hints).toEqual(['earlier', 'earlier']);
+  });
+
+  it('handles duplicate identical marks at the same clean offset', async () => {
+    const base = 'Some {==x==}{>>ok<<} text\n';
+    const draft = 'Some {==x==}{>>ok<<}{>>ok<<} text\n';
+    const { c } = await open(base);
+    expect(c.load(draft, base)).toBe(true);
+    expect(owners(c)).toEqual(['critic_hl:x:false', 'comment:ok:false', 'comment:ok:true']);
+  });
+
+  it('keeps a standalone earlier highlight read-only when followed by an own comment', async () => {
+    const base = 'Some {==x==} text\n';
+    const draft = 'Some {==x==}{>>mine<<} text\n';
+    const { c, hints, answer } = await open(base);
+    expect(c.load(draft, base)).toBe(true);
+    expect(owners(c)).toEqual(['critic_hl:x:false', 'comment:mine:true']);
+    const [mine] = comments(c);
+    answer.note = 'edited';
+    await c.editNote(mine.pos);
+    expect(hints).toEqual([]);
+    expect(c.flush()).toBe('Some {==x==}{>>edited<<} text\n');
+  });
+
+  it('makes a mark edited in Source editable while untouched earlier marks stay read-only', async () => {
+    const base = 'One {++alice++} two {++bob++} three\n';
+    const editedInSource = 'One {++alice!++} two {++bob++} three\n';
+    const { c, hints } = await open(base);
+    expect(c.load(editedInSource, base)).toBe(true);
+    expect(c.baseFailClosed).toBe(false);
+    expect(owners(c)).toEqual(['critic_ins:alice!:true', 'critic_ins:bob:false']);
+
+    // Can edit alice!, cannot edit bob.
+    const bangPos = posOf(c, 'alice!', 5);
+    c.view.dispatch(c.view.state.tr.delete(bangPos, bangPos + 1));
+    expect(hints).toEqual([]);
+    expect(c.flush()).toBe('One {++alice++} two {++bob++} three\n');
+    const bobPos = posOf(c, 'bob');
+    c.view.dispatch(c.view.state.tr.delete(bobPos, bobPos + 1));
+    expect(hints).toEqual(['earlier']);
+  });
+
+  it('fails closed when base has marks and clean text changed in Source', async () => {
+    const base = 'one {>>n<<} two {++x++} three\n';
+    const shifted = 'one more {>>n<<} two {++x++} three{++Q++}\n';
+    const { c, hints } = await open(base);
+    expect(c.load(shifted, base)).toBe(true);
+    expect(c.baseFailClosed).toBe(true);
+    expect(owners(c).every((x) => x.endsWith(':false'))).toBe(true);
+    const [comment] = comments(c);
+    await c.editNote(comment.pos);
+    expect(hints).toEqual(['earlier']);
+  });
+
+  it('marks all draft marks as own when base has no marks even if clean text changed', async () => {
+    const base = 'one two\n';
+    const draft = 'one more {++x++} two\n';
+    const { c } = await open(base);
+    expect(c.load(draft, base)).toBe(true);
+    expect(c.baseFailClosed).toBe(false);
+    expect(owners(c)).toEqual(['critic_ins:x:true']);
+  });
+});

@@ -407,8 +407,7 @@ export type ReviewHint =
   | 'paste-multi'
   | 'earlier'
   | 'moved'
-  | 'source-own'
-  | 'resumed-draft'
+  | 'unmarked-source'
   | 'composing'
   | 'code-run'
   | 'generic'
@@ -447,13 +446,9 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title: 'This edit would move an earlier comment.',
     body: 'Edit around it, or use the Source view.',
   },
-  'source-own': {
+  'unmarked-source': {
     title:
-      "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
-    body: 'You can still change them there.',
-  },
-  'resumed-draft': {
-    title: 'Suggestions from before you left are read-only in the graphical view.',
+      'Existing marks are read-only in the graphical view while text outside marks has changed.',
     body: 'You can change them in Source.',
   },
   composing: {
@@ -739,6 +734,8 @@ export class ScionPageArtifactDetail extends LitElement {
   private tooLargeByBlocks = false;
   /** The hint shown under the toolbar of the graphical review page. */
   @state() private graphicalHint: ReviewHint | null = null;
+  /** The base version seq of the current review draft (used to guard baseContent). */
+  @state() private reviewBaseSeq: number | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
   private preloaded = false;
 
@@ -2466,6 +2463,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.staleDraft = null;
     this.criticView = 'marks';
     this.reviewing = true;
+    this.reviewBaseSeq = v?.seq ?? null;
     this.reviewGraphical = this.graphicalReview;
     if (this.reviewDraftsEnabled && v && this.artifactId) {
       this.draftController = new ReviewDraftController({
@@ -2505,12 +2503,6 @@ export class ScionPageArtifactDetail extends LitElement {
       this.largeConfirmed = false;
       this.releaseChoice();
       void this.sizeReview(this.reviewText, ++this.reviewRuns);
-      if (init.rev > 0 && init.savedAt) {
-        const counts = countCritic(init.body);
-        if (counts.suggestions + counts.comments + counts.highlights > 0) {
-          this.showHint('resumed-draft');
-        }
-      }
     }
   }
 
@@ -2690,11 +2682,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Switches between the graphical and source views, remembering the choice. */
   private setReviewView(next: ReviewView): void {
     if (next === this.reviewView) return;
-    // Own suggestions are the reviewer's only until the text returns from
-    // the Source view, where it is opened again (every mark then earlier).
-    let ownMarks = false;
     if (next === 'source') {
-      ownMarks = this.graphicalEditor?.hasOwnMarks() ?? false;
       if (!this.takeGraphicalText()) return;
     } else {
       void this.ensureEditor();
@@ -2702,7 +2690,6 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.graphicalHint !== 'load-failed' || next === 'graphical') this.clearHint();
     this.reviewView = next;
     storeReviewView(next);
-    if (ownMarks) this.showHint('source-own');
   }
 
   /** Ctrl+Alt+M (and Cmd+Alt+M) comments in the source view too. */
@@ -2998,6 +2985,7 @@ export class ScionPageArtifactDetail extends LitElement {
         this.reviewText = loaded.body;
         this.reviewNote = loaded.note;
         this.reviewPreview = loaded.body;
+        this.reviewBaseSeq = loaded.base;
         this.carriedReview = loaded.carried
           ? { base: loaded.carried.base, body: loaded.carried.body, entry: loaded.entry }
           : null;
@@ -4800,18 +4788,13 @@ export class ScionPageArtifactDetail extends LitElement {
         ? 'image'
         : hint === 'load-failed'
           ? 'exclamation-triangle'
-          : hint === 'source-own' ||
-              hint === 'resumed-draft' ||
-              hint === 'large' ||
-              hint === 'too-large'
+          : hint === 'unmarked-source' || hint === 'large' || hint === 'too-large'
             ? 'info-circle'
             : 'slash-circle';
     const action =
       hint === 'image' ||
       hint === 'load-failed' ||
       hint === 'earlier' ||
-      hint === 'source-own' ||
-      hint === 'resumed-draft' ||
       hint === 'large' ||
       hint === 'too-large'
         ? nothing
@@ -4985,6 +4968,10 @@ export class ScionPageArtifactDetail extends LitElement {
             ? this.editorLoad === 'ready' && this.reviewSize !== null
               ? html`<scion-review-editor
                   .content=${this.reviewText}
+                  .baseContent=${this.text !== null &&
+                  (this.reviewBaseSeq === null || this.reviewBaseSeq === v.seq)
+                    ? lfText(this.text)
+                    : undefined}
                   .artifactId=${this.artifactId}
                   .seq=${v.seq}
                   .entryPath=${f.path}

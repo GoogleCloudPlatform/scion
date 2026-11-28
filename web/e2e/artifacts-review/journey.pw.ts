@@ -326,19 +326,19 @@ test('edits become suggestions, comments work by button and shortcut, and the re
     await cdp.detach();
   }
 
-  // A switch to Source and back, with no edit, makes the reviewer's own
-  // comments earlier: the notice says so, and Enter on one shows the
-  // earlier-review hint.
+  // A switch to Source and back keeps the reviewer's own comments editable
+  // (no read-only notice): clicking one still opens the edit dialog.
   await page.locator('sl-radio-button[value="source"]').click();
-  await expect(hint(page)).toContainText(
-    "Suggestions you've made so far become read-only in the graphical view after you switch to Source."
-  );
+  await expect(hint(page)).toHaveCount(0);
   await page.locator('sl-radio-button[value="graphical"]').click();
   await expect(editor(page)).toBeVisible();
+  await expect(hint(page)).toHaveCount(0);
   await editor(page).locator('.critic-comment').nth(1).click();
-  await page.keyboard.press('Enter');
-  await expect(hint(page)).toContainText('This suggestion is from an earlier review.');
+  await expect(dialog).toHaveAttribute('open', '');
+  await expect(dialog).toHaveAttribute('label', 'Edit comment 2');
+  await page.keyboard.press('Escape');
   await expect(dialog).not.toHaveAttribute('open', '');
+  await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
 
   // Source view: the tokens are there, and Ctrl+Alt+M comments there too.
   await page.locator('sl-radio-button[value="source"]').click();
@@ -378,6 +378,10 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await expect(editor(page).locator('ins.critic-sub-new')).toHaveText('many');
   await expect(editor(page).locator('.critic-comment')).toHaveCount(2);
   expect(await editorText(page)).toBe(final);
+  // Marks from the submitted review version are now earlier (read-only).
+  await editor(page).locator('.critic-comment').nth(1).click();
+  await expect(hint(page)).toContainText('This suggestion is from an earlier review.');
+  await expect(dialog).not.toHaveAttribute('open', '');
 });
 
 test('a stale review reloads the current version and keeps the discarded text', async ({

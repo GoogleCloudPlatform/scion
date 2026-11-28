@@ -676,3 +676,122 @@ test('abandon review from sticky overflow menu deletes draft with ?rev= and exit
     await ctx.close();
   }
 });
+
+test('own draft suggestions remain editable after resume and Source round-trip while earlier marks stay read-only', async ({
+  browser,
+}) => {
+  const docWithEarlier = [
+    '# Round-Trip Editability',
+    '',
+    'First paragraph with {++earlier++} suggestion and comment.{>>earlier note<<}',
+    '',
+    'Second paragraph for own edits.',
+    '',
+  ].join('\n');
+
+  const a = await publish({
+    project,
+    title: 'Editable resumed draft',
+    entry: 'plan.md',
+    files: { 'plan.md': Buffer.from(docWithEarlier) },
+  });
+  const grant = await admin('POST', `/api/v1/artifacts/${a.id}/grants`, {
+    subjectKind: 'principal',
+    subjectRef: `user:${reviewerId}`,
+    permission: 'review',
+  });
+  expect([200, 201]).toContain(grant.status);
+
+  // Context A: reviewer adds an own insertion and saves draft.
+  const ctxA = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
+  try {
+    const pageA = await ctxA.newPage();
+    collectPageErrors(pageA, errors);
+    await pageA.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
+    await startGraphicalReview(pageA);
+
+    const editorA = pageA.locator('scion-review-editor .ProseMirror');
+    await editorA.locator('p', { hasText: 'Second paragraph' }).first().click();
+    await pageA.keyboard.press('End');
+    await pageA.keyboard.type(' OwnDraft');
+
+    const saveDraftBtn = pageA.locator('scion-page-artifact-detail .edit-footer sl-button', {
+      hasText: 'Save Draft',
+    });
+    await expect(saveDraftBtn.locator('button')).toBeEnabled({ timeout: 15_000 });
+    const putDone = pageA.waitForResponse(
+      (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
+      { timeout: 30_000 }
+    );
+    await saveDraftBtn.click();
+    expect((await putDone).status()).toBe(200);
+  } finally {
+    await ctxA.close();
+  }
+
+  // Context B: resume draft, verify own insertion is editable and earlier comment is read-only,
+  // then round-trip Graphical -> Source -> Graphical and verify again.
+  const ctxB = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
+  try {
+    const pageB = await ctxB.newPage();
+    collectPageErrors(pageB, errors);
+    await pageB.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
+
+    const resumeBtn = pageB.locator('scion-page-artifact-detail .header-actions sl-button', {
+      hasText: 'Resume draft',
+    });
+    await expect(resumeBtn).toBeVisible({ timeout: 30_000 });
+    await resumeBtn.click();
+
+    const editorB = pageB.locator('scion-review-editor .ProseMirror');
+    await expect(editorB).toBeVisible({ timeout: 30_000 });
+
+    // No read-only resumed-draft hint on normal resume.
+    await expect(pageB.locator('scion-page-artifact-detail .hint-strip')).toHaveCount(0);
+
+    // Edit own resumed insertion by removing "Draft" (5 backspaces) and typing "Edited".
+    await editorB.locator('p', { hasText: 'Second paragraph' }).first().click();
+    await pageB.keyboard.press('End');
+    for (let i = 0; i < 5; i++) await pageB.keyboard.press('Backspace');
+    await pageB.keyboard.type('Edited');
+    expect(await editorText(pageB)).toContain('{++ OwnEdited++}');
+
+    // Earlier comment badge stays read-only (clicking it shows the earlier hint).
+    await editorB.locator('.critic-comment').first().click();
+    await expect(pageB.locator('scion-page-artifact-detail .hint-strip')).toContainText(
+      'This suggestion is from an earlier review.'
+    );
+
+    // Switch Graphical -> Source -> Graphical: no source-own hint, own insertion stays editable.
+    const sourceToggle = pageB.locator('scion-page-artifact-detail .g-toolbar sl-radio-button', {
+      hasText: 'Source',
+    });
+    await sourceToggle.click();
+    await expect(pageB.locator('scion-page-artifact-detail scion-code-editor')).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(pageB.locator('scion-page-artifact-detail .hint-strip')).toHaveCount(0);
+
+    const graphicalToggle = pageB.locator('scion-page-artifact-detail .g-toolbar sl-radio-button', {
+      hasText: 'Graphical',
+    });
+    await graphicalToggle.click();
+    await expect(editorB).toBeVisible({ timeout: 15_000 });
+    await expect(pageB.locator('scion-page-artifact-detail .hint-strip')).toHaveCount(0);
+
+    // Own insertion is still editable after returning from Source.
+    await editorB.locator('p', { hasText: 'Second paragraph' }).first().click();
+    await pageB.keyboard.press('End');
+    for (let i = 0; i < 6; i++) await pageB.keyboard.press('Backspace');
+    await pageB.keyboard.type('Final');
+    expect(await editorText(pageB)).toContain('{++ OwnFinal++}');
+
+    // Earlier comment is still read-only after returning from Source.
+    await editorB.locator('.critic-comment').first().click();
+    await expect(pageB.locator('scion-page-artifact-detail .hint-strip')).toContainText(
+      'This suggestion is from an earlier review.'
+    );
+  } finally {
+    await ctxB.close();
+  }
+});
