@@ -257,9 +257,9 @@ func (s *BrokerSecretStore) UpsertJoinToken(ctx context.Context, token *store.Br
 		// Already inside store.WithTx: run on the caller's transaction.
 		return upsertJoinToken(ctx, s.client, uid, token)
 	}
+	defer func() { _ = tx.Rollback() }()
 	replaced, err := upsertJoinToken(ctx, tx.Client(), uid, token)
 	if err != nil {
-		_ = tx.Rollback()
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {

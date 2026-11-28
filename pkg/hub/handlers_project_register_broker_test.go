@@ -320,13 +320,20 @@ func TestProjectRegisterEmbeddedBroker_ExistingSecretNotReturned(t *testing.T) {
 }
 
 // TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned pins that a
-// new broker row created under an ID whose secret is still stored does not
-// receive that secret.
+// new broker row created under an ID whose credentials are still stored clears
+// those leftover credentials in the same transaction rather than inheriting or
+// returning them, and mints a fresh secret for the new broker.
 func TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned(t *testing.T) {
 	srv, s := testServer(t)
 	requester := newHubMemberUser(t, s, "register-leftover-requester")
 	brokerID := tid("register-leftover-broker")
 	encoded, raw := storeKnownBrokerSecret(t, s, brokerID)
+	require.NoError(t, s.CreateJoinToken(context.Background(), &store.BrokerJoinToken{
+		BrokerID:  brokerID,
+		TokenHash: "register-leftover-join-hash",
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedBy: requester.ID,
+	}))
 
 	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-leftover-project",
@@ -337,7 +344,24 @@ func TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned(t *testing.T) {
 		},
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assertBodyCarriesNoStoredSecret(t, rec.Body.String(), encoded, raw)
+	body := rec.Body.String()
+	assert.NotContains(t, body, encoded, "the response must not carry the leftover secret")
+	assert.NotContains(t, body, string(raw), "the response must not carry the raw leftover secret")
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Broker)
+	assert.Equal(t, brokerID, resp.Broker.ID)
+	require.NotEmpty(t, resp.SecretKey, "a fresh secret is minted after clearing the leftover one")
+	assert.NotEqual(t, encoded, resp.SecretKey, "the minted secret must not match the leftover secret")
+
+	stored, err := s.GetBrokerSecret(context.Background(), brokerID)
+	require.NoError(t, err)
+	assert.False(t, bytes.Equal(raw, stored.SecretKey), "the leftover secret must be replaced")
+	assert.Equal(t, resp.SecretKey, base64.StdEncoding.EncodeToString(stored.SecretKey), "the stored secret must match the newly minted one")
+
+	_, err = s.GetJoinTokenByBrokerID(context.Background(), brokerID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "any leftover join token for that broker ID must be cleared")
 }
 
 // TestProjectRegisterEmbeddedBroker_LostSecretInsertIsKeyless pins that a

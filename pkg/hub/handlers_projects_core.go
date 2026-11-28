@@ -2521,7 +2521,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// an empty-ID caller.
 			broker.CreatedBy = ownerForNewBroker(callerUser)
 
-			if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+			if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
