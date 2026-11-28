@@ -16928,6 +16928,8 @@
 | http_route | GET | `/api/v1/gcp-service-accounts` |
 | http_route | GET | `/api/v1/gcp-service-accounts/{id}` |
 | http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts` |
+| http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts/{saId}` |
+| http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts/{saId}/status` |
 
 **Principals:** `user`, `agent`
 
@@ -17002,9 +17004,9 @@
 | http_route | GET | `/api/v1/env` |
 | http_route | GET | `/api/v1/env/{key}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `project.read`
 

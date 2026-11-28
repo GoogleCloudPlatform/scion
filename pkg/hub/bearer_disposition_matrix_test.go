@@ -1588,6 +1588,30 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 	}))
 	m.ids.triggerEvent = agentTrigEvtID
 
+	// Seed project-scoped env var and GCP service account so env.read and
+	// nested gcp.identity.read routes have real positive controls.
+	const aprmProjectEnvKey = "APRM_PROJECT_ENV"
+	_, err := m.store.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:      tid("aprm-env"),
+		Key:     aprmProjectEnvKey,
+		Value:   "aprm-val",
+		Scope:   store.ScopeProject,
+		ScopeID: m.ids.project,
+		Created: now,
+		Updated: now,
+	})
+	require.NoError(t, err)
+
+	aprmProjSAID := tid("aprm-proj-sa")
+	require.NoError(t, m.store.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:        aprmProjSAID,
+		Scope:     store.ScopeProject,
+		ScopeID:   m.ids.project,
+		Email:     "aprm-proj-sa@li-gcp-project.iam.gserviceaccount.com",
+		ProjectID: "li-gcp-project",
+		CreatedAt: now,
+	}))
+
 	fullScopes := ScopesForRole(AgentRoleFull)
 	var withoutScopes []AgentTokenScope
 	for _, sc := range fullScopes {
@@ -1598,13 +1622,27 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, withoutScopes)
 	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, fullScopes)
 
-	// Per-route request helper that supplies project scope query params for
-	// top-level /gcp-service-accounts so its project-scoped branch is enforced.
+	// Per-route request helper supplying project scope query params and
+	// project-scoped IDs so project-scoped branches are exercised with
+	// positive controls.
 	send := func(e bearerMatrixEntry, token string) *httptest.ResponseRecorder {
 		key := e.key()
-		if key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/gcp-service-accounts" {
+		switch {
+		case key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/gcp-service-accounts":
 			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
 				"/api/v1/gcp-service-accounts?scope=project&scopeId="+m.ids.project, nil, token)
+		case key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/projects/{id}/gcp-service-accounts/{saId}":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/projects/"+m.ids.project+"/gcp-service-accounts/"+aprmProjSAID, nil, token)
+		case key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/projects/{id}/gcp-service-accounts/{saId}/status":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/projects/"+m.ids.project+"/gcp-service-accounts/"+aprmProjSAID+"/status", nil, token)
+		case key.OperationID == "env.read" && key.Pattern == "/api/v1/env":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/env?scope=project&scopeId="+m.ids.project, nil, token)
+		case key.OperationID == "env.read" && key.Pattern == "/api/v1/env/{key}":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/env/"+aprmProjectEnvKey+"?scope=project&scopeId="+m.ids.project, nil, token)
 		}
 		return m.request(t, e, token)
 	}
@@ -1751,6 +1789,90 @@ func TestProjectMetricsRoutes_AgentProjectReadScope(t *testing.T) {
 				"cross-project agent with project:read must be refused: %s", recOtherProj.Body.String())
 
 			recUser := doRequest(t, m.srv, http.MethodGet, path, nil)
+			require.Equal(t, http.StatusOK, recUser.Code,
+				"authorized user caller must remain unaffected: %s", recUser.Body.String())
+		})
+	}
+}
+
+// TestProjectEnvAndGCPSARoutes_AgentProjectReadScope verifies that the
+// project-scoped env read routes and nested project GCP service account item
+// and status routes enforce project:read for same-project agents, continue
+// admitting same-project agents with project:read and authorized user callers,
+// and refuse cross-project agents.
+func TestProjectEnvAndGCPSARoutes_AgentProjectReadScope(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	const envKey = "SCOPE_TEST_PROJECT_ENV"
+	_, err := m.store.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:      tid("scope-test-env"),
+		Key:     envKey,
+		Value:   "val",
+		Scope:   store.ScopeProject,
+		ScopeID: m.ids.project,
+		Created: now,
+		Updated: now,
+	})
+	require.NoError(t, err)
+
+	projSAID := tid("scope-test-proj-sa")
+	require.NoError(t, m.store.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:        projSAID,
+		Scope:     store.ScopeProject,
+		ScopeID:   m.ids.project,
+		Email:     "scope-test-proj-sa@li-gcp-project.iam.gserviceaccount.com",
+		ProjectID: "li-gcp-project",
+		CreatedAt: now,
+	}))
+
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+	otherProjectAgent := m.mintAgentTokenWithScopes(t, tid("other-proj-agent-env-sa"), m.otherProject, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+
+	cases := []struct {
+		name              string
+		path              string
+		crossProjectCodes []int
+	}{
+		{
+			name:              "env list",
+			path:              "/api/v1/env?scope=project&scopeId=" + m.ids.project,
+			crossProjectCodes: []int{http.StatusForbidden},
+		},
+		{
+			name:              "env get",
+			path:              "/api/v1/env/" + envKey + "?scope=project&scopeId=" + m.ids.project,
+			crossProjectCodes: []int{http.StatusForbidden},
+		},
+		{
+			name:              "project gcp sa get",
+			path:              "/api/v1/projects/" + m.ids.project + "/gcp-service-accounts/" + projSAID,
+			crossProjectCodes: []int{http.StatusForbidden, http.StatusNotFound},
+		},
+		{
+			name:              "project gcp sa status",
+			path:              "/api/v1/projects/" + m.ids.project + "/gcp-service-accounts/" + projSAID + "/status",
+			crossProjectCodes: []int{http.StatusForbidden, http.StatusNotFound},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recNoScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, tc.path, nil, withoutScope)
+			require.Equal(t, http.StatusForbidden, recNoScope.Code,
+				"same-project agent without project:read must be refused: %s", recNoScope.Body.String())
+
+			recWithScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, tc.path, nil, withScope)
+			require.Equal(t, http.StatusOK, recWithScope.Code,
+				"same-project agent with project:read must succeed: %s", recWithScope.Body.String())
+
+			recOtherProj := doRequestWithAgentToken(t, m.srv, http.MethodGet, tc.path, nil, otherProjectAgent)
+			require.Contains(t, tc.crossProjectCodes, recOtherProj.Code,
+				"cross-project agent with project:read must be refused: %s", recOtherProj.Body.String())
+
+			recUser := doRequest(t, m.srv, http.MethodGet, tc.path, nil)
 			require.Equal(t, http.StatusOK, recUser.Code,
 				"authorized user caller must remain unaffected: %s", recUser.Body.String())
 		})

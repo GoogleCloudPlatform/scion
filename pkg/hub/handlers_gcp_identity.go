@@ -684,6 +684,15 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) getGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID, saID string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
+	if agent := GetAgentIdentityFromContext(r.Context()); agent != nil && agent.ProjectID() != projectID {
+		NotFound(w, "GCP Service Account")
+		return
+	}
+
 	sa, err := s.store.GetGCPServiceAccount(r.Context(), saID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -699,26 +708,8 @@ func (s *Server) getGCPServiceAccount(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	// Hub-scoped SAs get a read check. Project-scoped reads are left exactly as
-	// they were — this handler has never had an authorization call, and adding
-	// one here would deny ordinary project members who can read their project's
-	// SAs today. That pre-existing gap is the route-authz manifest's problem
-	// (#598), not this phase's.
-	//
-	// ⚠️ WHAT THIS CHECK ACTUALLY DENIES: not much, and knowing that is the
-	// point. hub-member-read-all is ResourceType "*" with ScopeType "hub"
-	// (seed.go, seedDefaultPoliciesAndGroups), and ScopeType "hub" matches
-	// neither arm of the matchesResource scope switch (authz.go), so no scope
-	// filter applies and it grants read on hub-scoped accounts to EVERY
-	// logged-in user. The only callers this check refuses are identity-less
-	// ones. Treat it as an authenticated-caller check, not as a restriction,
-	// and do not add a hub-scoped WRITE gate on ActionRead or ActionList
-	// expecting it to hold — it would be inert on arrival.
-	//
-	// #46, sa-arch's wording; the earlier text here claimed this check kept a
-	// hub-wide credential from inheriting the gap above, which the wildcard
-	// removes. WHO may read hub-scoped accounts is an open policy question with
-	// ptone and is deliberately not changed here.
+	// Agent callers require project:read and own-project scoping above.
+	// Hub-scoped SAs additionally run authorizeGCPServiceAccount.
 	if sa.Scope == store.ScopeHub {
 		if !s.authorizeGCPServiceAccount(w, r, sa, ActionRead) {
 			return

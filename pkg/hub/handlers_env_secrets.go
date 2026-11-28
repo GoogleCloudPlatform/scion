@@ -135,6 +135,9 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 				Forbidden(w)
 				return "", false
 			}
+			if !checkAgentReadScope(w, r) {
+				return "", false
+			}
 			if agentIdent.ProjectID() != clientScopeID {
 				Forbidden(w)
 				return "", false
