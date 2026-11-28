@@ -96,3 +96,22 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiCLIMCPCapabilities(t *testing.T) {
+	caps := New("gemini-cli").AdvancedCapabilities()
+	if caps.MCP.Stdio.Support != api.SupportYes {
+		t.Errorf("mcp.stdio = %q, want %q", caps.MCP.Stdio.Support, api.SupportYes)
+	}
+	if caps.MCP.SSE.Support != api.SupportYes {
+		t.Errorf("mcp.sse = %q, want %q", caps.MCP.SSE.Support, api.SupportYes)
+	}
+	if caps.MCP.StreamableHTTP.Support != api.SupportYes {
+		t.Errorf("mcp.streamable_http = %q, want %q", caps.MCP.StreamableHTTP.Support, api.SupportYes)
+	}
+	if caps.MCP.ProjectScope.Support != api.SupportNo {
+		t.Errorf("mcp.project_scope = %q, want %q", caps.MCP.ProjectScope.Support, api.SupportNo)
+	}
+	if caps.MCP.ProjectScope.Reason == "" {
+		t.Errorf("mcp.project_scope.reason is empty, want non-empty explanation")
+	}
+}
