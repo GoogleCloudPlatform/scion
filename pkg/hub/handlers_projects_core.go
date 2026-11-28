@@ -2964,6 +2964,14 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read-only discovery summary of available Hub System One instances for
+	// callers who already pass project System One binding authorization (A2):
+	// …/system-one/available-instances.
+	if subPath == "system-one/available-instances" {
+		s.handleProjectSystemOneAvailableInstances(w, r, projectID)
+		return
+	}
+
 	// Project message policies (ptone/scion#8047):
 	// …/message-policies, …/message-policies/test, …/message-policies/decisions,
 	// …/message-policies/{policyId}, …/message-policies/{policyId}/test, and

@@ -143,6 +143,7 @@
 - [project.messagingpolicy.update](#projectmessagingpolicyupdate) — Set a project's cross-project inbound messaging policy. The caller also must be an active direct project owner or a local unscoped hub admin
 - [project.systemoneinstances.read](#projectsystemoneinstancesread) — Read a project's System One hub instance allowlist (ptone/scion#8045 D1; 404 while hub.system_one is off)
 - [project.systemoneinstances.manage](#projectsystemoneinstancesmanage) — Set, add, or remove entries in a project's System One hub instance allowlist. Caller must hold project.manage_system_one_instances and be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8045 D1; 404 while hub.system_one is off)
+- [project.systemoneinstances.available](#projectsystemoneinstancesavailable) — Read-only discovery summary of Hub System One provider instances (name, adapter, model, enabled, question types, distribution completeness, native metrics, abstains; no secrets or endpoints) for callers who already pass project System One binding authorization (404 unless both hub.system_one and hub.message_policies are on)
 - [project.messagepolicy.read](#projectmessagepolicyread) — List or read a project's configured message policies and surface coverage declaration (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.messagepolicy.create](#projectmessagepolicycreate) — Create a message policy on covered outbound surfaces in a project. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.messagepolicy.update](#projectmessagepolicyupdate) — Update a project message policy, bump its revision, and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
@@ -5863,6 +5864,38 @@
 ### Tests
 
 - `pkg/hub:TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate`
+
+---
+
+## project.systemoneinstances.available
+
+**Domain:** project
+
+**Description:** Read-only discovery summary of Hub System One provider instances (name, adapter, model, enabled, question types, distribution completeness, native metrics, abstains; no secrets or endpoints) for callers who already pass project System One binding authorization (404 unless both hub.system_one and hub.message_policies are on)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/system-one/available-instances` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage`)
+
+**Base Permission:** `project.manage_system_one_instances`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage`
 
 ---
 
@@ -14132,6 +14165,7 @@
 | http_route | GET | `/api/v1/admin/system-one/adapters` |
 | http_route | GET | `/api/v1/admin/system-one/instances` |
 | http_route | GET | `/api/v1/admin/system-one/instances/{name}` |
+| http_route | GET | `/api/v1/admin/system-one/instances/{name}/projects` |
 
 **Principals:** `user`
 

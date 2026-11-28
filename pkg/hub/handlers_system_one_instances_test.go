@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -4723,5 +4724,228 @@ func TestSystemOneAdapters_CapabilitiesAndNoIO(t *testing.T) {
 		assert.Equal(t, "owned_api_key", ts.AuthModes[0].Mode)
 		assert.Equal(t, "bearer", ts.AuthModes[0].TransportScheme)
 		assert.True(t, ts.AuthModes[0].CustomEndpointAllowed)
+	})
+}
+
+func TestSystemOneInstanceProjects_AuthzAndList(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("experiment off returns 404 to admin on GET and POST", func(t *testing.T) {
+		srv, s, _ := newSystemOneTestServer(t, false)
+		superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-proj-off-super", store.SystemRoleSuperAdmin))
+		require.NoError(t, err)
+
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			rec := doRequestAsUser(t, srv, superAdmin, method, systemOneAdminPath+"/inst-a/projects", nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s when hub.system_one is off: %s", method, rec.Body.String())
+		}
+	})
+
+	t.Run("authz matrix, empty results, populated results, and field allowlist", func(t *testing.T) {
+		srv, s, localBackend := newSystemOneTestServer(t, true)
+
+		superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-proj-super", store.SystemRoleSuperAdmin))
+		require.NoError(t, err)
+		hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-proj-hubadmin", store.SystemRoleHubAdmin))
+		require.NoError(t, err)
+		owner, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-proj-owner", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		member, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-proj-member", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		nonMember, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-proj-nonmember", store.SystemRoleHubMember))
+		require.NoError(t, err)
+
+		const (
+			secretEndpoint = "https://internal-admin-projects.typesafe.example"
+			secretKeyName  = "systemone.instance.admin-proj-secret"
+			secretVal      = "super-secret-admin-key-1234"
+		)
+		_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+			Name:    secretKeyName,
+			Value:   secretVal,
+			Scope:   secret.ScopeHub,
+			ScopeID: "test-hub-id",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       uuid.NewString(),
+			Name:     "inst-bound",
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: secretEndpoint,
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: secretKeyName},
+			Enabled:  true,
+		}))
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       uuid.NewString(),
+			Name:     "inst-empty",
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: "https://api.typesafe.ai",
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "s1-sec-empty"},
+			Enabled:  true,
+		}))
+
+		pZeta := &store.Project{ID: uuid.NewString(), Name: "Zeta Project", Slug: "s1-admin-zeta", OwnerID: owner.ID}
+		pAlpha := &store.Project{ID: uuid.NewString(), Name: "Alpha Project", Slug: "s1-admin-alpha", OwnerID: owner.ID}
+		pUnbound := &store.Project{ID: uuid.NewString(), Name: "Unbound Project", Slug: "s1-admin-unbound", OwnerID: owner.ID}
+		require.NoError(t, s.CreateProject(ctx, pZeta))
+		require.NoError(t, s.CreateProject(ctx, pAlpha))
+		require.NoError(t, s.CreateProject(ctx, pUnbound))
+
+		ownerRole, err := s.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               uuid.NewString(),
+			RoleDefinitionID: ownerRole.ID,
+			PrincipalType:    "user",
+			PrincipalID:      owner.ID,
+			ScopeType:        "project",
+			ScopeID:          pAlpha.ID,
+		})
+		require.NoError(t, err)
+		memberRole, err := s.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               uuid.NewString(),
+			RoleDefinitionID: memberRole.ID,
+			PrincipalType:    "user",
+			PrincipalID:      member.ID,
+			ScopeType:        "project",
+			ScopeID:          pAlpha.ID,
+		})
+		require.NoError(t, err)
+
+		_, _, err = s.AddProjectSystemOneInstance(ctx, pZeta.ID, "inst-bound")
+		require.NoError(t, err)
+		_, _, err = s.AddProjectSystemOneInstance(ctx, pAlpha.ID, "inst-bound")
+		require.NoError(t, err)
+
+		boundPath := systemOneAdminPath + "/inst-bound/projects"
+		emptyPath := systemOneAdminPath + "/inst-empty/projects"
+
+		// Unsupported methods return 405 with Allow: GET.
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			rec := doRequestAsUser(t, srv, superAdmin, method, boundPath, nil)
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "%s should be 405: %s", method, rec.Body.String())
+			assert.Equal(t, http.MethodGet, rec.Header().Get("Allow"))
+		}
+
+		// Allowed: super_admin and hub_admin (session).
+		for _, tc := range []struct {
+			name string
+			user *store.User
+		}{
+			{name: "super_admin", user: superAdmin},
+			{name: "hub_admin", user: hubAdmin},
+		} {
+			t.Run("allowed_"+tc.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, boundPath, nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+				rawBody := rec.Body.String()
+				for _, forbidden := range []string{secretEndpoint, secretKeyName, secretVal} {
+					assert.NotContains(t, rawBody, forbidden, "response must not leak %q", forbidden)
+				}
+
+				var raw map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+				rawKeys := make([]string, 0, len(raw))
+				for k := range raw {
+					rawKeys = append(rawKeys, k)
+				}
+				assert.ElementsMatch(t, []string{"instance", "projects"}, rawKeys)
+
+				rawProjs, ok := raw["projects"].([]any)
+				require.True(t, ok)
+				require.Len(t, rawProjs, 2)
+				for _, elem := range rawProjs {
+					m, ok := elem.(map[string]any)
+					require.True(t, ok)
+					itemKeys := make([]string, 0, len(m))
+					for k := range m {
+						itemKeys = append(itemKeys, k)
+					}
+					assert.ElementsMatch(t, []string{"id", "name"}, itemKeys)
+				}
+
+				var resp ListSystemOneInstanceProjectsResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				assert.Equal(t, "inst-bound", resp.Instance)
+				assert.Equal(t, []SystemOneInstanceProjectRefDTO{
+					{ID: pAlpha.ID, Name: pAlpha.Name},
+					{ID: pZeta.ID, Name: pZeta.Name},
+				}, resp.Projects)
+			})
+		}
+
+		// Empty allowlisting projects returns empty JSON array [].
+		recEmpty := doRequestAsUser(t, srv, superAdmin, http.MethodGet, emptyPath, nil)
+		require.Equal(t, http.StatusOK, recEmpty.Code, recEmpty.Body.String())
+		assert.Contains(t, recEmpty.Body.String(), `"projects":[]`)
+		var emptyResp ListSystemOneInstanceProjectsResponse
+		require.NoError(t, json.Unmarshal(recEmpty.Body.Bytes(), &emptyResp))
+		assert.Equal(t, "inst-empty", emptyResp.Instance)
+		assert.NotNil(t, emptyResp.Projects)
+		assert.Empty(t, emptyResp.Projects)
+
+		// Unknown or invalid instance name -> 404.
+		recUnknown := doRequestAsUser(t, srv, superAdmin, http.MethodGet, systemOneAdminPath+"/does-not-exist/projects", nil)
+		assert.Equal(t, http.StatusNotFound, recUnknown.Code)
+		recInvalid := doRequestAsUser(t, srv, superAdmin, http.MethodGet, systemOneAdminPath+"/Bad_Name/projects", nil)
+		assert.Equal(t, http.StatusNotFound, recInvalid.Code)
+
+		// Forbidden: project owner, project member, non-member.
+		for _, tc := range []struct {
+			name string
+			user *store.User
+		}{
+			{name: "project_owner", user: owner},
+			{name: "project_member", user: member},
+			{name: "non_member", user: nonMember},
+		} {
+			t.Run("forbidden_"+tc.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, boundPath, nil)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s should be 403: %s", tc.name, rec.Body.String())
+			})
+		}
+
+		// Forbidden: hub admin with UAT (SessionOnly route).
+		uatAdmin, _, err := srv.userAccessTokenService.CreateToken(ctx, hubAdmin.ID, pAlpha.ID, "hubadmin-uat", []string{"project:read"}, nil)
+		require.NoError(t, err)
+		recUAT := doRequestWithToken(t, srv, uatAdmin, http.MethodGet, boundPath, nil)
+		assert.Equal(t, http.StatusForbidden, recUAT.Code, "UAT should be refused on SessionOnly admin route: %s", recUAT.Body.String())
+
+		// Forbidden: hub admin under View-as-member.
+		vamTok, _, err := srv.GetUserTokenService().MintAccessToken(UserTokenSubject{
+			UserID:       hubAdmin.ID,
+			Email:        hubAdmin.Email,
+			DisplayName:  hubAdmin.DisplayName,
+			Role:         hubAdmin.Role,
+			ClientType:   ClientTypeWeb,
+			ViewAsMember: true,
+		})
+		require.NoError(t, err)
+		recVAM := doRequestWithToken(t, srv, vamTok, http.MethodGet, boundPath, nil)
+		assert.Equal(t, http.StatusForbidden, recVAM.Code, "hub admin under VAM should be 403: %s", recVAM.Body.String())
+
+		// Forbidden: agent token (even an agent owned by hubAdmin).
+		agentRow := &store.Agent{
+			ID:        uuid.NewString(),
+			Slug:      "admin-proj-agent",
+			Name:      "admin-proj-agent",
+			ProjectID: pAlpha.ID,
+			OwnerID:   hubAdmin.ID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agentRow))
+		agentTok, err := srv.agentTokenService.GenerateAgentToken(agentRow.ID, pAlpha.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
+		require.NoError(t, err)
+		recAgent := doRequestWithToken(t, srv, agentTok, http.MethodGet, boundPath, nil)
+		assert.Equal(t, http.StatusForbidden, recAgent.Code, "agent token should be 403: %s", recAgent.Body.String())
+
+		// Unauthenticated -> 401.
+		recUnauth := doRequestWithToken(t, srv, "", http.MethodGet, boundPath, nil)
+		assert.Equal(t, http.StatusUnauthorized, recUnauth.Code)
 	})
 }
