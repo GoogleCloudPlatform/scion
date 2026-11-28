@@ -408,7 +408,9 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 				"untrustedVars": []string{},
 			},
 		}
-		details := assertErrCode(t, postTrigger(userCtx, rawBody), http.StatusBadRequest, "untrusted_var_not_allowed")
+		recEmpty := f.doJSON(t, userCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID), rawBody)
+		details := assertErrCode(t, recEmpty, http.StatusBadRequest, "untrusted_var_not_allowed")
 		assert.Equal(t, "task", details["slot"])
 		assert.Equal(t, "event.payload.title", details["path"])
 	})
