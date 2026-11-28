@@ -1069,9 +1069,10 @@ check-extras-go-images:
 	@./hack/check-extras-go-images.sh --self-test
 	@./hack/check-extras-go-images.sh
 
-## check-downgrade-floor-selftest: Test scripts/release/check-downgrade-floor.sh
+## check-downgrade-floor-selftest: Test scripts/release/check-downgrade-floor.sh and check-downgrade-floor-cut.sh
 check-downgrade-floor-selftest:
 	@./scripts/release/test-check-downgrade-floor.sh
+	@./scripts/release/test-check-downgrade-floor-cut.sh
 
 ## check-docs-links: Check docs-site internal links, #heading anchors, /scion/ base prefixes, and legacy redirects
 # NOTE: same caveat as check-authz-guards above -- make collapses the
