@@ -317,6 +317,12 @@ export class ScionChatComposer extends LitElement {
   /** W7: Upload in progress. */
   @state() private uploading = false;
 
+  /** Percent of the current large-upload batch sent, or null when using legacy upload. */
+  @state() private uploadPercent: number | null = null;
+
+  /** Abort controller for the active chunked chat attachment upload, if any. */
+  private _uploadAbortController: AbortController | null = null;
+
   /** Artifacts picked with "Attach artifact", sent as references. */
   @state() private pendingArtifacts: PendingArtifact[] = [];
 
@@ -383,10 +389,13 @@ export class ScionChatComposer extends LitElement {
       // made in: a topic upload carries the topic's project, which a DM
       // refuses at send. Drafts keep only text, so they are dropped rather
       // than carried over.
+      this._uploadAbortController?.abort();
+      this._uploadAbortController = null;
       this.pendingFiles = [];
       this.uploadFailures = [];
       this.pendingArtifacts = [];
       this.uploading = false;
+      this.uploadPercent = null;
       this.resetMentionTracking();
       this.restoreDraft();
     }
@@ -912,6 +921,9 @@ export class ScionChatComposer extends LitElement {
     }
 
     .upload-progress {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
       font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       padding: 0 0.25rem;
@@ -1164,6 +1176,8 @@ export class ScionChatComposer extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._uploadAbortController?.abort();
+    this._uploadAbortController = null;
     // Flush any pending draft so it is not lost when the component unmounts.
     this.flushDraft(this.conversationKey);
   }
@@ -1404,7 +1418,24 @@ export class ScionChatComposer extends LitElement {
           ${this.pendingArtifacts.length > 0 ? this.renderPendingArtifacts() : nothing}
           ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
-          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
+          ${this.uploading
+            ? html`<div class="upload-progress" role="status">
+                <span
+                  >${this.uploadPercent !== null
+                    ? `Uploading... ${this.uploadPercent}%`
+                    : 'Uploading...'}</span
+                >
+                ${this._uploadAbortController
+                  ? html`<sl-button
+                      size="small"
+                      variant="text"
+                      class="upload-cancel-btn"
+                      @click=${() => this.cancelUpload()}
+                      >Cancel</sl-button
+                    >`
+                  : nothing}
+              </div>`
+            : nothing}
         </div>
       </div>
     `;
@@ -1986,6 +2017,11 @@ export class ScionChatComposer extends LitElement {
     await this.uploadFiles(Array.from(files));
   }
 
+  /** Cancel an in-progress large attachment upload. */
+  private cancelUpload(): void {
+    this._uploadAbortController?.abort();
+  }
+
   /**
    * Upload one or more files to the attachment endpoint.
    * Shared by the file picker, paste handler, and drag-and-drop handler.
@@ -2010,6 +2046,53 @@ export class ScionChatComposer extends LitElement {
     // result is dropped rather than attached to the one now open.
     const uploadKey = this.conversationKey;
     const switchedAway = (): boolean => this.conversationKey !== uploadKey;
+
+    if (isFeatureEnabled('hub.large_uploads')) {
+      const controller = new AbortController();
+      this._uploadAbortController = controller;
+      this.uploading = true;
+      this.uploadPercent = 0;
+      try {
+        const { uploadChatAttachments } = await import('../../../client/chunked-upload.js');
+        if (switchedAway()) return;
+
+        const result = await uploadChatAttachments(files, {
+          ...(!this.isDirectMessage() ? { projectId: this.projectId } : {}),
+          onProgress: (sent, total) => {
+            if (switchedAway()) return;
+            this.uploadPercent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 100;
+          },
+          signal: controller.signal,
+        });
+        if (switchedAway()) return;
+
+        this.uploadFailures = result.failures;
+        if (result.attachments.length > 0) {
+          this.pendingFiles = [...this.pendingFiles, ...result.attachments];
+        }
+      } catch (err) {
+        if (switchedAway()) return;
+        if (err instanceof Error && err.name === 'UploadCancelledError') {
+          return;
+        }
+        this.dispatchEvent(
+          new CustomEvent('composer-error', {
+            detail: { message: err instanceof Error ? err.message : 'Upload failed' },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      } finally {
+        if (this._uploadAbortController === controller) {
+          this._uploadAbortController = null;
+        }
+        if (!switchedAway()) {
+          this.uploading = false;
+          this.uploadPercent = null;
+        }
+      }
+      return;
+    }
 
     this.uploading = true;
     try {
