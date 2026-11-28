@@ -77,7 +77,7 @@ or register this machine's Runtime Broker: `harness-config install`, `sync`, `pu
 
 **Commands that need no project.** Commands that act on the Hub connection, a login, this machine's
 Runtime Broker, or the server run outside a project without `--global` or `--project`:
-`scion use`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
+`scion use`, `scion login`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
 `scion hub remove`, the `scion hub auth` commands,
 `scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs`,
 `join` and `convert`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
@@ -1461,12 +1461,19 @@ full lifecycle.
 
 ## Hub Integration
 
+### `scion login`
+
+Top-level alias for `scion hub auth login`. Authenticates with a Scion Hub server using browser-based OAuth, or the device authorization flow in headless environments or with `--no-browser`. Human mode only (not available in agent mode); available on Windows.
+
+- Flags: `--no-browser` (use device flow instead of opening a browser), `--provider <google|github>` (OAuth provider to use), plus the root `--hub <url|name>` flag. The deprecated `--hub-url` flag is only accepted on `scion hub auth login`, not on `scion login`.
+- Uses the same Hub URL resolution order, hub-list updates, and credential storage (`~/.scion/credentials.json`) as [`scion hub auth login`](#scion-hub).
+
 ### `scion hub`
 
-Manages connection to and interaction with a Scion Hub. Authentication lives under `scion hub auth` (there is no top-level `scion auth` command).
+Manages connection to and interaction with a Scion Hub. Authentication lives under `scion hub auth` (with `scion login` as a top-level alias for `scion hub auth login`; there is no top-level `scion auth` command).
 
 - `scion hub auth`: Manage Hub authentication.
-    - `login`: Authenticate with Hub server (opens a browser; supports `--no-browser` for device flow and `--provider github`).
+    - `login` (also available as top-level `scion login`): Authenticate with Hub server (opens a browser; supports `--no-browser` for device flow and `--provider github`).
         - **Hub URL.** Taken from, in order: the root `--hub` flag (a hub nickname or URL), the `SCION_HUB_ENDPOINT` environment variable, then `SCION_HUB_URL`, then the directory's link entry, then the current Hub. This is the order every Hub command uses (see [Hub resolution order](#global-flags)). `--hub-url` is a hidden, deprecated alias of `--hub` that wins over it; it prints a deprecation notice.
         - **Hub list.** A hub URL given with `--hub` or `--hub-url` that is not in the hub list yet is added to it after a successful login, with a nickname derived from its host. When no Hub is current, the Hub logged in to becomes the current Hub after a successful login (`Hub '<name>' (<url>) is now the current hub.`): one given with `--hub` or `--hub-url` (a URL or a nickname), or the directory's link entry Hub, but never one taken from an environment variable. A login never switches a Hub that is already current; when the Hub is not the current Hub, the command prints how to select it (`scion use --hub <name>`).
         - **Settings are never written.** When the Hub came from the current context or from the directory's link entry, the command prints `Logged in to <url> (current hub, selected with 'scion use').` or `Logged in to <url> (the hub this directory is linked to).` A Hub taken from an environment variable is not added to the hub list.

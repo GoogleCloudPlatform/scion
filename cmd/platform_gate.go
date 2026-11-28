@@ -192,6 +192,11 @@ var windowsAllowed = map[string]bool{
 	"config.cd-project": true,
 	"config.schema":     true,
 
+	// Top-level alias of 'hub auth login' (ptone/scion#9744): client-side only;
+	// local writes go through pkg/credentials (credentials.json) and
+	// pkg/config/cli_context.go (context.yaml), both using privatefs.
+	"login": true,
+
 	"hub":                       true,
 	"hub.auth":                  true,
 	"hub.auth.login":            true,
