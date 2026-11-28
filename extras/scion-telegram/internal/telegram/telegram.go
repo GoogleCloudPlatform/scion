@@ -79,6 +79,9 @@ type inboundPayload struct {
 //     msg.ThreadID carried only the Telegram forum MessageThreadID)
 func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID int64, hasChatID bool, threadID int64) {
 	target := plugin.ResolveConversationTarget(msg)
+	if target.Kind == "direct" {
+		return 0, false, 0
+	}
 	if target.ExternalRef == "" {
 		return 0, false, 0
 	}
@@ -127,34 +130,41 @@ func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID in
 	return 0, false, id
 }
 
-// telegramInboundConversation derives the Phase 11 top-level conversation
-// addressing (surface, external_ref, parent_ref) for an inbound Telegram message.
+// telegramInboundConversation derives the Phase 11 / P5 top-level conversation
+// addressing (surface, external_ref, parent_ref, legacy_ref) for an inbound
+// Telegram message.
 //
-// Only threaded messages (forum topics where msg.ThreadID is set) emit
-// (surface, external_ref, parent_ref) with external_ref == threadID and
-// parent_ref == chatID so inbound threads share the exact thread:<project>:<topic>
-// key used by pre-P4 rows and by outbound `--channel telegram --thread-id <topic>`
-// replies, while outbound composes (parent_ref, external_ref) to address the
-// forum chat + topic. Non-threaded messages (1:1 private chats and flat chats
-// without a forum topic) omit external_ref so the hub resolves them through
-// Phase 5 as direct dm: conversations, matching `scion message user:<x>`.
+// Surface is always set to "telegram" (even for 1:1 private chats and flat
+// chats with empty external_ref) so P5d can require surface on every broker
+// inbound request, and legacy_ref carries the exact msg.ThreadID value for the
+// hub's read-only Phase-5 continuity fallback.
+//
+// Only threaded messages (forum topics where msg.ThreadID is set) populate
+// external_ref == threadID and parent_ref == chatID so inbound threads share
+// the exact thread:<project>:<topic> key used by pre-P4 rows and by outbound
+// `--channel telegram --thread-id <topic>` replies, while outbound composes
+// (parent_ref, external_ref) to address the forum chat + topic. Non-threaded
+// messages (1:1 private chats and flat chats without a forum topic) omit
+// external_ref so the hub resolves them through Phase 5 as direct dm:
+// conversations, matching `scion message user:<x>`.
 func telegramInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
 	if msg == nil {
 		return plugin.InboundConversation{}
 	}
-	threadID := msg.ThreadID
-	if threadID == "" {
-		return plugin.InboundConversation{}
+	conv := plugin.InboundConversation{
+		Surface:   "telegram",
+		LegacyRef: msg.ThreadID,
+	}
+	if msg.ThreadID == "" {
+		return conv
 	}
 	var chatID string
 	if msg.Metadata != nil {
 		chatID = msg.Metadata["telegram_chat_id"]
 	}
-	return plugin.InboundConversation{
-		Surface:     "telegram",
-		ExternalRef: threadID,
-		ParentRef:   chatID,
-	}
+	conv.ExternalRef = msg.ThreadID
+	conv.ParentRef = chatID
+	return conv
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -493,26 +503,24 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 	var chatIDs []int64
 
 	// Priority 0: Conversation external_ref (Phase 11).
-	// When chatRoutes or topicChats are configured, only post to the
-	// conversation's chat if it is registered in the broker's routes;
-	// otherwise fall back to the pre-P4 routing path.
+	// Only post to the conversation's chat if it is registered in the
+	// broker's configured routes (chatRoutes or topicChats); default-deny
+	// when no routes are configured so an unconfigured broker never posts
+	// to an arbitrary conversation chat ID (L2).
 	if convChatID, ok, _ := parseTelegramConversationTarget(msg); ok {
-		allowConvChat := true
-		if len(chatRoutes) > 0 || len(topicChats) > 0 {
-			allowConvChat = false
-			if _, exists := chatRoutes[convChatID]; exists {
-				allowConvChat = true
-			} else {
-				for _, chats := range topicChats {
-					for _, cid := range chats {
-						if cid == convChatID {
-							allowConvChat = true
-							break
-						}
-					}
-					if allowConvChat {
+		allowConvChat := false
+		if _, exists := chatRoutes[convChatID]; exists {
+			allowConvChat = true
+		} else {
+			for _, chats := range topicChats {
+				for _, cid := range chats {
+					if cid == convChatID {
+						allowConvChat = true
 						break
 					}
+				}
+				if allowConvChat {
+					break
 				}
 			}
 		}

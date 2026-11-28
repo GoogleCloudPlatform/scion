@@ -439,7 +439,9 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	var fallbackThreadTS string
 
 	convTarget := plugin.ResolveConversationTarget(msg)
-	isUserDM := (convTarget.Kind == "direct" || (msg.Conversation == nil && strings.HasPrefix(convTarget.ExternalRef, "dm:"))) &&
+	isRecipientRouted := (convTarget.Kind == "direct" ||
+		(msg.Conversation != nil && msg.Conversation.Surface == "native") ||
+		(msg.Conversation == nil && strings.HasPrefix(convTarget.ExternalRef, "dm:"))) &&
 		strings.HasPrefix(msg.Recipient, "user:")
 	if convTarget.Kind != "direct" && convTarget.ExternalRef != "" {
 		parts := strings.SplitN(convTarget.ExternalRef, ":", 2)
@@ -481,7 +483,7 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		channelIDs, threadTSs = b.resolveRecipientChannels(ctx, msg.Recipient, projectID, ccSlug)
 	}
 
-	if len(channelIDs) == 0 && !isUserDM && projectID != "" && store != nil {
+	if len(channelIDs) == 0 && !isRecipientRouted && projectID != "" && store != nil {
 		links, err := store.GetChannelLinksForProject(ctx, projectID)
 		if err != nil {
 			b.log.Warn("Failed to get channel links for broadcast", "project_id", projectID, "error", err)

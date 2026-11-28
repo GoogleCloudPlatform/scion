@@ -206,7 +206,7 @@ func externalRefMessage(target *store.Agent, surface, ref, parent string) Messag
 	}
 }
 
-const chatIntegrationsOnly = "surface and external_ref are set by chat integrations"
+const chatIntegrationsOnly = "surface, external_ref, parent_ref and legacy_ref are set by chat integrations"
 
 // TestAgentMessage_ExternalRefFromNonIntegrationCallerRefused: on
 // /agents/{id}/message only chat integrations (broker-authenticated callers)

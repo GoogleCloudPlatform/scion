@@ -406,6 +406,14 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 				Surface:     "native",
 				ExternalRef: a2aKey,
 			},
+			"conv-native-group": {
+				ID:          "conv-native-group",
+				ProjectID:   &projectID,
+				Kind:        "group",
+				Surface:     "native",
+				ExternalRef: "thread:p1:native-topic",
+				DisplayName: "Native Topic",
+			},
 		},
 	}
 
@@ -503,6 +511,34 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 		ThreadID:  dmKey,
 	}))
 	assert.Len(t, getPosted(), 4, "pre-P5a dm: ThreadID for unmapped user must not broadcast")
+
+	// 7. Native-surface user-addressed rule (O1): a native group conversation
+	// addressed to a user: recipient with Channel:"slack" routes to the user's
+	// DM when mapped and drops (never broadcasts to project links) when unmapped.
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-alice", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "native group addressed to mapped user",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-native-group",
+	}))
+	posted = getPosted()
+	require.Len(t, posted, 5)
+	assert.Equal(t, "D_ALICE_DM", posted[4].Channel)
+	assert.Equal(t, "", posted[4].ThreadTS)
+
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-bob", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:bob@example.com",
+		Msg:            "native group addressed to unmapped user",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-native-group",
+	}))
+	assert.Len(t, getPosted(), 5, "native-surface group for unmapped user must not broadcast to project links")
 }
 
 // TestSlackBroker_Publish_PreUpgradeBareTimestampNeverPostsToTS (R-FV1)

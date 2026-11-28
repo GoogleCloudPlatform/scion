@@ -2379,7 +2379,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// refused before anything is looked up or written.
 	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "" || req.LegacyRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
 		logReferenceRefused(ctx, logging.RequestPath(r), "external chat reference from a caller that is not a chat integration", GetIdentityFromContext(ctx))
-		ValidationError(w, "surface and external_ref are set by chat integrations", nil)
+		ValidationError(w, "surface, external_ref, parent_ref and legacy_ref are set by chat integrations", nil)
 		return
 	}
 

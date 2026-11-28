@@ -1078,7 +1078,15 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// When a store and projectID are present, only post to the conversation's
 	// chat if it is still an active GroupLink for this project; otherwise fall
 	// back to the pre-P4 routing path so unlinking a group stops replies into
-	// existing forum-topic conversations.
+	// existing forum-topic conversations. When refused, zero convThreadID so
+	// the refused chat's forum topic ID is never attached to a fallback chat (L1).
+	convTarget := plugin.ResolveConversationTarget(msg)
+	isRecipientRouted := msg != nil &&
+		(convTarget.Kind == "direct" ||
+			(msg.Conversation != nil && msg.Conversation.Surface == "native") ||
+			(msg.Conversation == nil && strings.HasPrefix(convTarget.ExternalRef, "dm:"))) &&
+		strings.HasPrefix(msg.Recipient, "user:")
+
 	convChatID, hasConvChatID, convThreadID := parseTelegramConversationTarget(msg)
 	if hasConvChatID {
 		allowConvChat := true
@@ -1093,6 +1101,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 		if allowConvChat {
 			chatIDs = append(chatIDs, convChatID)
+		} else {
+			convThreadID = 0
 		}
 	}
 
@@ -1107,8 +1117,12 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Priority 2: Look up via ConversationContext for the recipient.
 	if len(chatIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
+		ccSlug := agentSlug
+		if ccSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
+			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
+		}
 		var denied bool
-		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, ccSlug)
 		if denied {
 			// The recipient is a linked user who cannot read the project
 			// (or the check failed): drop rather than broadcast. The reason
@@ -1117,8 +1131,9 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
-	// Priority 3: Broadcast to all GroupLinks for the project.
-	if len(chatIDs) == 0 && projectID != "" && store != nil {
+	// Priority 3: Broadcast to all GroupLinks for the project. Never broadcast
+	// direct or native-surface messages addressed to a user.
+	if len(chatIDs) == 0 && !isRecipientRouted && projectID != "" && store != nil {
 		links, err := store.GetGroupLinksForProject(ctx, projectID)
 		if err != nil {
 			b.log.Warn("Failed to get group links for broadcast", "project_id", projectID, "error", err)
