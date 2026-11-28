@@ -1304,6 +1304,17 @@
           "type": "string",
           "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods whose runtime choice used this profile, for example a sandbox class such as gvisor. Wins over the runtime entry's value."
         },
+        "sandbox_runtime": {
+          "type": "object",
+          "description": "Docker and Podman only. Runs agents under this profile with a sandboxing OCI runtime registered with the local engine (for example gVisor runsc), so the agent can run its own container engine without host access. Read from the global settings file only; needs the agent_policy.sandbox_runtime experiment.",
+          "required": ["name", "kind"],
+          "properties": {
+            "name": { "type": "string", "description": "Runtime name registered with the engine (daemon.json runtimes key), passed as --runtime." },
+            "kind": { "type": "string", "enum": ["gvisor", "sysbox"], "description": "Sandbox technology. Decides which extra container flags are added; gvisor adds all capabilities, an unconfined engine seccomp profile and an executable /var/lib/docker tmpfs, which are safe only under gVisor." },
+            "docker_storage_size": { "type": "string", "description": "gvisor only. Size of the executable tmpfs at /var/lib/docker (default 6g); uses host memory." }
+          },
+          "additionalProperties": false
+        },
         "shared_dir_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],

@@ -402,6 +402,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	newArgs = appendSharedDirGroupArgs(newArgs, config, podmanRuntimeName(r.Rootless), !r.Rootless)
 
+	newArgs = appendSandboxRuntimeArgs(newArgs, config)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	// Secret values go to podman through its environment, not argv

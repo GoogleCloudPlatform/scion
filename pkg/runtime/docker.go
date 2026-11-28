@@ -100,6 +100,8 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	newArgs = appendSharedDirGroupArgs(newArgs, config, "docker", true)
 
+	newArgs = appendSandboxRuntimeArgs(newArgs, config)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)

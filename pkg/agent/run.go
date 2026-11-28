@@ -1909,7 +1909,25 @@ authDone:
 	// translated to host.docker.internal, use --network=host so the container
 	// can reach the host's loopback interface directly. This also rewrites any
 	// bridge hostnames back to localhost in opts.Env.
-	networkMode := runtime.ResolveHostNetworking(m.Runtime.Name(), opts.Env)
+	//
+	// A gVisor sandbox runtime is resolved first: gVisor runs its own network
+	// stack and cannot share the host's (no loopback, no host interfaces), so
+	// its agents always use bridge networking and reach a host-local hub
+	// through host.docker.internal (mapped to host-gateway by
+	// BridgeExtraHosts). Forcing host networking with one is refused.
+	sandbox, err := resolveStartSandboxRuntime(ctx, opts.Name, profileName, m.Runtime.Name())
+	if err != nil {
+		return nil, err
+	}
+	var networkMode string
+	if sandbox != nil && sandbox.Kind == config.SandboxKindGVisor {
+		if os.Getenv(runtime.ForceHostNetworkEnvVar) != "" {
+			return nil, refuseAgentPolicy(opts.Name, NewAgentPolicyError("profile", "profiles."+profileName+".sandbox_runtime",
+				"host networking is forced (%s) but a gVisor sandbox cannot use host networking", runtime.ForceHostNetworkEnvVar))
+		}
+	} else {
+		networkMode = runtime.ResolveHostNetworking(m.Runtime.Name(), opts.Env)
+	}
 	if networkMode != "" {
 		opts.Env["SCION_NETWORK_MODE"] = networkMode
 	}
@@ -3216,6 +3234,7 @@ authDone:
 		// records) without changing cleanup ownership.
 		ObserveResourceCreated: opts.ObserveResourceCreated,
 	}
+	runCfg.Sandbox = sandbox
 	var runDeadlineStr string
 	if api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.AgentPolicyDurationBackstop) {
 		if effDur := finalScionCfg.ParseMaxDuration(); effDur > 0 {

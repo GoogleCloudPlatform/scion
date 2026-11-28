@@ -1075,7 +1075,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// depth: agents do not require raw sockets, and removing this unneeded
 	// default capability restricts raw packet access across all metadata and
 	// network modes. Apple Container does not accept --cap-drop flags.
-	if config.RuntimeName == "docker" || config.RuntimeName == "podman" {
+	// A gVisor sandbox keeps it: the inner Docker engine needs raw sockets,
+	// which gVisor implements in its own network stack (runsc --net-raw).
+	if (config.RuntimeName == "docker" || config.RuntimeName == "podman") && !sandboxIsGVisor(config) {
 		addArg("--cap-drop", "NET_RAW")
 	}
 

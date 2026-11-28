@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 )
@@ -320,6 +321,12 @@ type RunConfig struct {
 	// harness-config's auth-candidate keys), even when nothing else set
 	// them.
 	SuppressedFallbackKeys []string
+
+	// Sandbox is the operator-declared sandbox runtime from the agent's
+	// profile (profiles.<name>.sandbox_runtime, global settings only), or nil.
+	// Docker and Podman pass --runtime and the flags the sandbox kind needs
+	// (appendSandboxRuntimeArgs); other runtimes ignore it.
+	Sandbox *config.V1SandboxRuntime
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design

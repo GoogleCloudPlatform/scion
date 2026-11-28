@@ -221,6 +221,14 @@ const AgentPolicyLimitCeilings = "agent_policy.limit_ceilings"
 // survive broker restarts and flag toggles.
 const AgentPolicyDurationBackstop = "agent_policy.duration_backstop"
 
+// AgentSandboxRuntime gates operator-declared sandbox runtimes on Docker and
+// Podman profiles (profiles.<name>.sandbox_runtime in the broker's global
+// settings; miller79/scion#37). When on, an agent started under such a profile
+// runs with `--runtime <name>` and the flags that sandbox needs for an inner
+// container engine (for example Docker inside gVisor). While off, the profile
+// block is ignored with a warning and agents start on the default runtime.
+const AgentSandboxRuntime = "agent_policy.sandbox_runtime"
+
 // ViewAsMember gates the "View as member" session toggle for hub admins
 // (ptone/scion#8648). The hub checks it when a session enters the mode;
 // existing sessions in the mode remain honoured and exit stays available
@@ -807,6 +815,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9372",
 		Owner:       "configuration",
 		ReviewBy:    "2027-05-26",
+	},
+	{
+		Name:        AgentSandboxRuntime,
+		Title:       "Sandbox runtimes on Docker profiles",
+		Description: "Runs agents whose profile declares sandbox_runtime (operator settings only) under that OCI runtime, such as gVisor runsc, with the flags it needs for Docker inside the agent. While off, the profile block is ignored with a warning and agents use the default runtime.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "miller79/scion#37",
+		Owner:       "configuration",
+		ReviewBy:    "2027-05-27",
 	},
 	{
 		Name:        AgentMoveBundle,

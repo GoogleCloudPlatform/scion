@@ -233,6 +233,7 @@ var dispatchExperimentNames = []string{
 	experiments.CodeSpanMentions,
 	experiments.AgentSecrets,
 	experiments.AgentPolicyDurationBackstop,
+	experiments.AgentSandboxRuntime,
 }
 
 // dispatchExperiments returns the dispatch experiments that are enabled

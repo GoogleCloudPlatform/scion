@@ -864,6 +864,12 @@ func compileSchemas() {
 					"node_selector":      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
 					"tolerations":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
 					"runtime_class_name": map[string]interface{}{"type": "string"},
+
+					// Docker/Podman sandbox runtime (miller79/scion#37); shape
+					// only. The broker reads it from its own global settings
+					// file only (config.LoadProfileSandboxRuntime), so a value
+					// stored here has no effect on agent starts.
+					"sandbox_runtime": map[string]interface{}{"type": "object"},
 				},
 				// Each property is a V1ProfileConfig field (pinned by
 				// TestProfilesSectionSchema_MatchesProfileConfig). A key the
