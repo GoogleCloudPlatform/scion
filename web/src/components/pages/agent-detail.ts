@@ -434,6 +434,30 @@ export class ScionPageAgentDetail extends LitElement {
       }
 
       /* ---- Header (layout in scion-detail-header) ---- */
+      .header-labels {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35em;
+        min-width: 0;
+        max-width: 100%;
+      }
+      .header-labels sl-tag {
+        max-width: 100%;
+      }
+      .header-labels sl-tag::part(base) {
+        max-width: min(20rem, 100%);
+      }
+      .header-labels sl-tag::part(content) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .header-labels-tooltip {
+        display: flex;
+        flex-direction: column;
+        gap: 0.125rem;
+      }
       .header-meta {
         display: flex;
         flex-wrap: wrap;
@@ -2565,6 +2589,33 @@ export class ScionPageAgentDetail extends LitElement {
     return view?.state === 'deleting' ? view : null;
   }
 
+  private renderHeaderLabels(agent: Agent): TemplateResult | typeof nothing {
+    if (!agent.labels) return nothing;
+    const entries = Object.entries(agent.labels).sort(([a], [b]) => a.localeCompare(b));
+    if (entries.length === 0) return nothing;
+    const visible = entries.slice(0, 3);
+    const overflow = entries.slice(3);
+    return html`
+      <span class="header-labels" data-testid="agent-header-labels">
+        ${visible.map(
+          ([k, v]) => html`<sl-tag size="small" variant="neutral" title="${k}: ${v}">${k}: ${v}</sl-tag>`
+        )}
+        ${overflow.length > 0
+          ? html`
+              <sl-tooltip>
+                <div slot="content" class="header-labels-tooltip">
+                  ${overflow.map(([k, v]) => html`<div>${k}: ${v}</div>`)}
+                </div>
+                <sl-tag size="small" variant="neutral" class="header-labels-more">
+                  +${overflow.length} more
+                </sl-tag>
+              </sl-tooltip>
+            `
+          : nothing}
+      </span>
+    `;
+  }
+
   private renderHeader() {
     const agent = this.agent!;
     const isShell = this.isShellAgent(agent);
@@ -2599,6 +2650,7 @@ export class ScionPageAgentDetail extends LitElement {
           : nothing}
         <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
         <scion-authority-badge .authority=${agent.authority}></scion-authority-badge>
+        ${this.renderHeaderLabels(agent)}
         ${!isShell
           ? html`
               <scion-message-mode-badge
@@ -3372,7 +3424,7 @@ export class ScionPageAgentDetail extends LitElement {
         contextType="agent"
         contextId=${this.agentId}
       ></scion-effective-access-boundary-notice>
-      ${this.renderMessagingCard()} ${this.renderLabelsCard(agent)}
+      ${this.renderMessagingCard()}
       ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
       ${this.renderGCPIdentityCard(
         cfg?.gcpIdentity,
@@ -3733,20 +3785,6 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
-        </div>
-      </div>
-    `;
-  }
-
-  private renderLabelsCard(agent: Agent) {
-    if (!agent.labels || Object.keys(agent.labels).length === 0) return nothing;
-    return html`
-      <div class="card">
-        <h3 class="card-title">Labels</h3>
-        <div style="display: flex; flex-wrap: wrap; gap: 0.35em; padding: 0.25em 0;">
-          ${Object.entries(agent.labels).map(
-            ([k, v]) => html`<sl-tag size="small" variant="neutral">${k}: ${v}</sl-tag>`
-          )}
         </div>
       </div>
     `;
