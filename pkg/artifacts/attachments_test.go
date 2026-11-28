@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -466,31 +465,6 @@ func TestCreateAttachmentLimits(t *testing.T) {
 	}
 	if _, err := f.svc.CreateAttachment(context.Background(), "a.txt", "text/plain", strings.NewReader("1")); err == nil {
 		t.Error("an upload without a caller was stored")
-	}
-}
-
-// TestOpenBoundAttachment: the delivery opener reads only an attachment
-// bound to the named message.
-func TestOpenBoundAttachment(t *testing.T) {
-	f := newAttachmentFixture(t, false)
-	ctx := context.Background()
-	sent := f.send(userU, "msg-1", pngBytes)
-	up := f.upload(userU, "a.txt", "text/plain", []byte("x"))
-
-	rc, info, err := f.svc.OpenBoundAttachment(ctx, sent, "msg-1")
-	if err != nil {
-		t.Fatalf("bound attachment: %v", err)
-	}
-	b, _ := io.ReadAll(rc)
-	_ = rc.Close()
-	if !bytes.Equal(b, pngBytes) || info.Name != "shot.png" {
-		t.Errorf("read %q, info %+v", b, info)
-	}
-	if _, _, err := f.svc.OpenBoundAttachment(ctx, sent, "msg-2"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("other message = %v, want ErrNotFound", err)
-	}
-	if _, _, err := f.svc.OpenBoundAttachment(ctx, up, "msg-1"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("unsent upload = %v, want ErrNotFound", err)
 	}
 }
 

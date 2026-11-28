@@ -479,42 +479,17 @@ func TestAgentAttachmentRelPath_TargetsFromAuthority(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Delivery plan: the projection is listed for every state but withheld
-// ---------------------------------------------------------------------------
-
-func TestAttachmentPlan_ProjectionCopiedUnlessWithheld(t *testing.T) {
-	del := messages.AttachmentDelivery{
-		ArtifactID: "a1", MessageID: "m1", Name: "x.txt",
-		ProjectedPath: "/scion-volumes/scratchpad/.attachments/_webchat/a1/x.txt", ProjectedMount: "scratchpad",
-	}
-	for _, state := range []string{messages.AttachmentDeliverable, messages.AttachmentUndeliverableRuntime, messages.AttachmentWithheld} {
-		e := messages.AttachmentPlanEntry{Delivery: del, State: state}
-		applyProjection(&e)
-		if state == messages.AttachmentWithheld {
-			assert.Empty(t, e.ProjectedPath, state)
-			assert.Empty(t, e.ProjectedMount, state)
-			continue
-		}
-		assert.Equal(t, del.ProjectedPath, e.ProjectedPath, state)
-		assert.Equal(t, "scratchpad", e.ProjectedMount, state)
-	}
-}
-
-// TestProjection_OnlyChatV2SendPathProjects pins, at the source level, that
-// the scratchpad projection of artifact attachments is reachable from one
-// place only: stageChatAttachments is called only by
-// sendAgentRouted (every chat v2 send, scheduled sends and promotions
-// included, goes through it; mention copies reuse its result), and
-// AttachmentRef.projectedPath/projectedMount are assigned only inside
-// stageChatAttachments, behind its projectionAudienceIsProject check.
-func TestProjection_OnlyChatV2SendPathProjects(t *testing.T) {
+// TestStageChatAttachments_OnlyCalledFromSendAgentRouted pins, at the source
+// level, that legacy scratchpad staging (stageChatAttachments) is called only
+// by sendAgentRouted (every chat v2 send, scheduled sends and promotions
+// included, goes through it; mention copies reuse its result).
+func TestStageChatAttachments_OnlyCalledFromSendAgentRouted(t *testing.T) {
 	// pkgmove:scan-covers guardScanSubdirs
-	// scanned through guardScanSubdirs; guards stageChatAttachments call sites and projectedPath/projectedMount writes.
+	// scanned through guardScanSubdirs; guards stageChatAttachments call sites.
 	paths, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
-	var callers, assigners []string
+	var callers []string
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -527,20 +502,9 @@ func TestProjection_OnlyChatV2SendPathProjects(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.CallExpr:
+				if x, ok := n.(*ast.CallExpr); ok {
 					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "stageChatAttachments" {
 						callers = append(callers, fn.Name.Name)
-					}
-				case *ast.AssignStmt:
-					for _, lhs := range x.Lhs {
-						if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "projectedPath" || sel.Sel.Name == "projectedMount") {
-							assigners = append(assigners, fn.Name.Name+"."+sel.Sel.Name)
-						}
-					}
-				case *ast.KeyValueExpr:
-					if id, ok := x.Key.(*ast.Ident); ok && (id.Name == "projectedPath" || id.Name == "projectedMount") {
-						assigners = append(assigners, fn.Name.Name+"."+id.Name+"(literal)")
 					}
 				}
 				return true
@@ -548,8 +512,6 @@ func TestProjection_OnlyChatV2SendPathProjects(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"sendAgentRouted"}, callers, "stageChatAttachments call sites")
-	assert.ElementsMatch(t, []string{"stageChatAttachments.projectedPath", "stageChatAttachments.projectedMount"}, assigners,
-		"projectedPath/projectedMount are set only by stageChatAttachments")
 }
 
 // failingLinksWCS fails every link lookup.

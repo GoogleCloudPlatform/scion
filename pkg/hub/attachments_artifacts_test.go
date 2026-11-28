@@ -496,11 +496,9 @@ func TestAttachmentArtifacts_ArtifactRoutesAnswerNotFound(t *testing.T) {
 }
 
 // While the experiment is on, an attachment stored as an artifact sent to
-// an agent reaches it by delivery into its home (ptone/scion#4596), and is
-// additionally projected into the project's scratchpad through the layout
-// authority so sibling agents find it (ptone/scion#5827): the
-// projection holds the stored bytes under .attachments/_webchat/<id>/.
-func TestAttachmentArtifacts_ProjectedForSiblings(t *testing.T) {
+// an agent reaches it by delivery into its home (ptone/scion#4596) only,
+// with no scratchpad copy even in a project topic thread (ptone/scion#9694).
+func TestAttachmentArtifacts_ProjectTopicNotCopiedToScratchpad(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	stagingDir := f.enableScratchpad(t)
@@ -508,22 +506,18 @@ func TestAttachmentArtifacts_ProjectedForSiblings(t *testing.T) {
 
 	id := f.uploadAs(t, f.ua, f.projA.ID, "log.txt", "agent bytes")
 	f.sendWith(t, f.ua, f.topicA, id)
-	got, err := os.ReadFile(filepath.Join(stagingDir, id, "log.txt"))
-	require.NoError(t, err, "the attachment is projected into the scratchpad")
-	assert.Equal(t, "agent bytes", string(got))
+	assert.NoDirExists(t, filepath.Join(stagingDir, id), "artifact attachments are not copied into the scratchpad")
 }
 
-// stageChatAttachments records an artifact attachment's projection on its
-// reference (experiment on, project topic thread) and adds no legacy entry
-// for it; the delivery built from the reference carries the projection after
-// the inbox path. On a direct conversation's key the same attachment is not
-// projected.
-func TestStageChatAttachments_ArtifactProjectionOnRef(t *testing.T) {
+// stageChatAttachments skips artifact-backed attachment references on both
+// direct conversations and project topic threads, adding no legacy staged
+// paths or mounts and writing nothing to the scratchpad.
+func TestStageChatAttachments_SkipsArtifactRefs(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	stagingDir := f.enableScratchpad(t)
 	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
-	id := f.uploadAs(t, f.ua, f.projA.ID, "p.txt", "projected")
+	id := f.uploadAs(t, f.ua, f.projA.ID, "p.txt", "inbox-only")
 	resp := f.sendWith(t, f.ua, dm, id)
 
 	info, err := f.srv.attachmentService().MessageAttachments(context.Background(), []string{resp.ID})
@@ -532,25 +526,21 @@ func TestStageChatAttachments_ArtifactProjectionOnRef(t *testing.T) {
 
 	// Direct conversation key: inbox only.
 	refs := []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
-	paths, mounts := f.srv.stageChatAttachments(context.Background(), dm, f.projA.ID, resp.ID, refs)
+	paths, mounts := f.srv.stageChatAttachments(context.Background(), dm, f.projA.ID, refs)
 	assert.Empty(t, paths)
 	assert.Empty(t, mounts)
-	assert.Empty(t, refs[0].projectedPath, "a DM attachment is never projected")
 	assert.NoDirExists(t, filepath.Join(stagingDir, id))
 
-	// Project topic thread key: projected.
+	// Project topic thread key: also inbox only.
 	refs = []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
-	paths, mounts = f.srv.stageChatAttachments(context.Background(), f.topicA, f.projA.ID, resp.ID, refs)
+	paths, mounts = f.srv.stageChatAttachments(context.Background(), f.topicA, f.projA.ID, refs)
 	assert.Empty(t, paths, "a delivered artifact attachment adds no legacy entry")
 	assert.Empty(t, mounts)
-	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+id+"/p.txt", refs[0].projectedPath)
-	assert.Equal(t, attachmentSharedDirName, refs[0].projectedMount)
-	assert.FileExists(t, filepath.Join(stagingDir, id, "p.txt"))
+	assert.NoDirExists(t, filepath.Join(stagingDir, id))
 
 	dels := attachmentDeliveries(resp.ID, refs)
 	require.Len(t, dels, 1)
-	assert.Equal(t, refs[0].projectedPath, dels[0].ProjectedPath)
-	assert.Equal(t, attachmentSharedDirName, dels[0].ProjectedMount)
+	assert.Equal(t, id, dels[0].ArtifactID)
 }
 
 // TestAttachmentArtifacts_DMToAgentNotProjected: with artifacts on, an
@@ -577,12 +567,12 @@ func TestAttachmentArtifacts_DMToAgentNotProjected(t *testing.T) {
 	assert.Equal(t, "legacy bytes", string(got))
 }
 
-// TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM: an attachment
+// TestAttachmentArtifacts_UploadedOnSentOffNotProjected: an attachment
 // uploaded as an artifact while the experiment was on, and sent after it
-// was turned off, is still delivered into the recipient's inbox, so in a
-// direct conversation it gets no scratchpad copy either; in a project topic
-// thread it is staged as before.
-func TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM(t *testing.T) {
+// was turned off, is still delivered into the recipient's inbox only —
+// neither a direct conversation nor a project topic thread gets a scratchpad
+// copy (avoiding double-listing on ON->OFF transition, ptone/scion#9694).
+func TestAttachmentArtifacts_UploadedOnSentOffNotProjected(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	stagingDir := f.enableScratchpad(t)
@@ -608,12 +598,13 @@ func TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM(t *testing.T) {
 	require.Len(t, plan, 1)
 	assert.NotEqual(t, messages.AttachmentWithheld, plan[0].State, "the recipient reads the attachment")
 	assert.Equal(t, attachmentInboxPath(resp.ID, "dm.txt"), plan[0].InboxPath)
-	assert.Empty(t, plan[0].ProjectedPath)
 
-	f.sendWith(t, f.ua, f.topicA, inTopic)
-	got, err := os.ReadFile(filepath.Join(stagingDir, inTopic, "topic.txt"))
-	require.NoError(t, err, "a project topic thread still gets the copy")
-	assert.Equal(t, "topic bytes", string(got))
+	topicResp := f.sendWith(t, f.ua, f.topicA, inTopic)
+	assert.NoDirExists(t, filepath.Join(stagingDir, inTopic), "an artifact attachment in a project topic thread gets no scratchpad copy even after experiment is toggled off")
+	topicInfo, err := f.srv.attachmentService().MessageAttachments(context.Background(), []string{topicResp.ID})
+	require.NoError(t, err)
+	require.Len(t, topicInfo[topicResp.ID], 1, "the attachment is bound to the topic message")
+	assert.Equal(t, inTopic, topicInfo[topicResp.ID][0].ID)
 }
 
 // TestChatKeyReadAudience: the classification the send authorization, the

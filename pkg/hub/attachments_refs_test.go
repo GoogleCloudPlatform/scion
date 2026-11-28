@@ -289,15 +289,10 @@ func hubCallerFuncs(t *testing.T, names ...string) map[string][]string {
 	return out
 }
 
-// TestOpenBoundAttachment_OnlyFromSendPath: OpenBoundAttachment checks no
-// caller, so pkg/hub calls it only from stageArtifactAttachment, and that
-// only from stageChatAttachments (design section 2).
-func TestOpenBoundAttachment_OnlyFromSendPath(t *testing.T) {
-	sites := hubCallerFuncs(t, "OpenBoundAttachment", "stageArtifactAttachment")
-	require.Equal(t, []string{"attachments_artifacts.go:stageArtifactAttachment"}, sites["OpenBoundAttachment"])
-	require.Equal(t, []string{"handlers_chat_v2.go:stageChatAttachments"}, sites["stageArtifactAttachment"])
-	// The capability redemption route is the one other caller-less read of
-	// a bound attachment (ptone/scion#4596, section 8.3).
+// TestServeBoundAttachment_OnlyFromDeliveryRoute: ServeBoundAttachment is
+// the sole caller-less read of a bound attachment (ptone/scion#4596,
+// section 8.3), called only from the capability redemption route.
+func TestServeBoundAttachment_OnlyFromDeliveryRoute(t *testing.T) {
 	require.Equal(t, []string{"attachment_delivery.go:handleAttachmentDelivery"}, hubCallerFuncs(t, "ServeBoundAttachment")["ServeBoundAttachment"])
 }
 

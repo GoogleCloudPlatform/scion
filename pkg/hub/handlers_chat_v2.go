@@ -62,7 +62,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -1322,44 +1321,28 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-// stageChatAttachments makes a message's attachments visible to agents,
-// after the message is authorized and stored, and returns the entries for
-// the message's legacy attachment list with, for each entry that is a path
+// stageChatAttachments makes legacy (AttachmentStore) attachments visible to
+// agents, after the message is authorized and stored, and returns the entries
+// for the message's legacy attachment list with, for each entry that is a path
 // in a shared dir, that dir's name (StructuredMessage.AttachmentMounts).
 //
-// The hub's attachment stores (the artifact service, the hub-private
-// AttachmentStore) are not mounted into agent containers, so each file is
-// projected into the project's scratchpad shared dir, resolved through the
-// layout authority (resolveAttachmentStaging, ptone/scion#5827):
-//   - an attachment stored as an artifact while hub.attachment_artifacts is
-//     on (read now, at send time) reaches the recipient by delivery into its
-//     home and adds no legacy entry. It is projected only when the message's
-//     read audience is the whole project (a project topic thread, key):
-//     a projection is readable by every agent that mounts the scratchpad,
-//     so a direct or group conversation, whose readers are its
-//     participants, gets inbox delivery only. The projection is recorded on
-//     refs[i] (projectedPath, projectedMount) and listed after the inbox
-//     path;
-//   - an attachment stored as an artifact (uploaded while the experiment
-//     was on) and sent while it is off is still delivered into the home;
-//     for a project topic thread it is also staged from its stored bytes
-//     and listed as a legacy entry, and otherwise it gets no scratchpad
-//     copy;
-//   - an AttachmentStore attachment is staged from the hub-private store.
-//     On a shared backend it is staged only when the whole project reads
-//     the message; on the local backend for every send. When it is not
-//     staged the hub-local path is sent, which host-process agents can
-//     still read.
+// Artifact-backed attachments (ref.artifact == true) are skipped here: they
+// reach each recipient exclusively via inbox delivery (~/.scion/inbox/<msg-id>/<name>),
+// with no scratchpad copy (ptone/scion#9694). Sibling agents in project
+// conversations fetch them via `scion conversation get-message --save-attachments`.
 //
-// Without artifact delivery (the last case) staging is the only way a
-// containerised agent reads the file. On the local backend it therefore
-// happens for every send, so on a workstation hub a DM's attachment is
-// readable by the project's other agents: a known limitation that ends
-// when the hub stores attachments as artifacts.
+// Legacy AttachmentStore attachments are staged from the hub-private store
+// into the project's scratchpad shared dir (resolveAttachmentStaging):
+//   - On a shared backend (NFS) they are staged only when the whole project
+//     reads the message (projectionAudienceIsProject); otherwise the hub-local
+//     path is sent, which host-process agents can still read.
+//   - On the local backend (workstation) they are staged for every send, since
+//     staging is the only way a containerised agent reads a legacy attachment
+//     (a known workstation limitation that ends when attachments are stored as
+//     artifacts).
 //
-// key is the message's thread key and messageID the stored message the
-// attachments are bound to.
-func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messageID string, attachmentRefs []AttachmentRef) ([]string, map[string]string) {
+// key is the message's thread key.
+func (s *Server) stageChatAttachments(ctx context.Context, key, projectID string, attachmentRefs []AttachmentRef) ([]string, map[string]string) {
 	if len(attachmentRefs) == 0 {
 		return nil, nil
 	}
@@ -1378,7 +1361,6 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 		mounts[p] = staging.mount.Name
 	}
 	staging := s.resolveAttachmentStaging(ctx, projectID)
-	artifactsOn := s.experimentEnabled(experiments.AttachmentArtifacts)
 	projectAudience := -1 // unknown until an attachment asks
 	wholeProject := func() bool {
 		if projectAudience < 0 {
@@ -1392,30 +1374,9 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 	for i := range attachmentRefs {
 		ref := attachmentRefs[i]
 		if ref.artifact {
-			// An attachment stored as an artifact is delivered into the
-			// recipient's home (ptone/scion#4596) whatever the experiment
-			// says now, so a scratchpad copy is only ever an addition for
-			// sibling agents, made only when they all read the message.
-			if !wholeProject() {
-				continue
-			}
-			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
-			if artifactsOn {
-				switch {
-				case err == nil:
-					attachmentRefs[i].projectedPath, attachmentRefs[i].projectedMount = staged, staging.mount.Name
-				case !errors.Is(err, errNoAttachmentStaging):
-					s.messageLog.Error("Failed to project attachment into the scratchpad",
-						"attachment", ref.ID, "error", err)
-				}
-				continue
-			}
-			if err != nil {
-				s.messageLog.Error("Failed to stage attachment for agent",
-					"attachment", ref.ID, "error", err)
-				continue
-			}
-			addStaged(staged, staging)
+			// Artifact-backed attachments are delivered exclusively into each
+			// recipient's inbox (~/.scion/inbox/<msg-id>/<name>), regardless of
+			// whether hub.attachment_artifacts is currently on or off.
 			continue
 		}
 		if localAS == nil {
@@ -2160,14 +2121,16 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
 	attachmentRefs = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
-	// Attachment files are projected into the project's scratchpad only
-	// now: every check that can refuse the send (authorization, validation,
-	// wake, conversation resolution, persistence) has passed.
-	stagedPaths, stagedMounts := s.stageChatAttachments(ctx, key, projectID, storeMsg.ID, attachmentRefs)
+	// Legacy AttachmentStore files are staged into the project's scratchpad
+	// only now: every check that can refuse the send (authorization, validation,
+	// wake, conversation resolution, persistence) has passed. Artifact-backed
+	// attachments are skipped by stageChatAttachments and delivered only into
+	// each recipient's inbox.
+	stagedPaths, stagedMounts := s.stageChatAttachments(ctx, key, projectID, attachmentRefs)
 	msg.Attachments = append(msg.Attachments, stagedPaths...)
 	msg.AttachmentMounts = stagedMounts
-	// The bound ones are delivered into the agent's home (ptone/scion#4596),
-	// with their scratchpad projection listed after the inbox path.
+	// Artifact-backed attachments are delivered into the agent's home
+	// (~/.scion/inbox/<msg-id>/<name>, ptone/scion#4596).
 	msg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, attachmentRefs)
 
 	// The row was stored with the optimistic "dispatched" state, which the
