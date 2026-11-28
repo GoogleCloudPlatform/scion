@@ -604,7 +604,7 @@ func (s *Server) handleUploadStatus(
 	}
 	writeJSON(w, http.StatusOK, UploadStatusResponse{
 		ID:           sess.ID,
-		State:        sess.State,
+		State:        store.UploadSessionState(effectiveUploadStateString(sess, uploadNowFn())),
 		Received:     sess.Received,
 		DeclaredSize: sess.DeclaredSize,
 		ExpiresAt:    effectiveUploadExpiry(sess.IdleExpiresAt, sess.HardExpiresAt),
@@ -726,7 +726,10 @@ func (s *Server) handleUploadComplete(
 		return
 	}
 
-	if err := s.store.TransitionUploadSession(ctx, sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateCompleted, token, result); err != nil {
+	compCtx, compCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = s.store.TransitionUploadSession(compCtx, sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateCompleted, token, result)
+	compCancel()
+	if err != nil {
 		if errors.Is(err, store.ErrLeaseLost) || errors.Is(err, store.ErrStateChanged) {
 			if cur, gerr := s.store.GetUploadSession(ctx, sid); gerr == nil && cur.State == store.UploadStateCompleted {
 				writeRawJSON(w, http.StatusOK, cur.Result)

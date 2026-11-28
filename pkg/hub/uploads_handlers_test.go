@@ -29,13 +29,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -763,6 +766,14 @@ func TestWorkspaceUploads_ExpiredSessionRefusedBeforeSweep(t *testing.T) {
 	errObj := decodeUploadAPIError(t, chunkRec)
 	assert.Equal(t, errCodeUploadInvalidState, errObj.Code)
 	assert.Equal(t, string(store.UploadStateExpired), errObj.Details["state"])
+
+	// Nit-2: GET status also reports effective state "expired" before the sweeper runs.
+	statusRec := doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, sess.ID), nil)
+	require.Equal(t, http.StatusOK, statusRec.Code, "body: %s", statusRec.Body.String())
+	var status UploadStatusResponse
+	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &status))
+	assert.Equal(t, store.UploadStateExpired, status.State)
 }
 
 type uploadCommitFaultStore struct {
@@ -809,4 +820,220 @@ func TestWorkspaceUploads_CommitFailureReleasesLease(t *testing.T) {
 	// Lease must have been released: immediate retry at offset 10 succeeds (not 409 upload_busy).
 	okRec := doChunkPut(t, srv, "", u+"?offset=10", payload[10:])
 	require.Equal(t, http.StatusOK, okRec.Code, "body: %s", okRec.Body.String())
+}
+
+// TestWorkspaceUploads_OffsetZeroCommitFaultRetryAndSymlinkRefused verifies R2:
+// when CommitUploadChunk fails on offset 0, the partial file already exists on
+// disk and takeovers is still 0; retrying at offset 0 succeeds and finalizes
+// with matching SHA-256, while a pre-planted symlink at the partial name before
+// chunk 0 is still refused.
+func TestWorkspaceUploads_OffsetZeroCommitFaultRetryAndSymlinkRefused(t *testing.T) {
+	srv, _, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *uploadCommitFaultStore {
+		return &uploadCommitFaultStore{Store: inner, fault: f}
+	})
+	setLargeUploadsExperiment(t, srv, true)
+	project, wsDir := createTestHubManagedProject(t, srv, "Uploads Offset0 Retry")
+
+	payload := []byte("offset-zero-commit-fault-retry-payload")
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "zero.bin", Path: "zero.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+	// Inject a one-shot commit fault on offset 0.
+	wrapped.failOnce.Store(true)
+	fault.Arm()
+	failRec := doChunkPut(t, srv, "", u+"?offset=0", payload)
+	require.Equal(t, http.StatusInternalServerError, failRec.Code)
+
+	// Partial file now exists on disk and takeovers == 0; retrying at offset 0 must succeed.
+	okRec := doChunkPut(t, srv, "", u+"?offset=0", payload)
+	require.Equal(t, http.StatusOK, okRec.Code, "body: %s", okRec.Body.String())
+
+	compRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusOK, compRec.Code, "body: %s", compRec.Body.String())
+
+	gotBytes, err := os.ReadFile(filepath.Join(wsDir, "zero.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, sha256.Sum256(payload), sha256.Sum256(gotBytes))
+
+	// A symlink planted at the partial name before chunk 0 must still be refused.
+	symStartRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "sym.bin", Path: "sym.bin", Size: 5, Overwrite: true})
+	require.Equal(t, http.StatusCreated, symStartRec.Code)
+	var symStarted UploadStartResponse
+	require.NoError(t, json.Unmarshal(symStartRec.Body.Bytes(), &symStarted))
+
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(wsDir, uploadPartialName(symStarted.ID))))
+
+	symChunkRec := doChunkPut(t, srv, "",
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s?offset=0", project.ID, symStarted.ID),
+		[]byte("12345"))
+	require.Equal(t, http.StatusBadRequest, symChunkRec.Code, "symlink partial must be refused; body: %s", symChunkRec.Body.String())
+}
+
+// TestWorkspaceUploads_FinalizePartialSizeMismatchWithoutTakeover verifies O3:
+// FileSink.Finalize rejects a partial file whose size does not match
+// DeclaredSize with 409 upload_integrity_mismatch even when takeovers == 0.
+func TestWorkspaceUploads_FinalizePartialSizeMismatchWithoutTakeover(t *testing.T) {
+	srv, _ := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	project, wsDir := createTestHubManagedProject(t, srv, "Uploads Size Mismatch")
+
+	payload := []byte("abcdefghij")
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "trunc.bin", Path: "trunc.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", payload).Code)
+
+	// Externally truncate the partial file while takeovers == 0.
+	partialPath := filepath.Join(wsDir, uploadPartialName(started.ID))
+	require.NoError(t, os.Truncate(partialPath, int64(len(payload)-2)))
+
+	compRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusConflict, compRec.Code, "body: %s", compRec.Body.String())
+	errObj := decodeUploadAPIError(t, compRec)
+	assert.Equal(t, errCodeUploadIntegrityMismatch, errObj.Code)
+}
+
+// TestWorkspaceUploads_SweeperNoHeadOfLineBlocking verifies O4: >100 terminal
+// sessions whose staging cleanup keeps failing cannot starve expired sessions
+// queued behind them in ORDER BY updated_at ASC.
+func TestWorkspaceUploads_SweeperNoHeadOfLineBlocking(t *testing.T) {
+	srv, st := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	projBroken, brokenDir := createTestHubManagedProject(t, srv, "Uploads Broken Cleanup")
+	projOK, _ := createTestHubManagedProject(t, srv, "Uploads Healthy Sweep")
+
+	// Replace brokenDir with a regular file so os.OpenRoot returns ENOTDIR
+	// (non-ErrNotExist), forcing cleanupUploadSessionStaging to fail.
+	require.NoError(t, os.RemoveAll(brokenDir))
+	require.NoError(t, os.WriteFile(brokenDir, []byte("not-a-dir"), 0o600))
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	oldUpdated := now.Add(-30 * time.Minute)
+
+	const stuckCount = uploadSweepBatchLimit + 5
+	for i := 0; i < stuckCount; i++ {
+		sid := fmt.Sprintf("upl_o4_stuck_%03d", i)
+		sess := &store.UploadSession{
+			ID:             sid,
+			HubID:          srv.uploadHubID(),
+			OwnerKind:      "user",
+			OwnerID:        DevUserID,
+			TargetKind:     store.UploadTargetWorkspace,
+			ScopeProjectID: projBroken.ID,
+			DestPath:       "stuck.bin",
+			FileName:       "stuck.bin",
+			MediaType:      "application/octet-stream",
+			DeclaredSize:   10,
+			StagingRef:     uploadPartialName(sid),
+			IdleExpiresAt:  oldUpdated,
+			HardExpiresAt:  oldUpdated,
+			CreatedAt:      oldUpdated,
+		}
+		require.NoError(t, st.CreateUploadSession(ctx, sess, store.UploadQuota{}))
+		require.NoError(t, st.TransitionUploadSession(ctx, sid, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateFailed, "", nil))
+		require.NoError(t, st.TouchUploadSessionUpdatedAt(ctx, sid, oldUpdated))
+	}
+
+	// Seed an expired uploading session on projOK with a newer updated_at so it
+	// sits behind all 105 stuck rows in ORDER BY updated_at ASC.
+	victimID := "upl_o4_victim"
+	victim := &store.UploadSession{
+		ID:             victimID,
+		HubID:          srv.uploadHubID(),
+		OwnerKind:      "user",
+		OwnerID:        DevUserID,
+		TargetKind:     store.UploadTargetWorkspace,
+		ScopeProjectID: projOK.ID,
+		DestPath:       "victim.bin",
+		FileName:       "victim.bin",
+		MediaType:      "application/octet-stream",
+		DeclaredSize:   10,
+		StagingRef:     uploadPartialName(victimID),
+		IdleExpiresAt:  now.Add(-5 * time.Minute),
+		HardExpiresAt:  now.Add(time.Hour),
+		CreatedAt:      now.Add(-10 * time.Minute),
+	}
+	require.NoError(t, st.CreateUploadSession(ctx, victim, store.UploadQuota{}))
+
+	srv.sweepUploadSessions(ctx, now)
+
+	// The victim behind the 105 stuck rows must have been expired.
+	gotVictim, err := st.GetUploadSession(ctx, victimID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UploadStateExpired, gotVictim.State)
+
+	// Stuck rows remain retained (cleanup failed) but backed off to now.
+	gotStuck, err := st.GetUploadSession(ctx, "upl_o4_stuck_000")
+	require.NoError(t, err)
+	assert.Equal(t, store.UploadStateFailed, gotStuck.State)
+	assert.False(t, gotStuck.UpdatedAt.Before(now), "stuck row updated_at %v should be backed off to >= %v", gotStuck.UpdatedAt, now)
+}
+
+type uploadZeroReader struct{}
+
+func (uploadZeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// TestWorkspaceUploads_LimitA_OneGiBChunkedAndMultipartClamped verifies LIMIT-A:
+// with max_workspace_file_size configured to 1 GiB via the admin API, chunked
+// start accepts declared size 1 GiB (201 Created), while legacy single-request
+// multipart upload above 100 MiB still returns 413 Request Entity Too Large.
+func TestWorkspaceUploads_LimitA_OneGiBChunkedAndMultipartClamped(t *testing.T) {
+	srv, st := testServer(t)
+	ops := NewOperationalSettings(st, koanf.New("."), koanf.New("."))
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+	setLargeUploadsExperiment(t, srv, true)
+
+	// Configure max_workspace_file_size = 1 GiB via real admin HTTP PUT.
+	putRec := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(putRec, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"uploads":{"max_workspace_file_size":1073741824}}}}`), ops)
+	require.Equal(t, http.StatusOK, putRec.Code, "admin PUT 1 GiB failed: %s", putRec.Body.String())
+	ApplySnapshot(srv, ops.Snapshot())
+
+	project, _ := createTestHubManagedProject(t, srv, "Uploads LimitA 1GiB")
+
+	// 1. Chunked start with declared size 1 GiB succeeds (201 Created).
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "big.bin", Path: "big.bin", Size: config.MaxLargeUploadFileSize, Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code, "chunked start 1 GiB body: %s", startRec.Body.String())
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	assert.Equal(t, config.MaxLargeUploadFileSize, started.MaxBytes)
+
+	// 2. Legacy single-request multipart upload above 100 MiB is still rejected with 413.
+	const boundary = "limitaboundary"
+	header := "--" + boundary + "\r\nContent-Disposition: form-data; name=\"huge.bin\"; filename=\"huge.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+	footer := "\r\n--" + boundary + "--\r\n"
+	body := io.MultiReader(
+		strings.NewReader(header),
+		io.LimitReader(uploadZeroReader{}, config.MaxUploadFileSize+1024),
+		strings.NewReader(footer),
+	)
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), body)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	mpRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(mpRec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, mpRec.Code, "legacy multipart >100 MiB must be 413; body: %s", mpRec.Body.String())
 }
