@@ -20,7 +20,9 @@
  * whenever `checked` is set without `type="checkbox"`.
  *
  * This guard scans `web/src/` (excluding tests) so any `<sl-menu-item>` that
- * binds or sets `checked` must also declare `type="checkbox"`.
+ * binds or sets `checked` must also declare `type="checkbox"`. Note: this
+ * static check covers Lit template tags only, not imperatively created
+ * `document.createElement('sl-menu-item')` nodes.
  */
 
 import { describe, it, expect } from 'vitest';

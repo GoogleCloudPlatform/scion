@@ -21,6 +21,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { syncSingleSelectMenuChecked, type SlCheckboxMenuItem } from '../../utils/menu-checkbox.js';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
@@ -1803,8 +1804,11 @@ export class ScionPageAgents extends LitElement {
                   Sort: ${this.sortField}
                 </sl-button>
                 <sl-menu
-                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
-                    this.toggleSort(e.detail.item.value as AgentSortField)}
+                  @sl-select=${(e: CustomEvent<{ item: SlCheckboxMenuItem }>) => {
+                    const value = e.detail.item.value as AgentSortField;
+                    this.toggleSort(value);
+                    syncSingleSelectMenuChecked(e.detail.item, this.sortField === value);
+                  }}
                 >
                   <sl-menu-item type="checkbox" value="name" ?checked=${this.sortField === 'name'}
                     >Name</sl-menu-item

@@ -31,6 +31,10 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import {
+  syncSingleSelectMenuChecked,
+  type SlCheckboxMenuItem,
+} from '../../../utils/menu-checkbox.js';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
@@ -1549,10 +1553,12 @@ export class ScionChatComposer extends LitElement {
 
   /** Handle agent selection from the dropdown menu. */
   private handleAgentMenuSelect(e: Event): void {
-    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const detail = (e as CustomEvent<{ item?: SlCheckboxMenuItem }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value') || '';
     const newDefault = value === '__clear__' ? '' : value;
+    const currentValue = this.defaultAgentMember()?.name ?? (this.defaultAgent ? '' : '__clear__');
+    syncSingleSelectMenuChecked(item, value === currentValue);
 
     if (newDefault === this.defaultAgent) return;
     // Picking the agent that is already the default (stored by ID or slug)

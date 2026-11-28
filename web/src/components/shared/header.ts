@@ -39,6 +39,7 @@
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
+import { syncSingleSelectMenuChecked, type SlCheckboxMenuItem } from '../../utils/menu-checkbox.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Project, User } from '../../shared/types.js';
@@ -1294,7 +1295,7 @@ export class ScionHeader extends LitElement {
           <sl-icon class="caret" name="chevron-down"></sl-icon>
         </button>
         <sl-menu
-          @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void =>
+          @sl-select=${(e: CustomEvent<{ item: SlCheckboxMenuItem }>): void =>
             this.handleModeSelect(e)}
         >
           <sl-menu-item type="checkbox" value="dashboard" ?checked=${!isChat && !isTerminal}>
@@ -1372,9 +1373,16 @@ export class ScionHeader extends LitElement {
   }
 
   /** Handle mode selection from the dropdown menu. */
-  private handleModeSelect(e: CustomEvent<{ item: { value: string } }>): void {
-    const value = e.detail.item.value;
+  private handleModeSelect(e: CustomEvent<{ item: SlCheckboxMenuItem }>): void {
+    const item = e.detail.item;
+    const value = item.value;
     if (value === 'dashboard' || value === 'chat' || value === 'terminals') {
+      const currentMode = this.isChatView()
+        ? 'chat'
+        : this.isTerminalView()
+          ? 'terminals'
+          : 'dashboard';
+      syncSingleSelectMenuChecked(item, value === currentMode);
       void this.handleModeSwitch(value);
     } else {
       this.terminalsMenuMod?.selectNarrowTerminalValue(value);
