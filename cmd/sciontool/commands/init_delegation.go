@@ -23,9 +23,9 @@ import (
 )
 
 // delegationSocketPath is where init serves the delegation socket: next to
-// the agent token file, in the agent user's ~/.scion.
+// the handoff agent token file, in the agent user's ~/.scion.
 func delegationSocketPath() string {
-	return filepath.Join(filepath.Dir(hub.TokenFilePath()), delegation.SocketName)
+	return filepath.Join(filepath.Dir(hub.HandoffTokenFilePath()), delegation.SocketName)
 }
 
 // startDelegationHelper serves the delegation socket for processes in the

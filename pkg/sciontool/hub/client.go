@@ -2287,7 +2287,7 @@ func TokenHomeIsolated() bool {
 // TokenFilePath returns the path to the active agent token file.
 // In default TokenStoreHome mode it resolves to <scion home>/.scion/scion-token.
 // In TokenStoreRuntimeFile mode it resolves to the configured runtime path
-// (e.g. /run/scion/scion-token). In TokenStoreMemory mode it returns "".
+// (e.g. /run/sciontool/auth/scion-token). In TokenStoreMemory mode it returns "".
 func TokenFilePath() string {
 	mode, rPath, _ := snapshotTokenStore()
 	switch mode {
@@ -2367,7 +2367,7 @@ func WriteTokenFile(token string, uid, gid int) error {
 // a sibling of the active agent credential file. In default TokenStoreHome
 // mode it resolves to <scion home>/.scion/transport-token; in
 // TokenStoreRuntimeFile mode it resolves to <runtime dir>/transport-token
-// (e.g. /run/scion/transport-token); in TokenStoreMemory mode it returns "".
+// (e.g. /run/sciontool/auth/transport-token); in TokenStoreMemory mode it returns "".
 func TransportTokenFilePath() string {
 	mode, rPath, _ := snapshotTokenStore()
 	switch mode {
@@ -2464,7 +2464,7 @@ func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 // transport source. In isolated token-store mode it takes and unconditionally
 // unlinks the handoff file (<scion home>/.scion/transport-token), never
 // restores an unparseable candidate back to the handoff path, and persists an
-// adopted token only to the runtime store (/run/scion/transport-token or
+// adopted token only to the runtime store (/run/sciontool/auth/transport-token or
 // memory) with uid=gid=0. It returns false, with no error, when there is no
 // transport token file or the client does not use a hub-provided transport
 // token. A value whose expiry cannot be parsed is not adopted: the current

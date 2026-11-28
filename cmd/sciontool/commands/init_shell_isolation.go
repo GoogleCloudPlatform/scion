@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/clicontextseed"
@@ -87,17 +86,33 @@ var shellContextSeedChown = dirfd.Fchown
 
 // runtimeTokenPathForInit is the root-only runtime token file path used in
 // isolated mode on root-init runtimes. Replaced only in unit tests so tests
-// never touch /run/scion.
+// never touch /run/sciontool/auth.
 var runtimeTokenPathForInit = hub.DefaultRuntimeTokenPath
 
 // initEffectiveUID returns the process's effective UID. Replaced only in unit
 // tests to exercise root-init vs rootless token-store selection.
 var initEffectiveUID = os.Geteuid
 
+// runChownTokenFile is hub.ChownTokenFile; replaced only in unit tests to
+// assert the ChownTokenFile skip under shellIsolation without CAP_CHOWN.
+var runChownTokenFile = hub.ChownTokenFile
+
+// chownTokenFileForStartup chowns the canonical home token file to
+// targetUID:targetGID in non-isolated mode. Under shellIsolation the token
+// lives in /run/sciontool/auth/scion-token (0600 root:root) or memory only,
+// so ChownTokenFile is skipped.
+func chownTokenFileForStartup(shellIsolation bool, token string, targetUID, targetGID int) {
+	if !shellIsolation && token != "" && targetUID > 0 {
+		if err := runChownTokenFile(targetUID, targetGID); err != nil {
+			log.Error("Failed to chown token file to UID=%d: %v", targetUID, err)
+		}
+	}
+}
+
 // configureShellTokenStoreMode selects the isolated runtime token store mode
-// (TokenStoreRuntimeFile on root-init runtimes when /run/scion is writable,
-// otherwise TokenStoreMemory with a warning; never TokenStoreHome). Safe to
-// call idempotently before and after re-exec.
+// (TokenStoreRuntimeFile on root-init runtimes when /run/sciontool/auth is
+// writable, otherwise TokenStoreMemory with a warning; never TokenStoreHome).
+// Safe to call idempotently before and after re-exec.
 func configureShellTokenStoreMode(targetUID int, rootless bool) hub.TokenStoreMode {
 	if hub.IsIsolatedTokenStore() {
 		return hub.CurrentTokenStoreMode()
@@ -118,9 +133,9 @@ func configureShellTokenStoreMode(targetUID int, rootless bool) hub.TokenStoreMo
 }
 
 // setupShellIsolatedTokenStore configures the isolated runtime token store
-// (root-only /run/scion/scion-token on root-init runtimes, or memory-only on
-// rootless/shared-UID runtimes or unwritable /run), takes and unconditionally
-// unlinks the broker handoff files (~/.scion/scion-token and
+// (root-only /run/sciontool/auth/scion-token on root-init runtimes, or
+// memory-only on rootless/shared-UID runtimes or unwritable /run), takes and
+// unconditionally unlinks the broker handoff files (~/.scion/scion-token and
 // ~/.scion/transport-token), and removes any stale .tmp files.
 //
 // This runs AFTER the environ-purge re-exec so no in-memory state is lost
@@ -206,45 +221,39 @@ func setupShellIsolatedTokenStore(targetUID int, rootless bool) error {
 
 // reconcileShellHandoffBeforeSupervisorRun re-runs the handoff take step
 // immediately before sup.Run and then verifies that both handoff paths are
-// absent. A legitimate broker reset-auth write that landed between
-// setupShellIsolatedTokenStore and sup.Run is taken, validated under signal
-// rules (and adopted if valid, or discarded if not), and unlinked so start
-// proceeds cleanly. Init fails closed only if an unlink or absence check fails.
-func reconcileShellHandoffBeforeSupervisorRun(hubClient *hub.Client) error {
+// absent.
+//
+// It NEVER adopts a late agent-token handoff directly (sidecar services and
+// pre-start hooks have already run as UID scion in this window, so a file-origin
+// candidate must still pass the normal file-change hub check + verified-anchor
+// check, or be adopted by a broker SIGUSR2). Instead it takes and unlinks the
+// file and returns the raw value as pendingAgentToken so authResetter can hold
+// it in PID 1 memory as pendingCandidate. Init fails closed only if an unlink
+// or absence check fails.
+func reconcileShellHandoffBeforeSupervisorRun(hubClient *hub.Client) (string, error) {
+	var pendingAgentToken string
 	tok, err := hub.TakeHandoffToken()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// Normal case: no late handoff arrived.
 		} else if errors.Is(err, hub.ErrHandoffUnlinkFailed) {
-			return fmt.Errorf("cannot remove late handoff token: %w", err)
+			return "", fmt.Errorf("cannot remove late handoff token: %w", err)
 		} else {
 			log.Warn("Ignored and removed invalid late handoff token entry: %v", err)
 		}
 	} else if tok != "" {
-		if hubClient != nil && hubClient.AgentID() != "" {
-			if info, verr := hub.ValidateCandidateToken(tok, hubClient.AgentID(), time.Now()); verr == nil {
-				hubClient.SetToken(tok)
-				if werr := hub.WriteTokenFile(tok, 0, 0); werr != nil {
-					log.Error("Failed to persist late handoff credential %s to runtime store: %v", info.LogID(), werr)
-				} else {
-					log.Info("Adopted late handoff credential %s before workload start", info.LogID())
-				}
-			} else {
-				log.Warn("Discarded invalid late handoff credential before workload start: %v", verr)
-			}
-		} else {
-			log.Warn("Discarded late handoff credential before workload start (hub client not configured)")
-		}
+		pendingAgentToken = tok
+		log.Info("Deferred late handoff credential to authResetter for validation before adoption")
 	}
 	if err := hub.RemoveStaleHandoffTmpFile(); err != nil {
-		return fmt.Errorf("cannot remove late stale handoff token temp file: %w", err)
+		return "", fmt.Errorf("cannot remove late stale handoff token temp file: %w", err)
 	}
 
 	// Re-run transport handoff take as well.
 	if hubClient != nil && hubClient.HasHubProvidedTransport() {
 		if adopted, terr := hubClient.AdoptTransportTokenFile(0, 0); terr != nil {
 			if errors.Is(terr, hub.ErrHandoffUnlinkFailed) {
-				return fmt.Errorf("cannot remove late handoff transport token: %w", terr)
+				return "", fmt.Errorf("cannot remove late handoff transport token: %w", terr)
 			}
 			log.Warn("Ignored and removed invalid late handoff transport token: %v", terr)
 		} else if adopted {
@@ -254,7 +263,7 @@ func reconcileShellHandoffBeforeSupervisorRun(hubClient *hub.Client) error {
 		if _, terr := hub.TakeHandoffTransportToken(); terr != nil {
 			if !errors.Is(terr, fs.ErrNotExist) {
 				if errors.Is(terr, hub.ErrHandoffUnlinkFailed) {
-					return fmt.Errorf("cannot remove late handoff transport token: %w", terr)
+					return "", fmt.Errorf("cannot remove late handoff transport token: %w", terr)
 				}
 				log.Warn("Ignored and removed invalid late handoff transport token entry: %v", terr)
 			}
@@ -263,10 +272,13 @@ func reconcileShellHandoffBeforeSupervisorRun(hubClient *hub.Client) error {
 		}
 	}
 	if err := hub.RemoveStaleHandoffTransportTmpFile(); err != nil {
-		return fmt.Errorf("cannot remove late stale handoff transport token temp file: %w", err)
+		return "", fmt.Errorf("cannot remove late stale handoff transport token temp file: %w", err)
 	}
 
-	return verifyShellHandoffTokenAbsent()
+	if err := verifyShellHandoffTokenAbsent(); err != nil {
+		return "", err
+	}
+	return pendingAgentToken, nil
 }
 
 // verifyShellHandoffTokenAbsent asserts that neither the agent token nor the

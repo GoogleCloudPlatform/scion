@@ -768,10 +768,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// In shell execution containers, isolate the runtime agent token before
 	// any hub.NewClient() call (including telemetry/trajectory) and before any
-	// workload process starts: configure /run/scion/scion-token (root-init) or
-	// memory-only (rootless / unwritable /run), take and unlink the handoff
-	// file, and remove any stale .tmp file. Fails closed if the handoff cannot
-	// be unlinked.
+	// workload process starts: configure /run/sciontool/auth/scion-token
+	// (root-init) or memory-only (rootless / unwritable /run), take and unlink
+	// the handoff file, and remove any stale .tmp file. Fails closed if the
+	// handoff cannot be unlinked.
 	if shellIsolation {
 		if err := setupShellIsolatedTokenStore(targetUID, rootless); err != nil {
 			log.Error("Failed to isolate runtime token: %v", err)
@@ -1446,13 +1446,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// it.
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	supChildArgs := childArgs
+	var lateHandoffPending string
 	if shellIsolation {
 		if beforeVerifyHandoffAbsentForTest != nil {
 			beforeVerifyHandoffAbsentForTest()
 		}
-		if err := reconcileShellHandoffBeforeSupervisorRun(hubClient); err != nil {
-			log.Error("Refusing to start workload: %v", err)
-			reportInitFailure(agentHome, err)
+		var reconcileErr error
+		lateHandoffPending, reconcileErr = reconcileShellHandoffBeforeSupervisorRun(hubClient)
+		if reconcileErr != nil {
+			log.Error("Refusing to start workload: %v", reconcileErr)
+			reportInitFailure(agentHome, reconcileErr)
 			return 1
 		}
 		supChildArgs = resolveShellStartCmdArgs(childArgs, os.Getenv)
@@ -1675,15 +1678,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// Read the agent token from the active token store. In non-isolated
 			// mode (canonical ~/.scion/scion-token), init runs as root and
 			// chowns the file to the scion user via a symlink-safe fd chain.
-			// In shell isolated mode the token lives in /run/scion/scion-token
+			// In shell isolated mode the token lives in /run/sciontool/auth/scion-token
 			// (0600 root:root) or memory only, so ChownTokenFile is skipped and
 			// refresh persists with ChownUID=0, ChownGID=0.
 			token := hub.ReadTokenFile()
-			if !shellIsolation && token != "" && targetUID > 0 {
-				if err := hub.ChownTokenFile(targetUID, targetGID); err != nil {
-					log.Error("Failed to chown token file to UID=%d: %v", targetUID, err)
-				}
-			}
+			chownTokenFileForStartup(shellIsolation, token, targetUID, targetGID)
 
 			tokenChownUID, tokenChownGID := targetUID, targetGID
 			if shellIsolation {
@@ -1884,6 +1883,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		targetUID:          targetUID,
 		targetGID:          targetGID,
 		isolated:           shellIsolation,
+		pendingCandidate:   lateHandoffPending,
 		now:                time.Now,
 	}
 
@@ -1895,6 +1895,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	defer credWatchCancel()
 	if hubClient != nil && hubClient.IsConfigured() {
 		authReset.watcher = startCredentialFileWatch(credWatchCtx, hubClient, hub.TokenWatchConfig{Notify: credFileChan})
+		if lateHandoffPending != "" && authReset.watcher != nil {
+			authReset.watcher.RetryPendingAfter(hub.TokenFingerprint(lateHandoffPending), 0)
+		}
 	}
 
 	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, credential
@@ -2885,8 +2888,8 @@ func (r *authResetter) reset(source authResetSource) {
 
 	// Reset-auth may also have written a fresh transport token. Adopt it so
 	// this process uses it immediately; in isolated mode it is taken from the
-	// handoff path and stored at /run/scion/transport-token (0600 root:root) or
-	// in memory only (chownUID=chownGID=0).
+	// handoff path and stored at /run/sciontool/auth/transport-token (0600
+	// root:root) or in memory only (chownUID=chownGID=0).
 	if adopted, err := hubClient.AdoptTransportTokenFile(chownUID, chownGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
 	} else if adopted {

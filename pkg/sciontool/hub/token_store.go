@@ -33,8 +33,8 @@ const (
 	// <scion home>/.scion/scion-token, shared with workload processes.
 	TokenStoreHome TokenStoreMode = iota
 	// TokenStoreRuntimeFile stores the token at a root-only runtime path
-	// (DefaultRuntimeTokenPath: /run/scion/scion-token, dir 0700, file 0600,
-	// owned by root:root).
+	// (DefaultRuntimeTokenPath: /run/sciontool/auth/scion-token, dir 0700,
+	// file 0600, owned by root:root).
 	TokenStoreRuntimeFile
 	// TokenStoreMemory keeps the token in memory only and never persists it
 	// to disk (used on rootless/shared-UID runtimes or when /run is not
@@ -159,7 +159,7 @@ func isDefaultRuntimePath(path string) bool {
 }
 
 // checkRuntimeStoreTestGuard panics under `go test` if code attempts to touch
-// the real /run/scion directory or any runtime token file without test
+// the real /run/sciontool/auth directory or any runtime token file without test
 // isolation enabled.
 func checkRuntimeStoreTestGuard(path, caller string) {
 	if !testing.Testing() {

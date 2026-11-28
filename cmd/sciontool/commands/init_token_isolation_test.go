@@ -394,18 +394,28 @@ func TestRunInit_ShellIsolation_RefusesStartWhenHandoffCannotBeUnlinked(t *testi
 
 	origRuntimePath := runtimeTokenPathForInit
 	origSetup := runSetupHostUser
+	origBeforeVerify := beforeVerifyHandoffAbsentForTest
 	origBeforeSup := beforeSupervisorRunForTest
+	origServicesStart := runServicesStart
 	runtimeTokenPathForInit = filepath.Join(t.TempDir(), "run-scion", hub.TokenFile)
 	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
 	t.Cleanup(func() {
 		runtimeTokenPathForInit = origRuntimePath
 		runSetupHostUser = origSetup
+		beforeVerifyHandoffAbsentForTest = origBeforeVerify
 		beforeSupervisorRunForTest = origBeforeSup
+		runServicesStart = origServicesStart
 	})
 
-	// Plant a directory at the handoff path so unlink fails closed.
+	// Plant a directory at the handoff path so the first take fails closed.
 	handoff := hub.HandoffTokenFilePath()
 	if err := os.MkdirAll(handoff, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Add a sidecar service config to prove the first-take unlink failure exits
+	// before sidecars or the pre-sup.Run reconcile step ever run (m7).
+	svcYAML := "- name: testsvc\n  command: [\"true\"]\n"
+	if err := os.WriteFile(filepath.Join(home, ".scion", "scion-services.yaml"), []byte(svcYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -416,6 +426,15 @@ func TestRunInit_ShellIsolation_RefusesStartWhenHandoffCannotBeUnlinked(t *testi
 	t.Setenv("SCION_HUB_URL", "")
 	t.Setenv("SCION_AGENT_ID", "")
 
+	servicesReached := false
+	runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
+		servicesReached = true
+		return nil
+	}
+	reconcileReached := false
+	beforeVerifyHandoffAbsentForTest = func() {
+		reconcileReached = true
+	}
 	supReached := false
 	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
 		supReached = true
@@ -428,6 +447,12 @@ func TestRunInit_ShellIsolation_RefusesStartWhenHandoffCannotBeUnlinked(t *testi
 	})
 	if code == 0 {
 		t.Fatal("RunInit exited 0, expected non-zero fail-closed exit when handoff cannot be unlinked")
+	}
+	if servicesReached {
+		t.Fatal("sidecar services started despite first-take handoff unlink failure")
+	}
+	if reconcileReached {
+		t.Fatal("pre-sup.Run reconcile step reached despite first-take handoff unlink failure")
 	}
 	if supReached {
 		t.Fatal("sup.Run was reached despite unremovable handoff token path")
@@ -709,52 +734,6 @@ func TestRunInit_ShellIsolation_StagedHubTokenSurvivesReExecInMemoryMode(t *test
 	}
 	if handoffExistsAtRun {
 		t.Fatal("handoff token file still existed at sup.Run")
-	}
-}
-
-func TestRunInit_ShellIsolation_StagedHubTokenWritesOwnerZero(t *testing.T) {
-	home := t.TempDir()
-	base := t.TempDir()
-	t.Cleanup(hub.SetTokenHome(home))
-	t.Cleanup(hub.SetRuntimeTokenStoreForTest(base))
-
-	runtimePath := filepath.Join(base, "run-scion", hub.TokenFile)
-	origRuntimePath := runtimeTokenPathForInit
-	origEUID := initEffectiveUID
-	origWrite := runWriteTokenFile
-	runtimeTokenPathForInit = runtimePath
-	initEffectiveUID = func() int { return 0 }
-	t.Cleanup(func() {
-		runtimeTokenPathForInit = origRuntimePath
-		initEffectiveUID = origEUID
-		runWriteTokenFile = origWrite
-	})
-
-	var stagedUID, stagedGID int
-	stagedUID, stagedGID = -1, -1
-	runWriteTokenFile = func(token string, uid, gid int) error {
-		stagedUID, stagedGID = uid, gid
-		return hub.WriteTokenFile(token, uid, gid)
-	}
-
-	// Stage before re-exec (TokenStoreHome) with owner 0:0, then take into RuntimeFile.
-	if _, err := stageHubToken("staged-runtime-tok", 0, 0); err != nil {
-		t.Fatalf("stageHubToken: %v", err)
-	}
-	if stagedUID != 0 || stagedGID != 0 {
-		t.Fatalf("stageHubToken wrote with uid=%d gid=%d, want 0:0", stagedUID, stagedGID)
-	}
-	if err := setupShellIsolatedTokenStore(1000, false); err != nil {
-		t.Fatalf("setupShellIsolatedTokenStore: %v", err)
-	}
-	if got := hub.CurrentTokenStoreMode(); got != hub.TokenStoreRuntimeFile {
-		t.Fatalf("mode = %v, want TokenStoreRuntimeFile", got)
-	}
-	if got := hub.ReadTokenFile(); got != "staged-runtime-tok" {
-		t.Fatalf("ReadTokenFile() = %q, want %q", got, "staged-runtime-tok")
-	}
-	if _, err := os.Lstat(hub.HandoffTokenFilePath()); !os.IsNotExist(err) {
-		t.Fatalf("handoff file still present after take: err=%v", err)
 	}
 }
 
@@ -1288,4 +1267,126 @@ func TestSetupShellIsolatedTokenStore_TransportMarkerGating(t *testing.T) {
 			t.Fatalf("SCION_TRANSPORT_TOKEN_FILE = %q, want %q", gotEnv, hub.TransportTokenFilePath())
 		}
 	})
+}
+
+func TestRunInit_ShellIsolation_LateHandoffDeferredNotAdoptedWithoutHubCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+	origSetup := runSetupHostUser
+	origBeforeVerify := beforeVerifyHandoffAbsentForTest
+	origBeforeSup := beforeSupervisorRunForTest
+	origWindow := childStartupCheckWindow
+	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	childStartupCheckWindow = 20 * time.Millisecond
+	t.Cleanup(func() {
+		runSetupHostUser = origSetup
+		beforeVerifyHandoffAbsentForTest = origBeforeVerify
+		beforeSupervisorRunForTest = origBeforeSup
+		childStartupCheckWindow = origWindow
+	})
+
+	now := time.Now().Truncate(time.Second)
+	initTok := testCredential(t, "initial-valid", now.Add(-time.Minute))
+	forgedLateTok := testCredential(t, "forged-late", now)
+	writeHandoffTokenForTest(t, initTok)
+
+	// Hub accepts only initTok and refuses forgedLateTok.
+	ch := newCredHub(t, initTok)
+
+	beforeVerifyHandoffAbsentForTest = func() {
+		writeHandoffTokenForTest(t, forgedLateTok)
+	}
+
+	var runtimeTokAtRun string
+	var handoffExistsAtRun bool
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		runtimeTokAtRun = hub.ReadTokenFile()
+		_, err := os.Lstat(hub.HandoffTokenFilePath())
+		handoffExistsAtRun = !os.IsNotExist(err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv("SCION_HUB_ENDPOINT", ch.srv.URL)
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+
+	code := RunInit([]string{"sh", "-c", "sleep 0.15"}, InitRunOptions{
+		DisableReExec:               true,
+		DisableTermSignalForwarding: true,
+		DisablePortForwarding:       true,
+	})
+	if code != 0 {
+		t.Fatalf("RunInit exited %d, want 0", code)
+	}
+	if handoffExistsAtRun {
+		t.Fatal("late handoff file still existed at sup.Run")
+	}
+	if runtimeTokAtRun != initTok {
+		t.Fatalf("runtime store at sup.Run = %q, want initial token (late handoff must NOT be adopted without hub check)", runtimeTokAtRun)
+	}
+	if ch.presented(initTok) == 0 {
+		t.Fatal("expected Hub requests to use initial token")
+	}
+	if ch.presented(forgedLateTok) > 0 && ch.checkCountExcept(initTok) == 0 {
+		t.Fatal("hubClient sent forged late token on non-check request")
+	}
+
+	// Verify the returned pending candidate flows cleanly into authResetter:
+	// file-change rules refuse it (hub returns 401), while SIGUSR2 adopts it
+	// under signal rules.
+	h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+	h.hub.set(func(c *credHub) { c.checkStatus = 401 })
+	writeHandoffTokenForTest(t, h.newTok)
+	pending, err := reconcileShellHandoffBeforeSupervisorRun(h.client)
+	if err != nil {
+		t.Fatalf("reconcileShellHandoffBeforeSupervisorRun: %v", err)
+	}
+	if pending != h.newTok {
+		t.Fatalf("pending = %q, want h.newTok", pending)
+	}
+	if got := h.client.AuthToken(); got != h.oldTok {
+		t.Fatal("reconcile adopted late handoff directly instead of deferring to authResetter")
+	}
+	if got := hub.ReadTokenFile(); got != h.oldTok {
+		t.Fatal("reconcile persisted late handoff to runtime store directly")
+	}
+	h.r.pendingCandidate = pending
+	h.r.reset(authResetFileChange)
+	if got := h.client.AuthToken(); got != h.oldTok {
+		t.Fatal("authResetFileChange adopted hub-refused pending candidate")
+	}
+	h.hub.set(func(c *credHub) { c.checkStatus = 0 })
+	h.r.reset(authResetSignal)
+	if got := h.client.AuthToken(); got != h.newTok {
+		t.Fatal("SIGUSR2 did not adopt pending candidate under signal rules")
+	}
+}
+
+func TestChownTokenFileForStartup_SkippedUnderShellIsolation(t *testing.T) {
+	origChown := runChownTokenFile
+	t.Cleanup(func() { runChownTokenFile = origChown })
+
+	called := 0
+	var gotUID, gotGID int
+	runChownTokenFile = func(uid, gid int) error {
+		called++
+		gotUID, gotGID = uid, gid
+		return nil
+	}
+
+	// Under shellIsolation with targetUID > 0, ChownTokenFile must be skipped.
+	chownTokenFileForStartup(true, "some-token", 1000, 1000)
+	if called != 0 {
+		t.Fatalf("runChownTokenFile called %d times under shellIsolation, want 0", called)
+	}
+
+	// Non-shell regression: targetUID > 0 must call ChownTokenFile(1000, 1000).
+	chownTokenFileForStartup(false, "some-token", 1000, 1000)
+	if called != 1 || gotUID != 1000 || gotGID != 1000 {
+		t.Fatalf("non-shell runChownTokenFile called=%d uid=%d gid=%d, want 1, 1000, 1000", called, gotUID, gotGID)
+	}
 }
