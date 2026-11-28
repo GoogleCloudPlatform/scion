@@ -9108,6 +9108,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 		h = s.corsMiddleware(h)
 	}
 
+	// Apply the sandbox page policy to every response on agent-port proxy
+	// routes before CORS, auth or routing runs, so every hub-generated
+	// response carries it even on a hub-only listener (ptone/scion#5944).
+	h = agentPortPolicyMiddleware(h)
+
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
 	// Requests whose path carries a bearer credential (artifact share-link
 	// tokens, artifact view capabilities) are not traced, so the path
