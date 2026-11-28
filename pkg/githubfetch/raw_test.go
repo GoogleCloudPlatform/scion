@@ -150,6 +150,22 @@ func TestFetchFile_BlobVerificationAndMidStreamCap(t *testing.T) {
 		assertErrorKind(t, err, KindUpstream)
 	})
 
+	t.Run("truncated raw body rejected without BlobSHA", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(goodBody[:5])
+		}))
+		t.Cleanup(srv.Close)
+
+		ep := Endpoint{APIBase: srv.URL, RawBase: srv.URL, WebHost: srv.URL, Codeload: srv.URL}
+		client := New(Options{Endpoint: ep, Doer: newHTTPDoer(srv.Client(), nil), Cooldown: NewCooldown(nil)})
+		src := Source{Owner: "acme", Repo: "repo"}
+		f := File{Path: "a.txt", Mode: 0o644, Size: int64(len(goodBody)), BlobSHA: ""}
+
+		var out bytes.Buffer
+		err := client.FetchFile(context.Background(), src, sha, f, Credential{}, &out)
+		assertErrorKind(t, err, KindUpstream)
+	})
+
 	t.Run("oversized raw body rejected mid-stream without draining", func(t *testing.T) {
 		var readFromStream atomic.Int64
 		pr, pw := io.Pipe()
@@ -614,6 +630,121 @@ func TestFetchFolder_RawBoundedParallelismAndPartialFailure(t *testing.T) {
 		}
 		if _, statErr := os.Stat(filepath.Join(destDir, "bad.txt")); !os.IsNotExist(statErr) {
 			t.Errorf("failed raw file bad.txt should have been removed")
+		}
+	})
+}
+
+func TestFetchFolder_RawContextCancelAndTimeout(t *testing.T) {
+	const sha = "7777777777777777777777777777777777777777"
+	const treeSHA = "8888888888888888888888888888888888888888"
+	bodyA := []byte("file-a-content")
+	bodyB := []byte("file-b-content")
+	twoFileTree := &Tree{
+		TreeSHA: treeSHA,
+		Files: []File{
+			{Path: "a.txt", Mode: 0o644, Size: int64(len(bodyA)), BlobSHA: gitBlobSHA(bodyA)},
+			{Path: "b.txt", Mode: 0o644, Size: int64(len(bodyB)), BlobSHA: gitBlobSHA(bodyB)},
+		},
+	}
+	src := Source{Owner: "acme", Repo: "repo", Ref: sha, Path: "pkg"}
+
+	t.Run("pre-cancelled context returns KindTimeout and zero result", func(t *testing.T) {
+		var hits atomic.Int32
+		doer := funcDoer(func(_ context.Context, _ Request) (*Response, error) {
+			hits.Add(1)
+			return nil, errors.New("should not be called")
+		})
+		client := New(Options{Endpoint: DefaultEndpoint(), Doer: doer, Cooldown: NewCooldown(nil)})
+		root, err := os.OpenRoot(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		res, err := client.FetchFolderResolved(ctx, src, sha, twoFileTree, Credential{}, root, ImportHostedLimits())
+		assertErrorKind(t, err, KindTimeout)
+		if res != (FolderResult{}) {
+			t.Fatalf("expected zero FolderResult on pre-cancelled ctx, got %+v", res)
+		}
+		if hits.Load() != 0 {
+			t.Fatalf("hits = %d, want 0", hits.Load())
+		}
+	})
+
+	t.Run("cancellation between files with RawConcurrency 1 returns KindTimeout and zero result", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var hits atomic.Int32
+		doer := funcDoer(func(_ context.Context, r Request) (*Response, error) {
+			hits.Add(1)
+			if strings.HasSuffix(r.URL, "/a.txt") {
+				// Return file A cleanly, then cancel ctx before file B starts.
+				cancel()
+				return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(bodyA))}, nil
+			}
+			return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(bodyB))}, nil
+		})
+		client := New(Options{
+			Endpoint:       DefaultEndpoint(),
+			Doer:           doer,
+			Cooldown:       NewCooldown(nil),
+			RawConcurrency: 1,
+		})
+		root, err := os.OpenRoot(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+
+		res, err := client.FetchFolderResolved(ctx, src, sha, twoFileTree, Credential{}, root, ImportHostedLimits())
+		assertErrorKind(t, err, KindTimeout)
+		if res != (FolderResult{}) {
+			t.Fatalf("expected zero FolderResult when cancelled between files, got %+v", res)
+		}
+		if hits.Load() != 1 {
+			t.Fatalf("hits = %d, want 1 (second file must not be fetched after cancel)", hits.Load())
+		}
+	})
+
+	t.Run("Limits.Timeout expiring between files with live parent ctx returns KindTimeout and zero result", func(t *testing.T) {
+		var hits atomic.Int32
+		doer := funcDoer(func(_ context.Context, r Request) (*Response, error) {
+			hits.Add(1)
+			if strings.HasSuffix(r.URL, "/a.txt") {
+				// Let Limits.Timeout expire before returning file A's body,
+				// simulating a slow first file followed by an expired folder deadline.
+				time.Sleep(60 * time.Millisecond)
+				return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(bodyA))}, nil
+			}
+			return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(bodyB))}, nil
+		})
+		client := New(Options{
+			Endpoint:       DefaultEndpoint(),
+			Doer:           doer,
+			Cooldown:       NewCooldown(nil),
+			RawConcurrency: 1,
+		})
+		root, err := os.OpenRoot(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+
+		lim := ImportHostedLimits()
+		lim.Timeout = 30 * time.Millisecond
+		lim.RequestTimeout = 0
+
+		res, err := client.FetchFolderResolved(context.Background(), src, sha, twoFileTree, Credential{}, root, lim)
+		assertErrorKind(t, err, KindTimeout)
+		if res != (FolderResult{}) {
+			t.Fatalf("expected zero FolderResult when Limits.Timeout expires between files, got %+v", res)
+		}
+		if hits.Load() != 1 {
+			t.Fatalf("hits = %d, want 1 (second file must not be fetched after timeout)", hits.Load())
 		}
 	})
 }

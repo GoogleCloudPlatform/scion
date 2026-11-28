@@ -305,6 +305,7 @@ func TestTemplateReimport_DownloadFailuresAreReported(t *testing.T) {
 		"auth rejected":      {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusUnauthorized, Detail: "status 401"}, http.StatusBadRequest, "reimport_failed", "rejected"},
 		"forbidden SSO":      {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusForbidden, Header: http.Header{"X-Github-Sso": {"required"}}, Detail: "status 403"}, http.StatusBadRequest, "reimport_failed", "SAML SSO"},
 		"rate limited 429":   {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"45"}}, Detail: "status 429"}, http.StatusTooManyRequests, "rate_limited", "rate limit"},
+		"upstream 502":       {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusBadGateway, Detail: "status 502"}, http.StatusBadRequest, "reimport_failed", "invalid or inconsistent response"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{err: tc.err})
@@ -1060,4 +1061,34 @@ func TestTemplateReimport_OverrideFolderAtSameCommitDownloads(t *testing.T) {
 	assert.Equal(t, folderB, second.SourceURL, "folder B's URL must be stored")
 	assert.Equal(t, commitC, second.SourceCommit)
 	assert.NotEqual(t, first.ContentHash, second.ContentHash, "folder B's content must replace folder A's content")
+}
+
+// TestTemplateReimport_ForcedTarballStrategySucceeds exercises the tarball
+// branch end-to-end through template reimport (PAX commit SHA + tree blob
+// verification) when the raw strategy is disabled.
+func TestTemplateReimport_ForcedTarballStrategySucceeds(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-reimport-tarball", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = githubfetch.New(githubfetch.Options{
+		Endpoint:    githubfetch.DefaultEndpoint(),
+		Doer:        fetcher,
+		Cooldown:    githubfetch.NewCooldown(nil),
+		MaxRetries:  0,
+		RawMaxFiles: -1, // force tarball strategy
+	})
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Empty(t, fetcher.recordedRawURLs(), "forced tarball strategy must not make raw requests")
+	assert.Equal(t, []string{"https://github.com/acme/repo/archive/" + defaultFakeReimportSHA + ".tar.gz"}, fetcher.recordedTarballURLs())
+
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, defaultFakeReimportSHA, got.SourceCommit)
+	assert.Len(t, got.Files, 2)
 }

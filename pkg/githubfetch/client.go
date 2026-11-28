@@ -63,8 +63,10 @@ type FolderResult struct {
 	TreeSHA   string
 	Files     int
 	Bytes     int64
-	Skipped   SkipCounts
-	Strategy  string
+	// Skipped records non-fatal skipped entries. Counts are populated by the
+	// tarball strategy only (the raw strategy leaves Skipped zero).
+	Skipped  SkipCounts
+	Strategy string
 }
 
 // Options configures a Client.
@@ -591,6 +593,9 @@ func (c *Client) shouldUseRaw(tree *Tree, l Limits) bool {
 }
 
 func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string, tree *Tree, cred Credential, dst *os.Root, l Limits) (FolderResult, error) {
+	if err := ctx.Err(); err != nil {
+		return FolderResult{}, &Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, err: err}
+	}
 	if l.MaxFiles > 0 && len(tree.Files) > l.MaxFiles {
 		return FolderResult{}, &Error{Kind: KindTooLarge, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "directory exceeds maximum file count"}
 	}
@@ -653,6 +658,7 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 	var (
 		mu           sync.Mutex
 		firstErr     error
+		completed    int
 		totalWritten int64
 	)
 	recordErr := func(err error) {
@@ -670,7 +676,8 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 		go func() {
 			defer wg.Done()
 			for f := range jobs {
-				if fetchCtx.Err() != nil {
+				if err := fetchCtx.Err(); err != nil {
+					recordErr(&Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, err: err})
 					return
 				}
 				mode := normalizeArchiveMode(int64(f.Mode))
@@ -708,9 +715,15 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 					return
 				}
 
+				// Defence in depth: plannedTotal was already validated against
+				// MaxTotal and each file is capped at f.Size, so this guards
+				// against any future caller or File with Size==0 and BlobSHA=="".
 				mu.Lock()
 				totalWritten += n
 				over := l.MaxTotal > 0 && totalWritten > l.MaxTotal
+				if !over {
+					completed++
+				}
 				mu.Unlock()
 				if over {
 					recordErr(&Error{Kind: KindTooLarge, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "fetched files exceed MaxTotal"})
@@ -724,11 +737,17 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 	if firstErr != nil {
 		return FolderResult{}, firstErr
 	}
+	if err := ctx.Err(); err != nil {
+		return FolderResult{}, &Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, err: err}
+	}
+	if completed != len(tree.Files) {
+		return FolderResult{}, &Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "incomplete raw folder fetch"}
+	}
 
 	return FolderResult{
 		CommitSHA: commitSHA,
 		TreeSHA:   tree.TreeSHA,
-		Files:     len(tree.Files),
+		Files:     completed,
 		Bytes:     totalWritten,
 		Strategy:  StrategyRaw,
 	}, nil

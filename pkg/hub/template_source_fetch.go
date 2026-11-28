@@ -154,7 +154,7 @@ func mapTemplateReimportError(err error) error {
 	case githubfetch.KindUpstream:
 		return &reimportFetchError{
 			Kind:    ghe.Kind,
-			Message: "GitHub returned an invalid or inconsistent archive",
+			Message: "GitHub returned an invalid or inconsistent response",
 		}
 	default:
 		return &reimportFetchError{
