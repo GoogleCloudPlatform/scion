@@ -203,12 +203,18 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 	})
 }
 
-// maxWorkspaceSyncManifestBodySize bounds workspace sync-to and sync-to/finalize
-// JSON request bodies carrying []transfer.FileInfo manifests at 16 MiB (same
-// class as maxAgentCreateBodySize).
-const maxWorkspaceSyncManifestBodySize = 16 << 20
+// maxFileManifestBodySize bounds JSON request bodies carrying file lists or
+// manifests (workspace sync-to/finalize, template/harness-config/skill
+// create/upload/finalize) at 16 MiB (same class as maxAgentCreateBodySize).
+// Derived from importMaxTreeFiles (20,000 files): a 20,000-entry manifest
+// (~170-500 B/entry) fits with headroom.
+const maxFileManifestBodySize = 16 << 20
 
-const workspaceSyncManifestTooLargeMsg = "request body exceeds the 16 MiB maximum size"
+const fileManifestTooLargeMsg = "request body exceeds the 16 MiB maximum size"
+
+const maxWorkspaceSyncManifestBodySize = maxFileManifestBodySize
+
+const workspaceSyncManifestTooLargeMsg = fileManifestTooLargeMsg
 
 // handleWorkspaceSyncFrom initiates a workspace sync from an agent.
 // POST /api/v1/agents/{id}/workspace/sync-from

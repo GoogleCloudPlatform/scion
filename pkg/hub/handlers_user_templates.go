@@ -178,8 +178,7 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateTemplateRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 	if refuseTemplateConfigFields(w, req.Config, req.Image) {

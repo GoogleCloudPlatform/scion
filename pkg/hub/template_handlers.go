@@ -446,8 +446,7 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateTemplateRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 	if refuseTemplateConfigFields(w, req.Config, req.Image) {
@@ -941,8 +940,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	}
 
 	var req UploadRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -1014,8 +1012,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var req FinalizeRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 

@@ -243,7 +243,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Limit request body size for both JSON and raw content paths.
+	// Decode JSON or read raw content within the harness config file size cap.
 	var req HarnessConfigFileWriteRequest
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		if !decodeJSONWithLimit(w, r, maxHarnessConfigFileSize+4096, "File too large for inline upload.", &req) {

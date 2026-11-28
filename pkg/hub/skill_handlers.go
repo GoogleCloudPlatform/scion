@@ -1130,8 +1130,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	var req PublishVersionRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -1471,8 +1470,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		Version string              `json:"version"`
 		Files   []FileUploadRequest `json:"files"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -1552,8 +1550,7 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	var req FinalizeSkillVersionRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 

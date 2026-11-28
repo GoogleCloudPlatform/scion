@@ -928,8 +928,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	// Parse request (optional)
 	var req RotateSecretRequest
 	if r.ContentLength > 0 {
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "invalid request body: "+err.Error())
+		if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &req) {
 			return
 		}
 	}
