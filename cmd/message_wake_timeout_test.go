@@ -30,13 +30,21 @@ import (
 )
 
 // TestSendMessage_SlowWakeExceedsDefaultClientTimeout verifies that a direct
-// message send to an agent whose wake takes longer than the hub client's
-// default 30s timeout (shortened here to 150ms) does not time out prematurely
+// message send to an agent whose wake takes longer than both the non-waking
+// msgSendTimeout (shortened here to 50ms) and the hub client's default timeout
+// (shortened here to 150ms) uses msgWakeSendTimeout with WithRequestTimeout
 // and receives the hub's accepted response (ptone/scion#9757).
 func TestSendMessage_SlowWakeExceedsDefaultClientTimeout(t *testing.T) {
 	t.Setenv("SCION_AGENT_NAME", "sender")
 	msgAttach = nil
 	msgAttachUpload = nil
+
+	// Shorten msgSendTimeout below the simulated wake delay while leaving
+	// msgWakeSendTimeout at its default (4m30s), so falling back to the
+	// non-wake send timeout fails this test.
+	origSend := msgSendTimeout
+	msgSendTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { msgSendTimeout = origSend })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
@@ -66,15 +74,29 @@ func TestSendMessage_SlowWakeExceedsDefaultClientTimeout(t *testing.T) {
 	assert.Contains(t, stdout, "Message accepted")
 }
 
-// TestSendMessage_TimeoutErrorStatesMessageNotDelivered verifies that when a
-// message send does time out on the client, the returned error clearly states
-// that the message was not delivered (ptone/scion#9757).
-func TestSendMessage_TimeoutErrorStatesMessageNotDelivered(t *testing.T) {
+// TestSendMessage_TimeoutErrorStatesUnknownDelivery verifies that when a
+// message send times out on the client, the returned error reports that
+// delivery status is unknown and advises checking the conversation before
+// resending, without falsely claiming the message was not delivered
+// (ptone/scion#9757).
+func TestSendMessage_TimeoutErrorStatesUnknownDelivery(t *testing.T) {
 	t.Run("agentMessageSendError_deadline_exceeded", func(t *testing.T) {
 		err := agentMessageSendError("builder", context.DeadlineExceeded)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "timed out")
-		assert.Contains(t, err.Error(), "message was not delivered")
+		assert.Contains(t, err.Error(), "delivery status is unknown")
+		assert.Contains(t, err.Error(), "Check the conversation before resending")
+		assert.NotContains(t, err.Error(), "was not delivered")
+		assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	})
+
+	t.Run("outboundMessageSendError_deadline_exceeded", func(t *testing.T) {
+		err := outboundMessageSendError("user@example.com", context.DeadlineExceeded)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "timed out")
+		assert.Contains(t, err.Error(), "delivery status is unknown")
+		assert.Contains(t, err.Error(), "Check the conversation before resending")
+		assert.NotContains(t, err.Error(), "was not delivered")
 		assert.True(t, errors.Is(err, context.DeadlineExceeded))
 	})
 
@@ -86,7 +108,7 @@ func TestSendMessage_TimeoutErrorStatesMessageNotDelivered(t *testing.T) {
 		}
 		err := agentMessageSendError("builder", apiErr)
 		require.Error(t, err)
-		assert.NotContains(t, err.Error(), "timed out sending message")
+		assert.NotContains(t, err.Error(), "timed out waiting for Hub confirmation")
 	})
 
 	t.Run("sendMessageViaHub_real_timeout", func(t *testing.T) {
@@ -124,15 +146,27 @@ func TestSendMessage_TimeoutErrorStatesMessageNotDelivered(t *testing.T) {
 		})
 		require.Error(t, sendErr)
 		assert.Contains(t, sendErr.Error(), "timed out")
-		assert.Contains(t, sendErr.Error(), "message was not delivered")
+		assert.Contains(t, sendErr.Error(), "delivery status is unknown")
+		assert.Contains(t, sendErr.Error(), "Check the conversation before resending")
+		assert.NotContains(t, sendErr.Error(), "was not delivered")
 	})
 }
 
-// TestMsgWakeSendTimeout_ExceedsHubDMWakeBudget verifies that the CLI's
-// wake-capable send timeout exceeds the hub's DM wake write budget
-// (syncDispatchTimeout 180s + wakeReadyTimeout 30s + syncDispatchWriteSlack 30s = 240s).
-func TestMsgWakeSendTimeout_ExceedsHubDMWakeBudget(t *testing.T) {
-	const hubDMWakeBudget = 240 * time.Second
-	assert.Greater(t, msgWakeSendTimeout, hubDMWakeBudget,
-		"msgWakeSendTimeout must outlast the hub's DM wake write budget (240s)")
+// TestUploadThenWakeSendContext_UsesWakeTimeout pins that msgWakeSendTimeout
+// is 4m30s (outlasting the hub's 240s DM wake write budget) and that
+// uploadThenWakeSendContext applies that deadline to the returned context.
+func TestUploadThenWakeSendContext_UsesWakeTimeout(t *testing.T) {
+	msgAttachUpload = nil
+	const wantTimeout = 4*time.Minute + 30*time.Second
+	assert.Equal(t, wantTimeout, msgWakeSendTimeout)
+
+	before := time.Now()
+	_, ctx, cancel, err := uploadThenWakeSendContext(context.Background())
+	require.NoError(t, err)
+	defer cancel()
+
+	dl, ok := ctx.Deadline()
+	require.True(t, ok, "wake send context must have a deadline")
+	assert.Greater(t, time.Until(dl), 4*time.Minute, "wake send context must use msgWakeSendTimeout")
+	assert.LessOrEqual(t, dl, before.Add(wantTimeout+5*time.Second))
 }

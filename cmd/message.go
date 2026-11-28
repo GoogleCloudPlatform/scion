@@ -558,15 +558,6 @@ func messageResponseConversationID(resp *hubclient.MessageResponse) string {
 	return resp.ConversationID
 }
 
-// agentMessageSendError renders a failed agent-message send. A 404 with the
-// hub's agent_not_found code means the recipient does not exist (deleted,
-// reaped, or misspelled), so the error states that plainly and names the
-// agent; the hub's own message is kept as the cause. Other 404s (e.g. a
-// stale project ID, "Project not found", or a bare 404 from an older hub or
-// a proxy) are not about the agent, so they and all other failures keep the
-// generic wording. Both go through wrapHubError, which (for a 404) adds no
-// hub-check hint, and Execute prints no Usage block for hub failures; the
-// command exits 1.
 // isSendTimeoutError reports whether err represents a client-side request
 // timeout (context deadline exceeded or a net.Error with Timeout() == true,
 // such as http.Client.Timeout). Hub HTTP error responses (apiclient.APIError)
@@ -586,23 +577,32 @@ func isSendTimeoutError(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// outboundMessageSendError formats a failed outbound-message send, clearly
-// stating that the message was not delivered when the request timed out on
-// the client (ptone/scion#9757).
+// outboundMessageSendError formats a failed outbound-message send. When the
+// request timed out on the client, delivery status is unknown because the hub
+// may still finish persisting or delivering the message (ptone/scion#9757).
 func outboundMessageSendError(recipient string, err error) error {
 	if isSendTimeoutError(err) {
-		return wrapHubError(fmt.Errorf("timed out sending message to %s; message was not delivered: %w", recipient, err))
+		return wrapHubError(fmt.Errorf("timed out waiting for Hub confirmation sending message to %s; delivery status is unknown (the Hub may still deliver it). Check the conversation before resending: %w", recipient, err))
 	}
 	return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
 }
 
+// agentMessageSendError renders a failed agent-message send. A 404 with the
+// hub's agent_not_found code means the recipient does not exist (deleted,
+// reaped, or misspelled), so the error states that plainly and names the
+// agent; the hub's own message is kept as the cause. Other 404s (e.g. a
+// stale project ID, "Project not found", or a bare 404 from an older hub or
+// a proxy) are not about the agent, so they and all other failures keep the
+// generic wording. Both go through wrapHubError, which (for a 404) adds no
+// hub-check hint, and Execute prints no Usage block for hub failures; the
+// command exits 1.
 func agentMessageSendError(agentName string, err error) error {
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) && apiErr.IsNotFound() && apiErr.Code == apiclient.ErrCodeAgentNotFound {
 		return wrapHubError(fmt.Errorf("agent '%s' not found; message not sent: %w", agentName, err))
 	}
 	if isSendTimeoutError(err) {
-		return wrapHubError(fmt.Errorf("timed out sending message to agent '%s' via Hub; message was not delivered: %w", agentName, err))
+		return wrapHubError(fmt.Errorf("timed out waiting for Hub confirmation sending message to agent '%s'; delivery status is unknown (the Hub may still be waking the agent or delivering the message). Check the conversation before resending: %w", agentName, err))
 	}
 	return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 }
@@ -722,7 +722,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 	})
 	if err != nil {
 		if isSendTimeoutError(err) {
-			return wrapHubError(fmt.Errorf("timed out sending cross-project message to agent '%s'; message was not delivered: %w", agentSlug, err))
+			return wrapHubError(fmt.Errorf("timed out waiting for Hub confirmation sending cross-project message to agent '%s'; delivery status is unknown (the Hub may still be waking the agent or delivering the message). Check the conversation before resending: %w", agentSlug, err))
 		}
 		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
 	}

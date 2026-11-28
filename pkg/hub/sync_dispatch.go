@@ -73,12 +73,7 @@ func detachLaunchKeepDeadline(ctx context.Context) (context.Context, context.Can
 // wake, persist, and dispatch by dmWakeWriteBudget. The caller must check
 // ctx.Err() before calling it and must call the returned cancel func.
 func detachDMWakeSend(ctx context.Context) (context.Context, context.CancelFunc) {
-	detached, cancel := context.WithTimeout(detachLaunchFromClient(ctx), dmWakeWriteBudget())
-	if deadline, ok := ctx.Deadline(); ok {
-		dctx, dcancel := context.WithDeadline(detached, deadline)
-		return dctx, func() { dcancel(); cancel() }
-	}
-	return detached, cancel
+	return dispatchContext(ctx, dmWakeWriteBudget())
 }
 
 // detachStopFromClient returns a context for the rest of a lifecycle stop or
