@@ -1159,6 +1159,51 @@ func TestFetchFolder_StreamingDoesNotBufferWholeArchive(t *testing.T) {
 	}
 }
 
+func TestListTreeShallow_OmitsRecursiveQuery(t *testing.T) {
+	const (
+		commitSHA = "abc1234567890abcdef1234567890abcdef12345"
+		treeSHA   = "fedcba9876543210fedcba9876543210fedcba98"
+	)
+	var gotURLs []string
+	doer := funcDoer(func(_ context.Context, r Request) (*Response, error) {
+		gotURLs = append(gotURLs, r.URL)
+		body, _ := json.Marshal(map[string]any{
+			"sha":       treeSHA,
+			"truncated": false,
+			"tree": []map[string]any{
+				{"path": "scion-agent.yaml", "mode": "100644", "type": "blob", "sha": "1111111111111111111111111111111111111111", "size": 12},
+				{"path": "sub", "mode": "040000", "type": "tree", "sha": "2222222222222222222222222222222222222222"},
+			},
+		})
+		return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+	client := New(Options{Endpoint: DefaultEndpoint(), Doer: doer, Cooldown: NewCooldown(nil)})
+
+	// Subfolder path
+	tree, err := client.ListTreeShallow(context.Background(), Source{Owner: "acme", Repo: "repo", Path: ".scion/templates/my-tmpl"}, commitSHA, Credential{}, Limits{})
+	if err != nil {
+		t.Fatalf("ListTreeShallow subfolder: %v", err)
+	}
+	if tree.TreeSHA != treeSHA {
+		t.Fatalf("TreeSHA = %q, want %q", tree.TreeSHA, treeSHA)
+	}
+	if len(gotURLs) != 1 || gotURLs[0] != "https://api.github.com/repos/acme/repo/git/trees/"+commitSHA+":.scion/templates/my-tmpl" {
+		t.Fatalf("unexpected URL for subfolder: %v", gotURLs)
+	}
+
+	// Repo root (empty path)
+	treeRoot, err := client.ListTreeShallow(context.Background(), Source{Owner: "acme", Repo: "repo"}, commitSHA, Credential{}, Limits{})
+	if err != nil {
+		t.Fatalf("ListTreeShallow root: %v", err)
+	}
+	if treeRoot.TreeSHA != treeSHA {
+		t.Fatalf("root TreeSHA = %q, want %q", treeRoot.TreeSHA, treeSHA)
+	}
+	if len(gotURLs) != 2 || gotURLs[1] != "https://api.github.com/repos/acme/repo/git/trees/"+commitSHA {
+		t.Fatalf("unexpected URL for root: %v", gotURLs)
+	}
+}
+
 func assertErrorKind(t *testing.T, err error, want Kind) {
 	t.Helper()
 	if err == nil {

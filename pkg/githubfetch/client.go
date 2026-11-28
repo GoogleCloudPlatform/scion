@@ -349,12 +349,26 @@ func (c *Client) resolveCommitSHA(ctx context.Context, s Source, ref string, kin
 // ListTree lists the recursive git tree for s.Path at commitSHA and validates
 // all entries against l before any file bytes are downloaded.
 func (c *Client) ListTree(ctx context.Context, s Source, commitSHA string, cred Credential, l Limits) (Tree, error) {
+	return c.listTree(ctx, s, commitSHA, cred, l, true)
+}
+
+// ListTreeShallow lists the non-recursive git tree for s.Path at commitSHA
+// (without ?recursive=1). Its top-level TreeSHA is the folder's git tree SHA,
+// suitable for lightweight drift checks without enumerating nested subtrees.
+func (c *Client) ListTreeShallow(ctx context.Context, s Source, commitSHA string, cred Credential, l Limits) (Tree, error) {
+	return c.listTree(ctx, s, commitSHA, cred, l, false)
+}
+
+func (c *Client) listTree(ctx context.Context, s Source, commitSHA string, cred Credential, l Limits, recursive bool) (Tree, error) {
 	treeish := url.PathEscape(commitSHA)
 	if trimmed := strings.Trim(s.Path, "/"); trimmed != "" {
 		treeish += ":" + escapePathSegments(trimmed)
 	}
 	u := c.endpoint.APIBase + "/repos/" + url.PathEscape(s.Owner) + "/" + url.PathEscape(s.Repo) +
-		"/git/trees/" + treeish + "?recursive=1"
+		"/git/trees/" + treeish
+	if recursive {
+		u += "?recursive=1"
+	}
 	hdr := http.Header{"Accept": {"application/vnd.github+json"}}
 	resp, err := c.doAPI(ctx, Request{URL: u, Header: hdr, MaxBytes: maxTreeResponseBytes}, s.RepoSlug(), cred)
 	if err != nil {
