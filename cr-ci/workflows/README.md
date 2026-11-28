@@ -302,6 +302,54 @@ comment with no quotes in it is ignored.
 `build-release.yml` (tag pushes) is not gated yet; its jobs carry the
 upstream-only repository guard instead.
 
+## Heavy-job gate (forks)
+
+On a fork, GitHub-hosted concurrency is bounded by the fork owner's account
+plan, so running the full PostgreSQL, Windows, and Web E2E fan-out on every
+staging push starves the hosted runner queue. Any fork can opt into gating
+those heavy jobs behind a PR label by setting the repository variable
+`SCION_HEAVY_CI_GATE=true` (Settings → Variables → Actions, or
+`gh variable set SCION_HEAVY_CI_GATE -R <owner>/<repo> -b true`) and creating
+the **`ci:full`** label.
+
+Each gated job ANDs this condition into its job-level `if:` (after the fork CI
+gate):
+
+```yaml
+(github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+```
+
+Gated jobs:
+
+- `ci.yml`: `hub-shard-plan`, `hub-shard`, `hub-shard-postgres-integration`,
+  `hub-sqlite-tests` (fan-in, using `((always()) && (<heavy>))`),
+  `launch-store-postgres-entadapter`, `launch-store-postgres-others`,
+  `launch-store-postgres-tests` (fan-in, using `((always()) && (<heavy>))`)
+- `windows.yml`: `windows`
+- `web-e2e.yml`: `e2e`
+
+How it behaves:
+
+- **Upstream is unaffected.** `GoogleCloudPlatform/scion` leaves
+  `SCION_HEAVY_CI_GATE` unset, so `vars.SCION_HEAVY_CI_GATE != 'true'` is
+  always true and upstream runs the full matrix on every PR and push as before.
+- **Unlabelled fork PRs** skip the gated jobs (including the two fan-in summary
+  jobs, which report **Skipped** rather than a false green) while continuing to
+  run all other checks (`changes`, check scripts, `build-and-test`,
+  `sqlite-nonhub-tests`, `lint`, `shellcheck`, `ent-generate-check`,
+  `single-node-vm-deploy-tests`, `starter-hub-tests`, `chat-mobile-e2e`,
+  `perf-budgets-web`, `windows-cross-build`, `workstation-smoke`).
+- **Running the heavy jobs on a fork PR:** add the `ci:full` label, then
+  **push** a commit (an empty commit works) or **close and reopen** the PR.
+  Adding the label alone does not start a workflow run because `labeled` is
+  deliberately not in `on.pull_request.types` (which is shared with upstream).
+- **Re-run caveat:** clicking "Re-run jobs" in the GitHub UI reuses the
+  original event payload and its old label set, so it will not pick up a
+  `ci:full` label added after the run was created. Push or close/reopen instead.
+- **Manual escape hatch:** `workflow_dispatch` (where available, such as
+  `web-e2e.yml`) is not a `pull_request` event, so it runs heavy jobs even when
+  `SCION_HEAVY_CI_GATE=true`.
+
 ## PoC success criteria
 
 These are part of the full P6 list in

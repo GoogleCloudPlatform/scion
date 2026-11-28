@@ -165,7 +165,7 @@ permissions:
 jobs:
   e2e:
     name: e2e (${{ matrix.suite }})
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: ubuntu-latest
     # port-proxy runs two suites, each on its own hub (see below).
     timeout-minutes: ${{ matrix.suite == 'port-proxy' && 35 || 20 }}
