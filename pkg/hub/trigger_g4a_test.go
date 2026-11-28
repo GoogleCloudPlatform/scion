@@ -1186,13 +1186,14 @@ func TestTriggerG4a_Reuse_UnboundClaimAndLostClaimRaceDeferAndDeliver(t *testing
 	assert.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
 	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, fires1.Items[0].Error)
 
-	// Bind the claim to a running agent and re-handle at RetryAt.
+	// Bind the claim to a running agent owned by the trigger author and re-handle at RetryAt.
 	ag1 := &store.Agent{
 		ID:              api.NewUUID(),
 		Slug:            "case1-bound-ag",
 		Name:            "case1-bound-ag",
 		ProjectID:       f.sched.proj.ID,
 		RuntimeBrokerID: f.sched.broker.ID,
+		OwnerID:         f.sched.creator.ID,
 		Phase:           string(state.PhaseRunning),
 		Activity:        string(state.ActivityWaitingForInput),
 	}
@@ -1203,6 +1204,12 @@ func TestTriggerG4a_Reuse_UnboundClaimAndLostClaimRaceDeferAndDeliver(t *testing
 	res1Done := disp.HandleItem(ctx, item1, nil)
 	assert.True(t, res1Done.Done)
 	_, _ = dqStore.CompleteDurableItem(ctx, item1.Seq, "case1-worker")
+
+	fires1Done, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trigResp.ID, EventID: item1.DedupKey}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1Done.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, fires1Done.Items[0].Status, "error=%q", fires1Done.Items[0].Error)
+	assert.Empty(t, fires1Done.Items[0].Error)
 
 	msgs := tracker.messages()
 	require.Len(t, msgs, 1)
