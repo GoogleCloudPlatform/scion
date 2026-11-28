@@ -1924,8 +1924,13 @@ describe('scion-agent-tree-view wheel & trackpad zoom (ptone/scion#9714)', () =>
   });
 
   it('coalesces a burst of small fractional trackpad scroll events into one animation frame', () => {
-    const events = [-1.5, -2.25, -3.75, -2.5].map((deltaY) =>
-      wheel({ deltaY, deltaMode: WheelEvent.DOM_DELTA_PIXEL, clientX: 250, clientY: 200 })
+    const events = [-1.5, -2.25, -3.75, -2.5].map((deltaY, i) =>
+      wheel({
+        deltaY,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        clientX: 250 + i * 10,
+        clientY: 200 + i * 5,
+      })
     );
     for (const ev of events) {
       expect(ev.defaultPrevented).toBe(true);
@@ -1937,9 +1942,9 @@ describe('scion-agent-tree-view wheel & trackpad zoom (ptone/scion#9714)', () =>
     flushFrames();
     const expectedFactor = Math.exp(10 * WHEEL_ZOOM_SENSITIVITY);
     expect(internal().scale).toBeCloseTo(expectedFactor, 8);
-    // Point under cursor (cx = 200, cy = 160) stays anchored: panX = 200 - factor * 200.
-    expect(internal().panX).toBeCloseTo(200 * (1 - expectedFactor), 6);
-    expect(internal().panY).toBeCloseTo(160 * (1 - expectedFactor), 6);
+    // Point under latest cursor (280 - 50 = 230, 215 - 40 = 175) stays anchored.
+    expect(internal().panX).toBeCloseTo(230 * (1 - expectedFactor), 6);
+    expect(internal().panY).toBeCloseTo(175 * (1 - expectedFactor), 6);
   });
 
   it('preserves classic mouse-wheel feel for quantized 100px and Firefox line-mode notches', () => {
@@ -1954,20 +1959,32 @@ describe('scion-agent-tree-view wheel & trackpad zoom (ptone/scion#9714)', () =>
     expect(Math.abs(internal().scale - afterPixelNotch)).toBeLessThan(0.01);
   });
 
-  it('applies a gentler zoom rate for trackpad pinch (ctrlKey) sequences', () => {
-    for (let i = 0; i < 4; i++) {
-      wheel({ deltaY: -5, ctrlKey: true, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
+  it('tracks a Chromium ctrlKey 2x pinch sequence (sum deltaY = -100*ln2) and supports Alt low-gear', () => {
+    const steps = 20;
+    const perEventDelta = (-100 * Math.LN2) / steps;
+    for (let i = 0; i < steps; i++) {
+      wheel({ deltaY: perEventDelta, ctrlKey: true, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
+      flushFrames();
     }
-    flushFrames();
     const pinchScale = internal().scale;
-    expect(pinchScale).toBeCloseTo(Math.exp(20 * PINCH_ZOOM_SENSITIVITY), 8);
+    expect(pinchScale).toBeGreaterThan(1.4);
+    expect(pinchScale).toBeCloseTo(Math.exp(100 * Math.LN2 * PINCH_ZOOM_SENSITIVITY), 6);
 
     internal().scale = 1;
-    for (let i = 0; i < 4; i++) {
-      wheel({ deltaY: -5, ctrlKey: false, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
+    for (let i = 0; i < steps; i++) {
+      wheel({
+        deltaY: perEventDelta,
+        ctrlKey: true,
+        altKey: true,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      });
+      flushFrames();
     }
-    flushFrames();
-    expect(pinchScale).toBeLessThan(internal().scale);
+    expect(internal().scale).toBeCloseTo(
+      Math.exp((100 * Math.LN2 * PINCH_ZOOM_SENSITIVITY) / LOW_GEAR_DIVISOR),
+      6
+    );
+    expect(internal().scale).toBeLessThan(pinchScale);
   });
 
   it('engages low-gear fine zoom when Alt is held', () => {

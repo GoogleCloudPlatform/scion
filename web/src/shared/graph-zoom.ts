@@ -42,10 +42,17 @@ export const PAGE_DELTA_PX = 400;
 export const WHEEL_ZOOM_SENSITIVITY = 0.0012;
 
 /**
- * Gentler exponential zoom rate `k` for trackpad pinch gestures, which
- * browsers synthesize as `wheel` events with `ctrlKey: true`.
+ * Exponential zoom rate `k` for trackpad pinch gestures, which Chromium
+ * synthesizes as `wheel` events with `ctrlKey: true` and
+ * `deltaY = -100 * ln(scale)` (`touchpad_pinch_event_queue.cc`).
+ *
+ * Because pinch `deltaY` is already in log-scale units (100 = a factor of `e`,
+ * `-100 * ln(2) ≈ -69.3` for a 2x pinch), `k = 0.01` tracks finger scale 1:1
+ * (`exp(-deltaY * 0.01) = scale`). `MAX_EVENT_LOG_STEP` still bounds `Ctrl`
+ * held with a discrete mouse wheel (~1.284x max per notch), and `Alt` low-gear
+ * divides by `LOW_GEAR_DIVISOR` (4x finer) for fine pinch adjustments.
  */
-export const PINCH_ZOOM_SENSITIVITY = 0.0006;
+export const PINCH_ZOOM_SENSITIVITY = 0.01;
 
 /**
  * Divisor applied to the zoom rate when the low-gear modifier (`Alt` / Option)

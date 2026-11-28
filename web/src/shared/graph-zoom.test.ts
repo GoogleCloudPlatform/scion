@@ -89,17 +89,37 @@ describe('wheelZoomLogDelta & wheelZoomFactor', () => {
     expect(Math.abs(firefoxNotch - chromeNotch)).toBeLessThan(0.01);
   });
 
-  it('uses a gentler sensitivity for ctrlKey (trackpad pinch) events', () => {
-    expect(PINCH_ZOOM_SENSITIVITY).toBeLessThan(WHEEL_ZOOM_SENSITIVITY);
-    const wheelLog = wheelZoomLogDelta({ deltaY: -20, ctrlKey: false });
-    const pinchLog = wheelZoomLogDelta({ deltaY: -20, ctrlKey: true });
-    expect(pinchLog).toBeCloseTo(20 * PINCH_ZOOM_SENSITIVITY, 10);
-    expect(pinchLog).toBeGreaterThan(0);
-    expect(pinchLog).toBeLessThan(wheelLog);
-    expect(wheelZoomFactor({ deltaY: -20, ctrlKey: true })).toBeCloseTo(
-      Math.exp(20 * PINCH_ZOOM_SENSITIVITY),
+  it('tracks Chromium ctrlKey pinch gestures (deltaY = -100*ln(scale)) across a 2x pinch sequence', () => {
+    // Chromium emits touchpad pinch as ctrlKey wheel events with deltaY = -100 * ln(scale).
+    // A physical 2x pinch sums to -100 * ln(2) ≈ -69.315 across ~20 small updates.
+    const steps = 20;
+    const perEventDelta = (-100 * Math.LN2) / steps;
+    let scale = 1;
+    for (let i = 0; i < steps; i++) {
+      const pending = accumulateWheelZoom(null, {
+        deltaY: perEventDelta,
+        deltaMode: DELTA_MODE_PIXEL,
+        ctrlKey: true,
+        clientX: 200,
+        clientY: 150,
+      });
+      scale *= flushWheelZoom(pending)!.factor;
+    }
+    expect(scale).toBeGreaterThan(1.4);
+    expect(scale).toBeCloseTo(2, 6);
+
+    // Single pinch event scales with PINCH_ZOOM_SENSITIVITY (distinct from wheel).
+    const singleDelta = -5;
+    expect(wheelZoomLogDelta({ deltaY: singleDelta, ctrlKey: true })).toBeCloseTo(
+      -singleDelta * PINCH_ZOOM_SENSITIVITY,
       10
     );
+    expect(wheelZoomLogDelta({ deltaY: singleDelta, ctrlKey: true })).toBeGreaterThan(
+      wheelZoomLogDelta({ deltaY: singleDelta, ctrlKey: false })
+    );
+
+    // Ctrl + discrete 100px mouse-wheel click is still bounded by MAX_EVENT_LOG_STEP.
+    expect(wheelZoomLogDelta({ deltaY: -100, ctrlKey: true })).toBe(MAX_EVENT_LOG_STEP);
   });
 
   it('divides zoom rate by LOW_GEAR_DIVISOR when altKey is held (for both wheel and pinch)', () => {
@@ -107,9 +127,18 @@ describe('wheelZoomLogDelta & wheelZoomFactor', () => {
     const lowGearWheel = wheelZoomLogDelta({ deltaY: -100, altKey: true });
     expect(lowGearWheel).toBeCloseTo(normalWheel / LOW_GEAR_DIVISOR, 10);
 
-    const normalPinch = wheelZoomLogDelta({ deltaY: -40, ctrlKey: true, altKey: false });
-    const lowGearPinch = wheelZoomLogDelta({ deltaY: -40, ctrlKey: true, altKey: true });
+    const normalPinch = wheelZoomLogDelta({ deltaY: -10, ctrlKey: true, altKey: false });
+    const lowGearPinch = wheelZoomLogDelta({ deltaY: -10, ctrlKey: true, altKey: true });
     expect(lowGearPinch).toBeCloseTo(normalPinch / LOW_GEAR_DIVISOR, 10);
+
+    // Full 2x pinch sequence with Alt held yields 4x finer log-scale (2^(1/4) ≈ 1.189x).
+    const steps = 20;
+    const perEventDelta = (-100 * Math.LN2) / steps;
+    let lowGearScale = 1;
+    for (let i = 0; i < steps; i++) {
+      lowGearScale *= wheelZoomFactor({ deltaY: perEventDelta, ctrlKey: true, altKey: true });
+    }
+    expect(lowGearScale).toBeCloseTo(Math.pow(2, 1 / LOW_GEAR_DIVISOR), 6);
   });
 
   it('clamps extreme positive and negative deltas per event to MAX_EVENT_LOG_STEP', () => {
