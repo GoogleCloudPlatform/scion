@@ -92,7 +92,7 @@ func commitSampleTrajectorySegment(
 	gen int,
 	byteStart int64,
 	raw []byte,
-) (string, []byte) {
+) (string, []byte, string) {
 	t.Helper()
 	gz, rawSHA, compSHA := gzipAndHash(t, raw)
 	prepReq := telemetrycontract.TrajectorySegmentPrepareRequest{
@@ -132,7 +132,7 @@ func commitSampleTrajectorySegment(
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepResp.SegmentID})
 	require.Equal(t, http.StatusOK, commitRec.Code, commitRec.Body.String())
 
-	return prepResp.SegmentID, gz
+	return prepResp.SegmentID, gz, prepResp.Upload.URL
 }
 
 func listTrajectoryReadAudits(t *testing.T, s store.Store, segmentID string) []*store.MutationAuditRecord {
@@ -161,7 +161,7 @@ func TestTrajectoryRead_AuthzMatrixAndReadAudit(t *testing.T) {
 
 	relPath := ".claude/projects/-workspace/sess-authz.jsonl"
 	raw := []byte("{\"type\":\"user\",\"text\":\"secret prompt\"}\n")
-	segID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, relPath, 0, 0, raw)
+	segID, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, relPath, 0, 0, raw)
 
 	// Prepare (but do NOT commit) a second segment to verify list never returns pending segments.
 	rawPending := []byte("{\"type\":\"assistant\",\"text\":\"pending\"}\n")
@@ -281,7 +281,7 @@ func TestTrajectoryRead_AuthzMatrixAndReadAudit(t *testing.T) {
 
 func TestTrajectoryRead_ExperimentOffReturns404(t *testing.T) {
 	srv, s, _, projA, agentA, agentTok := setupTrajectorySegmentFixture(t)
-	segID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+	segID, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-exp.jsonl", 0, 0, []byte("{\"ok\":true}\n"))
 
 	adminA := createTrajectoryTestUserWithRole(t, s, "exp-admin@example.com", store.ProjectRoleAdmin, store.RoleScopeProject, projA.ID)
@@ -333,7 +333,7 @@ func TestTrajectoryRead_AuditFailureBlocksDownload(t *testing.T) {
 		return &trajectoryAuditFailStore{Store: inner, fault: sw}
 	})
 
-	segID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+	segID, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-audit-fail.jsonl", 0, 0, []byte("{\"audit\":\"required\"}\n"))
 
 	// Swap in the GCS storage double to prove GenerateSignedURL is never even
@@ -360,7 +360,7 @@ func TestTrajectoryRead_LocalHMACDownloadEndToEnd(t *testing.T) {
 	srv.trajectoryDownloadURLExpiry = 5 * time.Minute
 
 	raw := []byte("{\"type\":\"user\",\"content\":\"hello verbatim\"}\n{\"type\":\"assistant\",\"content\":\"hi\"}\n")
-	segID, expectedGZ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+	segID, expectedGZ, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-e2e.jsonl", 0, 0, raw)
 
 	adminA := createTrajectoryTestUserWithRole(t, s, "e2e-admin@example.com", store.ProjectRoleAdmin, store.RoleScopeProject, projA.ID)
@@ -429,9 +429,9 @@ func TestTrajectoryRead_CapabilityReplayProtection(t *testing.T) {
 
 	raw1 := []byte("{\"seg\":1}\n")
 	raw2 := []byte("{\"seg\":2}\n")
-	seg1ID, gz1 := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+	seg1ID, gz1, seg1UploadURLStr := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-replay.jsonl", 0, 0, raw1)
-	seg2ID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+	seg2ID, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-replay.jsonl", 0, int64(len(raw1)), raw2)
 
 	adminA := createTrajectoryTestUserWithRole(t, s, "replay-admin@example.com", store.ProjectRoleAdmin, store.RoleScopeProject, projA.ID)
@@ -477,6 +477,18 @@ func TestTrajectoryRead_CapabilityReplayProtection(t *testing.T) {
 
 	// 4. Upload capability (from segments:prepare) replayed as GET download
 	//    (without and with agent token) -> 403.
+	//    First, replay seg1's own upload capability against committed seg1 so
+	//    agent ID, segment ID, object path, and committed status all match and
+	//    HMAC domain separation alone must refuse the request.
+	seg1UploadURL, err := url.Parse(seg1UploadURLStr)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, seg1UploadURL.RequestURI(), "").Code)
+	sameSegGetWithAgentTok := httptest.NewRequest(http.MethodGet, seg1UploadURL.RequestURI(), nil)
+	sameSegGetWithAgentTok.Header.Set("X-Scion-Agent-Token", agentTok)
+	sameSegGetWithAgentTokRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(sameSegGetWithAgentTokRec, sameSegGetWithAgentTok)
+	assert.Equal(t, http.StatusForbidden, sameSegGetWithAgentTokRec.Code)
+
 	raw3 := []byte("{\"seg\":3}\n")
 	gz3, raw3SHA, comp3SHA := gzipAndHash(t, raw3)
 	prepRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
@@ -517,9 +529,9 @@ func TestTrajectoryRead_CapabilityReplayProtection(t *testing.T) {
 func TestTrajectoryRead_ListFiltersAndPagination(t *testing.T) {
 	srv, s, _, projA, agentA, agentTok := setupTrajectorySegmentFixture(t)
 
-	s1, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, ".claude/projects/-workspace/a.jsonl", 0, 0, []byte("line1\n"))
-	s2, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, ".claude/projects/-workspace/a.jsonl", 0, 6, []byte("line2\n"))
-	s3, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, ".claude/projects/-workspace/b.jsonl", 1, 0, []byte("line3\n"))
+	s1, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, ".claude/projects/-workspace/a.jsonl", 0, 0, []byte("line1\n"))
+	s2, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, ".claude/projects/-workspace/a.jsonl", 0, 6, []byte("line2\n"))
+	s3, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok, ".claude/projects/-workspace/b.jsonl", 1, 0, []byte("line3\n"))
 
 	adminA := createTrajectoryTestUserWithRole(t, s, "page-admin@example.com", store.ProjectRoleAdmin, store.RoleScopeProject, projA.ID)
 	adminTok := trajectoryUserSessionToken(t, srv, adminA)
@@ -581,7 +593,7 @@ func (f *fakeGCSSignedGetStorage) GenerateSignedURL(_ context.Context, objectPat
 
 func TestTrajectoryRead_GCSSignedGET(t *testing.T) {
 	srv, s, loc, projA, agentA, agentTok := setupTrajectorySegmentFixture(t)
-	segID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+	segID, _, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-gcs.jsonl", 0, 0, []byte("{\"gcs\":true}\n"))
 
 	fakeGCS := &fakeGCSSignedGetStorage{Storage: loc}
