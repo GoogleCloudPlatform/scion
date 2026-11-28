@@ -1338,6 +1338,16 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 	}
 }
 
+// HasHubProvidedTransport reports whether the client's transport source is
+// a hub-provided token (injected or file-backed), as opposed to none or a
+// self-refreshing metadata source.
+func (c *Client) HasHubProvidedTransport() bool {
+	if c == nil {
+		return false
+	}
+	return c.hasHubProvidedTransport()
+}
+
 // hasHubProvidedTransport reports whether the client's transport source is
 // a hub-provided token (injected or file-backed), as opposed to none or a
 // self-refreshing metadata source.

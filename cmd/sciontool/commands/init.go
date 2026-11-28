@@ -558,11 +558,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the refresh loop keeps current; the env value is only valid for about
 	// an hour. When staged secrets are also present, the single re-exec
 	// below restarts init with the cleaned environment for both.
-	stageTransportUID, stageTransportGID := targetUID, targetGID
+	var transportCleared bool
 	if shellIsolation {
-		stageTransportUID, stageTransportGID = 0, 0
+		transportCleared = stageTransportTokenWithPolicy(0, 0, true)
+	} else {
+		transportCleared = stageTransportToken(targetUID, targetGID)
 	}
-	transportCleared := stageTransportToken(stageTransportUID, stageTransportGID)
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file secrets into this single base64 blob
@@ -3065,6 +3066,15 @@ var reExecWithCleanEnv = func() error {
 // written the env var is left in place so hub access keeps working until
 // it expires.
 func stageTransportToken(uid, gid int) bool {
+	return stageTransportTokenWithPolicy(uid, gid, false)
+}
+
+// stageTransportTokenWithPolicy is stageTransportToken with an optional
+// overwrite mode used under shellIsolation: when overwrite is true, any
+// pre-existing handoff transport token file is unlinked (no-follow) first and
+// the expires-later comparison is skipped so a workload-planted far-future
+// file on a persistent home can never override the fresh bootstrap token.
+func stageTransportTokenWithPolicy(uid, gid int, overwrite bool) bool {
 	tok := os.Getenv(transportauth.EnvTransportToken)
 	if tok == "" {
 		// No hub-provided transport token this start. If none was staged
@@ -3080,7 +3090,19 @@ func stageTransportToken(uid, gid int) bool {
 		}
 		return false
 	}
-	path, err := hub.SeedTransportTokenFile(tok, uid, gid)
+	var (
+		path string
+		err  error
+	)
+	if overwrite {
+		if _, rerr := hub.RemoveTransportTokenFile(); rerr != nil {
+			log.Error("Failed to remove pre-existing handoff transport token file: %v", rerr)
+		}
+		path = hub.TransportTokenFilePath()
+		err = hub.WriteTransportTokenFile(tok, uid, gid)
+	} else {
+		path, err = hub.SeedTransportTokenFile(tok, uid, gid)
+	}
 	if err != nil {
 		log.Error("Failed to write transport token file; leaving bootstrap value in the environment: %v", err)
 		return false

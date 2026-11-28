@@ -1143,3 +1143,149 @@ func TestRunInit_ShellIsolation_RuntimeFileModeAndStagingUIDZeroAndSidecarIsolat
 		t.Fatalf("expected runServicesStart called with WorkloadIsolation=true (called=%v, isolated=%v)", svcStartCalled, svcManagerIsolated)
 	}
 }
+
+func TestRunInit_ShellIsolation_TransportStagingOverwritesFarFuturePlantedToken(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+	origSetup := runSetupHostUser
+	origBeforeSup := beforeSupervisorRunForTest
+	origReExec := reExecWithCleanEnv
+	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	reExecWithCleanEnv = func() error {
+		hub.ResetTokenStore()
+		return nil
+	}
+	t.Cleanup(func() {
+		runSetupHostUser = origSetup
+		beforeSupervisorRunForTest = origBeforeSup
+		reExecWithCleanEnv = origReExec
+	})
+
+	// Plant a far-future-exp transport token in ~/.scion/transport-token.
+	farFutureTransport := testCredential(t, "planted-far-future", time.Now().Add(365*24*time.Hour))
+	freshTransport := testCredential(t, "fresh-bootstrap", time.Now())
+
+	handoffTransport := hub.HandoffTransportTokenFilePath()
+	if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handoffTransport, []byte(farFutureTransport), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_AGENT_ID", "")
+	t.Setenv(transportauth.EnvTransportToken, freshTransport)
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+	var observed bool
+	var gotTransport string
+	var handoffExistsAtRun bool
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		observed = true
+		gotTransport, _ = hub.ReadTransportTokenFileGuarded("")
+		_, err := os.Lstat(handoffTransport)
+		handoffExistsAtRun = !os.IsNotExist(err)
+	}
+
+	code := RunInit([]string{"true"}, InitRunOptions{
+		DisableTermSignalForwarding: true,
+		DisablePortForwarding:       true,
+	})
+	if code != 0 {
+		t.Fatalf("RunInit exited %d, want 0", code)
+	}
+	if !observed {
+		t.Fatal("beforeSupervisorRunForTest was not called")
+	}
+	if handoffExistsAtRun {
+		t.Fatal("handoff transport-token still existed at sup.Run")
+	}
+	if gotTransport != freshTransport {
+		t.Fatalf("runtime transport token = %q, want fresh bootstrap token (far-future planted file must not win)", gotTransport)
+	}
+}
+
+func TestSetupShellIsolatedTokenStore_TransportMarkerGating(t *testing.T) {
+	t.Run("without SCION_TRANSPORT_TOKEN_FILE marker, handoff is unlinked and NOT seeded", func(t *testing.T) {
+		home := t.TempDir()
+		base := t.TempDir()
+		t.Cleanup(hub.SetTokenHome(home))
+		t.Cleanup(hub.SetRuntimeTokenStoreForTest(base))
+
+		runtimePath := filepath.Join(base, "sciontool", "auth", hub.TokenFile)
+		origPath := runtimeTokenPathForInit
+		origEUID := initEffectiveUID
+		runtimeTokenPathForInit = runtimePath
+		initEffectiveUID = func() int { return 0 }
+		t.Cleanup(func() {
+			runtimeTokenPathForInit = origPath
+			initEffectiveUID = origEUID
+		})
+
+		handoffTransport := hub.HandoffTransportTokenFilePath()
+		if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(handoffTransport, []byte("unmarked-stale-transport"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+		if err := setupShellIsolatedTokenStore(1000, false); err != nil {
+			t.Fatalf("setupShellIsolatedTokenStore: %v", err)
+		}
+		if _, err := os.Lstat(handoffTransport); !os.IsNotExist(err) {
+			t.Fatalf("handoff transport file still exists: err=%v", err)
+		}
+		if _, err := os.Lstat(hub.TransportTokenFilePath()); !os.IsNotExist(err) {
+			t.Fatalf("runtime transport file should NOT be seeded without staged marker: err=%v", err)
+		}
+	})
+
+	t.Run("with SCION_TRANSPORT_TOKEN_FILE marker, handoff is unlinked and seeded into runtime store", func(t *testing.T) {
+		home := t.TempDir()
+		base := t.TempDir()
+		t.Cleanup(hub.SetTokenHome(home))
+		t.Cleanup(hub.SetRuntimeTokenStoreForTest(base))
+
+		runtimePath := filepath.Join(base, "sciontool", "auth", hub.TokenFile)
+		origPath := runtimeTokenPathForInit
+		origEUID := initEffectiveUID
+		runtimeTokenPathForInit = runtimePath
+		initEffectiveUID = func() int { return 0 }
+		t.Cleanup(func() {
+			runtimeTokenPathForInit = origPath
+			initEffectiveUID = origEUID
+		})
+
+		handoffTransport := hub.HandoffTransportTokenFilePath()
+		if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(handoffTransport, []byte("marked-staged-transport"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(transportauth.EnvTransportTokenFile, handoffTransport)
+
+		if err := setupShellIsolatedTokenStore(1000, false); err != nil {
+			t.Fatalf("setupShellIsolatedTokenStore: %v", err)
+		}
+		if _, err := os.Lstat(handoffTransport); !os.IsNotExist(err) {
+			t.Fatalf("handoff transport file still exists: err=%v", err)
+		}
+		got, err := hub.ReadTransportTokenFileGuarded(hub.TransportTokenFilePath())
+		if err != nil || got != "marked-staged-transport" {
+			t.Fatalf("runtime transport file = %q (err=%v), want %q", got, err, "marked-staged-transport")
+		}
+		if gotEnv := os.Getenv(transportauth.EnvTransportTokenFile); gotEnv != hub.TransportTokenFilePath() {
+			t.Fatalf("SCION_TRANSPORT_TOKEN_FILE = %q, want %q", gotEnv, hub.TransportTokenFilePath())
+		}
+	})
+}

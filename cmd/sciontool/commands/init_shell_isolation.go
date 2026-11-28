@@ -239,6 +239,33 @@ func reconcileShellHandoffBeforeSupervisorRun(hubClient *hub.Client) error {
 	if err := hub.RemoveStaleHandoffTmpFile(); err != nil {
 		return fmt.Errorf("cannot remove late stale handoff token temp file: %w", err)
 	}
+
+	// Re-run transport handoff take as well.
+	if hubClient != nil && hubClient.HasHubProvidedTransport() {
+		if adopted, terr := hubClient.AdoptTransportTokenFile(0, 0); terr != nil {
+			if errors.Is(terr, hub.ErrHandoffUnlinkFailed) {
+				return fmt.Errorf("cannot remove late handoff transport token: %w", terr)
+			}
+			log.Warn("Ignored and removed invalid late handoff transport token: %v", terr)
+		} else if adopted {
+			log.Info("Adopted late handoff transport credential before workload start")
+		}
+	} else {
+		if _, terr := hub.TakeHandoffTransportToken(); terr != nil {
+			if !errors.Is(terr, fs.ErrNotExist) {
+				if errors.Is(terr, hub.ErrHandoffUnlinkFailed) {
+					return fmt.Errorf("cannot remove late handoff transport token: %w", terr)
+				}
+				log.Warn("Ignored and removed invalid late handoff transport token entry: %v", terr)
+			}
+		} else {
+			log.Warn("Discarded late handoff transport credential before workload start (no hub-provided transport)")
+		}
+	}
+	if err := hub.RemoveStaleHandoffTransportTmpFile(); err != nil {
+		return fmt.Errorf("cannot remove late stale handoff transport token temp file: %w", err)
+	}
+
 	return verifyShellHandoffTokenAbsent()
 }
 

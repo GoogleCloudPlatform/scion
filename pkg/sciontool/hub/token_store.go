@@ -52,7 +52,7 @@ const (
 	DefaultRuntimeTokenPath = DefaultRuntimeTokenDir + "/" + TokenFile
 	// DefaultRuntimeTransportTokenPath is the root-only runtime path for the
 	// isolated transport token.
-	DefaultRuntimeTransportTokenPath = "/run/scion/" + transportauth.TransportTokenFileName
+	DefaultRuntimeTransportTokenPath = DefaultRuntimeTokenDir + "/" + transportauth.TransportTokenFileName
 )
 
 // ErrHandoffUnlinkFailed is returned when PID 1 cannot remove the handoff
