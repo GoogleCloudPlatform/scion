@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // ErrAgentFilesDeleteRefused is returned when an agent files delete would
@@ -629,7 +630,7 @@ func makeWritableInRoot(parent *os.Root, name string, expected fs.FileInfo) {
 	if err != nil || !os.SameFile(expected, opened) {
 		return
 	}
-	f, err := child.Open(".")
+	f, err := rootopen.OpenDir(child, ".")
 	if err != nil {
 		return
 	}
