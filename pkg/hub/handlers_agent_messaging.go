@@ -642,6 +642,10 @@ func (s *Server) resolveOutboundRouting(
 				return nil, fmt.Errorf("group post refused: %s", decision.Reason)
 			}
 
+			if err := s.checkGroupThreadIDNotDMKey(w, conv.ID, req.ThreadID); err != nil {
+				return nil, err
+			}
+
 			// Auto-register sender as participant (listing concern, non-fatal)
 			// when its message mode allows joining by posting.
 			if authKind, authID := authenticatedSender(ctx); authID != "" && decision.MayJoin {
@@ -696,8 +700,13 @@ func (s *Server) resolveOutboundRouting(
 			// The sender's message mode is checked before the thread
 			// conversation is resolved, so a refused post writes no row
 			// (group_message_mode.go).
-			if kind == "group" && !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
-				return nil, fmt.Errorf("group post refused by message mode")
+			if kind == "group" {
+				if err := s.checkGroupThreadIDNotDMKey(w, "", req.ThreadID); err != nil {
+					return nil, err
+				}
+				if !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
+					return nil, fmt.Errorf("group post refused by message mode")
+				}
 			}
 			var keyOpts []messaging.ConversationByKeyOption
 			s.mu.RLock()
@@ -1182,13 +1191,13 @@ func (s *Server) resolveAssertedDirectUserRecipient(ctx context.Context, w http.
 // checkDirectThreadIDMatchesDMKey applies the ptone/scion#2211 direct-conversation
 // thread_id check: when the caller supplied a dm:-prefixed thread_id
 // alongside an asserted direct conversation, that thread_id must equal the
-// conversation's own DM key (ExternalRef) — a mismatched dm: thread_id names
-// a different conversation than the one the caller just asserted. A no-op
-// when thread_id is empty (still backfilled elsewhere) or not dm:-prefixed
-// (some other addressing scheme). Shared by both the conversation_ref and
-// the raw conversation_id paths, so the two behave identically.
+// conversation's own DM key (ExternalRef) — a mismatched or whitespace-padded
+// dm: thread_id is rejected. A no-op when thread_id is empty (still backfilled
+// elsewhere) or not dm:-prefixed after trimming whitespace. Shared by both the
+// conversation_ref and the raw conversation_id paths, so the two behave
+// identically.
 func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, threadID string) error {
-	if !strings.HasPrefix(threadID, "dm:") {
+	if !strings.HasPrefix(strings.TrimSpace(threadID), "dm:") {
 		return nil
 	}
 	if threadID != externalRef {
@@ -1200,6 +1209,21 @@ func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversa
 		return fmt.Errorf("thread_id does not match DM key")
 	}
 	return nil
+}
+
+// checkGroupThreadIDNotDMKey rejects a dm:-prefixed thread_id when routing to
+// a group conversation. A caller-supplied dm: thread_id is only valid for a
+// matching direct conversation, so rejecting it here ensures plain messages,
+// decisions, secret requests, and command requests all enforce the same rule.
+func (s *Server) checkGroupThreadIDNotDMKey(w http.ResponseWriter, conversationID, threadID string) error {
+	if !strings.HasPrefix(strings.TrimSpace(threadID), "dm:") {
+		return nil
+	}
+	s.messageLog.Warn("supplied dm: thread_id cannot be used with a group conversation",
+		"thread_id", threadID, "conversation_id", conversationID)
+	ValidationError(w, "a dm: thread_id cannot be used with a non-DM conversation",
+		map[string]interface{}{"field": "thread_id"})
+	return fmt.Errorf("dm: thread_id cannot be used with a group conversation")
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -3113,6 +3137,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
+				if err := s.checkDirectThreadIDMatchesDMKey(w, conv.ID, conv.ExternalRef, structuredMsg.ThreadID); err != nil {
+					return
+				}
 			case "group":
 				// Deny when either project ID is unset (empty or zero UUID).
 				// Two unset IDs comparing equal would authorize a request
@@ -3147,6 +3174,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						return
 					}
 					senderMayJoin = decision.MayJoin
+				}
+
+				if err := s.checkGroupThreadIDNotDMKey(w, conv.ID, structuredMsg.ThreadID); err != nil {
+					return
 				}
 
 				// Auto-register the sender (when its mode allows joining by
@@ -3237,14 +3268,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				// thread conversation is resolved, so a refused post writes
 				// no row (group_message_mode.go). Every other sender of a
 				// thread post was decided by decideKeyedPostSender.
-				if kind == "group" && authKind == "agent" {
-					sender, ok := s.loadGroupPostSender(ctx, w, authID)
-					if !ok {
+				if kind == "group" {
+					if err := s.checkGroupThreadIDNotDMKey(w, "", structuredMsg.ThreadID); err != nil {
 						return
 					}
-					threadPostSender = sender
-					if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
-						return
+					if authKind == "agent" {
+						sender, ok := s.loadGroupPostSender(ctx, w, authID)
+						if !ok {
+							return
+						}
+						threadPostSender = sender
+						if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
+							return
+						}
 					}
 				}
 				var keyOpts []messaging.ConversationByKeyOption
