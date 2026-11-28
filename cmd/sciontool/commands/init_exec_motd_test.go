@@ -148,10 +148,10 @@ func TestBuildExecContainerMOTD_ProxyTransportLine(t *testing.T) {
 			for _, persistent := range []string{"true", "false"} {
 				got := buildExecContainerMOTD(baseEnv(mode, persistent))
 				assert.Contains(t, got, "Hub requires transport auth: log in with your own credentials first.")
-				// Combined with P3's 3-line login block, worst case (persistent=false)
-				// must stay within the 20-line one-screen budget (17 + 3 = 20).
-				assert.LessOrEqual(t, strings.Count(got, "\n"), 17,
-					"MOTD in proxy mode (persistent=%s) must leave 3 lines for P3 login block within 20-line budget", persistent)
+				// Worst case (persistent=false + login block + proxy transport line)
+				// must stay within the 20-line one-screen budget.
+				assert.LessOrEqual(t, strings.Count(got, "\n"), 20,
+					"MOTD in proxy mode (persistent=%s) must fit within 20-line budget", persistent)
 				for _, line := range strings.Split(got, "\n") {
 					assert.LessOrEqual(t, utf8.RuneCountInString(line), 70,
 						"MOTD line exceeds 70 runes (mode=%s persistent=%s): %q", mode, persistent, line)
