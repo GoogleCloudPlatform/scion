@@ -201,6 +201,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `hub env` (all) | Y | - |
 | `hub notifications` | Y | - |
 | `init` | Y | - |
+| `label` | Y | Y (direct children only, non-reserved keys; Hub enforces creator check and refuses self-edit, ptone/scion#9867) |
 | `list` | Y | Y (also with a target-hub profile, as for `create`) |
 | `login` | Y | - |
 | `logs` | Y | Y (also with a target-hub profile, as for `create`) |

@@ -207,6 +207,11 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 			ID: tid("relrule-fedrow-launched"), ProjectID: f.projectBeta.ID,
 			Ancestry: []string{f.projectOwnerID, fed.ID()},
 		}), ActionRead, "agent.read", true},
+		// The creator_label rule applies to local agents only.
+		"creator_label": {RelationshipRuleCreatorLabel, agentLabelsUpdateResource(&store.Agent{
+			ID: tid("relrule-fedrow-label"), ProjectID: f.projectBeta.ID,
+			CreatedBy: fed.ID(), Ancestry: []string{f.projectOwnerID, fed.ID()},
+		}), ActionUpdate, "agent.update", true},
 		"ancestor": {RelationshipRuleAncestor, agentResource(&store.Agent{
 			ID: tid("relrule-fedrow-desc"), ProjectID: f.projectBeta.ID,
 			Ancestry: []string{f.projectOwnerID, fed.ID()},
@@ -354,7 +359,7 @@ func TestRelationshipRules_RuleIDsMatchPolicyNames(t *testing.T) {
 	ids := map[string]bool{}
 	for _, id := range []RelationshipRuleID{
 		RelationshipRuleOwner, RelationshipRuleAncestor, RelationshipRuleProgeny,
-		RelationshipRuleHubMemberSAAssign, RelationshipRuleLauncher,
+		RelationshipRuleHubMemberSAAssign, RelationshipRuleLauncher, RelationshipRuleCreatorLabel,
 		RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation, RelationshipRuleBrokerAssociation,
 		RelationshipRuleAgentAssociation,
 	} {

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,13 +62,14 @@ func TestBuildLabelUpdateRequest(t *testing.T) {
 	})
 }
 
-func TestLabelCmd_AgentModeExcluded(t *testing.T) {
-	assert.False(t, agentAllowed["label"], "scion label must be human-mode only")
+func TestLabelCmd_AgentModeAllowed(t *testing.T) {
+	assert.True(t, agentAllowed["label"], "scion label must be available in agent mode (Hub enforces direct-child authorization)")
 
 	root := buildTestTree()
+	root.AddCommand(&cobra.Command{Use: "label"})
 	applyModeRestrictions(root, ModeAgent)
 	names := collectCommandNames(root)
-	assert.NotContains(t, names, "label", "scion label must be stripped in agent mode")
+	assert.Contains(t, names, "label", "scion label must remain available in agent mode")
 }
 
 func TestLabelCmd_WindowsAllowed(t *testing.T) {

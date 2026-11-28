@@ -1830,6 +1830,12 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			if permissionID == permissionAgentRead && descendantStatusReadHolds(agent, resource, ActionRead, permissionID) {
 				return true
 			}
+			// agent.update has no agent scope. The creator_label rule
+			// (authz_agent_labels.go) admits it for a direct child target on
+			// the merge label PATCH routes only.
+			if permissionID == permissionAgentUpdate && creatorLabelEditHolds(agent, resource, ActionUpdate, permissionID) {
+				return true
+			}
 			_, ok := allowed[permissionID]
 			return ok
 		},

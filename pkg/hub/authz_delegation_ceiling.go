@@ -210,10 +210,12 @@ func (a *AuthzService) checkDelegationCeiling(
 	// The walk starts at agentID, so the caller the predicate decides for
 	// must be that agent.
 	descendantRead := false
+	creatorLabelEdit := false
 	if caller, ok := req.Principal.Identity.(AgentIdentity); ok && caller.ID() == agentID {
 		descendantRead = descendantStatusReadHolds(caller, req.Resource, req.Action, permissionID)
+		creatorLabelEdit = creatorLabelEditHolds(caller, req.Resource, req.Action, permissionID)
 	}
-	return a.walkDelegationChainCore(ctx, req.Resource, req.Action, permissionID, agentID, attested, descendantRead, scopeType, scopeID, explain, cause, note...)
+	return a.walkDelegationChainCore(ctx, req.Resource, req.Action, permissionID, agentID, attested, descendantRead, creatorLabelEdit, scopeType, scopeID, explain, cause, note...)
 }
 
 // checkUserSecretParentCeiling is checkDelegationCeiling's arm for an
@@ -290,6 +292,32 @@ func descendantReadPassesHop(edge *store.DelegationEdge, permissionID string, de
 	}
 }
 
+// creatorLabelEditReasonMarker is appended to the reason of a delegation
+// ceiling that passed only because a bounded hop admitted a direct-creator
+// label edit. It is a fixed string.
+const creatorLabelEditReasonMarker = "delegation ceiling: creator label edit"
+
+// creatorLabelEditPassesHop reports whether edge admits permissionID only
+// through the creator_label direct-child rule (authz_agent_labels.go):
+// creatorLabelEdit is set, the permission is agent.update, and the edge is
+// bounded with a known ceiling version whose frozen IDs do not already hold
+// agent.update.
+func creatorLabelEditPassesHop(edge *store.DelegationEdge, permissionID string, creatorLabelEdit bool) bool {
+	if !creatorLabelEdit || permissionID != permissionAgentUpdate || edge == nil || edge.Kind != store.EffectCeilingBounded {
+		return false
+	}
+	frozen, ok := uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
+	if !ok {
+		return false
+	}
+	switch frozen.Version {
+	case permissions.CeilingVersionUnspecified, permissions.CeilingVersionV1:
+		return !frozen.Allows(permissionAgentUpdate)
+	default:
+		return false
+	}
+}
+
 // maxDelegationDepth limits the delegation chain walk.
 const maxDelegationDepth = 10
 
@@ -336,14 +364,15 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	cause *DenyCause,
 	note ...*unrecordedHopNote,
 ) (bool, string, error) {
-	return a.walkDelegationChainCore(ctx, resource, action, permissionID, agentID, attested, false, scopeType, scopeID, explain, cause, note...)
+	return a.walkDelegationChainCore(ctx, resource, action, permissionID, agentID, attested, false, false, scopeType, scopeID, explain, cause, note...)
 }
 
 // walkDelegationChainCore is walkDelegationChainWithCause with
-// descendantRead: true only when checkDelegationCeiling found that the
-// authenticated caller reads the status of one of its descendants through
-// a single-agent GET (descendantStatusReadHolds). Then a bounded hop does not
-// deny agent.read (hopEffectCeilingDenyFor); every delegator check still
+// descendantRead and creatorLabelEdit: each is true only when
+// checkDelegationCeiling found that the authenticated caller satisfies
+// descendantStatusReadHolds (single-agent GET) or creatorLabelEditHolds
+// (direct-child merge label PATCH). Then a bounded hop does not deny the
+// respective permission (hopEffectCeilingDenyFor); every delegator check still
 // runs first, at every hop. Every other caller passes false.
 func (a *AuthzService) walkDelegationChainCore(
 	ctx context.Context,
@@ -353,22 +382,27 @@ func (a *AuthzService) walkDelegationChainCore(
 	agentID string,
 	attested bool,
 	descendantRead bool,
+	creatorLabelEdit bool,
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
 	note ...*unrecordedHopNote,
 ) (bool, string, error) {
-	used := false
-	allowed, reason, err := a.walkDelegationChainHops(ctx, resource, action, permissionID, agentID, attested, descendantRead, &used, scopeType, scopeID, explain, cause, note...)
-	if allowed && used {
+	usedDescendantRead := false
+	usedCreatorLabel := false
+	allowed, reason, err := a.walkDelegationChainHops(ctx, resource, action, permissionID, agentID, attested, descendantRead, creatorLabelEdit, &usedDescendantRead, &usedCreatorLabel, scopeType, scopeID, explain, cause, note...)
+	if allowed && usedDescendantRead {
 		reason += " (" + descendantReadReasonMarker + ")"
+	}
+	if allowed && usedCreatorLabel {
+		reason += " (" + creatorLabelEditReasonMarker + ")"
 	}
 	return allowed, reason, err
 }
 
-// walkDelegationChainHops is the walk itself. used is set when a bounded
-// hop admitted agent.read only through the descendant status read
-// (descendantReadPassesHop).
+// walkDelegationChainHops is the walk itself. usedDescendantRead /
+// usedCreatorLabel are set when a bounded hop admitted agent.read /
+// agent.update only through descendantReadPassesHop / creatorLabelEditPassesHop.
 func (a *AuthzService) walkDelegationChainHops(
 	ctx context.Context,
 	resource Resource,
@@ -377,7 +411,9 @@ func (a *AuthzService) walkDelegationChainHops(
 	agentID string,
 	attested bool,
 	descendantRead bool,
-	used *bool,
+	creatorLabelEdit bool,
+	usedDescendantRead *bool,
+	usedCreatorLabel *bool,
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
@@ -523,23 +559,28 @@ func (a *AuthzService) walkDelegationChainHops(
 				setCause(DenyCauseCeilingDelegatorLacksPermission)
 				return false, fmt.Sprintf("delegator %s does not hold %s", edge.DelegatorID, permissionID), nil
 			}
-			if c, why := hopEffectCeilingDenyFor(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled(), descendantRead); c != "" {
+			if c, why := hopEffectCeilingDenyFor(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled(), descendantRead, creatorLabelEdit); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
 				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
 			if descendantReadPassesHop(edge, permissionID, descendantRead) {
-				*used = true
+				*usedDescendantRead = true
 				addStep("delegation_ceiling_descendant_read",
 					fmt.Sprintf("edge %s: status read of a descendant of agent:%s", edge.ID, agentID))
+			}
+			if creatorLabelEditPassesHop(edge, permissionID, creatorLabelEdit) {
+				*usedCreatorLabel = true
+				addStep("delegation_ceiling_creator_label",
+					fmt.Sprintf("edge %s: label edit of a direct child of agent:%s", edge.ID, agentID))
 			}
 			addStep("delegation_ceiling_allowed",
 				fmt.Sprintf("delegator user %s holds %s (%s)", edge.DelegatorID, permissionID, reason))
 			return true, "delegation ceiling passed", nil
 
 		case store.DelegationPrincipalAgent:
-			allowed, reason, err := a.checkAgentHoldsPermission(ctx, edge.DelegatorID, permissionID, edge.ScopeType, edge.ScopeID)
+			allowed, reason, err := a.checkAgentHoldsPermissionFor(ctx, edge.DelegatorID, permissionID, edge.ScopeType, edge.ScopeID, creatorLabelEdit)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					addStep("delegation_ceiling_delegator_not_live",
@@ -556,16 +597,21 @@ func (a *AuthzService) walkDelegationChainHops(
 				setCause(DenyCauseCeilingDelegatorLacksPermission)
 				return false, fmt.Sprintf("delegator agent %s does not hold %s: %s", edge.DelegatorID, permissionID, reason), nil
 			}
-			if c, why := hopEffectCeilingDenyFor(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled(), descendantRead); c != "" {
+			if c, why := hopEffectCeilingDenyFor(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled(), descendantRead, creatorLabelEdit); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
 				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
 			if descendantReadPassesHop(edge, permissionID, descendantRead) {
-				*used = true
+				*usedDescendantRead = true
 				addStep("delegation_ceiling_descendant_read",
 					fmt.Sprintf("edge %s: status read of a descendant of agent:%s", edge.ID, agentID))
+			}
+			if creatorLabelEditPassesHop(edge, permissionID, creatorLabelEdit) {
+				*usedCreatorLabel = true
+				addStep("delegation_ceiling_creator_label",
+					fmt.Sprintf("edge %s: label edit of a direct child of agent:%s", edge.ID, agentID))
 			}
 			addStep("delegation_ceiling_link_allowed",
 				fmt.Sprintf("delegator agent %s holds %s; continuing", edge.DelegatorID, permissionID))
@@ -660,17 +706,17 @@ func adoptionCeilingCovers(permissionID string) bool {
 //     passes the rest;
 //   - a principal hop passes.
 func hopEffectCeilingDeny(edge *store.DelegationEdge, permissionID string, resource Resource, actingAgentID string, devLocalEnabled bool) (DenyCause, string) {
-	return hopEffectCeilingDenyFor(edge, permissionID, resource, actingAgentID, devLocalEnabled, false)
+	return hopEffectCeilingDenyFor(edge, permissionID, resource, actingAgentID, devLocalEnabled, false, false)
 }
 
-// hopEffectCeilingDenyFor is hopEffectCeilingDeny with descendantRead
-// (see walkDelegationChainCore): when it is true, a bounded hop does not
-// deny agent.read. agent.read has no agent scope, so no frozen ceiling
-// holds it; the exception is limited to the status read of a descendant
-// on the single-agent GET routes (descendantStatusReadHolds), the way
-// selfTarget is limited to the acting agent itself. The provenance checks
-// above it still apply, and every other permission is unchanged.
-func hopEffectCeilingDenyFor(edge *store.DelegationEdge, permissionID string, resource Resource, actingAgentID string, devLocalEnabled, descendantRead bool) (DenyCause, string) {
+// hopEffectCeilingDenyFor is hopEffectCeilingDeny with descendantRead and
+// creatorLabelEdit (see walkDelegationChainCore): when set, a bounded hop does
+// not deny agent.read (descendant status read) or agent.update (direct-child
+// label edit). Neither permission has an agent scope, so no frozen ceiling
+// holds it; the exceptions are limited to those exact stored-target routes,
+// the way selfTarget is limited to the acting agent itself. The provenance
+// checks above them still apply, and every other permission is unchanged.
+func hopEffectCeilingDenyFor(edge *store.DelegationEdge, permissionID string, resource Resource, actingAgentID string, devLocalEnabled, descendantRead, creatorLabelEdit bool) (DenyCause, string) {
 	if hasDevLocalProvenance(edge) {
 		if !devLocalEnabled {
 			return DenyCauseCeilingSourceNotAllowed, "delegation ceiling: " + reasonDevLocalDisabled
@@ -691,7 +737,7 @@ func hopEffectCeilingDenyFor(edge *store.DelegationEdge, permissionID string, re
 		}
 		return "", ""
 	default:
-		if descendantReadPassesHop(edge, permissionID, descendantRead) {
+		if descendantReadPassesHop(edge, permissionID, descendantRead) || creatorLabelEditPassesHop(edge, permissionID, creatorLabelEdit) {
 			return "", ""
 		}
 		selfTarget := resource.Type == "agent" && resource.ID != "" && resource.ID == actingAgentID
@@ -1068,6 +1114,14 @@ func (a *AuthzService) checkAgentHoldsPermission(
 	ctx context.Context,
 	agentID, permissionID, scopeType, scopeID string,
 ) (bool, string, error) {
+	return a.checkAgentHoldsPermissionFor(ctx, agentID, permissionID, scopeType, scopeID, false)
+}
+
+func (a *AuthzService) checkAgentHoldsPermissionFor(
+	ctx context.Context,
+	agentID, permissionID, scopeType, scopeID string,
+	creatorLabelEdit bool,
+) (bool, string, error) {
 	agent, err := a.store.GetAgent(ctx, agentID)
 	if err != nil {
 		return false, fmt.Sprintf("agent %s lookup failed: %v", agentID, err), err
@@ -1099,6 +1153,15 @@ func (a *AuthzService) checkAgentHoldsPermission(
 
 	requiredScope := permissionToAgentScope(permissionID)
 	if requiredScope == "" {
+		// Direct-child label edit (ptone/scion#9867): agent.update has no
+		// agent scope, so an intermediate live, unheld agent delegator in the
+		// same project passes the hop while the walk continues to the root user.
+		if creatorLabelEdit && permissionID == permissionAgentUpdate {
+			if scopeType == store.RoleScopeProject && agent.ProjectID == scopeID {
+				return true, "agent creator label edit delegation hop", nil
+			}
+			return false, fmt.Sprintf("delegator agent %s is outside project %s", agentID, scopeID), nil
+		}
 		// No agent scope maps to this permission: only the project read
 		// baseline applies, for registered read/list permissions in the
 		// agent's own project.

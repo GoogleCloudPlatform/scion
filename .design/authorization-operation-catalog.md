@@ -17,7 +17,7 @@
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach; agent principals are refused label edits; writes agent.suspend_policy.set when suspendPolicy changes and agent.labels.update when labels change
-- [agent.labels.update](#agentlabelsupdate) — Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Refuses agent principals and audits every label change atomically
+- [agent.labels.update](#agentlabelsupdate) — Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Admits human callers with agent.update and local agents editing non-reserved keys on their direct children in the same project (never self, orphans, or reserved scion.*/system keys); audits every label change atomically
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
@@ -1006,7 +1006,7 @@
 
 **Domain:** agent
 
-**Description:** Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Refuses agent principals and audits every label change atomically
+**Description:** Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Admits human callers with agent.update and local agents editing non-reserved keys on their direct children in the same project (never self, orphans, or reserved scion.*/system keys); audits every label change atomically
 
 ### Entry Points
 
@@ -1015,9 +1015,9 @@
 | http_route | PATCH | `/api/v1/agents/{id}/labels` |
 | http_route | PATCH | `/api/v1/projects/{projectId}/agents/{id}/labels` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -1041,6 +1041,8 @@
 
 - `pkg/hub:TestAgentSubRoute_CatalogDrift`
 - `pkg/hub:TestPatchAgentLabels_Authorization`
+- `pkg/hub:TestPatchAgentLabels_CreatorAgentMatrix`
+- `pkg/hub:TestPatchAgentLabels_ReservedKeysAndUnauthenticated`
 - `pkg/hub:TestPatchAgentLabels_ConcurrentMerge`
 
 ---

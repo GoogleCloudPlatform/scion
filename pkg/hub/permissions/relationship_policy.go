@@ -195,6 +195,15 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ReadOnly:       true,
 	},
 	{
+		// creator_label/agent/agent (ptone/scion#9867): a local agent edits
+		// non-reserved labels on its direct children in the same project. The
+		// rule produces a candidate only on the merge label PATCH routes.
+		Relationship:   "creator_label",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   ResourceAgent,
+		PermissionIDs:  []string{"agent.update"},
+	},
+	{
 		// progeny/agent/secret compatibility row
 		// (storeProgenyAdapter.ReadPermissions,
 		// TestRelationshipCharacterization_Progeny); dispatcher resolution

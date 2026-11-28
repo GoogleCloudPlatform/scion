@@ -99,6 +99,16 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 		"agent.delegation.revoke", "agent.delegation.credential.revoke", "agent.delegation.list", "agent.delegation.read",
 		"agent.delegation.revoke_all",
 	},
+	// Creator direct-child label edit (ptone/scion#9867): agent.update only.
+	{"creator_label", "agent", "agent"}: {
+		"agent.create", "agent.read", "agent.list", "agent.delete", "agent.attach",
+		"agent.lifecycle", "agent.port_access", "agent.stop_all", "agent.message",
+		"agent.set_message_mode", "agent.grant_hub_mode", "agent.status_update",
+		"agent.log_append", "agent.notify", "agent.token_refresh", "agent.port_forward",
+		"agent.identity_token", "agent.delegation.create", "agent.delegation.exchange",
+		"agent.delegation.revoke", "agent.delegation.credential.revoke", "agent.delegation.list", "agent.delegation.read",
+		"agent.delegation.revoke_all",
+	},
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {
 		"gcp_service_account.create", "gcp_service_account.read", "gcp_service_account.delete",
 		"gcp_service_account.list", "gcp_service_account.verify", "gcp_service_account.mint",
