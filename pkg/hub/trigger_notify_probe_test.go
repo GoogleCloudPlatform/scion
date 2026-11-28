@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
@@ -66,7 +68,7 @@ func p7aFire(f *triggersTestFixture, tr *store.Trigger) *store.TriggerFire {
 // Two hub replicas (two Servers over one store) each finish a different failed
 // fire of the same trigger within the cooldown. Acceptance 12 / §7.4: exactly
 // one user notice within the cooldown.
-func TestP7aProbe_CooldownAcrossReplicas_DefectRepro(t *testing.T) {
+func TestTriggerNotify_CooldownAcrossReplicas(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
 	fixedNow := time.Date(2026, 11, 27, 15, 10, 0, 0, time.UTC)
@@ -89,7 +91,7 @@ func TestP7aProbe_CooldownAcrossReplicas_DefectRepro(t *testing.T) {
 
 // Same for a restart: a fresh Server must still honor the durable cooldown
 // within the hour bucket.
-func TestP7aProbe_CooldownAcrossRestart_DefectRepro(t *testing.T) {
+func TestTriggerNotify_CooldownAcrossRestart(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
 	fixedNow := time.Date(2026, 11, 27, 15, 10, 0, 0, time.UTC)
@@ -112,7 +114,7 @@ func TestP7aProbe_CooldownAcrossRestart_DefectRepro(t *testing.T) {
 // Design §10: cooldown is per (definition, sink, outcome, reason). A
 // project-cap skip notice must not suppress a later, different refused outcome
 // within the hour, while a repeated refused with the same reason is suppressed.
-func TestP7aProbe_CooldownKeyPerOutcomeReason_DefectRepro(t *testing.T) {
+func TestTriggerNotify_CooldownKeyPerOutcomeReason(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
 	fixedNow := time.Date(2026, 11, 27, 15, 10, 0, 0, time.UTC)
@@ -136,7 +138,7 @@ func TestP7aProbe_CooldownKeyPerOutcomeReason_DefectRepro(t *testing.T) {
 
 // Live authz at notification: admin authors a trigger with a notify agent,
 // then loses project membership. The agent sink must not deliver.
-func TestP7aProbe_AgentSinkLiveAuthzAfterRevocation(t *testing.T) {
+func TestTriggerNotify_AgentSinkLiveAuthzAfterRevocation(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
 	disp := &notifyTestDispatcher{}
@@ -196,4 +198,158 @@ func TestTriggerNotify_SanitizeReasonUTF8Boundary(t *testing.T) {
 	assert.True(t, utf8.ValidString(gotOffset), "offset truncated reason must remain valid UTF-8")
 	assert.LessOrEqual(t, len(gotOffset), maxFireNotifyReasonBytes)
 	assert.Equal(t, "a"+strings.Repeat("🔥", 29), gotOffset)
+}
+
+// O4 (review 2): NoWake must suppress hub auto-wake even when IdleSuspend is
+// enabled and the notify target carries an auto-waking SuspendReason (idle).
+// The agent must not be resumed and the notify row must end skipped
+// "target not running".
+func TestTriggerNotify_NoWakeSuppressesIdleAutoWake(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+	setIdleSuspendExperiment(t, f.srv, true)
+	t.Cleanup(f.srv.waitAutoWakeIdle)
+
+	idleAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "idle-notify-target",
+		Name:      "idle-notify-target",
+		ProjectID: f.projectID,
+		Phase:     string(state.PhaseRunning),
+		OwnerID:   f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, idleAgent))
+	awSuspendFor(t, f.store, idleAgent, state.SuspendReasonIdle)
+	require.Equal(t, autoWakeResume, f.srv.autoWakeModeOf(idleAgent),
+		"fixture precondition: agent must qualify for auto-wake when NoWake is false")
+
+	disp := &wakeTrackingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	tr := p7aProbeTrigger(t, f, f.ownerAuth, "p7a-nowake-idle", &TriggerNotifySpec{
+		AgentID:    idleAgent.ID,
+		UserNotice: boolPtr(false),
+	})
+
+	f.srv.notifyTriggerFire(ctx, tr, p7aFire(f, tr), hubfire.FireOutcome{
+		Status: hubfire.FireStatusFailed,
+		Error:  "message failed",
+	})
+
+	disp.mu2.Lock()
+	starts := len(disp.startCalls)
+	msgs := len(disp.messageCalls)
+	disp.mu2.Unlock()
+	assert.Zero(t, starts, "notify with NoWake must not attempt to wake/resume an idle-suspended agent")
+	assert.Zero(t, msgs, "notify with NoWake must not deliver to a suspended agent")
+
+	afterAgent, err := f.store.GetAgent(ctx, idleAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), afterAgent.Phase, "agent phase must remain suspended")
+
+	fires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		ProjectID: f.projectID,
+		TriggerID: tr.ID,
+	}, store.ListOptions{Limit: 20})
+	require.NoError(t, err)
+	var notifyRow *store.TriggerFire
+	for i := range fires.Items {
+		if fires.Items[i].ActionType == store.TriggerActionNotify && fires.Items[i].ActionIndex == store.TriggerFireActionIndexNotify {
+			notifyRow = &fires.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, notifyRow, "expected agent-sink notify row in trigger_fires")
+	assert.Equal(t, store.TriggerFireStatusSkipped, notifyRow.Status)
+	assert.Equal(t, trigger.ErrFireTargetNotRunning, notifyRow.Error)
+}
+
+// O5 (review 2): notify-agent authoring must be exactly as strict as
+// message-action authoring for every principal: for each principal P, let A_P
+// be the set of agents P can target with a message action. With a known-good
+// action target, creating a trigger whose notify.agentId = T must succeed iff
+// T is in A_P.
+func TestTriggerNotify_AuthoringParityAcrossPrincipals(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	otherAgent := &store.Agent{
+		ID: api.NewUUID(), Slug: "rev2-other", Name: "rev2-other", ProjectID: f.otherProjID,
+		Phase: string(state.PhaseRunning), OwnerID: f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
+
+	targets := map[string]string{
+		"target": f.targetAgent.ID, "agentA": f.agentA.ID, "agentB": f.agentB.ID,
+		"agentNone": f.agentNone.ID, "otherProj": otherAgent.ID,
+	}
+
+	ownerEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "rev2-owner-ep", SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, ownerEpRec.Code, ownerEpRec.Body.String())
+	var ownerEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(ownerEpRec.Body.Bytes(), &ownerEp))
+
+	agentEpRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "rev2-agenta-ep", SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, agentEpRec.Code, agentEpRec.Body.String())
+	var agentEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(agentEpRec.Body.Bytes(), &agentEp))
+
+	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
+	principals := []struct {
+		name string
+		id   Identity
+		ep   string
+	}{
+		{"owner", f.ownerAuth, ownerEp.ID},
+		{"admin", f.adminAuth, ownerEp.ID},
+		{"member", f.memberAuth, ownerEp.ID},
+		{"viewer", f.viewerAuth, ownerEp.ID},
+		{"agentA-baseline", f.agentAAuth, agentEp.ID},
+		{"uat-full", scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:create", "trigger:read", "webhook_endpoint:read", "agent:message"), ownerEp.ID},
+		{"uat-no-message", scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:create", "trigger:read", "webhook_endpoint:read"), ownerEp.ID},
+	}
+
+	n := 0
+	create := func(p Identity, ep, action string, notify *TriggerNotifySpec) int {
+		n++
+		rec := f.doTrigger(t, p, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("rev2-parity-%d", n),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep},
+			Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: action, Message: "hi"},
+			Notify: notify,
+		})
+		if rec.Code == http.StatusCreated {
+			var resp TriggerResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			_ = f.store.DeleteTrigger(ctx, resp.ID)
+		}
+		return rec.Code
+	}
+
+	for _, p := range principals {
+		allowed := map[string]bool{}
+		good := ""
+		for name, tid := range targets {
+			code := create(p.id, p.ep, tid, nil)
+			t.Logf("principal=%s message-action target=%s -> %d", p.name, name, code)
+			if code == http.StatusCreated {
+				allowed[name] = true
+				good = tid
+			}
+		}
+		if good == "" {
+			t.Logf("principal=%s cannot author any message trigger; notify parity vacuous", p.name)
+			continue
+		}
+		for name, tid := range targets {
+			code := create(p.id, p.ep, good, &TriggerNotifySpec{AgentID: tid})
+			t.Logf("principal=%s notify target=%s -> %d (message-action allowed=%v)", p.name, name, code, allowed[name])
+			assert.Equal(t, allowed[name], code == http.StatusCreated,
+				"principal=%s notify target=%s: notify authoring must match message authoring", p.name, name)
+		}
+	}
 }

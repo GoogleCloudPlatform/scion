@@ -385,6 +385,7 @@ var viewAsMemberIdentityRebuildPolicy = map[string]viewAsMemberGate{
 	"decisions_profile.go:waitingOnYouTotal":                            vamNotARequestGate("background worker; durable state must use real authority"),
 	"exec_container.go:ResolveExecContainer":                            vamNotARequestGate("resolves exec container owner via clamped AuthzService, not a caller admin gate"),
 	"firecore_authority.go:resolveFireUser":                             vamNotARequestGate("background trigger/schedule fire authority (no web session)"),
+	"firecore_notify.go:sendUserFireNotification":                       vamNotARequestGate("background notify: evaluates the notification recipient user's live trigger.read, not a web session caller"),
 	"github_app_association_authz.go:AuthorizeGitHubTokenSourceProject": vamNotARequestGate("evaluates GitHub token source user via clamped AuthzService"),
 	"github_app_association_authz.go:githubBindingUserIsAdmin":          vamNotARequestGate("evaluates GitHub binding user via clamped AuthzService.Decide"),
 	"lifecycle_hook_fire_authority.go:authorizeHookFire":                vamNotARequestGate("background lifecycle hook fire authority (no web session)"),

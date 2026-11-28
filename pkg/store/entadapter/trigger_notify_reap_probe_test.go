@@ -13,11 +13,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// P7a review probe: a notify row (action_type=notify, action_index=-1) left in
-// "firing" by a hub crash mid-notification is reaped by ReapExpiredTriggerFires,
-// which must still mark it failed without touching the trigger's error_count or
-// last_fire_* (notify rows must be excluded from counters).
-func TestP7aProbe_ReapedNotifyRowCountsAsTriggerError_DefectRepro(t *testing.T) {
+// TestTriggerNotifyStore_ReapedNotifyRowExcludedFromCounters verifies that a
+// notify row (action_type=notify, action_index=-1) left in "firing" by a hub
+// crash mid-notification is marked failed by ReapExpiredTriggerFires without
+// touching the trigger's error_count or last_fire_*.
+func TestTriggerNotifyStore_ReapedNotifyRowExcludedFromCounters(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
 	t.Logf("dialect=%s", cs.client.Driver().Dialect())

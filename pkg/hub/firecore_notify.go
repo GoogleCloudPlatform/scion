@@ -74,6 +74,9 @@ var triggerNotifyEventNamespace = uuid.MustParse("c3b2d9a4-7e1f-4c8b-9a5d-2e6f8a
 //     bucket across replicas and hub restarts without any schema change. Because
 //     it is a fixed window, two notices for the same key may land close together
 //     across a bucket boundary (e.g., 10:59 and 11:01).
+//   - At-most-once delivery: the cooldown bucket is claimed before recipient
+//     lookup, authz, or delivery, so a failed or skipped delivery consumes the
+//     bucket for the remainder of the hour (preventing retry amplification).
 //
 // Security inventory (Stage 2 §18 S24):
 //   - No payload text: buildFireNotifyMessage formats only the validated

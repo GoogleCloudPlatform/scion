@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -154,9 +155,12 @@ func TestTriggerNotifyStore_FireRowIdempotencyAndRateExclusion(t *testing.T) {
 	require.True(t, claimed)
 
 	// Notify fire row uses action_index = TriggerFireActionIndexNotify (-1) and
-	// a deterministic UUIDv5 derived from (fire_id, "notify").
+	// a deterministic fixed-window cooldown UUIDv5 matching
+	// hub.TriggerNotifyCooldownEventID(triggerID, sink, outcome, reason, window).
 	ns := uuid.MustParse("c3b2d9a4-7e1f-4c8b-9a5d-2e6f8a1b4c90")
-	derivedEventID := uuid.NewSHA1(ns, []byte(origFireID+"\x00notify")).String()
+	window := now.Unix() / 3600
+	cooldownKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d", trID, "agent_message", "failed", "message failed", window)
+	derivedEventID := uuid.NewSHA1(ns, []byte(cooldownKey)).String()
 
 	notifyFire1 := &store.TriggerFire{
 		ID:          uuid.NewString(),
