@@ -30,7 +30,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/apierr"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -524,48 +526,57 @@ func TestJSONBodyLimits_ManifestEndpoints(t *testing.T) {
 		}
 		require.NoError(t, s.CreateSkill(context.Background(), skill))
 
+		skillUpload50 := make([]FileUploadRequest, 50)
+		skillManifest50 := make([]store.TemplateFile, 50)
+		const sampleHash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		skillUpload50[0] = FileUploadRequest{Path: "SKILL.md", Size: 64}
+		skillManifest50[0] = store.TemplateFile{Path: "SKILL.md", Size: 64, Hash: sampleHash, Mode: "0644"}
+		for i := 1; i < 50; i++ {
+			p := fmt.Sprintf("scripts/file-%02d.sh", i)
+			skillUpload50[i] = FileUploadRequest{Path: p, Size: 128}
+			skillManifest50[i] = store.TemplateFile{Path: p, Size: 128, Hash: sampleHash, Mode: "0644"}
+		}
+
 		t.Run("publishSkillVersion", func(t *testing.T) {
 			path := "/api/v1/skills/" + skill.ID + "/versions"
 			manifestBody, err := json.Marshal(PublishVersionRequest{
 				Version: "1.0.0",
-				Files:   uploadEntries,
+				Files:   skillUpload50,
 			})
 			require.NoError(t, err)
-			require.Greater(t, len(manifestBody), int(apierr.DefaultMaxJSONBodyBytes))
+			require.Less(t, len(manifestBody), int(apierr.DefaultMaxJSONBodyBytes))
 
 			rec := doDevRequest(t, srv, http.MethodPost, path, manifestBody)
 			assertManifestPassedDecode(t, rec)
 
 			prefix := `{"version":"1.0.1","files":[{"path":"SKILL.md","size":1}],"pad":"`
 			suffix := `"}`
-			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, maxFileManifestBodySize))
+			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)))
 			assertManifestPassedDecode(t, rec)
 
-			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, maxFileManifestBodySize+1))
-			msg := assertPayloadTooLarge(t, rec)
-			assert.Contains(t, msg, "16 MiB")
+			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)+1))
+			assertPayloadTooLarge(t, rec)
 		})
 
 		t.Run("handleSkillUpload", func(t *testing.T) {
 			path := "/api/v1/skills/" + skill.ID + "/upload"
 			manifestBody, err := json.Marshal(map[string]any{
 				"version": "1.0.0",
-				"files":   uploadEntries,
+				"files":   skillUpload50,
 			})
 			require.NoError(t, err)
-			require.Greater(t, len(manifestBody), int(apierr.DefaultMaxJSONBodyBytes))
+			require.Less(t, len(manifestBody), int(apierr.DefaultMaxJSONBodyBytes))
 
 			rec := doDevRequest(t, srv, http.MethodPost, path, manifestBody)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 			prefix := `{"version":"1.0.0","files":[{"path":"SKILL.md","size":1}],"pad":"`
 			suffix := `"}`
-			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, maxFileManifestBodySize))
+			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)))
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, maxFileManifestBodySize+1))
-			msg := assertPayloadTooLarge(t, rec)
-			assert.Contains(t, msg, "16 MiB")
+			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)+1))
+			assertPayloadTooLarge(t, rec)
 		})
 
 		t.Run("handleSkillFinalize", func(t *testing.T) {
@@ -573,23 +584,22 @@ func TestJSONBodyLimits_ManifestEndpoints(t *testing.T) {
 			manifestBody, err := json.Marshal(FinalizeSkillVersionRequest{
 				Version: "1.0.0",
 				Manifest: &SkillManifest{
-					Files: manifestEntries,
+					Files: skillManifest50,
 				},
 			})
 			require.NoError(t, err)
-			require.Greater(t, len(manifestBody), int(apierr.DefaultMaxJSONBodyBytes))
+			require.Less(t, len(manifestBody), int(apierr.DefaultMaxJSONBodyBytes))
 
 			rec := doDevRequest(t, srv, http.MethodPost, path, manifestBody)
 			assertManifestPassedDecode(t, rec)
 
 			prefix := `{"version":"1.0.0","manifest":{"files":[{"path":"SKILL.md","size":1,"hash":"sha256:00"}]},"pad":"`
 			suffix := `"}`
-			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, maxFileManifestBodySize))
+			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)))
 			assertManifestPassedDecode(t, rec)
 
-			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, maxFileManifestBodySize+1))
-			msg := assertPayloadTooLarge(t, rec)
-			assert.Contains(t, msg, "16 MiB")
+			rec = doDevRequest(t, srv, http.MethodPost, path, exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)+1))
+			assertPayloadTooLarge(t, rec)
 		})
 	})
 }
@@ -764,4 +774,310 @@ func TestJSONBodyLimits_BrokerHMACIngest(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestJSONBodyLimits_AuthLogout(t *testing.T) {
+	const logoutLimit = 4 << 10
+	const path = "/api/v1/auth/logout"
+	prefix := `{"refreshToken":"`
+	suffix := `"}`
+
+	srv, _ := testServer(t)
+
+	doAuthLogout := func(s *Server, body io.Reader) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, body)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.handleAuthLogout(rec, req)
+		return rec
+	}
+
+	t.Run("unauthenticated oversized gets 401 and reads 0 bytes", func(t *testing.T) {
+		body := newBodyLimitCountingReader(exactSizeJSON(t, prefix, suffix, logoutLimit+1024))
+		req := httptest.NewRequest(http.MethodPost, path, body)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Zero(t, body.bytesRead.Load())
+	})
+
+	t.Run("empty body succeeds", func(t *testing.T) {
+		rec := doAuthLogout(srv, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("malformed small body still succeeds", func(t *testing.T) {
+		rec := doAuthLogout(srv, strings.NewReader("{invalid"))
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("exact 4 KiB limit succeeds", func(t *testing.T) {
+		payload := exactSizeJSON(t, prefix, suffix, logoutLimit)
+		rec := doAuthLogout(srv, bytes.NewReader(payload))
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("4 KiB + 1 byte returns 413 and stops reading", func(t *testing.T) {
+		payload := exactSizeJSON(t, prefix, suffix, logoutLimit+1)
+		body := newBodyLimitCountingReader(payload)
+		rec := doAuthLogout(srv, body)
+		assertPayloadTooLarge(t, rec)
+		assert.LessOrEqual(t, body.bytesRead.Load(), int64(logoutLimit+1),
+			"MaxBytesReader must stop reading once the 4 KiB cap is exceeded")
+	})
+
+	t.Run("oversized request closes connection via net/http", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv.handleAuthLogout(w, r)
+		}))
+		defer ts.Close()
+
+		payload := exactSizeJSON(t, prefix, suffix, logoutLimit+4096)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+path, bytes.NewReader(payload))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+		assert.True(t, resp.Close, "MaxBytesReader overflow must signal Connection: close")
+	})
+
+	t.Run("proxy mode returns 200 and reads 0 bytes", func(t *testing.T) {
+		proxySrv, _ := testServer(t)
+		proxySrv.config.AuthMode = "proxy"
+		body := newBodyLimitCountingReader(exactSizeJSON(t, prefix, suffix, logoutLimit+1024))
+		rec := doAuthLogout(proxySrv, body)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Zero(t, body.bytesRead.Load())
+	})
+}
+
+type panicOnSignStorage struct {
+	*contentMockStorage
+	signCalls int
+}
+
+func (p *panicOnSignStorage) GenerateSignedURL(ctx context.Context, objectPath string, opts storage.SignedURLOptions) (*storage.SignedURL, error) {
+	p.signCalls++
+	return p.contentMockStorage.GenerateSignedURL(ctx, objectPath, opts)
+}
+
+func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
+	const overLimit = importMaxTreeFiles + 1
+
+	overUploadFiles := make([]FileUploadRequest, overLimit)
+	for i := range overUploadFiles {
+		overUploadFiles[i] = FileUploadRequest{Path: fmt.Sprintf("f%d", i), Size: 1}
+	}
+	const sampleHash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	overManifestFiles := make([]store.TemplateFile, overLimit)
+	for i := range overManifestFiles {
+		overManifestFiles[i] = store.TemplateFile{Path: fmt.Sprintf("f%d", i), Size: 1, Hash: sampleHash, Mode: "0644"}
+	}
+	overTransferFiles := make([]transfer.FileInfo, overLimit)
+	for i := range overTransferFiles {
+		overTransferFiles[i] = transfer.FileInfo{Path: fmt.Sprintf("f%d", i), Size: 1, Hash: sampleHash}
+	}
+
+	assertTooManyFiles := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "expected 400 validation_error, got %d: %s", rec.Code, rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), "body: %s", rec.Body.String())
+		assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+		assert.Contains(t, strings.ToLower(errResp.Error.Message), "too many files")
+	}
+
+	doDevRequest := func(t *testing.T, srv *Server, method, path string, payload []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("generateUploadURLs rejects over limit before signing", func(t *testing.T) {
+		stor := &panicOnSignStorage{contentMockStorage: newContentMockStorage("test-bucket")}
+		_, _, err := generateUploadURLs(context.Background(), stor, "skills/global/s/1.0.0", overUploadFiles)
+		require.Error(t, err)
+		assert.Contains(t, strings.ToLower(err.Error()), "too many files")
+		assert.Zero(t, stor.signCalls, "must not call GenerateSignedURL when file count exceeds cap")
+	})
+
+	t.Run("generateStagingUploadURLs rejects over limit before signing", func(t *testing.T) {
+		stor := &panicOnSignStorage{contentMockStorage: newContentMockStorage("test-bucket")}
+		_, err := generateStagingUploadURLs(context.Background(), stor, "templates/global/t", "templates", "tid", overUploadFiles, "upload-1", "")
+		require.Error(t, err)
+		assert.Contains(t, strings.ToLower(err.Error()), "too many files")
+		assert.Zero(t, stor.signCalls, "must not call GenerateSignedURL when file count exceeds cap")
+	})
+
+	t.Run("templates", func(t *testing.T) {
+		srv, s, stor := testTemplateFileServer(t)
+		tmpl := createTestTemplate(t, s, stor, map[string]string{"CLAUDE.md": "# Agent"})
+
+		t.Run("createTemplateV2", func(t *testing.T) {
+			body, err := json.Marshal(CreateTemplateRequest{
+				Name:    "over-limit-tmpl",
+				Harness: "claude",
+				Scope:   "global",
+				Files:   overUploadFiles,
+			})
+			require.NoError(t, err)
+			require.Less(t, len(body), maxFileManifestBodySize)
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
+			assertTooManyFiles(t, rec)
+		})
+
+		t.Run("handleTemplateUpload", func(t *testing.T) {
+			body, err := json.Marshal(UploadRequest{Files: overUploadFiles})
+			require.NoError(t, err)
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/upload", body)
+			assertTooManyFiles(t, rec)
+		})
+
+		t.Run("handleTemplateFinalize", func(t *testing.T) {
+			body, err := json.Marshal(FinalizeRequest{
+				Manifest: &TemplateManifest{Version: "1.0", Files: overManifestFiles},
+			})
+			require.NoError(t, err)
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/finalize", body)
+			assertTooManyFiles(t, rec)
+		})
+	})
+
+	t.Run("createUserTemplate", func(t *testing.T) {
+		srv, _, owner, _, _, _, _ := setupAgentBodyLimitFixture(t)
+		stor := &panicOnSignStorage{contentMockStorage: newContentMockStorage("test-bucket")}
+		srv.SetStorage(stor)
+
+		body, err := json.Marshal(CreateTemplateRequest{
+			Name:    "over-limit-user-tmpl",
+			Harness: "claude",
+			Files:   overUploadFiles,
+		})
+		require.NoError(t, err)
+		rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/users/me/templates", bytes.NewReader(body))
+		assertTooManyFiles(t, rec)
+		assert.Zero(t, stor.signCalls)
+	})
+
+	t.Run("harness-configs", func(t *testing.T) {
+		srv, s, _ := testHarnessConfigFileServer(t)
+		hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+
+		t.Run("createHarnessConfig", func(t *testing.T) {
+			body, err := json.Marshal(CreateHarnessConfigRequest{
+				Name:    "over-limit-hc",
+				Harness: "claude",
+				Scope:   "global",
+				Files:   overUploadFiles,
+			})
+			require.NoError(t, err)
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", body)
+			assertTooManyFiles(t, rec)
+		})
+
+		t.Run("handleHarnessConfigUpload", func(t *testing.T) {
+			body, err := json.Marshal(UploadRequest{Files: overUploadFiles})
+			require.NoError(t, err)
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/upload", body)
+			assertTooManyFiles(t, rec)
+		})
+
+		t.Run("handleHarnessConfigFinalize", func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"manifest": map[string]any{"version": "1.0", "files": overManifestFiles},
+			})
+			require.NoError(t, err)
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
+			assertTooManyFiles(t, rec)
+		})
+	})
+
+	t.Run("workspace-sync", func(t *testing.T) {
+		srv, _, owner, outsider, _, _, runningAgent := setupAgentBodyLimitFixture(t)
+		stor := &panicOnSignStorage{contentMockStorage: newContentMockStorage("test-bucket")}
+		srv.SetStorage(stor)
+
+		syncToBody, err := json.Marshal(SyncToRequest{Files: overTransferFiles})
+		require.NoError(t, err)
+		require.Less(t, len(syncToBody), maxWorkspaceSyncManifestBodySize)
+
+		t.Run("sync-to rejects over limit for authorized owner", func(t *testing.T) {
+			rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to", bytes.NewReader(syncToBody))
+			assertTooManyFiles(t, rec)
+			assert.Zero(t, stor.signCalls)
+		})
+
+		t.Run("sync-to authorizes outsider before file-count check", func(t *testing.T) {
+			rec := doRawRequestWithUser(t, srv, outsider, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to", bytes.NewReader(syncToBody))
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		})
+
+		finalizeBody, err := json.Marshal(SyncToFinalizeRequest{
+			Manifest: &transfer.Manifest{Files: overTransferFiles},
+		})
+		require.NoError(t, err)
+		require.Less(t, len(finalizeBody), maxWorkspaceSyncManifestBodySize)
+
+		t.Run("sync-to finalize rejects over limit for authorized owner", func(t *testing.T) {
+			rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to/finalize", bytes.NewReader(finalizeBody))
+			assertTooManyFiles(t, rec)
+		})
+
+		t.Run("sync-to finalize authorizes outsider before file-count check", func(t *testing.T) {
+			rec := doRawRequestWithUser(t, srv, outsider, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to/finalize", bytes.NewReader(finalizeBody))
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		})
+	})
+}
+
+func TestJSONBodyLimits_ProjectBroadcast(t *testing.T) {
+	srv, _, owner, outsider, project, _, _ := setupAgentBodyLimitFixture(t)
+	path := "/api/v1/projects/" + project.ID + "/broadcast"
+	prefix := `{"structured_message":{"version":1,"type":"instruction","msg":"`
+	suffix := `"}}`
+
+	t.Run("unauthenticated oversized gets 401 and reads 0 bytes", func(t *testing.T) {
+		body := newBodyLimitCountingReader(exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)+1024))
+		rec := doRawRequestWithUser(t, srv, nil, http.MethodPost, path, body)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Zero(t, body.bytesRead.Load())
+	})
+
+	t.Run("unauthorized non-member oversized gets 403 and reads 0 bytes", func(t *testing.T) {
+		body := newBodyLimitCountingReader(exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)+1024))
+		rec := doRawRequestWithUser(t, srv, outsider, http.MethodPost, path, body)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Zero(t, body.bytesRead.Load())
+	})
+
+	t.Run("exact 1 MiB limit passes decode", func(t *testing.T) {
+		payload := exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes))
+		rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, path, bytes.NewReader(payload))
+		assertPassedBodyDecode(t, rec)
+		assert.NotContains(t, strings.ToLower(rec.Body.String()), "invalid request body", rec.Body.String())
+	})
+
+	t.Run("1 MiB + 1 byte returns 413 payload_too_large and stops reading", func(t *testing.T) {
+		payload := exactSizeJSON(t, prefix, suffix, int(apierr.DefaultMaxJSONBodyBytes)+1)
+		body := newBodyLimitCountingReader(payload)
+		rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, path, body)
+		assertPayloadTooLarge(t, rec)
+		assert.LessOrEqual(t, body.bytesRead.Load(), apierr.DefaultMaxJSONBodyBytes+1)
+	})
+
+	t.Run("malformed JSON still returns 400 invalid_request", func(t *testing.T) {
+		rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, path, strings.NewReader("{invalid"))
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeInvalidRequest, errResp.Error.Code)
+	})
 }

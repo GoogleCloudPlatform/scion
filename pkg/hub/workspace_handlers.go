@@ -356,6 +356,15 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
+	if len(req.Files) > importMaxTreeFiles {
+		tooManyErr := &tooManyFilesError{field: "files", count: len(req.Files), limit: importMaxTreeFiles}
+		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
+			"field": tooManyErr.field,
+			"max":   tooManyErr.limit,
+		})
+		return
+	}
+
 	// Check storage is configured
 	stor := s.GetStorage()
 	if stor == nil {
@@ -438,6 +447,15 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	agent := s.getAuthorizedWorkspaceAgent(w, r, agentID, ActionUpdate)
 	if agent == nil {
+		return
+	}
+
+	if len(req.Manifest.Files) > importMaxTreeFiles {
+		tooManyErr := &tooManyFilesError{field: "manifest.files", count: len(req.Manifest.Files), limit: importMaxTreeFiles}
+		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
+			"field": tooManyErr.field,
+			"max":   tooManyErr.limit,
+		})
 		return
 	}
 

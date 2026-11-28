@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/apierr"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
@@ -4534,13 +4535,12 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// before decoding, so no sender is stamped, no target is computed and
 	// nothing is published.
 	if s.rejectRetiredRawMessageBody(w, r, rawIngressBroadcast,
-		agentKeysAuditTarget{ProjectID: projectID}, "", rawTombstonePreAuthMaxBodyBytes, "structured_message") {
+		agentKeysAuditTarget{ProjectID: projectID}, "", apierr.DefaultMaxJSONBodyBytes, "structured_message") {
 		return
 	}
 
 	var req BroadcastMessageRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if len(req.AttachmentIDs) > 0 {
