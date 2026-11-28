@@ -178,13 +178,22 @@ func (s *fileUploadSink) WriteChunk(ctx context.Context, sess *store.UploadSessi
 		}
 	} else {
 		before, err = dir.Lstat(partialBase)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("%w: partial file missing at offset %d", errUploadIntegrityMismatch, offset)
+		}
 		if err != nil {
 			return "", err
 		}
 		if notRegular(before) {
 			return "", fmt.Errorf("%w: partial is not a regular file", errWorkspaceWriteRefused)
 		}
+		if before.Size() < offset {
+			return "", fmt.Errorf("%w: partial size %d is shorter than committed offset %d", errUploadIntegrityMismatch, before.Size(), offset)
+		}
 		f, err = openWorkspaceFileForWrite(dir, partialBase, true)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("%w: partial file disappeared before open at offset %d", errUploadIntegrityMismatch, offset)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -214,6 +223,10 @@ func (s *fileUploadSink) WriteChunk(ctx context.Context, sess *store.UploadSessi
 	if notRegular(opened) || notRegular(named) || !os.SameFile(opened, named) || (before != nil && !os.SameFile(opened, before)) {
 		cleanupOnErr()
 		return "", fmt.Errorf("%w: partial changed while opening it", errWorkspaceWriteRefused)
+	}
+	if offset > 0 && opened.Size() < offset {
+		cleanupOnErr()
+		return "", fmt.Errorf("%w: partial size %d is shorter than committed offset %d", errUploadIntegrityMismatch, opened.Size(), offset)
 	}
 
 	if err := f.Truncate(offset); err != nil {
@@ -321,9 +334,14 @@ func (s *fileUploadSink) Finalize(ctx context.Context, sess *store.UploadSession
 		}
 
 		// Idempotent finalize retry (§3.7): if the partial is already gone and
-		// dest is present as a regular file with matching size, treat as done.
+		// dest is present as a regular file with matching size and matching
+		// SHA-256 digest, treat as done. A mismatching destination (e.g. a
+		// pre-existing same-size file with overwrite=false whose partial was
+		// removed) is treated as missing.
 		if dInfo, derr := dir.Lstat(destBase); derr == nil && !notRegular(dInfo) && dInfo.Size() == sess.DeclaredSize {
-			return marshalWorkspaceFileInfo(sess.DestPath, dInfo)
+			if herr := verifyPartialHash(ctx, dir, destBase, dInfo, digestHex); herr == nil {
+				return marshalWorkspaceFileInfo(sess.DestPath, dInfo)
+			}
 		}
 		return nil, errUploadPartialMissing
 	}

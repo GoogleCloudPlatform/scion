@@ -1037,3 +1037,96 @@ func TestWorkspaceUploads_LimitA_OneGiBChunkedAndMultipartClamped(t *testing.T) 
 	srv.Handler().ServeHTTP(mpRec, req)
 	require.Equal(t, http.StatusRequestEntityTooLarge, mpRec.Code, "legacy multipart >100 MiB must be 413; body: %s", mpRec.Body.String())
 }
+
+// TestWorkspaceUploads_MissingOrShortPartialAtOffsetFailsWith409 verifies O1:
+// at offset > 0, a missing or truncated partial file fails the session with a
+// terminal 409 integrity_mismatch (not a retryable 500 or zero-filled hole).
+func TestWorkspaceUploads_MissingOrShortPartialAtOffsetFailsWith409(t *testing.T) {
+	srv, st := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	project, wsDir := createTestHubManagedProject(t, srv, "Uploads O1 Partial")
+
+	t.Run("deleted partial after chunk 1", func(t *testing.T) {
+		startRec := doRequest(t, srv, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+			UploadStartRequest{Name: "del.bin", Path: "del.bin", Size: 20, Overwrite: true})
+		require.Equal(t, http.StatusCreated, startRec.Code)
+		var started UploadStartResponse
+		require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+		u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+		require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", []byte("0123456789")).Code)
+		require.NoError(t, os.Remove(filepath.Join(wsDir, uploadPartialName(started.ID))))
+
+		rec := doChunkPut(t, srv, "", u+"?offset=10", []byte("abcdefghij"))
+		require.Equal(t, http.StatusConflict, rec.Code, "deleted partial must return 409; body: %s", rec.Body.String())
+		errObj := decodeUploadAPIError(t, rec)
+		assert.Equal(t, errCodeUploadIntegrityMismatch, errObj.Code)
+
+		sess, err := st.GetUploadSession(context.Background(), started.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.UploadStateFailed, sess.State)
+	})
+
+	t.Run("truncated partial shorter than received", func(t *testing.T) {
+		startRec := doRequest(t, srv, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+			UploadStartRequest{Name: "short.bin", Path: "short.bin", Size: 20, Overwrite: true})
+		require.Equal(t, http.StatusCreated, startRec.Code)
+		var started UploadStartResponse
+		require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+		u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+		require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", []byte("0123456789")).Code)
+		partialPath := filepath.Join(wsDir, uploadPartialName(started.ID))
+		require.NoError(t, os.Truncate(partialPath, 5))
+
+		rec := doChunkPut(t, srv, "", u+"?offset=10", []byte("abcdefghij"))
+		require.Equal(t, http.StatusConflict, rec.Code, "truncated partial must return 409; body: %s", rec.Body.String())
+		errObj := decodeUploadAPIError(t, rec)
+		assert.Equal(t, errCodeUploadIntegrityMismatch, errObj.Code)
+
+		sess, err := st.GetUploadSession(context.Background(), started.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.UploadStateFailed, sess.State)
+		_, statErr := os.Stat(partialPath)
+		assert.True(t, os.IsNotExist(statErr), "partial should be cleaned up after terminal failure")
+	})
+}
+
+// TestWorkspaceUploads_IdempotentFinalizeVerifiesDestDigest verifies O2: when
+// the partial is missing on complete and a same-size file already exists at
+// dest, Finalize re-hashes dest and refuses a digest mismatch rather than
+// returning 200 or bypassing overwrite=false.
+func TestWorkspaceUploads_IdempotentFinalizeVerifiesDestDigest(t *testing.T) {
+	srv, _ := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	project, wsDir := createTestHubManagedProject(t, srv, "Uploads O2 Idempotent")
+
+	destPath := filepath.Join(wsDir, "a.txt")
+	require.NoError(t, os.WriteFile(destPath, []byte("0123456789"), 0o600))
+
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "a.txt", Path: "a.txt", Size: 10, Overwrite: false})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", []byte("abcdefghij")).Code)
+	require.NoError(t, os.Remove(filepath.Join(wsDir, uploadPartialName(started.ID))))
+
+	// Pre-existing same-size a.txt has different bytes: must NOT return 200.
+	compRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.NotEqual(t, http.StatusOK, compRec.Code, "digest mismatch on missing partial must not succeed; body: %s", compRec.Body.String())
+
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("0123456789"), got)
+
+	// True idempotent retry: if dest holds the uploaded bytes, complete succeeds.
+	require.NoError(t, os.WriteFile(destPath, []byte("abcdefghij"), 0o600))
+	retryRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusOK, retryRec.Code, "matching dest digest on retry should succeed; body: %s", retryRec.Body.String())
+}

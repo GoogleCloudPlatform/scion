@@ -524,6 +524,15 @@ func (s *Server) handleUploadChunk(
 
 	partRef, writeErr := sink.WriteChunk(chunkCtx, claimed, offset, token, tee, n)
 	if writeErr != nil {
+		if errors.Is(writeErr, errUploadIntegrityMismatch) {
+			failCtx, failCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.store.TransitionUploadSession(failCtx, sid, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(failCtx, claimed)
+			failCancel()
+			writeError(w, http.StatusConflict, errCodeUploadIntegrityMismatch,
+				"Upload staging file is missing or corrupted; restart the upload", nil)
+			return
+		}
 		_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
 		switch {
 		case errors.Is(writeErr, errUploadChunkTooLarge):
