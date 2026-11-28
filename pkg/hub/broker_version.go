@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -41,11 +42,18 @@ func HubBuildToken() string {
 	return hubBuildToken()
 }
 
-// brokerVersionToken bounds a Runtime Broker supplied version the same way
-// as hubBuildToken. It is applied when a version is stored and again when
-// one is read, so rows stored before the bound existed are covered too.
+// brokerVersionToken bounds and normalizes a Runtime Broker supplied version
+// the same way as hubBuildToken. Whitespace-only, non-printable, and unusable
+// placeholder tokens ("dev") normalize to "" so they are treated as unknown
+// rather than compared as a real build token (ptone/scion#6382). It is applied
+// when a version is stored and again when one is read, so rows stored before
+// the normalization existed are covered too.
 func brokerVersionToken(v string) string {
-	return boundedPrintable(v, hubInstanceMaxVersionBytes)
+	v = strings.TrimSpace(boundedPrintable(v, hubInstanceMaxVersionBytes))
+	if strings.EqualFold(v, "dev") {
+		return ""
+	}
+	return v
 }
 
 // brokerVersionStatus compares a Runtime Broker's stored version with the
