@@ -795,10 +795,11 @@ func encodedMatchRulesLength(rules []Rule) int {
 // AND semantics (§3.1, §5), returning both the summary MatchResult and the
 // content-free per-element RuleTrace.
 //
-// Security L1 seam note (ptone/scion#8030): Stage 1 grants consumer "trigger"
-// only pure, no-I/O Grant("cel"), where celengine.Program.Eval enforces a
-// post-return wall-clock backstop. Admitting any second dialect to "trigger"
-// requires a post-return deadline check in ruleengine.Evaluate or that dialect.
+// Implemented as the trigger adapter over pkg/ruleengine's shared ChainRun
+// primitive (shared-rule-chain-design v1 §3.8, Amendment A1 §3/P8): both Inline
+// and IO domains share the caller context and per-event BudgetTracker, using
+// DefaultANDPolicy, NoopEnricher, and no reserved names, with explicit class
+// mapping back to MatchResult and RuleTrace.
 func (r *Rules) MatchAllWithTrace(
 	ctx context.Context,
 	scope celengine.CacheScope,
@@ -876,95 +877,259 @@ func (r *Rules) MatchAllWithTrace(
 		}, trace, err
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	scope = normalizeTriggerScope(scope, act.projectID)
 	input := ruleengine.Input{Activation: act.toMap()}
-	lastDialect := ""
-	trace := RuleTrace{
-		Elements: make([]RuleTraceElement, 0, len(rules)),
+
+	// Build the Chain for the valid prefix of rules. Any trigger-level defect
+	// (empty expr, >MaxMatchRuleBytes, or un-admitted dialect) at index k stops
+	// prefix construction so elements 0..k-1 still run in strict author order
+	// through ChainRun and the defect at k is surfaced only if all earlier
+	// elements pass (preserving exact short-circuit and trace parity).
+	type prefixDefect struct {
+		index   int
+		dialect string
+		err     error
+	}
+	var defect *prefixDefect
+
+	onMiss := func(d string) {
+		if cfg.onCompileMiss != nil {
+			cfg.onCompileMiss(SafeDialectName(d))
+		}
 	}
 
-	finishEarly := func(through int, dialect, cls, reason string, elapsed time.Duration, prov string, err error) (MatchResult, RuleTrace, error) {
-		safeDialect := SafeDialectName(dialect)
-		trace.Elements = append(trace.Elements, RuleTraceElement{
-			Index:      through,
-			Dialect:    safeDialect,
-			Class:      cls,
-			Reason:     reason,
-			DurationMs: max(elapsed.Milliseconds(), int64(0)),
-			Provenance: sanitizeTraceProvenance(prov),
-			Elapsed:    max(elapsed, time.Duration(0)),
-		})
-		trace.Unexecuted = unexecutedIndices(through, len(rules))
-		trace.BudgetRemainingMs = budgetRemainingMsPtr(cfg.tracker)
-		return MatchResult{
-			Matched: false,
-			Through: through,
-			Dialect: safeDialect,
-			Class:   cls,
-			Reason:  reason,
-		}, trace, err
-	}
-
+	elements := make([]ruleengine.ChainElement, 0, len(rules))
 	for i, elem := range rules {
 		through := i + 1
 		rawDialect := elem.normalizedDialect()
 		dialect := SafeDialectName(rawDialect)
 
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				fErr := &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err}
-				return finishEarly(through, dialect, MatchClassFailed, celengine.ReasonCanceled, 0, "", fErr)
-			}
-		}
-		if cfg.tracker != nil && cfg.tracker.Exhausted() {
-			return finishEarly(through, dialect, MatchClassBudget, MatchReasonBudgetExhausted, 0, "", ruleengine.ErrBudgetExhausted)
-		}
-
 		if strings.TrimSpace(elem.Expr) == "" {
-			return finishEarly(through, dialect, MatchClassFailed, MatchReasonCorruptRules, 0, "", ErrCorruptMatchRules)
+			defect = &prefixDefect{index: through, dialect: dialect, err: ErrCorruptMatchRules}
+			break
 		}
 		if len(elem.Expr) > MaxMatchRuleBytes {
-			err := &corruptRuleSizeError{detail: fmt.Sprintf("element %d length %d exceeds maximum %d", through, len(elem.Expr), MaxMatchRuleBytes)}
-			return finishEarly(through, dialect, MatchClassFailed, celengine.CategorySize, 0, "", err)
+			defect = &prefixDefect{
+				index:   through,
+				dialect: dialect,
+				err:     &corruptRuleSizeError{detail: fmt.Sprintf("element %d length %d exceeds maximum %d", through, len(elem.Expr), MaxMatchRuleBytes)},
+			}
+			break
 		}
-
 		d, err := r.engine.DialectFor(ConsumerName, rawDialect)
 		if err != nil {
-			cls, reason := classifyMatchError(err)
-			return finishEarly(through, dialect, cls, reason, 0, "", err)
+			defect = &prefixDefect{index: through, dialect: dialect, err: err}
+			break
 		}
-
-		// O2 / 3a F2 & SEC-3b2-01: compile time on a cache miss is NOT charged
-		// to cfg.tracker (eval budget); it is bounded by cfg.compileTracker,
-		// while cache hits continue evaluating even after compile exhaustion (R3).
-		compiled, err := r.cachedCompileWithBudget(ctx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
-		if err != nil {
-			cls, reason := classifyMatchError(err)
-			return finishEarly(through, dialect, cls, reason, 0, "", err)
+		if d.Declares().PerformsIO {
+			// T2: revisit eager IO compilation before earlier elements run once
+			// the trigger consumer admits IO dialects (today triggers grant CEL
+			// only, so this branch is unreachable in production). IO elements
+			// must be pre-compiled (A1 §4 / P18) and execute via EvaluatePending.
+			compiled, cErr := r.cachedCompileWithBudget(ctx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
+			if cErr != nil {
+				defect = &prefixDefect{index: through, dialect: dialect, err: cErr}
+				break
+			}
+			elements = append(elements, ruleengine.ChainElement{
+				Index:    through,
+				Dialect:  rawDialect,
+				Kind:     ruleengine.KindFilter,
+				Compiled: compiled,
+			})
+			continue
 		}
-
-		evalStart := time.Now()
-		dec, err := r.engine.Evaluate(ctx, compiled, input, ruleengine.Budget{
-			MaxEvalTime: d.Declares().MaxEvalTime,
-			Tracker:     cfg.tracker,
+		elements = append(elements, ruleengine.ChainElement{
+			Index:   through,
+			Dialect: rawDialect,
+			Kind:    ruleengine.KindFilter,
+			Source: &ruleengine.ChainElementSource{
+				Expr:          elem.Expr,
+				Scope:         scope,
+				Kind:          ruleengine.KindFilter,
+				EnvRef:        matchEnvRef(),
+				EnvVersion:    EnvironmentVersion,
+				CompileBudget: cfg.compileTracker,
+				OnCompileMiss: onMiss,
+			},
 		})
-		evalElapsed := max(time.Since(evalStart), time.Duration(0))
-		if err != nil {
-			cls, reason := classifyMatchError(err)
-			return finishEarly(through, dialect, cls, reason, evalElapsed, dec.Trace, err)
+	}
+
+	dom := ruleengine.Domain{
+		Ctx:    ctx,
+		Budget: ruleengine.Budget{Tracker: cfg.tracker},
+	}
+	run, err := r.engine.NewChainRun(
+		ruleengine.ChainDomains{Inline: dom, IO: dom},
+		ruleengine.Chain{Elements: elements},
+		input,
+		ruleengine.ChainLimits{MaxElements: MaxMatchRules, MaxTraceBytes: MaxRuleTraceBytes},
+		ruleengine.DefaultANDPolicy,
+		ruleengine.NoopEnricher{},
+		nil,
+	)
+	if err != nil {
+		dialect := SafeDialectName(rules[0].normalizedDialect())
+		cls, reason := classifyMatchError(err)
+		trace := RuleTrace{
+			Elements: []RuleTraceElement{{
+				Index:   1,
+				Dialect: dialect,
+				Class:   cls,
+				Reason:  reason,
+			}},
+			Unexecuted:        unexecutedIndices(1, len(rules)),
+			BudgetRemainingMs: budgetRemainingMsPtr(cfg.tracker),
 		}
-		if !dec.Bool {
-			return finishEarly(through, dialect, MatchClassFalse, "", evalElapsed, dec.Trace, nil)
+		return MatchResult{
+			Matched: false,
+			Through: 1,
+			Dialect: dialect,
+			Class:   cls,
+			Reason:  reason,
+		}, trace, err
+	}
+
+	for {
+		_, pend, done, nextErr := run.Next()
+		if nextErr != nil {
+			dialect := SafeDialectName(rules[0].normalizedDialect())
+			cls, reason := classifyMatchError(nextErr)
+			return MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: dialect,
+				Class:   cls,
+				Reason:  reason,
+			}, RuleTrace{}, nextErr
 		}
+		if pend != nil {
+			if evalErr := r.engine.EvaluatePending(pend); evalErr != nil {
+				dialect := SafeDialectName(pend.Dialect())
+				cls, reason := classifyMatchError(evalErr)
+				return MatchResult{
+					Matched: false,
+					Through: pend.Index(),
+					Dialect: dialect,
+					Class:   cls,
+					Reason:  reason,
+				}, RuleTrace{}, evalErr
+			}
+			if _, resErr := run.Resume(); resErr != nil {
+				dialect := SafeDialectName(pend.Dialect())
+				cls, reason := classifyMatchError(resErr)
+				return MatchResult{
+					Matched: false,
+					Through: pend.Index(),
+					Dialect: dialect,
+					Class:   cls,
+					Reason:  reason,
+				}, RuleTrace{}, resErr
+			}
+			continue
+		}
+		if done {
+			break
+		}
+	}
+
+	chainRes, _ := run.Result()
+	trace := RuleTrace{
+		Elements: make([]RuleTraceElement, 0, len(rules)),
+	}
+	lastDialect := ""
+	var decidingErr error
+	var decidingCls, decidingReason string
+
+	for _, step := range chainRes.Steps {
+		safeDialect := SafeDialectName(step.Dialect)
+		cls, reason, stepErr := mapStepOutcomeToTrigger(step)
 		trace.Elements = append(trace.Elements, RuleTraceElement{
-			Index:      through,
-			Dialect:    dialect,
-			Class:      MatchClassMatched,
-			DurationMs: max(evalElapsed.Milliseconds(), int64(0)),
-			Provenance: sanitizeTraceProvenance(dec.Trace),
-			Elapsed:    evalElapsed,
+			Index:      step.Index,
+			Dialect:    safeDialect,
+			Class:      cls,
+			Reason:     reason,
+			DurationMs: max(step.Elapsed.Milliseconds(), int64(0)),
+			Provenance: sanitizeTraceProvenance(step.RawTrace),
+			Elapsed:    max(step.Elapsed, time.Duration(0)),
 		})
-		lastDialect = dialect
+		lastDialect = safeDialect
+		decidingCls = cls
+		decidingReason = reason
+		decidingErr = stepErr
+	}
+
+	if chainRes.Stopped {
+		through := chainRes.Deciding.Index
+		trace.Unexecuted = unexecutedIndices(through, len(rules))
+		trace.BudgetRemainingMs = budgetRemainingMsPtr(cfg.tracker)
+		return MatchResult{
+			Matched: false,
+			Through: through,
+			Dialect: lastDialect,
+			Class:   decidingCls,
+			Reason:  decidingReason,
+		}, trace, decidingErr
+	}
+
+	if defect != nil {
+		// Preserve pre-element cancel/budget check precedence before surfacing
+		// the element defect at defect.index.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			fErr := &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: ctxErr}
+			trace.Elements = append(trace.Elements, RuleTraceElement{
+				Index:   defect.index,
+				Dialect: defect.dialect,
+				Class:   MatchClassFailed,
+				Reason:  celengine.ReasonCanceled,
+			})
+			trace.Unexecuted = unexecutedIndices(defect.index, len(rules))
+			trace.BudgetRemainingMs = budgetRemainingMsPtr(cfg.tracker)
+			return MatchResult{
+				Matched: false,
+				Through: defect.index,
+				Dialect: defect.dialect,
+				Class:   MatchClassFailed,
+				Reason:  celengine.ReasonCanceled,
+			}, trace, fErr
+		}
+		if cfg.tracker != nil && cfg.tracker.Exhausted() {
+			trace.Elements = append(trace.Elements, RuleTraceElement{
+				Index:   defect.index,
+				Dialect: defect.dialect,
+				Class:   MatchClassBudget,
+				Reason:  MatchReasonBudgetExhausted,
+			})
+			trace.Unexecuted = unexecutedIndices(defect.index, len(rules))
+			trace.BudgetRemainingMs = budgetRemainingMsPtr(cfg.tracker)
+			return MatchResult{
+				Matched: false,
+				Through: defect.index,
+				Dialect: defect.dialect,
+				Class:   MatchClassBudget,
+				Reason:  MatchReasonBudgetExhausted,
+			}, trace, ruleengine.ErrBudgetExhausted
+		}
+
+		cls, reason := classifyMatchError(defect.err)
+		trace.Elements = append(trace.Elements, RuleTraceElement{
+			Index:   defect.index,
+			Dialect: defect.dialect,
+			Class:   cls,
+			Reason:  reason,
+		})
+		trace.Unexecuted = unexecutedIndices(defect.index, len(rules))
+		trace.BudgetRemainingMs = budgetRemainingMsPtr(cfg.tracker)
+		return MatchResult{
+			Matched: false,
+			Through: defect.index,
+			Dialect: defect.dialect,
+			Class:   cls,
+			Reason:  reason,
+		}, trace, defect.err
 	}
 
 	trace.BudgetRemainingMs = budgetRemainingMsPtr(cfg.tracker)
@@ -974,6 +1139,42 @@ func (r *Rules) MatchAllWithTrace(
 		Dialect: lastDialect,
 		Class:   MatchClassMatched,
 	}, trace, nil
+}
+
+// mapStepOutcomeToTrigger explicitly maps engine-owned ruleengine.StepClass
+// values to trigger consumer MatchClass/Reason/error tuples (v1 §3.8).
+func mapStepOutcomeToTrigger(step ruleengine.StepOutcome) (class, reason string, err error) {
+	switch step.Class {
+	case ruleengine.StepClassPass:
+		return MatchClassMatched, "", nil
+	case ruleengine.StepClassFail:
+		return MatchClassFalse, "", nil
+	case ruleengine.StepClassUncertain:
+		if step.Err != nil {
+			cls, rsn := classifyMatchError(step.Err)
+			return cls, rsn, step.Err
+		}
+		return MatchClassUncertain, sanitizeMatchReason(step.Reason, MatchReasonUncertain), &ruleengine.UncertainError{Reason: step.Reason}
+	case ruleengine.StepClassBudget:
+		if step.Reason == ruleengine.ReasonCompileBudgetExhausted {
+			return MatchClassBudget, MatchReasonCompileBudgetExhausted, ErrCompileBudgetExhausted
+		}
+		if step.Err != nil {
+			return MatchClassBudget, MatchReasonBudgetExhausted, step.Err
+		}
+		return MatchClassBudget, MatchReasonBudgetExhausted, ruleengine.ErrBudgetExhausted
+	case ruleengine.StepClassCanceled:
+		if step.Err != nil {
+			return MatchClassFailed, celengine.ReasonCanceled, step.Err
+		}
+		return MatchClassFailed, celengine.ReasonCanceled, &ruleengine.FailedError{Reason: celengine.ReasonCanceled}
+	default:
+		if step.Err != nil {
+			cls, rsn := classifyMatchError(step.Err)
+			return cls, rsn, step.Err
+		}
+		return MatchClassFailed, sanitizeMatchReason(step.Reason, MatchReasonEvalFailed), &ruleengine.FailedError{Reason: step.Reason}
+	}
 }
 
 func classifyMatchError(err error) (class, reason string) {
