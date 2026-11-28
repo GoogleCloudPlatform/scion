@@ -665,4 +665,169 @@ describe('triggers source-extensions registry (trivial test provider)', () => {
     ]);
     expect(matchPatch.form).toBeNull();
   });
+
+  it('keeps non-cel rules in list pane when switching to another form-capable source kind (J16c P2)', async () => {
+    registerSourceKind('demo-source', { label: 'Demo App', sourceIdMode: 'none' });
+    registerSourceKind('demo-source-2', { label: 'Demo App 2', sourceIdMode: 'none' });
+
+    const formRenderSpy = vi.fn(({ onChange }) => {
+      queueMicrotask(() =>
+        onChange({
+          types: ['demo.opened'],
+          rules: [{ dialect: 'cel', expr: 'form_only == true' }],
+          form: { preset: 'overwritten' },
+          valid: true,
+        })
+      );
+      return html`<div data-demo-form-pane></div>`;
+    });
+    registerFormAuthoring('demo-source', { label: 'Demo Form', render: formRenderSpy });
+    registerFormAuthoring('demo-source-2', { label: 'Demo Form 2', render: formRenderSpy });
+
+    const existingTrigger = {
+      id: 'tr-switch-src',
+      projectId: 'proj-1',
+      name: 'switch-src-rule',
+      source: { kind: 'demo-source', id: '' },
+      match: {
+        types: ['demo.opened'],
+        rules: [
+          { dialect: 'cel', expr: 'event.attributes.a == "1"' },
+          { dialect: 'system_one', expr: 'require_approval("sec-team")' },
+          { dialect: 'cel', expr: 'event.attributes.b == "2"' },
+        ],
+        form: { preset: 'p1' },
+      },
+      action: { type: 'message', agentId: 'ag-1', message: 'hi' },
+      subject: { mode: 'new' },
+      status: 'active',
+      authorizationRevision: 3,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T10:00:00Z',
+      updatedAt: '2026-11-28T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(existingTrigger));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [existingTrigger], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-switch-src"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    const sourceSelect = el.shadowRoot?.querySelector(
+      '[data-trigger-source-kind]'
+    ) as HTMLSelectElement;
+    sourceSelect.value = 'demo-source-2';
+    sourceSelect.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect(formRenderSpy).not.toHaveBeenCalled();
+    expect(el.shadowRoot?.querySelector('[data-demo-form-pane]')).toBeNull();
+
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[0]).toEqual({
+      source: { kind: 'demo-source-2', id: '' },
+      expectedRevision: 3,
+    });
+    expect(patchBodies[0]['match']).toBeUndefined();
+  });
+
+  it('still opens form pane and applies form output for CEL-only triggers with match.form (J16c P3)', async () => {
+    registerSourceKind('demo-source', { label: 'Demo App', sourceIdMode: 'none' });
+
+    let renders = 0;
+    registerFormAuthoring('demo-source', {
+      label: 'Demo Form',
+      render: ({ onChange }) => {
+        renders++;
+        if (renders === 1) {
+          queueMicrotask(() =>
+            onChange({
+              types: ['demo.opened'],
+              rules: [{ dialect: 'cel', expr: 'form_compiled == true' }],
+              form: { preset: 'p2' },
+              valid: true,
+            })
+          );
+        }
+        return html`<div data-demo-form-pane>CEL-only form</div>`;
+      },
+    });
+
+    const celOnlyTrigger = {
+      id: 'tr-cel-form',
+      projectId: 'proj-1',
+      name: 'cel-form-rule',
+      source: { kind: 'demo-source', id: '' },
+      match: {
+        types: ['demo.opened'],
+        rules: [{ dialect: 'cel', expr: 'event.attributes.a == "1"' }],
+        form: { preset: 'p1' },
+      },
+      action: { type: 'message', agentId: 'ag-1', message: 'hi' },
+      subject: { mode: 'new' },
+      status: 'active',
+      authorizationRevision: 3,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T10:00:00Z',
+      updatedAt: '2026-11-28T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(celOnlyTrigger));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [celOnlyTrigger], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-cel-form"]') as HTMLElement).click();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect(renders).toBeGreaterThan(0);
+    expect(el.shadowRoot?.querySelector('[data-demo-form-pane]')).toBeTruthy();
+
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[0]?.['match']).toEqual({
+      types: ['demo.opened'],
+      rules: [{ dialect: 'cel', expr: 'form_compiled == true' }],
+      form: { preset: 'p2' },
+    });
+  });
 });

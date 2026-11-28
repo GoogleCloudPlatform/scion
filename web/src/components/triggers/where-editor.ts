@@ -141,9 +141,16 @@ export class ScionTriggerWhereEditor extends LitElement {
       flex-shrink: 0;
     }
 
-    .non-admitted-note {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted);
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
 
     .row-actions {
@@ -283,7 +290,7 @@ export class ScionTriggerWhereEditor extends LitElement {
                               class="dialect-readonly"
                               data-where-dialect=${index}
                               data-where-dialect-readonly
-                              >${rule.dialect}</span
+                              ><span class="sr-only">Dialect: </span>${rule.dialect}</span
                             >
                           `
                         : html`
@@ -338,6 +345,9 @@ export class ScionTriggerWhereEditor extends LitElement {
                       rows="2"
                       resize="auto"
                       placeholder="event.attributes.env == 'prod'"
+                      help-text=${nonAdmitted
+                        ? `This rule uses ${rule.dialect}; edit it with the CLI or API.`
+                        : nothing}
                       ?readonly=${this.readonly || nonAdmitted}
                       .value=${rule.expr}
                       data-where-expr=${index}
@@ -347,13 +357,6 @@ export class ScionTriggerWhereEditor extends LitElement {
                         this.updateExpr(index, ta.value);
                       }}
                     ></sl-textarea>
-                    ${nonAdmitted
-                      ? html`
-                          <div class="non-admitted-note" data-where-non-admitted-note=${index}>
-                            This rule uses ${rule.dialect}; edit it with the CLI or API.
-                          </div>
-                        `
-                      : nothing}
                     ${err
                       ? html`
                           <div class="row-error" role="alert" data-where-error=${index}>

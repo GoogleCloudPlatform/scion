@@ -160,20 +160,21 @@ describe('scion-trigger-where-editor', () => {
       latest = (e as CustomEvent<{ rules: TriggerMatchRuleSpec[] }>).detail.rules;
     });
 
-    // Non-admitted row 1 renders dialect as read-only text (no sl-select), readonly textarea, and CLI/API note.
+    // Non-admitted row 1 renders dialect as read-only text (no sl-select), readonly textarea, and CLI/API help-text.
     const row1 = el.shadowRoot?.querySelector('[data-where-row="1"]');
     expect(row1?.hasAttribute('data-where-non-admitted')).toBe(true);
     expect(row1?.querySelector('sl-select')).toBeNull();
     const dialectEl = el.shadowRoot?.querySelector('[data-where-dialect="1"]');
     expect(dialectEl?.hasAttribute('data-where-dialect-readonly')).toBe(true);
-    expect(dialectEl?.textContent?.trim()).toBe('system_one');
+    expect(dialectEl?.textContent?.trim()).toBe('Dialect: system_one');
+
+    const expr0Check = el.shadowRoot?.querySelector('[data-where-expr="0"]') as HTMLTextAreaElement;
+    expect(expr0Check.hasAttribute('help-text')).toBe(false);
 
     const expr1 = el.shadowRoot?.querySelector('[data-where-expr="1"]') as HTMLTextAreaElement;
     expect(expr1.hasAttribute('readonly')).toBe(true);
     expect(expr1.value).toBe(systemOneRule.expr);
-
-    const note1 = el.shadowRoot?.querySelector('[data-where-non-admitted-note="1"]');
-    expect(note1?.textContent?.trim()).toBe(
+    expect(expr1.getAttribute('help-text')).toBe(
       'This rule uses system_one; edit it with the CLI or API.'
     );
 

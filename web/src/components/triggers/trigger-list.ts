@@ -506,6 +506,14 @@ export class ScionTriggerList extends LitElement {
     return hasNonCelTriggerRules(this.formRules);
   }
 
+  private get activeAuthoringPane(): 'form' | 'cel' {
+    return getFormAuthoring(this.formSourceKind) &&
+      this.formAuthoringPane === 'form' &&
+      !this.hasNonCelRules
+      ? 'form'
+      : 'cel';
+  }
+
   private buildDiffPatchBody(
     orig: TriggerDefinition,
     effectiveSourceId: string,
@@ -644,10 +652,7 @@ export class ScionTriggerList extends LitElement {
       this.formError = 'Source endpoint is required.';
       return;
     }
-    const formExt = getFormAuthoring(this.formSourceKind);
-    const inFormPane =
-      Boolean(formExt) && this.formAuthoringPane === 'form' && !this.hasNonCelRules;
-    if (inFormPane && !this.formAuthoringValid) {
+    if (this.activeAuthoringPane === 'form' && !this.formAuthoringValid) {
       this.formError = this.formAuthoringErrors.join('; ') || 'Fix the form errors before saving.';
       return;
     }
@@ -1226,12 +1231,14 @@ export class ScionTriggerList extends LitElement {
                 <sl-radio-group
                   label="Authoring mode"
                   size="small"
-                  .value=${this.hasNonCelRules ? 'cel' : this.formAuthoringPane}
+                  .value=${this.activeAuthoringPane}
                   data-authoring-mode
                   @sl-change=${(e: Event) => {
-                    const next = (e.target as HTMLInputElement).value === 'form' ? 'form' : 'cel';
+                    const group = e.target as HTMLInputElement;
+                    const next = group.value === 'form' ? 'form' : 'cel';
                     if (next === 'form' && this.hasNonCelRules) {
                       this.formAuthoringPane = 'cel';
+                      group.value = 'cel';
                       return;
                     }
                     this.formAuthoringPane = next;
@@ -1253,7 +1260,7 @@ export class ScionTriggerList extends LitElement {
                   : nothing}
               `
             : nothing}
-          ${formExt && this.formAuthoringPane === 'form' && !this.hasNonCelRules
+          ${formExt && this.activeAuthoringPane === 'form'
             ? html`
                 <div data-form-authoring-pane>
                   ${formExt.render({
@@ -1406,9 +1413,7 @@ export class ScionTriggerList extends LitElement {
               this.formNotify = e.detail.notify;
             }}
           ></scion-trigger-notify-editor>
-          ${formExt &&
-          this.formAuthoringPane === 'form' &&
-          !this.hasNonCelRules &&
+          ${this.activeAuthoringPane === 'form' &&
           !this.formAuthoringValid &&
           this.formAuthoringErrors.length > 0
             ? html`
@@ -1433,10 +1438,7 @@ export class ScionTriggerList extends LitElement {
           variant="primary"
           ?loading=${this.saving}
           ?disabled=${this.saving ||
-          (Boolean(formExt) &&
-            this.formAuthoringPane === 'form' &&
-            !this.hasNonCelRules &&
-            !this.formAuthoringValid)}
+          (this.activeAuthoringPane === 'form' && !this.formAuthoringValid)}
           data-submit-trigger
           @click=${() => this.submitTriggerForm()}
         >
