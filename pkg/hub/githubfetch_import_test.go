@@ -703,7 +703,8 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), tc.wantReimpCode)
 			assert.Contains(t, rec.Body.String(), tc.wantMsgSubstr)
 
-			// Skills discover-directory: keeps fixed message, logs kind.
+			// Skills discover-directory: keeps fixed message, logs kind on the
+			// "skill discovery fetch failed" record itself.
 			logBuf.Reset()
 			srv.templateGitHubClient = fake.client(t)
 			rec = doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/skills/discover-directory", map[string]string{
@@ -712,7 +713,14 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			})
 			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "Failed to fetch remote skills; check the URL and repository access")
-			assert.Contains(t, logBuf.String(), "kind="+tc.wantLogKind)
+			foundSkillLog := false
+			for _, line := range strings.Split(logBuf.String(), "\n") {
+				if strings.Contains(line, "skill discovery fetch failed") && strings.Contains(line, "kind="+tc.wantLogKind) {
+					foundSkillLog = true
+					break
+				}
+			}
+			assert.True(t, foundSkillLog, "expected 'skill discovery fetch failed' log record with kind=%s; got:\n%s", tc.wantLogKind, logBuf.String())
 		})
 	}
 }
@@ -905,4 +913,51 @@ func TestHostedImport_GitHubArchiveRedirect(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), errImportDownloadFailed.Error())
+}
+
+// TestGitHubFetchPath2_HostedVsWorkstationFileLimit pins that hosted Hubs apply
+// githubfetch.ImportHostedLimits() (MaxFiles=2000) while workstation Hubs apply
+// githubfetch.ImportLocalLimits() (MaxFiles=20000) on Path 2 GitHub imports.
+func TestGitHubFetchPath2_HostedVsWorkstationFileLimit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+
+	const sha = "7777777777777777777777777777777777777777"
+	files := make(map[string]string, 2001)
+	files["alpha/scion-agent.yaml"] = "schema_version: \"1\"\nharness: claude\n"
+	for i := 0; i < 2000; i++ {
+		files[fmt.Sprintf("alpha/f-%04d.txt", i)] = "x"
+	}
+	fake := &fakeImportGitHub{
+		refs: map[string]string{"refs/heads/main": sha},
+		filesByPath: map[string]map[string]string{
+			"templates": files,
+		},
+	}
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	srv.templateGitHubClient = fake.client(t)
+	ctx := context.Background()
+
+	admin := newReimportAdmin(t, s)
+	proj := &store.Project{ID: tid("gf-p2-lim-proj"), Name: "gf-p2-lim", Slug: "gf-p2-lim"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	grantUserActionOnResource(t, s, admin.ID, "template", proj.ID, ActionCreate)
+
+	// 1. Hosted Hub (MaxFiles=2000) rejects a 2,001-file folder as too large.
+	srv.workstation = false
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+proj.ID+"/discover-templates", map[string]string{
+		"sourceUrl": "https://github.com/acme/large-repo/tree/main/templates",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeDiscoverFailed)
+	assert.Contains(t, rec.Body.String(), "GitHub source exceeds the size or file count limit")
+
+	// 2. Workstation Hub (MaxFiles=20000) accepts the same 2,001-file folder.
+	srv.workstation = true
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+proj.ID+"/discover-templates", map[string]string{
+		"sourceUrl": "https://github.com/acme/large-repo/tree/main/templates",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"alpha"`)
 }

@@ -326,10 +326,7 @@ func (s *Server) fetchGitHubForImport(ctx context.Context, scope, scopeID, fetch
 }
 
 func (s *Server) getImportGitHubClient(lim githubfetch.Limits) *githubfetch.Client {
-	if s.templateGitHubClient != nil {
-		return s.templateGitHubClient
-	}
-	if importGitHubClientOverride != nil {
+	if s.templateGitHubClient == nil && importGitHubClientOverride != nil {
 		return importGitHubClientOverride
 	}
 	return s.getTemplateGitHubClient(lim)
@@ -348,6 +345,28 @@ func (s *Server) importDownloader() config.RemoteDownloadFunc {
 	return newImportDownloader(s.resourceLog)
 }
 
+type importBytesFetcher interface {
+	FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error)
+}
+
+// githubArchiveFetchConfig returns the remotefetch.Config used by hosted Hubs
+// for user-supplied https://github.com/... archive downloads (redirects are
+// restricted to github.com and codeload.github.com, up to 3 hops, vetted
+// network, no Authorization).
+func githubArchiveFetchConfig(logger *slog.Logger) remotefetch.Config {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return remotefetch.Config{
+		MaxBytes:     importMaxDownloadBytes,
+		Timeout:      importDownloadTimeout,
+		MaxRedirects: importGitHubArchiveMaxRedirects,
+		AllowedHosts: githubArchiveHosts,
+		Network:      remotefetch.NetworkVetted,
+		Logger:       logger,
+	}
+}
+
 // newImportDownloader returns the SSRF-safe download hook for hosted Hubs
 // fetching archive sources. User-supplied https://github.com/... archive
 // downloads follow redirects only within githubArchiveHosts (github.com and
@@ -364,14 +383,11 @@ func newImportDownloader(logger *slog.Logger) config.RemoteDownloadFunc {
 		DisableRedirects: true,
 		Logger:           logger,
 	})
-	githubArchive := remotefetch.New(remotefetch.Config{
-		MaxBytes:     importMaxDownloadBytes,
-		Timeout:      importDownloadTimeout,
-		MaxRedirects: importGitHubArchiveMaxRedirects,
-		AllowedHosts: githubArchiveHosts,
-		Network:      remotefetch.NetworkVetted,
-		Logger:       logger,
-	})
+	githubArchive := remotefetch.New(githubArchiveFetchConfig(logger))
+	return newImportDownloaderWithFetchers(direct, githubArchive)
+}
+
+func newImportDownloaderWithFetchers(direct, githubArchive importBytesFetcher) config.RemoteDownloadFunc {
 	return func(ctx context.Context, rawURL, _ string) ([]byte, error) {
 		var (
 			res *remotefetch.Result

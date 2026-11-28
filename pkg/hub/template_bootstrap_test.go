@@ -1150,14 +1150,17 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 	oldTransport := http.DefaultClient.Transport
 	defer func() { http.DefaultClient.Transport = oldTransport }()
 
-	var capturedAuthHeader string
+	var capturedAPIAuth, capturedRawAuth string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "api.github.com" {
+			switch req.URL.Host {
+			case "api.github.com":
+				capturedAPIAuth = req.Header.Get("Authorization")
+			case "raw.githubusercontent.com":
+				capturedRawAuth = req.Header.Get("Authorization")
+			default:
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
-
-			capturedAuthHeader = req.Header.Get("Authorization")
 
 			// Write a simple dummy tar.gz containing a test template directory structure
 			var buf bytes.Buffer
@@ -1213,8 +1216,11 @@ system_prompt: system-prompt.md
 		t.Errorf("expected imported templates [my-template], got %v", imported)
 	}
 
-	if capturedAuthHeader != "Bearer my-secret-token-12345" {
-		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
+	if capturedAPIAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected api.github.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedAPIAuth)
+	}
+	if capturedRawAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected raw.githubusercontent.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedRawAuth)
 	}
 
 	// Verify template was saved to store
@@ -1272,13 +1278,17 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	oldTransport := http.DefaultClient.Transport
 	defer func() { http.DefaultClient.Transport = oldTransport }()
 
-	var capturedAuthHeader string
+	var capturedAPIAuth, capturedRawAuth string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "api.github.com" {
+			switch req.URL.Host {
+			case "api.github.com":
+				capturedAPIAuth = req.Header.Get("Authorization")
+			case "raw.githubusercontent.com":
+				capturedRawAuth = req.Header.Get("Authorization")
+			default:
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
-			capturedAuthHeader = req.Header.Get("Authorization")
 
 			var buf bytes.Buffer
 			gzw := gzip.NewWriter(&buf)
@@ -1313,8 +1323,11 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	if len(imported) != 1 || imported[0] != "my-config" {
 		t.Errorf("expected imported harness-configs [my-config], got %v", imported)
 	}
-	if capturedAuthHeader != "Bearer my-secret-token-12345" {
-		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
+	if capturedAPIAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected api.github.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedAPIAuth)
+	}
+	if capturedRawAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected raw.githubusercontent.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedRawAuth)
 	}
 
 	existing, err := s.GetHarnessConfigBySlug(ctx, "my-config", store.HarnessConfigScopeProject, projectID)

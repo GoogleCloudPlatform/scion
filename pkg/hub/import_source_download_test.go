@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,4 +60,46 @@ func TestIsGitHubArchiveDownloadURL(t *testing.T) {
 	assert.False(t, isGitHubArchiveDownloadURL("http://github.com/acme/repo/archive/main.tar.gz"))
 	assert.False(t, isGitHubArchiveDownloadURL("https://codeload.github.com/acme/repo/tar.gz/main"))
 	assert.False(t, isGitHubArchiveDownloadURL("https://example.com/archive/main.tar.gz"))
+}
+
+type stubImportBytesFetcher struct {
+	urls []string
+	body []byte
+	err  error
+}
+
+func (f *stubImportBytesFetcher) FetchBytes(_ context.Context, rawURL string) (*remotefetch.Result, error) {
+	f.urls = append(f.urls, rawURL)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &remotefetch.Result{Body: f.body}, nil
+}
+
+// TestNewImportDownloader_GitHubArchiveConfigAndDispatch pins the production
+// githubArchive remotefetch.Config and verifies newImportDownloaderWithFetchers
+// routes https://github.com/... archive URLs to the githubArchive fetcher and
+// non-GitHub URLs to the no-redirect direct fetcher.
+func TestNewImportDownloader_GitHubArchiveConfigAndDispatch(t *testing.T) {
+	cfg := githubArchiveFetchConfig(nil)
+	assert.Equal(t, []string{"github.com", "codeload.github.com"}, cfg.AllowedHosts)
+	assert.Equal(t, 3, cfg.MaxRedirects)
+	assert.Equal(t, remotefetch.NetworkVetted, cfg.Network)
+	assert.False(t, cfg.DisableRedirects)
+
+	direct := &stubImportBytesFetcher{body: []byte("direct-body")}
+	ghArchive := &stubImportBytesFetcher{body: []byte("gh-archive-body")}
+	dl := newImportDownloaderWithFetchers(direct, ghArchive)
+
+	body, err := dl(context.Background(), "https://github.com/acme/repo/archive/main.tar.gz", "Bearer ignored-secret")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("gh-archive-body"), body)
+	assert.Equal(t, []string{"https://github.com/acme/repo/archive/main.tar.gz"}, ghArchive.urls)
+	assert.Empty(t, direct.urls, "github.com archive URL must dispatch to githubArchive fetcher, not direct")
+
+	body, err = dl(context.Background(), "https://artifacts.example.com/pkg.tar.gz", "Bearer ignored-secret")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("direct-body"), body)
+	assert.Equal(t, []string{"https://artifacts.example.com/pkg.tar.gz"}, direct.urls)
+	assert.Len(t, ghArchive.urls, 1, "non-GitHub URL must dispatch to direct fetcher")
 }
