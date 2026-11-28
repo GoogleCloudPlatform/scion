@@ -1357,6 +1357,10 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	// Verify project exists
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -1450,6 +1454,10 @@ func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Requ
 
 // handleProjectMetricsDashboard serves the per-project metrics dashboard.
 func (s *Server) handleProjectMetricsDashboard(w http.ResponseWriter, r *http.Request, projectID, _ string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Verify project exists

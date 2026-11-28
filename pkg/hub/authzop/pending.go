@@ -71,8 +71,6 @@ var PendingBearerDispositions = []PendingEntry{
 	// --- projects ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/mint", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "DELETE", Area: AreaProjects},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "GET", Area: AreaProjects},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}/status", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}/verify", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/providers", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/providers/{brokerId}", Method: "DELETE", Area: AreaProjects},
@@ -95,7 +93,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/keys/status", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{key}/runs", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{key}/runs/{runId}", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/metrics/session/{id}", Method: "GET", Area: AreaHub},
 	// --- catalog_resources ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/local-image", Method: "DELETE", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/pull-image", Method: "POST", Area: AreaCatalogResources},

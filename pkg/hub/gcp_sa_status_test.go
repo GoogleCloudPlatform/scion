@@ -304,12 +304,12 @@ func TestGCPSAStatus_AgentOnlyInOwnProject(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, other))
 	otherAgent := createSAStatusAgent(t, s, other.ID, "outsider", "")
 
-	ownToken := srv.generateRecordedAgentToken(t, agent.ID, projectID, nil, nil)
+	ownToken := srv.generateRecordedAgentToken(t, agent.ID, projectID, []AgentTokenScope{ScopeProjectRead}, nil)
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, ownToken)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), mappedGSA, "project agents may see the account email")
 
-	otherToken := srv.generateRecordedAgentToken(t, otherAgent.ID, other.ID, nil, nil)
+	otherToken := srv.generateRecordedAgentToken(t, otherAgent.ID, other.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	rec = doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, otherToken)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
@@ -437,9 +437,10 @@ func TestListGCPServiceAccounts_MappingSummary(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), `"mapping"`, "the hub-scope list carries no mapping summary")
 }
 
-// An agent token without project:read sees no agents in the view, the same
-// gate listAgents applies (checkAgentReadScope).
-func TestGCPSAStatus_AgentWithoutProjectReadSeesNoAgents(t *testing.T) {
+// An agent token without project:read is refused by the status route and
+// receives no agents from gcpServiceAccountAgents; an agent token carrying
+// project:read is admitted.
+func TestGCPSAStatus_AgentRequiresProjectReadScope(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
 	sa := mappingTestSA(t, s, projectID, mappedGSA)
 	agent := createSAStatusAgent(t, s, projectID, "no-read", sa.ID)
@@ -455,14 +456,16 @@ func TestGCPSAStatus_AgentWithoutProjectReadSeesNoAgents(t *testing.T) {
 	got := srv.gcpServiceAccountAgents(ctx, projectID, sa.ID)
 	assert.Equal(t, GCPServiceAccountAgents{Names: []string{}}, got)
 
-	// Route level: the rest of the view is served, the agents section is
-	// empty, and no sibling agent name leaks.
+	// Route level: agent token without project:read is refused with 403.
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, tok)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), "sibling")
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// Positive control: same-project agent token with project:read is admitted.
+	tokWithRead := srv.generateRecordedAgentToken(t, agent.ID, projectID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
+	recOK := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, tokWithRead)
+	require.Equal(t, http.StatusOK, recOK.Code, recOK.Body.String())
 	var st GCPServiceAccountStatus
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
-	assert.Equal(t, 0, st.Agents.Count)
+	require.NoError(t, json.Unmarshal(recOK.Body.Bytes(), &st))
 	assert.Equal(t, sa.ID, st.Account.ID)
 }
 

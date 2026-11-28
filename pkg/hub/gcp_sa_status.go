@@ -191,9 +191,13 @@ type GCPServiceAccountNextStep struct {
 // an id, an email or a display name, resolved the same way as on assign.
 //
 // Authorization is the same as reading the account on the nested GET, plus:
-// an agent may read it only from its own project, and a user must be able
-// to read the project.
+// an agent requires project:read and may read only from its own project, and a
+// user must be able to read the project.
 func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Request, projectID, ref string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	if agent := GetAgentIdentityFromContext(ctx); agent != nil && agent.ProjectID() != projectID {
@@ -210,14 +214,8 @@ func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Reque
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	// Project read for user callers. The view exposes more than the stored
-	// row (project and hub defaults, provider broker and profile names), so a
-	// user must be able to read the project, which keeps the "project members
-	// see it" rule (design §9 Q1) holding if the hub-wide read policy is
-	// narrowed later. Agents are not put through this check: Q1 includes the
-	// project's agents, and their access is the own-project isolation above,
-	// with the agents section gated on the project:read token scope
-	// (gcpServiceAccountAgents).
+	// Project read for user callers. Agent callers are gated by project:read
+	// and own-project isolation above.
 	if GetAgentIdentityFromContext(ctx) == nil {
 		if !s.authorize(w, r, projectResource(project), ActionRead) {
 			return
@@ -240,8 +238,7 @@ func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Reque
 		NotFound(w, "GCP Service Account")
 		return
 	}
-	// The same read gate as getGCPServiceAccount: hub-scoped accounts get a
-	// read check, project-scoped reads have none (see that handler).
+	// Hub-scoped accounts additionally run authorizeGCPServiceAccount.
 	if sa.Scope == store.ScopeHub {
 		if !s.authorizeGCPServiceAccount(w, r, sa, ActionRead) {
 			return
@@ -581,9 +578,10 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 	if identity == nil {
 		return out
 	}
-	// The same token-scope gate listAgents applies (checkAgentReadScope): an
-	// agent token without project:read sees no agents. Here the section is
-	// left empty rather than failing the whole view.
+	// Defense-in-depth scope check matching checkAgentReadScope: the status
+	// route refuses agent tokens lacking project:read before calling this
+	// helper, and the helper itself returns an empty section for any agent
+	// context without project:read.
 	if agent := GetAgentIdentityFromContext(ctx); agent != nil && !agent.HasScope(ScopeProjectRead) {
 		return out
 	}

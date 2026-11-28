@@ -126,6 +126,7 @@ type idFixtures struct {
 	agentRestore            string
 	agentRestoreProject     string
 	agentProvisioning       string
+	agentSessionMetrics     string
 	artifact                string
 	projectEnvKey           string
 	projectSecretKey        string
@@ -556,6 +557,20 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		require.NoError(t, sErr)
 		require.NoError(t, s.CreateSecret(ctx, secretRow))
 	}
+	liSessMetrics := &store.AgentSessionMetrics{
+		AgentID:      f.agent,
+		ProjectID:    f.project,
+		SessionID:    "li-session-metrics",
+		StartedAt:    now.Add(-time.Minute),
+		Status:       "completed",
+		TurnCount:    1,
+		Model:        "li-model",
+		TokensInput:  100,
+		TokensOutput: 50,
+	}
+	require.NoError(t, s.CreateAgentSessionMetrics(ctx, liSessMetrics))
+	f.agentSessionMetrics = liSessMetrics.ID
+
 	liTriggerPayload := `{"agentId":"` + f.agent + `","agentName":"li-agent","message":"li-trigger-msg","wake":true}`
 	for _, trSeed := range []struct {
 		id     string
@@ -1300,52 +1315,54 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/members/principals/{type}/{principalId}": {"id": f.project, "type": "user", "principalId": f.memberPrincipalDel},
 
 		// --- project-route operations family ---
-		"/api/v1/projects/{id}/env":                               {"id": f.project},
-		"/api/v1/projects/{id}/env/{key}":                         {"id": f.project, "key": f.projectEnvKey},
-		"/api/v1/projects/{id}/secrets":                           {"id": f.project},
-		"/api/v1/projects/{id}/secrets/{key}":                     {"id": f.project, "key": f.projectSecretKey},
-		"/api/v1/projects/{id}/providers":                         {"id": f.project},
-		"/api/v1/projects/{id}/shared-dirs":                       {"id": f.project},
-		"/api/v1/projects/{id}/shared-dirs/{name}":                {"id": f.project, "name": f.projectSharedDir},
-		"/api/v1/projects/{id}/shared-dirs/{name}/archive":        {"id": f.project, "name": f.projectSharedDir},
-		"/api/v1/projects/{id}/shared-dirs/{name}/files":          {"id": f.project, "name": f.projectSharedDir},
-		"/api/v1/projects/{id}/shared-dirs/{name}/files/{path}":   {"id": f.project, "name": f.projectSharedDir, "path": "li.txt"},
-		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
-		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
-		"/api/v1/users/me/injected-skills/{id}":                   {"id": f.userSkillInjection},
-		"/api/v1/users/me/templates/{id}":                         {"id": f.userTemplate},
-		"/api/v1/users/me/templates/{id}/upload":                  {"id": f.userTemplate},
-		"/api/v1/users/me/templates/{id}/finalize":                {"id": f.userTemplate},
-		"/api/v1/users/me/templates/{id}/download":                {"id": f.userTemplate},
-		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
-		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
-		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},
-		"/api/v1/projects/{id}/metrics-summary":                   {"id": f.project},
-		"/api/v1/projects/{id}/metrics/summary":                   {"id": f.project},
-		"/api/v1/projects/{id}/metrics":                           {"id": f.project},
-		"/api/v1/projects/{id}/usage":                             {"id": f.project},
-		"/api/v1/projects/{id}/pre-start-hooks":                   {"id": f.project},
-		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":          {"id": f.project, "hookId": f.projectPreStartHook},
-		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate": {"id": f.project, "hookId": f.projectPreStartHook},
-		"/api/v1/projects/{id}/settings":                          {"id": f.project},
-		"/api/v1/projects/{id}/settings/resolved":                 {"id": f.project},
-		"/api/v1/projects/{id}/messaging-policy":                  {"id": f.project},
-		"/api/v1/projects/{id}/set-template":                      {"id": f.project},
-		"/api/v1/projects/{id}/clone":                             {"id": f.project},
-		"/api/v1/projects/{id}/discover-templates":                {"id": f.project},
-		"/api/v1/projects/{id}/import-templates":                  {"id": f.project},
-		"/api/v1/projects/{id}/discover-harness-configs":          {"id": f.project},
-		"/api/v1/projects/{id}/import-harness-configs":            {"id": f.project},
-		"/api/v1/projects/{id}/workspace/archive":                 {"id": f.project},
-		"/api/v1/projects/{id}/workspace/files":                   {"id": f.project},
-		"/api/v1/projects/{id}/workspace/files/{path}":            {"id": f.project, "path": "li-files.txt"},
-		"/api/v1/projects/{id}/workspace/pull":                    {"id": f.project},
-		"/api/v1/projects/{id}/github-installation":               {"id": f.project},
-		"/api/v1/projects/{id}/github-status":                     {"id": f.project},
-		"/api/v1/projects/{id}/github-permissions":                {"id": f.project},
-		"/api/v1/projects/{id}/git-identity":                      {"id": f.project},
-		"/api/v1/projects/{id}/trigger-sources/github":            {"id": f.project},
-		"/api/v1/projects/{id}/members/assignable-roles":          {"id": f.project},
+		"/api/v1/projects/{id}/env":                                {"id": f.project},
+		"/api/v1/projects/{id}/env/{key}":                          {"id": f.project, "key": f.projectEnvKey},
+		"/api/v1/projects/{id}/secrets":                            {"id": f.project},
+		"/api/v1/projects/{id}/secrets/{key}":                      {"id": f.project, "key": f.projectSecretKey},
+		"/api/v1/projects/{id}/providers":                          {"id": f.project},
+		"/api/v1/projects/{id}/shared-dirs":                        {"id": f.project},
+		"/api/v1/projects/{id}/shared-dirs/{name}":                 {"id": f.project, "name": f.projectSharedDir},
+		"/api/v1/projects/{id}/shared-dirs/{name}/archive":         {"id": f.project, "name": f.projectSharedDir},
+		"/api/v1/projects/{id}/shared-dirs/{name}/files":           {"id": f.project, "name": f.projectSharedDir},
+		"/api/v1/projects/{id}/shared-dirs/{name}/files/{path}":    {"id": f.project, "name": f.projectSharedDir, "path": "li.txt"},
+		"/api/v1/projects/{id}/injected-skills":                    {"id": f.project},
+		"/api/v1/projects/{id}/injected-skills/{entryId}":          {"id": f.project, "entryId": f.projectSkillInjection},
+		"/api/v1/users/me/injected-skills/{id}":                    {"id": f.userSkillInjection},
+		"/api/v1/users/me/templates/{id}":                          {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/upload":                   {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/finalize":                 {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/download":                 {"id": f.userTemplate},
+		"/api/v1/projects/{id}/gcp-service-accounts":               {"id": f.project},
+		"/api/v1/projects/{id}/gcp-service-accounts/{saId}":        {"id": f.project, "saId": f.gcpSA},
+		"/api/v1/projects/{id}/gcp-service-accounts/{saId}/status": {"id": f.project, "saId": f.gcpSA},
+		"/api/v1/projects/{id}/message-logs":                       {"id": f.project},
+		"/api/v1/projects/{id}/broadcast":                          {"id": f.project},
+		"/api/v1/projects/{id}/metrics-summary":                    {"id": f.project},
+		"/api/v1/projects/{id}/metrics/summary":                    {"id": f.project},
+		"/api/v1/projects/{id}/metrics":                            {"id": f.project},
+		"/api/v1/projects/{id}/usage":                              {"id": f.project},
+		"/api/v1/projects/{id}/pre-start-hooks":                    {"id": f.project},
+		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":           {"id": f.project, "hookId": f.projectPreStartHook},
+		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate":  {"id": f.project, "hookId": f.projectPreStartHook},
+		"/api/v1/projects/{id}/settings":                           {"id": f.project},
+		"/api/v1/projects/{id}/settings/resolved":                  {"id": f.project},
+		"/api/v1/projects/{id}/messaging-policy":                   {"id": f.project},
+		"/api/v1/projects/{id}/set-template":                       {"id": f.project},
+		"/api/v1/projects/{id}/clone":                              {"id": f.project},
+		"/api/v1/projects/{id}/discover-templates":                 {"id": f.project},
+		"/api/v1/projects/{id}/import-templates":                   {"id": f.project},
+		"/api/v1/projects/{id}/discover-harness-configs":           {"id": f.project},
+		"/api/v1/projects/{id}/import-harness-configs":             {"id": f.project},
+		"/api/v1/projects/{id}/workspace/archive":                  {"id": f.project},
+		"/api/v1/projects/{id}/workspace/files":                    {"id": f.project},
+		"/api/v1/projects/{id}/workspace/files/{path}":             {"id": f.project, "path": "li-files.txt"},
+		"/api/v1/projects/{id}/workspace/pull":                     {"id": f.project},
+		"/api/v1/projects/{id}/github-installation":                {"id": f.project},
+		"/api/v1/projects/{id}/github-status":                      {"id": f.project},
+		"/api/v1/projects/{id}/github-permissions":                 {"id": f.project},
+		"/api/v1/projects/{id}/git-identity":                       {"id": f.project},
+		"/api/v1/projects/{id}/trigger-sources/github":             {"id": f.project},
+		"/api/v1/projects/{id}/members/assignable-roles":           {"id": f.project},
 
 		// --- group family ---
 		"/api/v1/groups/{id}":                                 {"id": f.group},
@@ -1458,7 +1475,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/allow-list/{email}":  {"email": f.allowListEmail},
 
 		// --- env var family ---
-		"/api/v1/env/{key}": {"key": f.envVarKey},
+		"/api/v1/env/{key}":            {"key": f.envVarKey},
+		"/api/v1/metrics/session/{id}": {"id": f.agentSessionMetrics},
 
 		// --- runtime broker family ---
 		"/api/v1/runtime-brokers/{id}":                                                  {"id": f.runtimeBroker},

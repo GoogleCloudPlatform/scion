@@ -417,6 +417,9 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 		scopeID = s.hubID
 		includeSecretMeta = false
 	} else {
+		if scope == store.ScopeProject && !checkAgentReadScope(w, r) {
+			return
+		}
 		resolved, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 		if !ok {
 			return
@@ -500,6 +503,10 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 
 	if query.Has("includePending") {
 		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
+	}
+
+	if scope == store.ScopeProject && !checkAgentReadScope(w, r) {
 		return
 	}
 

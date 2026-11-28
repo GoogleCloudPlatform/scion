@@ -24,7 +24,7 @@
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
 - [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read
 - [agent.messages.read](#agentmessagesread) — Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it
-- [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate session metrics
+- [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate or individual session metrics
 - [agent.lifecycle.keys](#agentlifecyclekeys) — Send keystrokes to an agent's session
 - [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action. A user's post into a thread by thread key also needs the post action of chat-thread-access on the agent's project (project:read, then project.chat_post; 403 chat_post_denied with reason read_only), decided before any wake or row
 - [agent.attach](#agentattach) — Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach
@@ -1255,13 +1255,14 @@
 
 **Domain:** agent
 
-**Description:** Read an agent's aggregate session metrics
+**Description:** Read an agent's aggregate or individual session metrics
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}/metrics/summary` |
+| http_route | GET | `/api/v1/metrics/session/{id}` |
 
 **Principals:** `user`, `agent`
 
@@ -17108,6 +17109,8 @@
 | http_route | GET | `/api/v1/gcp-service-accounts` |
 | http_route | GET | `/api/v1/gcp-service-accounts/{id}` |
 | http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts` |
+| http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts/{saId}` |
+| http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts/{saId}/status` |
 
 **Principals:** `user`, `agent`
 
@@ -17182,9 +17185,9 @@
 | http_route | GET | `/api/v1/env` |
 | http_route | GET | `/api/v1/env/{key}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `project.read`
 

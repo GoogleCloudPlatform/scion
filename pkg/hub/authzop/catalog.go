@@ -283,7 +283,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	// Conversation management API — inline authorization via participant checks.
 	{Pattern: "/api/v1/gcp-service-accounts/mint", Kind: ExemptionAuthenticationOnly, Reason: "Hub-scope GCP SA minting, inline policy check in handler", Owner: "route_metadata.go"},
 	// Cross-project messaging — inline authorization.
-	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/visitor-grants", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own visitor grants, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/visitor-dms", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own DMs with agents it may message, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},

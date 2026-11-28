@@ -27,9 +27,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1283,5 +1285,622 @@ func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 		if pin := spec.Bearer.Pin; pin != "" && !declared[pin] {
 			t.Errorf("operation %s: bearer Pin %q is not a declared test in pkg/hub", spec.ID, pin)
 		}
+	}
+}
+
+func specAdmitsAgentJWT(spec authzop.OperationSpec) bool {
+	hasPrincipal := false
+	for _, p := range spec.Principals {
+		if p == authzop.PrincipalAgent {
+			hasPrincipal = true
+			break
+		}
+	}
+	if !hasPrincipal {
+		return false
+	}
+	for _, c := range spec.Credentials {
+		if c == authzop.CredentialAgentJWT {
+			return true
+		}
+	}
+	return false
+}
+
+// mintAgentTokenWithScopes signs and records a real agent JWT for agentID in
+// projectID carrying the exact scopes given (bypassing dev-auth role upgrades
+// so tests can exercise tokens lacking ScopeProjectRead).
+func (m *bearerMatrixFixture) mintAgentTokenWithScopes(t *testing.T, agentID, projectID string, scopes []AgentTokenScope) string {
+	t.Helper()
+	tok, cred, err := m.srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   agentID,
+		ProjectID: projectID,
+		Scopes:    scopes,
+	}, "")
+	require.NoError(t, err, "sign agent token with scopes %v", scopes)
+	require.NoError(t, m.store.CreateAgentCredential(t.Context(), cred), "record agent credential")
+	return tok
+}
+
+// agentProjectReadScopeExemptions lists catalogued GET entry points that admit
+// PrincipalAgent + CredentialAgentJWT but by policy are NOT gated by
+// ScopeProjectRead (agent self-service routes, caller-owned inbox/DM routes,
+// hub-level discovery routes, or routes gated by a different scope/authority
+// such as project:secret:read, project:artifact:read, or agent.attach).
+//
+// Routes that refuse every agent token (including routes whose handlers call
+// checkAgentReadScope before a kernel or user-only refusal) belong in
+// agentProjectReadRefusedForAllAgents instead, so both token dispositions are
+// pinned rather than skipped.
+//
+// Every entry must carry a non-empty policy reason and is staleness-checked
+// against both the live catalog and live enforcement behavior.
+var agentProjectReadScopeExemptions = map[liveInventoryKey]string{
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages/stream"}:                        "user-only stream endpoint (agents are refused with a stream backend installed; 501 without publisher in fixture)",
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}:                        "self-only port proxy (authorizePortAccess admits only the owning agent)",
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:              "self-only port proxy (authorizePortAccess admits only the owning agent)",
+	{"agent.port.list", http.MethodGet, "/api/v1/agents/{id}/ports"}:                                      "agent self-service route listing only the calling agent's own exposed ports",
+	{"agent.port.tunnel", http.MethodGet, "/api/v1/agents/{id}/ports/tunnel"}:                             "agent self-service WebSocket tunnel gated by self-ownership and agent:port:forward",
+	{"agent.usage.capabilities", http.MethodGet, "/api/v1/agents/{id}/usage/capabilities"}:                "agent self-service capabilities check (self-only; reads no project data)",
+	{"agent.secrets.access", http.MethodGet, "/api/v1/agents/{id}/secrets"}:                               "agent self-service secret access gated by self-identity, not project:read",
+	{"agent.secrets.access", http.MethodGet, "/api/v1/agents/{id}/secrets/{key}"}:                         "agent self-service secret access gated by self-identity, not project:read",
+	{"agent.screen.read", http.MethodGet, "/api/v1/agents/{id}/screen"}:                                   "gated by agent.attach lifecycle authority rather than project:read",
+	{"agent.screen.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/screen"}:              "gated by agent.attach lifecycle authority rather than project:read",
+	{"agent.attach", http.MethodGet, "/api/v1/agents/{id}/pty"}:                                           "gated by agent.attach lifecycle authority rather than project:read",
+	{"project.secret.read", http.MethodGet, "/api/v1/projects/{id}/secrets"}:                              "gated by project:secret:read scope rather than project:read",
+	{"project.secret.read", http.MethodGet, "/api/v1/projects/{id}/secrets/{key}"}:                        "gated by project:secret:read scope rather than project:read",
+	{"artifact.list", http.MethodGet, "/api/v1/artifacts"}:                                                "gated per row by project:artifact:read scope (requires mine=1), not project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}"}:                                           "gated by project:artifact:read scope rather than project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}/files/{path}"}:                              "gated by project:artifact:read scope rather than project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}:               "gated by project:artifact:read scope rather than project:read",
+	{"artifact.read", http.MethodGet, "/api/v1/artifacts/{id}/versions/{seq}/archive"}:                    "gated by project:artifact:read scope rather than project:read",
+	{"artifact.review.draft.read", http.MethodGet, "/api/v1/artifacts/{id}/review-draft"}:                 "gated by project:artifact:read/create scope rather than project:read",
+	{"artifact.review.request.list", http.MethodGet, "/api/v1/artifacts/{id}/review-requests"}:            "gated by project:artifact:read scope rather than project:read",
+	{"artifact.version.read", http.MethodGet, "/api/v1/artifacts/{id}/versions"}:                          "gated by project:artifact:read scope rather than project:read",
+	{"artifact.version.read", http.MethodGet, "/api/v1/artifacts/{id}/versions/{seq}"}:                    "gated by project:artifact:read scope rather than project:read",
+	{"inbox.capabilities.read", http.MethodGet, "/api/v1/messaging/capabilities"}:                         "static self-service messaging capability discovery",
+	{"inbox.conversation.list", http.MethodGet, "/api/v1/conversations"}:                                  "caller's own inbox conversations (group rows require project:read separately)",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}"}:                      "participant-scoped direct conversation owned by the calling agent",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages"}:             "participant-scoped direct conversation messages owned by the calling agent",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/messages/{messageId}"}: "participant-scoped direct conversation message owned by the calling agent",
+	{"inbox.conversation.direct.read", http.MethodGet, "/api/v1/conversations/{id}/watch"}:                "participant-scoped direct conversation watch owned by the calling agent",
+	{"agent.message.target.resolve", http.MethodGet, "/api/v1/messaging/targets/resolve"}:                 "gated by cross-project messaging setting and authorizeAgentMessage, not project:read",
+	{"chat.attachment.probe", http.MethodGet, "/api/v1/chat/attachments"}:                                 "static self-service chat attachment capability probe",
+	{"user.self.profile", http.MethodGet, "/api/v1/auth/me"}:                                              "caller self-profile endpoint",
+	{"hub.experiments.read", http.MethodGet, "/api/v1/experiments"}:                                       "hub-level experiment flag discovery for any signed-in identity",
+	{"hub.profiling.read", http.MethodGet, "/api/v1/profiling"}:                                           "hub-level profiling status discovery for any signed-in identity",
+	{"hub.injectedskills.read", http.MethodGet, "/api/v1/hub/settings/injected-skills"}:                   "hub-level injected skills settings for any signed-in identity",
+	{"hub.conduitgrantkeys.read", http.MethodGet, "/api/v1/conduit/grant-keys"}:                           "hub-level conduit grant public keys for any signed-in identity",
+	{"hub.triggerpresets.read", http.MethodGet, "/api/v1/trigger-presets"}:                                "hub-level trigger presets discovery, not a project read",
+	{"env.hub.read", http.MethodGet, "/api/v1/env/{key}"}:                                                 "hub-level env key lookup, not a project read",
+	{"secret.hub.read", http.MethodGet, "/api/v1/secrets"}:                                                "hub-level secret listing, not a project read",
+	{"secret.hub.read", http.MethodGet, "/api/v1/secrets/{key}"}:                                          "hub-level secret key lookup, not a project read",
+	{"agent.delegation.list", http.MethodGet, "/api/v1/agents/{id}/delegations"}:                          "agent self-service listing only its own delegations",
+	{"agent.delegation.read", http.MethodGet, "/api/v1/agents/{id}/delegations/{grantId}"}:                "agent self-service reading only its own delegation grant",
+}
+
+// agentProjectReadRefusedPin describes the expected refusal behavior for a
+// catalogued GET entry point that refuses all agent tokens (both with and
+// without ScopeProjectRead).
+type agentProjectReadRefusedPin struct {
+	// RequireScopeRefusal is true when the handler calls checkAgentReadScope
+	// before the downstream agent refusal, so the token lacking
+	// ScopeProjectRead must specifically receive the project:read scope refusal.
+	RequireScopeRefusal bool
+	Reason              string
+}
+
+// agentProjectReadRefusedForAllAgents pins catalogued GET entry points that
+// refuse every agent token (both without and with ScopeProjectRead). Unlike
+// agentProjectReadScopeExemptions, every entry here is actively asserted for
+// both token kinds and fails if either token is admitted or if a
+// checkAgentReadScope-guarded route stops returning the scope refusal.
+// Entries are staleness-checked against the live catalog and live responses.
+var agentProjectReadRefusedForAllAgents = map[liveInventoryKey]agentProjectReadRefusedPin{
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs/stream"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogsStream calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogsStream calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentMessages calls checkAgentReadScope then requires a UserIdentity (refuses all agent tokens)",
+	},
+	{"agent.delegation.list", http.MethodGet, "/api/v1/users/me/delegations"}: {
+		RequireScopeRefusal: false,
+		Reason:              "handleUserMeDelegations is session-only (admitAgentDelegationCaller refuses all agent tokens)",
+	},
+	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts/{id}"}: {
+		RequireScopeRefusal: false,
+		Reason:              "flat by-ID route requires a user identity; agent callers get 404",
+	},
+	{"project.workspace.read", http.MethodGet, "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		RequireScopeRefusal: false,
+		Reason:              "handleProjectWorkspaceUploads requires a user principal (404 while hub.large_uploads is off, 403 for agents when on)",
+	},
+	{"project.shareddir.read", http.MethodGet, "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}: {
+		RequireScopeRefusal: false,
+		Reason:              "resumable shared-dir uploads require a user principal (404 while hub.large_uploads is off, 403 for agents when on)",
+	},
+}
+
+// agentProjectReadFixturePending lists catalogued GET entry points that cannot
+// reach a positive control in the generic bearer-matrix fixture (for example,
+// behind a default-off experiment or requiring specialized execution fixtures).
+// They are NOT counted as enforced and are staleness-checked so any route that
+// begins passing the positive control must be promoted out of this list.
+var agentProjectReadFixturePending = map[liveInventoryKey]string{
+	{"schedule.event.read", http.MethodGet, "/api/v1/projects/{projectId}/scheduled-events/{id}/output"}: "requires an exec-type scheduled event with captured output and live agent:attach on the target agent",
+	{"project.messagepolicy.read", http.MethodGet, "/api/v1/projects/{id}/message-policies"}:             "answers 404 while hub.message_policies experiment is off in the bearer-matrix fixture",
+	{"project.messagepolicy.read", http.MethodGet, "/api/v1/projects/{id}/message-policies/{policyId}"}:  "answers 404 while hub.message_policies experiment is off in the bearer-matrix fixture",
+}
+
+// agentProjectReadPositiveAdmitted reports whether rec represents a valid
+// positive control for an agent carrying ScopeProjectRead: either 2xx, or the
+// exact post-auth 5xx documented in bearerMatrixPositiveServerErrors (for
+// example 501 on log routes when no dispatcher or log-query service is
+// configured in the test server), never carrying an authz error code.
+func agentProjectReadPositiveAdmitted(key liveInventoryKey, rec *httptest.ResponseRecorder) bool {
+	if rec.Code >= 200 && rec.Code < 300 {
+		return true
+	}
+	if want, ok := bearerMatrixPositiveServerErrors[key]; ok && rec.Code == want.Status {
+		return !bearerMatrixAuthzErrorCodes[bearerMatrixErrorCode(rec)]
+	}
+	return false
+}
+
+// agentProjectReadRefusedByScope reports whether rec is a specific refusal
+// attributable to missing ScopeProjectRead:
+//   - HTTP 403 with error.code == "forbidden" and a scope/permission denial
+//     message ("Missing required scope: project:read" from checkAgentReadScope,
+//     or "Insufficient permissions" from the authz kernel's project.read check), or
+//   - HTTP 404 on inbox.conversation.resolve, which masks denied project
+//     conversation lookups as not_found (paired with a 200 positive control).
+func agentProjectReadRefusedByScope(key liveInventoryKey, rec *httptest.ResponseRecorder) bool {
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return false
+	}
+	if key.OperationID == "inbox.conversation.resolve" && rec.Code == http.StatusNotFound && resp.Error.Code == ErrCodeNotFound {
+		return true
+	}
+	if rec.Code != http.StatusForbidden || resp.Error.Code != ErrCodeForbidden {
+		return false
+	}
+	return strings.Contains(resp.Error.Message, string(ScopeProjectRead)) ||
+		strings.Contains(resp.Error.Message, "Insufficient permissions")
+}
+
+// agentProjectReadRefusedByScopeCheck reports whether rec is specifically the
+// checkAgentReadScope refusal (HTTP 403 forbidden mentioning ScopeProjectRead).
+func agentProjectReadRefusedByScopeCheck(rec *httptest.ResponseRecorder) bool {
+	if rec.Code != http.StatusForbidden {
+		return false
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return false
+	}
+	return resp.Error.Code == ErrCodeForbidden && strings.Contains(resp.Error.Message, string(ScopeProjectRead))
+}
+
+// TestAgentProjectReadScopeMatrix_CatalogEntryPoints drives real agent JWTs
+// through every catalogued GET entry point that admits PrincipalAgent with
+// CredentialAgentJWT (deny-by-default).
+//
+// The admitting token carries ScopesForRole(AgentRoleFull) (which includes
+// ScopeProjectRead); the refused token carries the exact same bundle minus
+// ScopeProjectRead. Every non-exempt, non-refused-all, non-fixture-pending
+// entry point must:
+//  1. Pass a positive control with ScopeProjectRead (2xx, or its documented
+//     post-auth 5xx in bearerMatrixPositiveServerErrors), and
+//  2. Be refused specifically by the scope/permission check without
+//     ScopeProjectRead.
+//
+// Routes that refuse every agent token (including checkAgentReadScope-guarded
+// routes that are also refused downstream for all agents) are pinned in
+// agentProjectReadRefusedForAllAgents and asserted for both token kinds.
+//
+// agentProjectReadScopeExemptions, agentProjectReadRefusedForAllAgents, and
+// agentProjectReadFixturePending are all checked for staleness against the
+// live catalog and live handler behavior.
+func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	// Seed agent-owned schedule, scheduled event, webhook endpoint, trigger,
+	// and trigger event so row-owned read routes have real positive controls.
+	agentAttribution := store.InitiatorAttribution{
+		InitiatorPrincipalKind:  "agent",
+		InitiatorPrincipalID:    m.ids.agent,
+		InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+		AttributionVersion:      1,
+		AuthorizationRevision:   1,
+	}
+
+	agentSchedID := tid("aprm-sched")
+	require.NoError(t, m.store.CreateSchedule(ctx, &store.Schedule{
+		ID: agentSchedID, ProjectID: m.ids.project, Name: "aprm-schedule",
+		CronExpr: "0 0 * * *", EventType: "message",
+		Payload: `{"agentId":"` + m.ids.agent + `","message":"ping"}`,
+		Status:  store.ScheduleStatusActive, CreatedBy: m.ids.agent,
+		InitiatorAttribution: agentAttribution,
+		CreatedAt:            now, UpdatedAt: now,
+	}))
+	m.ids.schedule = agentSchedID
+
+	agentEvtID := tid("aprm-evt")
+	require.NoError(t, m.store.CreateScheduledEvent(ctx, &store.ScheduledEvent{
+		ID: agentEvtID, ProjectID: m.ids.project, EventType: "message",
+		FireAt: now.Add(time.Hour), Payload: `{"agentId":"` + m.ids.agent + `","message":"ping"}`,
+		Status: store.ScheduledEventPending, CreatedBy: m.ids.agent,
+		InitiatorAttribution: agentAttribution, CreatedAt: now,
+	}))
+	m.ids.scheduledEvent = agentEvtID
+
+	agentEpID := tid("aprm-wh")
+	require.NoError(t, m.store.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{
+		ID: agentEpID, ProjectID: m.ids.project, Name: "aprm-webhook-ep",
+		Status: store.WebhookEndpointStatusActive, SignatureMode: store.WebhookSignatureModeScionV1,
+		SecretVersion: 1, OwnerPrincipalKind: "agent", OwnerPrincipalID: m.ids.agent,
+		OwnerCredentialKind: store.InitiatorCredentialKindAgent,
+		CreatedBy:           m.ids.agent, CreatedAt: now, UpdatedAt: now,
+	}))
+	m.ids.webhookEndpoint = agentEpID
+
+	agentTrigID := tid("aprm-trig")
+	require.NoError(t, m.store.CreateTrigger(ctx, &store.Trigger{
+		ID: agentTrigID, ProjectID: m.ids.project, Name: "aprm-trigger",
+		Status: store.TriggerStatusActive, StatusReason: store.TriggerStatusReasonNone,
+		SourceKind: store.TriggerSourceKindWebhook, SourceID: agentEpID,
+		MatchTypes: []string{"webhook.received"}, MatchDialect: "cel",
+		ActionType: "message", ActionPayload: `{"agentId":"` + m.ids.agent + `","message":"hi"}`,
+		SubjectDialect: "cel", SubjectMode: store.TriggerSubjectModeNew,
+		CreatedBy:            m.ids.agent,
+		InitiatorAttribution: agentAttribution,
+		CreatedAt:            now, UpdatedAt: now,
+	}))
+	m.ids.trigger = agentTrigID
+
+	agentTrigEvtID := tid("aprm-trigevt")
+	require.NoError(t, m.store.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID: agentTrigEvtID, ProjectID: m.ids.project,
+		SourceKind: store.TriggerSourceKindWebhook, SourceID: agentEpID,
+		Type: "webhook.received", Subject: "webhook:" + agentEpID,
+		DedupKey: "aprm-trigger-event-dedup", OccurredAt: now, ReceivedAt: now,
+		Attributes: map[string]string{"endpoint_name": "aprm-webhook-ep"},
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Payload:    `{"ok":true}`, PayloadBytes: 11,
+		Status: store.TriggerEventStatusProcessed, CreatedAt: now,
+	}))
+	m.ids.triggerEvent = agentTrigEvtID
+
+	// Seed project-scoped env var and GCP service account so env.read and
+	// nested gcp.identity.read routes have real positive controls.
+	const aprmProjectEnvKey = "APRM_PROJECT_ENV"
+	_, err := m.store.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:      tid("aprm-env"),
+		Key:     aprmProjectEnvKey,
+		Value:   "aprm-val",
+		Scope:   store.ScopeProject,
+		ScopeID: m.ids.project,
+		Created: now,
+		Updated: now,
+	})
+	require.NoError(t, err)
+
+	aprmProjSAID := tid("aprm-proj-sa")
+	require.NoError(t, m.store.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:        aprmProjSAID,
+		Scope:     store.ScopeProject,
+		ScopeID:   m.ids.project,
+		Email:     "aprm-proj-sa@li-gcp-project.iam.gserviceaccount.com",
+		ProjectID: "li-gcp-project",
+		CreatedAt: now,
+	}))
+
+	fullScopes := ScopesForRole(AgentRoleFull)
+	var withoutScopes []AgentTokenScope
+	for _, sc := range fullScopes {
+		if sc != ScopeProjectRead {
+			withoutScopes = append(withoutScopes, sc)
+		}
+	}
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, withoutScopes)
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, fullScopes)
+
+	// Per-route request helper supplying project scope query params and
+	// project-scoped IDs so project-scoped branches are exercised with
+	// positive controls.
+	send := func(e bearerMatrixEntry, token string) *httptest.ResponseRecorder {
+		key := e.key()
+		switch {
+		case key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/gcp-service-accounts":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/gcp-service-accounts?scope=project&scopeId="+m.ids.project, nil, token)
+		case key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/projects/{id}/gcp-service-accounts/{saId}":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/projects/"+m.ids.project+"/gcp-service-accounts/"+aprmProjSAID, nil, token)
+		case key.OperationID == "gcp.identity.read" && key.Pattern == "/api/v1/projects/{id}/gcp-service-accounts/{saId}/status":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/projects/"+m.ids.project+"/gcp-service-accounts/"+aprmProjSAID+"/status", nil, token)
+		case key.OperationID == "env.read" && key.Pattern == "/api/v1/env":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/env?scope=project&scopeId="+m.ids.project, nil, token)
+		case key.OperationID == "env.read" && key.Pattern == "/api/v1/env/{key}":
+			return doRequestWithAgentToken(t, m.srv, http.MethodGet,
+				"/api/v1/env/"+aprmProjectEnvKey+"?scope=project&scopeId="+m.ids.project, nil, token)
+		}
+		return m.request(t, e, token)
+	}
+
+	seen := map[liveInventoryKey]bool{}
+	enforced := 0
+	refusedAll := 0
+	exempted := 0
+	fixturePending := 0
+
+	for _, e := range bearerMatrixEntries() {
+		ep := e.EntryPoint
+		if ep.Method != http.MethodGet || !specAdmitsAgentJWT(e.Spec) {
+			continue
+		}
+		key := e.key()
+		seen[key] = true
+		label := string(e.Spec.ID) + " " + ep.Method + " " + ep.Pattern
+
+		recWithout := send(e, withoutScope)
+		recWith := send(e, withScope)
+
+		if pin, ok := agentProjectReadRefusedForAllAgents[key]; ok {
+			if strings.TrimSpace(pin.Reason) == "" {
+				t.Errorf("refused-for-all-agents entry %v has an empty reason", key)
+			}
+			if _, dup := agentProjectReadScopeExemptions[key]; dup {
+				t.Errorf("key %v appears in both agentProjectReadRefusedForAllAgents and agentProjectReadScopeExemptions", key)
+			}
+			if _, dup := agentProjectReadFixturePending[key]; dup {
+				t.Errorf("key %v appears in both agentProjectReadRefusedForAllAgents and agentProjectReadFixturePending", key)
+			}
+			if pin.RequireScopeRefusal {
+				if !agentProjectReadRefusedByScopeCheck(recWithout) {
+					t.Errorf("%s: agent token without %s got %d (%s), want %s scope refusal: %s",
+						label, ScopeProjectRead, recWithout.Code, bearerMatrixErrorCode(recWithout), ScopeProjectRead, recWithout.Body.String())
+				}
+			} else if !bearerMatrixRefused(ep.Method, recWithout.Code) {
+				t.Errorf("%s: agent token without %s got %d, want %s: %s",
+					label, ScopeProjectRead, recWithout.Code, bearerMatrixRefusal(ep.Method), recWithout.Body.String())
+			}
+			if agentProjectReadPositiveAdmitted(key, recWith) {
+				t.Errorf("stale refused-for-all-agents entry %s: with-scope agent token was admitted (with=%d); promote to enforced",
+					label, recWith.Code)
+			} else if !bearerMatrixRefused(ep.Method, recWith.Code) {
+				t.Errorf("%s: agent token with %s got %d, want %s: %s",
+					label, ScopeProjectRead, recWith.Code, bearerMatrixRefusal(ep.Method), recWith.Body.String())
+			}
+			refusedAll++
+			continue
+		}
+
+		if reason, ok := agentProjectReadScopeExemptions[key]; ok {
+			if strings.TrimSpace(reason) == "" {
+				t.Errorf("exemption %v has an empty reason", key)
+			}
+			if _, dup := agentProjectReadFixturePending[key]; dup {
+				t.Errorf("key %v appears in both agentProjectReadScopeExemptions and agentProjectReadFixturePending", key)
+			}
+			if agentProjectReadRefusedByScope(key, recWithout) && agentProjectReadPositiveAdmitted(key, recWith) {
+				t.Errorf("stale exemption %s: route enforces %s (without=%d, with=%d); remove from agentProjectReadScopeExemptions",
+					label, ScopeProjectRead, recWithout.Code, recWith.Code)
+			}
+			exempted++
+			continue
+		}
+
+		if reason, ok := agentProjectReadFixturePending[key]; ok {
+			if strings.TrimSpace(reason) == "" {
+				t.Errorf("fixture-pending entry %v has an empty reason", key)
+			}
+			if agentProjectReadPositiveAdmitted(key, recWith) {
+				t.Errorf("stale fixture-pending %s: positive control succeeded (with=%d); promote out of agentProjectReadFixturePending",
+					label, recWith.Code)
+			}
+			fixturePending++
+			continue
+		}
+
+		// Enforced row: must pass BOTH positive control (with project:read) and
+		// specific scope refusal (without project:read).
+		if !agentProjectReadPositiveAdmitted(key, recWith) {
+			t.Errorf("%s: positive control with %s got %d, want 2xx or documented post-auth 5xx (add fixture/override or move to agentProjectReadFixturePending): %s",
+				label, ScopeProjectRead, recWith.Code, recWith.Body.String())
+		}
+		if !agentProjectReadRefusedByScope(key, recWithout) {
+			t.Errorf("%s: agent token without %s got %d (%s), want scope/permission refusal (or add a policy-justified entry to agentProjectReadScopeExemptions): %s",
+				label, ScopeProjectRead, recWithout.Code, bearerMatrixErrorCode(recWithout), recWithout.Body.String())
+		}
+		enforced++
+	}
+
+	for key := range agentProjectReadRefusedForAllAgents {
+		if !seen[key] {
+			t.Errorf("stale refused-for-all-agents entry %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
+		}
+	}
+	for key := range agentProjectReadScopeExemptions {
+		if !seen[key] {
+			t.Errorf("stale exemption %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
+		}
+	}
+	for key := range agentProjectReadFixturePending {
+		if !seen[key] {
+			t.Errorf("stale fixture-pending entry %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
+		}
+	}
+
+	if enforced == 0 {
+		t.Fatal("matrix exercised no catalog entry points enforcing agent project:read")
+	}
+	t.Logf("agent project:read scope matrix: enforced=%d refused_all=%d exempted=%d fixture_pending=%d", enforced, refusedAll, exempted, fixturePending)
+}
+
+// TestProjectMetricsRoutes_AgentProjectReadScope verifies that the three
+// project metrics routes refuse same-project agent tokens lacking project:read,
+// continue admitting same-project agent tokens carrying project:read and
+// authorized user callers, and keep refusing cross-project agent tokens.
+func TestProjectMetricsRoutes_AgentProjectReadScope(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+	otherProjectAgent := m.mintAgentTokenWithScopes(t, tid("other-proj-agent"), m.otherProject, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+
+	paths := []string{
+		"/api/v1/projects/" + m.ids.project + "/metrics-summary",
+		"/api/v1/projects/" + m.ids.project + "/metrics/summary",
+		"/api/v1/projects/" + m.ids.project + "/metrics",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			recNoScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, path, nil, withoutScope)
+			require.Equal(t, http.StatusForbidden, recNoScope.Code,
+				"same-project agent without project:read must be refused: %s", recNoScope.Body.String())
+
+			recWithScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, path, nil, withScope)
+			require.Equal(t, http.StatusOK, recWithScope.Code,
+				"same-project agent with project:read must succeed: %s", recWithScope.Body.String())
+
+			recOtherProj := doRequestWithAgentToken(t, m.srv, http.MethodGet, path, nil, otherProjectAgent)
+			require.Equal(t, http.StatusForbidden, recOtherProj.Code,
+				"cross-project agent with project:read must be refused: %s", recOtherProj.Body.String())
+
+			recUser := doRequest(t, m.srv, http.MethodGet, path, nil)
+			require.Equal(t, http.StatusOK, recUser.Code,
+				"authorized user caller must remain unaffected: %s", recUser.Body.String())
+		})
+	}
+}
+
+// TestProjectEnvAndGCPSARoutes_AgentProjectReadScope verifies that the
+// project-scoped env read routes and nested project GCP service account item
+// and status routes enforce project:read for same-project agents, continue
+// admitting same-project agents with project:read and authorized user callers,
+// and refuse cross-project agents.
+func TestProjectEnvAndGCPSARoutes_AgentProjectReadScope(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	const envKey = "SCOPE_TEST_PROJECT_ENV"
+	_, err := m.store.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:      tid("scope-test-env"),
+		Key:     envKey,
+		Value:   "val",
+		Scope:   store.ScopeProject,
+		ScopeID: m.ids.project,
+		Created: now,
+		Updated: now,
+	})
+	require.NoError(t, err)
+
+	projSAID := tid("scope-test-proj-sa")
+	require.NoError(t, m.store.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:        projSAID,
+		Scope:     store.ScopeProject,
+		ScopeID:   m.ids.project,
+		Email:     "scope-test-proj-sa@li-gcp-project.iam.gserviceaccount.com",
+		ProjectID: "li-gcp-project",
+		CreatedAt: now,
+	}))
+
+	sessMetrics := &store.AgentSessionMetrics{
+		AgentID:      m.ids.agent,
+		ProjectID:    m.ids.project,
+		SessionID:    "scope-test-session",
+		StartedAt:    now.Add(-time.Minute),
+		Status:       "completed",
+		TurnCount:    1,
+		Model:        "test-model",
+		TokensInput:  100,
+		TokensOutput: 50,
+	}
+	require.NoError(t, m.store.CreateAgentSessionMetrics(ctx, sessMetrics))
+
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+	otherProjectAgent := m.mintAgentTokenWithScopes(t, tid("other-proj-agent-env-sa"), m.otherProject, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+
+	cases := []struct {
+		name              string
+		path              string
+		crossProjectCodes []int
+	}{
+		{
+			name:              "env list",
+			path:              "/api/v1/env?scope=project&scopeId=" + m.ids.project,
+			crossProjectCodes: []int{http.StatusForbidden},
+		},
+		{
+			name:              "env get",
+			path:              "/api/v1/env/" + envKey + "?scope=project&scopeId=" + m.ids.project,
+			crossProjectCodes: []int{http.StatusForbidden},
+		},
+		{
+			name:              "project gcp sa get",
+			path:              "/api/v1/projects/" + m.ids.project + "/gcp-service-accounts/" + projSAID,
+			crossProjectCodes: []int{http.StatusForbidden, http.StatusNotFound},
+		},
+		{
+			name:              "project gcp sa status",
+			path:              "/api/v1/projects/" + m.ids.project + "/gcp-service-accounts/" + projSAID + "/status",
+			crossProjectCodes: []int{http.StatusForbidden, http.StatusNotFound},
+		},
+		{
+			name:              "session metrics get",
+			path:              "/api/v1/metrics/session/" + sessMetrics.ID,
+			crossProjectCodes: []int{http.StatusForbidden},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recNoScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, tc.path, nil, withoutScope)
+			require.Equal(t, http.StatusForbidden, recNoScope.Code,
+				"same-project agent without project:read must be refused: %s", recNoScope.Body.String())
+
+			recWithScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, tc.path, nil, withScope)
+			require.Equal(t, http.StatusOK, recWithScope.Code,
+				"same-project agent with project:read must succeed: %s", recWithScope.Body.String())
+
+			recOtherProj := doRequestWithAgentToken(t, m.srv, http.MethodGet, tc.path, nil, otherProjectAgent)
+			require.Contains(t, tc.crossProjectCodes, recOtherProj.Code,
+				"cross-project agent with project:read must be refused: %s", recOtherProj.Body.String())
+
+			recUser := doRequest(t, m.srv, http.MethodGet, tc.path, nil)
+			require.Equal(t, http.StatusOK, recUser.Code,
+				"authorized user caller must remain unaffected: %s", recUser.Body.String())
+		})
 	}
 }
