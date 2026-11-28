@@ -49,14 +49,18 @@ crci_help_exit "$USAGE"
 crci_start
 [[ -n $TAG ]] || TAG=$(crci_default_tag runner)
 
-P=${CFG[GCP_PROJECT]}
-R=${CFG[REGION]}
-JOB=${CFG[RUNNER_JOB_NAME]}
-IMAGE=$(crci_image_ref "${CFG[RUNNER_IMAGE_NAME]}" "$TAG")
-EXEC=$(crci_sa_email "${CFG[EXEC_SA_NAME]}")
-MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
-TIMEOUT_S=$(crci_duration_seconds "${CFG[TASK_TIMEOUT]}")
-IDLE_S=$(crci_duration_seconds "${CFG[RUNNER_IDLE_TIMEOUT]}")
+P=$(crci_cfg GCP_PROJECT)
+R=$(crci_cfg REGION)
+JOB=$(crci_cfg RUNNER_JOB_NAME)
+IMAGE=$(crci_image_ref "$(crci_cfg RUNNER_IMAGE_NAME)" "$TAG")
+EXEC=$(crci_sa_email "$(crci_cfg EXEC_SA_NAME)")
+MEDIATOR=$(crci_sa_email "$(crci_cfg MEDIATOR_SA_NAME)")
+TIMEOUT_S=$(crci_duration_seconds "$(crci_cfg TASK_TIMEOUT)")
+IDLE_S=$(crci_duration_seconds "$(crci_cfg RUNNER_IDLE_TIMEOUT)")
+RUNNER_CPU=$(crci_cfg RUNNER_CPU)
+RUNNER_MEMORY=$(crci_cfg RUNNER_MEMORY)
+RUNNER_DISK_GI=$(crci_cfg RUNNER_DISK_GI)
+RUNNER_BUILD_CACHE_IN_RAM=$(crci_cfg RUNNER_BUILD_CACHE_IN_RAM)
 
 crci_note "image must exist (build-runner-image.sh)"
 if ! crci_exists gcloud artifacts docker images describe "$IMAGE" --project="$P" --format='value(image_summary.digest)'; then
@@ -69,13 +73,13 @@ fi
 SHAPE=(
   --image="$IMAGE" --region="$R" --project="$P"
   --service-account="$EXEC"
-  --cpu="${CFG[RUNNER_CPU]}" --memory="${CFG[RUNNER_MEMORY]}"
+  --cpu="$RUNNER_CPU" --memory="$RUNNER_MEMORY"
   --tasks=1 --parallelism=1 --max-retries=0 --task-timeout="${TIMEOUT_S}s"
   --labels=managed-by=cr-ci
-  --set-env-vars="RUNNER_BUILD_CACHE_IN_RAM=${CFG[RUNNER_BUILD_CACHE_IN_RAM]},RUNNER_IDLE_TIMEOUT_SECONDS=$IDLE_S"
+  --set-env-vars="RUNNER_BUILD_CACHE_IN_RAM=$RUNNER_BUILD_CACHE_IN_RAM,RUNNER_IDLE_TIMEOUT_SECONDS=$IDLE_S"
 )
 VOLUME=(
-  --add-volume="name=scratch,type=ephemeral-disk,size=${CFG[RUNNER_DISK_GI]}Gi"
+  --add-volume="name=scratch,type=ephemeral-disk,size=${RUNNER_DISK_GI}Gi"
   "--add-volume-mount=volume=scratch,mount-path=/home/runner"
 )
 
@@ -85,8 +89,8 @@ VOLUME=(
 # create or update itself is the check.
 DISK_HINT="if the error says \"Total size of 'ephemeral-disk' volumes cannot exceed N GiB\", N is the limit in $R: set RUNNER_DISK_GI to at most N, or request a higher per-instance quota (docs/gcp-setup.md, \"Quotas\")"
 crci_note "C8: runner job $JOB"
-if ((CFG[RUNNER_DISK_GI] > 10)); then
-  crci_note "RUNNER_DISK_GI=${CFG[RUNNER_DISK_GI]} is above Cloud Run's 10 GiB per-instance default: it needs the per-instance quota raised in $R (the limit is per region)"
+if ((RUNNER_DISK_GI > 10)); then
+  crci_note "RUNNER_DISK_GI=$RUNNER_DISK_GI is above Cloud Run's 10 GiB per-instance default: it needs the per-instance quota raised in $R (the limit is per region)"
 fi
 if crci_exists gcloud run jobs describe "$JOB" --region="$R" --project="$P" --format='value(name)'; then
   crci_run_hint "$DISK_HINT" gcloud run jobs update "$JOB" "${SHAPE[@]}" --clear-volumes --clear-volume-mounts "${VOLUME[@]}"

@@ -19,5 +19,7 @@ done
 crci_help_exit "$USAGE"
 crci_load_config "$CRCI_CONFIG"
 for k in "${CRCI_KEYS[@]}"; do
-  printf '%s=%s\n' "$k" "${CFG[$k]}"
+  v=""
+  crci_cfg_into v "$k"
+  printf '%s=%s\n' "$k" "$v"
 done

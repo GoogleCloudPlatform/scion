@@ -66,8 +66,9 @@ The step-by-step order is in [docs/gcp-setup.md](../docs/gcp-setup.md) and the
   source at HEAD (`runner/`; `mediator/` plus `go.mod`), so an unchanged source
   keeps its tag. With `--apply`, uncommitted changes there are refused; pass
   `--tag TAG` to override (and to build outside a git checkout).
-- **Shell:** bash >= 4, `set -euo pipefail`, `--help` on every script, and
-  shellcheck clean under both of these (see [Static checks](#static-checks)).
+- **Shell:** bash >= 3.2 (macOS `/bin/bash` compatible), `set -euo pipefail`,
+  `--help` on every script, and shellcheck clean under both of these (see
+  [Static checks](#static-checks)).
 
 ## Static checks
 
