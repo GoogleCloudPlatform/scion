@@ -15,7 +15,9 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -56,6 +58,8 @@ var (
 	ErrAttachmentTooLarge = errors.New("artifacts: the attachment exceeds the file size limit")
 	// ErrAttachmentName: the file name cannot name an artifact file.
 	ErrAttachmentName = errors.New("artifacts: invalid attachment file name")
+	// ErrComposerUnsupported: blob storage does not implement storage.Composer.
+	ErrComposerUnsupported = errors.New("artifacts: blob storage does not support compose")
 	// errNoPrincipal: the request has no caller the service serves.
 	errNoPrincipal = errors.New("artifacts: no authenticated caller")
 )
@@ -156,6 +160,171 @@ func (s *Service) CreateAttachment(ctx context.Context, name, mediaType string, 
 		return AttachmentInfo{}, fmt.Errorf("artifacts: record attachment: %w", err)
 	}
 	return AttachmentInfo{ID: a.ID, Name: clean, MediaType: mediaType, Size: spool.size}, nil
+}
+
+// StagedAttachment describes a chat attachment whose bytes have already been
+// staged in the blob store as ordered part objects (ptone/scion#8654 §3.6).
+type StagedAttachment struct {
+	// ArtifactID is the pre-allocated UUID for idempotent finalization.
+	ArtifactID string
+	// Name is the sanitized attachment filename.
+	Name string
+	// MediaType is the classified MIME type (derived from the first bytes).
+	MediaType string
+	// Size is the exact total byte length of the staged parts.
+	Size int64
+	// SHA256 is the lowercase hex SHA-256 digest computed while streaming chunks.
+	SHA256 string
+	// Parts lists the ordered staged object paths to compose. Empty only when Size == 0.
+	Parts []string
+	// StagingPrefix, when non-empty, is deleted best-effort after finalization.
+	StagingPrefix string
+}
+
+// CreateAttachmentFromStaged promotes staged blob parts into a content-addressed
+// attachment artifact using the pre-allocated ArtifactID (ptone/scion#8654 §3.6).
+//
+// It never calls spoolBody or storeBlob: bytes cross the Hub once during chunk
+// upload, and finalization touches the blob, composes the parts server-side into
+// BlobPath(hub, digest), inserts the artifact with the pre-allocated ID (treating
+// a unique conflict for the same owner/digest/size as an idempotent retry), and
+// deletes the staging prefix best-effort.
+func (s *Service) CreateAttachmentFromStaged(ctx context.Context, in StagedAttachment) (AttachmentInfo, error) {
+	kind, ref, _, ok := s.host.Principal(ctx)
+	if !ok {
+		return AttachmentInfo{}, errNoPrincipal
+	}
+	if !canonicalID(in.ArtifactID) {
+		return AttachmentInfo{}, fmt.Errorf("artifacts: invalid pre-allocated artifact id")
+	}
+	clean, err := cleanFilePath(in.Name)
+	if err != nil || strings.Contains(clean, "/") || isReservedPath(clean) {
+		return AttachmentInfo{}, ErrAttachmentName
+	}
+	if in.Size < 0 {
+		return AttachmentInfo{}, fmt.Errorf("artifacts: negative attachment size")
+	}
+	if len(in.SHA256) != 64 {
+		return AttachmentInfo{}, fmt.Errorf("artifacts: invalid sha256 digest")
+	}
+	if _, err := hex.DecodeString(in.SHA256); err != nil {
+		return AttachmentInfo{}, fmt.Errorf("artifacts: invalid sha256 digest: %w", err)
+	}
+	digest := strings.ToLower(in.SHA256)
+
+	b, ok := s.backend()
+	if !ok {
+		return AttachmentInfo{}, ErrUnavailable
+	}
+	composer, ok := b.blobs.(storage.Composer)
+	if !ok {
+		return AttachmentInfo{}, ErrComposerUnsupported
+	}
+	if in.Size > b.maxFileBytes(ctx) {
+		return AttachmentInfo{}, ErrAttachmentTooLarge
+	}
+
+	cleanupStaging := func() {
+		if in.StagingPrefix == "" {
+			return
+		}
+		prefix := storage.DirPrefix(in.StagingPrefix)
+		if prefix == "" {
+			return
+		}
+		if delErr := b.blobs.DeletePrefix(ctx, prefix); delErr != nil {
+			slog.WarnContext(ctx, "artifacts: best-effort staged attachment cleanup failed",
+				"prefix", prefix, "artifact_id", in.ArtifactID, "error", delErr)
+		}
+	}
+
+	// Idempotent retry check: if a previous finalize attempt already published
+	// this pre-allocated artifact (and possibly already deleted staging),
+	// return the existing record without re-composing.
+	if info, found := existingStagedAttachment(ctx, b, in.ArtifactID, kind, ref, digest, in.Size); found {
+		cleanupStaging()
+		return info, nil
+	}
+
+	// Step 2: touch blob before writing content address (blob-sweep protocol).
+	if err := b.store.TouchBlob(ctx, digest, blobClock()); err != nil {
+		return AttachmentInfo{}, fmt.Errorf("artifacts: touch attachment blob: %w", err)
+	}
+
+	// Step 3: promote staged parts into BlobPath(hub, digest).
+	dst := BlobPath(b.hubID, digest)
+	if len(in.Parts) == 0 {
+		if in.Size != 0 {
+			return AttachmentInfo{}, fmt.Errorf("artifacts: missing staged parts for %d-byte attachment", in.Size)
+		}
+		if _, err := b.blobs.Upload(ctx, dst, bytes.NewReader(nil), storage.UploadOptions{
+			ContentType: in.MediaType,
+			Idempotent:  true,
+		}); err != nil {
+			return AttachmentInfo{}, fmt.Errorf("artifacts: store empty attachment blob: %w", err)
+		}
+	} else {
+		obj, err := composer.Compose(ctx, dst, in.Parts, storage.UploadOptions{
+			ContentType: in.MediaType,
+		})
+		if err != nil {
+			return AttachmentInfo{}, fmt.Errorf("artifacts: compose attachment blob: %w", err)
+		}
+		if obj != nil && obj.Size != in.Size {
+			return AttachmentInfo{}, fmt.Errorf("artifacts: composed attachment size %d does not match expected %d", obj.Size, in.Size)
+		}
+	}
+
+	// Step 4: CreatePublished with pre-allocated artifact_id.
+	now := time.Now().UTC()
+	a := &Artifact{
+		ID: in.ArtifactID, ScopeKind: ScopeKindUpload, ScopeRef: PrincipalRef(kind, ref),
+		OwnerKind: kind, OwnerRef: ref, Title: clean, CurrentSeq: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	v := &Version{
+		ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: VersionKindAttachment, EntryPath: clean,
+		TotalBytes: in.Size, FileCount: 1, CreatedByKind: kind, CreatedByRef: ref,
+		CreatedAt: now, State: VersionStateReady,
+	}
+	f := File{VersionID: v.ID, Path: clean, Size: in.Size, SHA256: digest, MediaType: in.MediaType}
+	if err := b.store.CreatePublished(ctx, a, v, []File{f}, nil); err != nil {
+		// Unique conflict on pre-allocated ID from a concurrent finalize:
+		// read and return the existing record as success (§3.6 step 4).
+		if info, found := existingStagedAttachment(ctx, b, in.ArtifactID, kind, ref, digest, in.Size); found {
+			cleanupStaging()
+			return info, nil
+		}
+		return AttachmentInfo{}, fmt.Errorf("artifacts: record staged attachment: %w", err)
+	}
+
+	// Step 5: delete staging prefix best-effort.
+	cleanupStaging()
+
+	return AttachmentInfo{ID: a.ID, Name: clean, MediaType: in.MediaType, Size: in.Size, SHA256: digest}, nil
+}
+
+func existingStagedAttachment(ctx context.Context, b backend, artifactID, ownerKind, ownerRef, digest string, size int64) (AttachmentInfo, bool) {
+	existing, err := b.store.GetAttachment(ctx, artifactID)
+	if err != nil || existing == nil {
+		return AttachmentInfo{}, false
+	}
+	if existing.OwnerKind != ownerKind || existing.OwnerRef != ownerRef {
+		return AttachmentInfo{}, false
+	}
+	ef, err := attachmentFile(ctx, b, existing)
+	if err != nil || ef == nil {
+		return AttachmentInfo{}, false
+	}
+	if ef.SHA256 != digest || ef.Size != size {
+		return AttachmentInfo{}, false
+	}
+	return AttachmentInfo{
+		ID:        existing.ID,
+		Name:      ef.Path,
+		MediaType: ef.MediaType,
+		Size:      ef.Size,
+		SHA256:    ef.SHA256,
+	}, true
 }
 
 // UsableAttachment reports whether id names an unsent upload of the sender
