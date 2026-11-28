@@ -207,6 +207,9 @@ type chatRecords struct {
 	topicMessageEdit   string
 	topicMessageDelete string
 	dmMessage          string
+	scheduledCancel    string
+	scheduledSendNow   string
+	scheduledDismiss   string
 }
 
 // seedChatRecords creates chatRecords for userID: topicID is the fixture
@@ -248,6 +251,30 @@ func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebCh
 	r.topicMessageDelete = message(topicID, topicConvID, projectID, 2*time.Second)
 	r.topicMessage = message(topicID, topicConvID, projectID, 3*time.Second)
 	r.dmMessage = message(r.dmAgent, dmAgentConvID, projectID, 4*time.Second)
+
+	if sms := scheduledMessageStoreFrom(wcs); sms != nil {
+		seedScheduled := func(status, failureReason string, fireAt time.Time) string {
+			id := uuid.NewString()
+			_, _, err := sms.CreateScheduledMessage(ctx, &ScheduledChatMessage{
+				ID:              id,
+				SenderUserID:    userID,
+				ConversationKey: topicID,
+				ProjectID:       projectID,
+				Content:         "scheduled " + id[:8],
+				IdempotencyKey:  "idem-" + id,
+				FireAt:          fireAt,
+				Status:          status,
+				FailureReason:   failureReason,
+				CreatedAt:       at,
+				UpdatedAt:       at,
+			})
+			require.NoError(t, err)
+			return id
+		}
+		r.scheduledCancel = seedScheduled(ScheduledMessagePending, "", at.Add(time.Hour))
+		r.scheduledSendNow = seedScheduled(ScheduledMessageFailed, ScheduledFailureMissed, at.Add(-2*time.Hour))
+		r.scheduledDismiss = seedScheduled(ScheduledMessageFailed, ScheduledFailureMissed, at.Add(-2*time.Hour))
+	}
 	return r
 }
 
@@ -1473,20 +1500,24 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads":                     {"id": f.project},
-		"/api/v1/chat/spaces/{id}/members":                     {"id": f.project},
-		"/api/v1/chat/spaces/{id}/read":                        {"id": f.project},
-		"/api/v1/chat/spaces/{id}/emoji":                       {"id": f.project},
-		"/api/v1/chat/topics/{id}":                             {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages":             {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages/{messageId}": {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
-		"/api/v1/chat/conversations/{id}/read":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/unread":               {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/mute":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/pin":                  {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
-		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
+		"/api/v1/chat/spaces/{id}/threads":                                 {"id": f.project},
+		"/api/v1/chat/spaces/{id}/members":                                 {"id": f.project},
+		"/api/v1/chat/spaces/{id}/read":                                    {"id": f.project},
+		"/api/v1/chat/spaces/{id}/emoji":                                   {"id": f.project},
+		"/api/v1/chat/topics/{id}":                                         {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages":                         {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages/{messageId}":             {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
+		"/api/v1/chat/conversations/{id}/read":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/unread":                           {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/mute":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/pin":                              {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/typing":                           {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/interagent":                       {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/promote":                          {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/scheduled":                        {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/scheduled/{scheduledId}":          {"id": f.chatTopic, "scheduledId": f.chat.scheduledCancel},
+		"/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/send-now": {"id": f.chatTopic, "scheduledId": f.chat.scheduledSendNow},
+		"/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/dismiss":  {"id": f.chatTopic, "scheduledId": f.chat.scheduledDismiss},
 		// Starred messages: the fixture thread's message (the PUT entry
 		// stars it before the read entries, the DELETE entry removes it).
 		"/api/v1/chat/stars/{messageId}": {"messageId": f.chat.topicMessage},
