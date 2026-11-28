@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -283,13 +284,16 @@ func TestProvisionAgent_ShellSkipsSkillsResolutionAndInstallation(t *testing.T) 
 	assert.True(t, os.IsNotExist(err), "no skills directory should be created for shell harness")
 }
 
-// TestInstallSkillsIntoHome_EmptySkillsDirSkipsResolution verifies that any
-// harness without a configured skills directory (such as a container-script
-// harness omitting skills_dir) skips skill resolution cleanly without calling
-// the resolver or failing.
-func TestInstallSkillsIntoHome_EmptySkillsDirSkipsResolution(t *testing.T) {
+// TestInstallSkillsIntoHome_EmptySkillsDir verifies empty skills_dir handling:
+//   - a non-shell harness with no skills_dir fails closed with a
+//     *SkillResolutionError when any required skill is declared;
+//   - optional skills (or no skills) are skipped cleanly without calling the
+//     resolver;
+//   - the reserved shell harness skips even required skills without failing or
+//     calling the resolver.
+func TestInstallSkillsIntoHome_EmptySkillsDir(t *testing.T) {
 	hcDir := t.TempDir()
-	h, err := harness.NewContainerScriptHarness(hcDir, config.HarnessConfigEntry{
+	nonShell, err := harness.NewContainerScriptHarness(hcDir, config.HarnessConfigEntry{
 		Harness: "custom-no-skills",
 		Provisioner: &config.HarnessProvisionerConfig{
 			Type:             "container-script",
@@ -298,16 +302,80 @@ func TestInstallSkillsIntoHome_EmptySkillsDirSkipsResolution(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Empty(t, h.SkillsDir())
+	require.Empty(t, nonShell.SkillsDir())
 
-	resolver := &shellTestSkillResolver{}
-	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	agentHome := t.TempDir()
+	t.Run("non-shell required skill fails closed", func(t *testing.T) {
+		resolver := &shellTestSkillResolver{}
+		ctx := ContextWithSkillResolver(context.Background(), resolver)
 
-	rec, err := installSkillsIntoHome(ctx, "no-skills-agent", "", h, agentHome, []api.SkillReference{
-		{URI: "gh://org/repo/skills/example", Scope: "project"},
+		rec, err := installSkillsIntoHome(ctx, "no-skills-agent", "", nonShell, t.TempDir(), []api.SkillReference{
+			{URI: "gh://org/repo/skills/example", Scope: "project"},
+		})
+		require.Error(t, err)
+		assert.Nil(t, rec)
+		assert.Equal(t, 0, resolver.calls, "skill resolver must not be called when harness has no skills_dir")
+
+		var skillErr *SkillResolutionError
+		require.True(t, errors.As(err, &skillErr), "expected *SkillResolutionError, got %T: %v", err, err)
+		assert.Equal(t, "gh://org/repo/skills/example", skillErr.URI)
+		assert.Equal(t, SkillErrCodeInstallFailed, skillErr.Code)
+		assert.Contains(t, skillErr.Message, "no skills_dir configured")
+		assert.Contains(t, skillErr.Message, "set skills_dir in the harness config or mark the skill optional")
 	})
-	require.NoError(t, err)
-	assert.Nil(t, rec)
-	assert.Equal(t, 0, resolver.calls, "skill resolver must not be called when harness has no skills_dir")
+
+	t.Run("non-shell mixed optional and required fails closed on required", func(t *testing.T) {
+		resolver := &shellTestSkillResolver{}
+		ctx := ContextWithSkillResolver(context.Background(), resolver)
+
+		rec, err := installSkillsIntoHome(ctx, "no-skills-agent", "", nonShell, t.TempDir(), []api.SkillReference{
+			{URI: "gh://org/repo/skills/opt", Optional: true, Scope: "project"},
+			{URI: "gh://org/repo/skills/req", Scope: "project"},
+		})
+		require.Error(t, err)
+		assert.Nil(t, rec)
+		assert.Equal(t, 0, resolver.calls)
+
+		var skillErr *SkillResolutionError
+		require.True(t, errors.As(err, &skillErr), "expected *SkillResolutionError, got %T: %v", err, err)
+		assert.Equal(t, "gh://org/repo/skills/req", skillErr.URI)
+		assert.Equal(t, SkillErrCodeInstallFailed, skillErr.Code)
+	})
+
+	t.Run("non-shell optional skills only skips cleanly", func(t *testing.T) {
+		resolver := &shellTestSkillResolver{}
+		ctx := ContextWithSkillResolver(context.Background(), resolver)
+
+		rec, err := installSkillsIntoHome(ctx, "no-skills-agent", "", nonShell, t.TempDir(), []api.SkillReference{
+			{URI: "gh://org/repo/skills/opt", Optional: true, Scope: "project"},
+			{URI: "scion-platform://git-operations", Optional: true, Scope: "hub"},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, rec)
+		assert.Equal(t, 0, resolver.calls, "skill resolver must not be called when harness has no skills_dir")
+	})
+
+	t.Run("non-shell no skills skips cleanly", func(t *testing.T) {
+		resolver := &shellTestSkillResolver{}
+		ctx := ContextWithSkillResolver(context.Background(), resolver)
+
+		rec, err := installSkillsIntoHome(ctx, "no-skills-agent", "", nonShell, t.TempDir(), nil)
+		require.NoError(t, err)
+		assert.Nil(t, rec)
+		assert.Equal(t, 0, resolver.calls)
+	})
+
+	t.Run("shell harness skips even required skills", func(t *testing.T) {
+		shellH := &harness.Shell{}
+		require.Empty(t, shellH.SkillsDir())
+
+		resolver := &shellTestSkillResolver{}
+		ctx := ContextWithSkillResolver(context.Background(), resolver)
+
+		rec, err := installSkillsIntoHome(ctx, "shell-agent", "", shellH, t.TempDir(), []api.SkillReference{
+			{URI: "gh://org/repo/skills/example", Scope: "project"},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, rec)
+		assert.Equal(t, 0, resolver.calls, "skill resolver must not be called for shell harness")
+	})
 }

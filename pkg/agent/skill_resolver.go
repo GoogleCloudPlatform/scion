@@ -98,9 +98,11 @@ const (
 	// failure: the ref could not be resolved for a reason none of the codes
 	// above describes. The create path keeps it on the 5xx path.
 	SkillErrCodeResolveFailed = "resolve_failed"
-	// SkillErrCodeInstallFailed is the code for a required skill that was
-	// resolved but could not be downloaded, verified or installed into the
-	// agent home. The create path keeps it on the 5xx path.
+	// SkillErrCodeInstallFailed is the code for a required skill that could
+	// not be installed into the agent home — either because it resolved but
+	// could not be downloaded, verified, or written, or because a non-shell
+	// harness has no skills_dir configured. The create path keeps it on the
+	// 5xx path.
 	SkillErrCodeInstallFailed = "install_failed"
 	// SkillErrCodeInvalidURI is the code for a skill reference that does
 	// not parse as a URI the resolver accepts.

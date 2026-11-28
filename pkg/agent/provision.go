@@ -5519,6 +5519,18 @@ func installSkillsIntoHome(ctx context.Context, agentName, projectDir string, h 
 		return nil, err
 	}
 	if skillsDir == "" {
+		// Fail closed when a non-shell harness has no skills_dir and required
+		// skills are declared (ptone/scion#9746). The reserved shell harness
+		// is an execution container, not an LLM harness, so it skips skills.
+		if _, isShell := h.(*harness.Shell); !isShell {
+			if requiredURIs := collectRequiredSkillURIs(skills); len(requiredURIs) > 0 {
+				return nil, &SkillResolutionError{
+					URI:     requiredURIs[0],
+					Code:    SkillErrCodeInstallFailed,
+					Message: "harness does not support skills (no skills_dir configured; set skills_dir in the harness config or mark the skill optional)",
+				}
+			}
+		}
 		if len(skills) > 0 {
 			slog.DebugContext(ctx, "provision: harness has no skills directory configured; skipping skill resolution",
 				"agent", agentName, "harness", h.Name(), "skipped", len(skills))
