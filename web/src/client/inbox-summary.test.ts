@@ -285,7 +285,8 @@ describe('InboxSummaryStore', () => {
   it('schedules expiry refresh from agent_executions.nextExpiresAt via generalized scheduleExpiryTimer (AC-13)', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
     const now = Date.now();
-    const execExpiresIso = new Date(now + 30_000).toISOString();
+    // Use 10s (strictly below INBOX_POLL_UNHEALTHY_MS = 30s) so the safety poll cannot mask expiry.
+    const execExpiresIso = new Date(now + 10_000).toISOString();
 
     fetchMock
       .mockResolvedValueOnce(
@@ -309,11 +310,11 @@ describe('InboxSummaryStore', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(store.total).toBe(1);
 
-    // Before 30s expiry: no refresh yet.
-    await vi.advanceTimersByTimeAsync(29_000);
+    // Before 10s expiry (+9s): no refresh yet.
+    await vi.advanceTimersByTimeAsync(9_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    // Past 30s expiry + 500ms buffer: refreshes and drops total to 0.
+    // Past 10s expiry + 500ms buffer (+11s total, well before 30s safety poll): refreshes and drops total to 0.
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(store.total).toBe(0);
