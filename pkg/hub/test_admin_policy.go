@@ -800,6 +800,9 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentPolicyTelemetryEnforcement: testAdminPolicyDeny,
 	experiments.AgentPolicyDurationBackstop:     testAdminPolicyDeny,
 	experiments.LargeUploads:                    testAdminPolicyDeny,
+	// All experiments are deny for test identities (admin tier design §3.6.1);
+	// a human admin enables hub.mcp_server for live E2E.
+	experiments.MCPServer: testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

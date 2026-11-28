@@ -82,6 +82,7 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// set at `server start` (daemon mode) is still lost to the child's defaults
 	// unless forwarded. appendDaemonBoolFlag omits them when unset.
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
+	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-mcp", enableMCP)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
 	// --test-mode (string value): forwarded verbatim when given, so the
 	// child resolves the same level and runs the same gate.
@@ -247,8 +248,8 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if at least one component is enabled
-	if !enableHub && !enableRuntimeBroker && !enableWeb {
-		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
+	if !enableHub && !enableRuntimeBroker && !enableWeb && !enableMCP {
+		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, --enable-web, or --enable-mcp")
 	}
 
 	// The convert host lock check (convert-apply design section 4.7), run

@@ -402,9 +402,9 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 
 	start := eventfeed.Start(q.Get("start"))
 	switch start {
-	case "", eventfeed.StartHead, eventfeed.StartBeginning:
+	case "", eventfeed.StartHead, eventfeed.StartBeginning, eventfeed.StartTail:
 	default:
-		BadRequest(w, fmt.Sprintf("invalid 'start' parameter %q: must be head or beginning", start))
+		BadRequest(w, fmt.Sprintf("invalid 'start' parameter %q: must be head, beginning, or tail", start))
 		return
 	}
 

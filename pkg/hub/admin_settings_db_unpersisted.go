@@ -87,6 +87,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "init_firewall"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
 	{"server", "relay"},
+	// MCP listener (ptone/scion#9662): Layer 0, read at startup.
+	{"server", "mcp"},
 	// server.keyring_file is never API-writable: rejectGateProtectedSettingsKeys
 	// refuses it before this list is consulted, so it is never routed to
 	// settings.yaml. It is listed so the request census stays complete.

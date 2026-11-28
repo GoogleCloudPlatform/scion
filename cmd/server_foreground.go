@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/mcpserver"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
@@ -84,6 +85,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/knadh/koanf/v2"
 	"github.com/spf13/cobra"
@@ -326,8 +328,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Check if at least one server is enabled
-	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb {
-		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
+	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb && !cfg.MCP.Enabled {
+		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, --enable-web, or --enable-mcp")
+	}
+	if err := validateMCPStartup(cfg, enableHub); err != nil {
+		return err
 	}
 
 	validateHostedBasic(cfg)
@@ -428,7 +433,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 8)
 
 	// Server boot hook: warn about legacy environment variables scion no
 	// longer reads, before project discovery and storage init. This is the
@@ -767,6 +772,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			// MountHubAPI); the audit writer closes after every server
 			// has drained (awaitServerExit).
 			log.Printf("Hub API will be mounted on Web server (port %d)", webPort)
+		}
+
+		// 11b. Start embedded MCP server listener if configured (server.mcp.enabled / --enable-mcp).
+		if cfg.MCP.Enabled {
+			if err := startEmbeddedMCPServer(ctx, shutdownSeq, cfg, hubSrv, &wg, errCh); err != nil {
+				return shutdownSeq.startupErr(ctx, err)
+			}
 		}
 	}
 
@@ -1637,6 +1649,9 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("enable-runtime-broker") {
 		cfg.RuntimeBroker.Enabled = enableRuntimeBroker
 	}
+	if cmd.Flags().Changed("enable-mcp") {
+		cfg.MCP.Enabled = enableMCP
+	}
 	if cmd.Flags().Changed("runtime-broker-port") {
 		cfg.RuntimeBroker.Port = runtimeBrokerPort
 	}
@@ -2072,6 +2087,110 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			return fmt.Errorf("web frontend port %d is already in use by another process", webPort)
 		}
 	}
+	if cfg.MCP.Enabled {
+		mcpHost := cfg.MCP.Host
+		if mcpHost == "" {
+			mcpHost = cfg.Hub.Host
+		}
+		if mcpHost == "" {
+			mcpHost = "0.0.0.0"
+		}
+		mcpPort := cfg.MCP.Port
+		if mcpPort == 0 {
+			mcpPort = mcpserver.DefaultPort
+		}
+		status := checkPort(mcpHost, mcpPort)
+		if status.inUse {
+			if status.isScionServer {
+				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", mcpPort)
+			}
+			return fmt.Errorf("MCP server port %d is already in use by another process", mcpPort)
+		}
+	}
+	return nil
+}
+
+// validateMCPStartup rejects standalone MCP mode in P1 (standalone mode against
+// a remote hub_endpoint is implemented in P4).
+func validateMCPStartup(cfg *config.GlobalConfig, hubEnabled bool) error {
+	if cfg == nil || !cfg.MCP.Enabled {
+		return nil
+	}
+	if !hubEnabled {
+		return fmt.Errorf("--enable-mcp (server.mcp.enabled) requires --enable-hub in this phase; standalone MCP mode is not yet implemented")
+	}
+	return nil
+}
+
+// startEmbeddedMCPServer builds and starts the embedded MCP HTTP listener
+// backed by an in-process RoundTripper into hubSrv.Handler(), registering its
+// BeginShutdown hook in shutdownPhaseMark.
+func startEmbeddedMCPServer(
+	ctx context.Context,
+	shutdownSeq *serverShutdownSequence,
+	cfg *config.GlobalConfig,
+	hubSrv *hub.Server,
+	wg *sync.WaitGroup,
+	errCh chan<- error,
+) error {
+	if cfg == nil || !cfg.MCP.Enabled {
+		return nil
+	}
+	mcpHost := cfg.MCP.Host
+	if mcpHost == "" {
+		mcpHost = cfg.Hub.Host
+	}
+	mcpPort := cfg.MCP.Port
+	if mcpPort == 0 {
+		mcpPort = mcpserver.DefaultPort
+	}
+	mcpPath := cfg.MCP.Path
+	if mcpPath == "" {
+		mcpPath = mcpserver.DefaultPath
+	}
+
+	ver := version.Short()
+	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport: &mcpserver.InProcessTransport{
+			Handler: hubSrv.Handler(),
+		},
+		Version: ver,
+		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, name string) (bool, error) {
+			return hubSrv.ExperimentEnabled(name), nil
+		},
+		DisableTransportAuth: true,
+	})
+
+	mcpSrv, err := mcpserver.New(mcpserver.Options{
+		Host:           mcpHost,
+		Port:           mcpPort,
+		Path:           mcpPath,
+		PublicURL:      cfg.MCP.PublicURL,
+		AllowedOrigins: cfg.MCP.AllowedOrigins,
+		Version:        ver,
+		Backend:        backend,
+		Logger:         slog.Default().With("component", "mcp"),
+	})
+	if err != nil {
+		return fmt.Errorf("initializing MCP server: %w", err)
+	}
+
+	shutdownSeq.addStep(shutdownPhaseMark, mcpSrv.BeginShutdown)
+
+	if cfg.MCP.PublicURL != "" {
+		log.Printf("Starting MCP server on %s:%d (path=%s, public_url=%s)", mcpHost, mcpPort, mcpPath, cfg.MCP.PublicURL)
+	} else {
+		log.Printf("Starting MCP server on %s:%d (path=%s)", mcpHost, mcpPort, mcpPath)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := mcpSrv.Start(ctx); err != nil {
+			errCh <- fmt.Errorf("mcp server error: %w", err)
+		}
+	}()
 	return nil
 }
 

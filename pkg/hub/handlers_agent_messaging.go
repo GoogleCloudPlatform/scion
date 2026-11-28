@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -2953,6 +2954,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// persistedConversationID is the conversation the persisted message
 	// landed in; the response reports it to every sender.
 	var persistedConversationID string
+	// persistedCursor is the opaque eventfeed cursor positioned at the
+	// persisted message's conversation_seq, allocated atomically on insert.
+	var persistedCursor string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
 	var artifactWarning string
@@ -3503,6 +3507,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID
+			if storeMsg.ConversationID != "" && storeMsg.ConversationSeq > 0 {
+				persistedCursor = string(eventfeed.EncodeCursor(storeMsg.ConversationID, storeMsg.ConversationSeq))
+			}
 			if delegatedSender {
 				s.recordAdmittedH2PolicyDecisions(ctx, &delegatedPolicyRes, persistedMsgID)
 			}
@@ -3819,6 +3826,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Deferred:        s.deferredReason(agent),
 			ArtifactWarning: artifactWarning,
 			ConversationID:  persistedConversationID,
+			Cursor:          persistedCursor,
 			ConversationKey: visitorConvKey,
 		})
 		return
@@ -3834,6 +3842,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
 		ConversationID:  persistedConversationID,
+		Cursor:          persistedCursor,
 		ConversationKey: visitorConvKey,
 	})
 }
@@ -3861,6 +3870,9 @@ type MessageDeliveryResponse struct {
 	// the sender can reply into it. Omitted only when the message was not
 	// recorded in a conversation.
 	ConversationID string `json:"conversation_id,omitempty"`
+	// Cursor is the opaque eventfeed cursor positioned at this message's
+	// conversation_seq, allocated atomically with persistence.
+	Cursor string `json:"cursor,omitempty"`
 	// ConversationKey is set only for a project visitor sender
 	// (ptone/scion#4603): the visitor's DM key with the agent
 	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read

@@ -269,7 +269,8 @@
     "server.hub.schedules",
     "server.hub.default_message_mode",
     "server.hub.init_firewall",
-    "server.relay"
+    "server.relay",
+    "server.mcp"
   ],
   "file_keys": [
     "active_profile",
