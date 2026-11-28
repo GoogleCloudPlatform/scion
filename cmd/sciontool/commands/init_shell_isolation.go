@@ -1,0 +1,184 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package commands
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/hubname"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"gopkg.in/yaml.v3"
+)
+
+// beforeSupervisorRunForTest, when non-nil, fires synchronously in runInit
+// immediately before sup.Run is launched so tests can inspect filesystem state
+// and supervisor.Config at the exact pre-workload boundary. Always nil in
+// production.
+var beforeSupervisorRunForTest func(cfg supervisor.Config)
+
+// shellContextSeedVersion matches config.CLIContextVersion (context.yaml v1).
+const shellContextSeedVersion = 1
+
+// shellSeedCLIContext is the minimal plain-endpoint context.yaml schema seeded
+// into a fresh shell execution container home before the workload starts.
+// Kept in sync with pkg/config.CLIContext via the schema-drift guard test in
+// pkg/config.
+type shellSeedCLIContext struct {
+	Version    int                           `yaml:"version"`
+	CurrentHub string                        `yaml:"current_hub"`
+	Hubs       map[string]*shellSeedHubEntry `yaml:"hubs"`
+}
+
+type shellSeedHubEntry struct {
+	Endpoint string `yaml:"endpoint"`
+}
+
+// shellContextSeedChown is the fd-based chown callback used when seeding
+// context.yaml. Replaced only in unit tests so ownership handoff can be
+// verified without CAP_CHOWN.
+var shellContextSeedChown = dirfd.Fchown
+
+// isShellExecContainer reports whether PID 1 is running inside a shell
+// execution container (ptone/scion#9743). It reads PID 1's broker-set
+// environment: true when SCION_HARNESS is "shell", or when SCION_HARNESS is
+// unset and SCION_HARNESS_READY declares ReadyStrategyIdle (mirroring
+// control.ExecEnabled's fallback). Evaluate once early in runInit and pass
+// explicitly.
+func isShellExecContainer(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	if strings.TrimSpace(getenv("SCION_HARNESS")) != "" {
+		return state.IsShellHarnessEnv(getenv)
+	}
+	return state.ReadySpecIsIdle(getenv)
+}
+
+// removeEnvFileNoFollow unlinks <agentHome>/.scion/scion-env through a
+// no-follow parent directory fd so a symlinked .scion directory is refused and
+// a symlink at scion-env is removed without following it. Missing .scion or
+// missing scion-env is a no-op.
+func removeEnvFileNoFollow(agentHome string) error {
+	envPath := filepath.Join(agentHome, ".scion", "scion-env")
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(envPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open .scion dir for scion-env unlink: %w", err)
+	}
+	defer func() { _ = dirfd.Close(dirFd) }()
+
+	if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("unlink %s: %w", envPath, err)
+	}
+	log.Debug("Removed stale scion-env file at %s", envPath)
+	return nil
+}
+
+// RenderShellCLIContextYAML renders the plain-endpoint context.yaml bytes for
+// rawEndpoint using hubname.NormalizeEndpoint and hubname.DeriveHubName.
+func RenderShellCLIContextYAML(rawEndpoint string) ([]byte, error) {
+	endpoint := hubname.NormalizeEndpoint(rawEndpoint)
+	if endpoint == "" {
+		return nil, errors.New("empty hub endpoint")
+	}
+	nick := hubname.DeriveHubName(endpoint)
+	doc := shellSeedCLIContext{
+		Version:    shellContextSeedVersion,
+		CurrentHub: nick,
+		Hubs: map[string]*shellSeedHubEntry{
+			nick: {Endpoint: endpoint},
+		},
+	}
+	data, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal context.yaml seed: %w", err)
+	}
+	return data, nil
+}
+
+// seedShellCLIContext writes <agentHome>/.scion/context.yaml with the
+// container's hub endpoint (SCION_HUB_ENDPOINT, falling back to SCION_HUB_URL)
+// if and only if the file does not already exist. Writes use dirfd no-follow +
+// O_EXCL with mode 0600 and owner uid:gid so a pre-existing file (on a
+// persistent home) or planted symlink is never overwritten or followed.
+func seedShellCLIContext(agentHome string, uid, gid int, getenv func(string) string) error {
+	if getenv == nil {
+		return nil
+	}
+	rawEndpoint := strings.TrimSpace(getenv("SCION_HUB_ENDPOINT"))
+	if rawEndpoint == "" {
+		rawEndpoint = strings.TrimSpace(getenv("SCION_HUB_URL"))
+	}
+	if rawEndpoint == "" {
+		log.Debug("Skipping CLI context seed: no SCION_HUB_ENDPOINT or SCION_HUB_URL")
+		return nil
+	}
+
+	data, err := RenderShellCLIContextYAML(rawEndpoint)
+	if err != nil {
+		return err
+	}
+
+	scionDir := filepath.Join(agentHome, ".scion")
+	scionDirFile, err := dirfd.EnsureDirNoFollow(scionDir, 0o755)
+	if err != nil {
+		return fmt.Errorf("ensure .scion dir for context.yaml seed: %w", err)
+	}
+	defer func() { _ = scionDirFile.Close() }()
+
+	if uid > 0 {
+		st, serr := scionDirOwnerUID(int(scionDirFile.Fd()))
+		if serr != nil {
+			log.Error("Failed to stat %s: %v", scionDir, serr)
+		} else if st == 0 {
+			if cerr := scionDirFile.Chown(uid, gid); cerr != nil {
+				log.Error("Failed to chown %s: %v", scionDir, cerr)
+			}
+		}
+	}
+
+	contextPath := filepath.Join(scionDir, "context.yaml")
+	if err := dirfd.WriteAtNoFollowWithChown(
+		int(scionDirFile.Fd()),
+		"context.yaml",
+		contextPath,
+		data,
+		0o600,
+		uid,
+		gid,
+		dirfd.CreateExclusive,
+		shellContextSeedChown,
+	); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			log.Debug("CLI context already exists at %s; leaving untouched", contextPath)
+			return nil
+		}
+		return fmt.Errorf("seed %s: %w", contextPath, err)
+	}
+	log.Debug("Seeded CLI context at %s", contextPath)
+	return nil
+}
