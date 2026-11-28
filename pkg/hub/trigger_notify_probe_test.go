@@ -354,3 +354,93 @@ func TestTriggerNotify_AuthoringParityAcrossPrincipals(t *testing.T) {
 		}
 	}
 }
+
+// L1 (ptone/scion#9804): hub-authored agent-sink failure notifications must
+// skip trigger template rendering and deliver trigger names containing "${"
+// verbatim (never refused as invalid template syntax and never expanding hub
+// metadata or event attributes). The user-notice sink is also verbatim.
+func TestTriggerNotify_AgentSinkVerbatimTemplateChars(t *testing.T) {
+	cases := []struct {
+		label string
+		name  string
+	}{
+		{label: "unclosed-placeholder", name: "deploy ${oops"},
+		{label: "trusted-placeholder", name: "${project.name}"},
+		{label: "untrusted-placeholder", name: "${event.attributes.x}"},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			f := setupTriggersTestFixture(t)
+			ctx := context.Background()
+			fixedNow := time.Date(2026, 11, 28, 10, 0, 0, 0, time.UTC)
+			f.srv.setFireNotifyClockForTest(func() time.Time { return fixedNow })
+
+			disp := &notifyTestDispatcher{}
+			f.srv.SetDispatcher(disp)
+
+			epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+				Name: fmt.Sprintf("verbatim-ep-%d", i), SignatureMode: store.WebhookSignatureModeScionV1,
+			})
+			require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+			var ep WebhookEndpointCreatedResponse
+			require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+			trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+				Name:   tc.name,
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+				Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "hi"},
+				Notify: &TriggerNotifySpec{
+					UserNotice: boolPtr(true),
+					AgentID:    f.agentA.ID,
+				},
+			})
+			require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+			var trResp TriggerResponse
+			require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &trResp))
+			tr, err := f.store.GetTrigger(ctx, trResp.ID)
+			require.NoError(t, err)
+
+			proj, err := f.store.GetProject(ctx, f.projectID)
+			require.NoError(t, err)
+
+			f.srv.notifyTriggerFire(ctx, tr, p7aFire(f, tr), hubfire.FireOutcome{
+				Status: hubfire.FireStatusFailed,
+				Error:  "message failed",
+			})
+
+			wantQuoted := fmt.Sprintf("%q", tc.name)
+
+			// Agent sink: delivered verbatim, never refused, never expanded.
+			calls := disp.getCalls()
+			require.Len(t, calls, 1, "agent-sink notify for trigger %q must be delivered", tc.name)
+			assert.Equal(t, f.agentA.ID, calls[0].Agent.ID)
+			assert.Contains(t, calls[0].Message, wantQuoted, "agent-sink message must contain trigger name verbatim")
+			if tc.name == "${project.name}" && proj.Name != "" {
+				assert.NotContains(t, calls[0].Message, proj.Name, "agent-sink message must not expand ${project.name}")
+			}
+
+			fires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+				ProjectID: f.projectID,
+				TriggerID: tr.ID,
+			}, store.ListOptions{Limit: 20})
+			require.NoError(t, err)
+			var agentNotifyRow *store.TriggerFire
+			for j := range fires.Items {
+				if fires.Items[j].ActionType == store.TriggerActionNotify && fires.Items[j].ActionIndex == store.TriggerFireActionIndexNotify {
+					agentNotifyRow = &fires.Items[j]
+					break
+				}
+			}
+			require.NotNil(t, agentNotifyRow, "expected agent-sink notify row in trigger_fires")
+			assert.Equal(t, store.TriggerFireStatusFired, agentNotifyRow.Status, "notify row must be fired, not refused")
+			assert.Empty(t, agentNotifyRow.Error)
+
+			// User-notice sink: unaffected and verbatim.
+			notifs, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.owner.ID, false)
+			require.NoError(t, err)
+			require.Len(t, notifs, 1, "user-notice sink must emit 1 notice")
+			assert.Contains(t, notifs[0].Message, wantQuoted, "user notice must contain trigger name verbatim")
+		})
+	}
+}
