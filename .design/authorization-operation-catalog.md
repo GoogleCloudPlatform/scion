@@ -240,8 +240,8 @@
 - [chat.star.conversations](#chatstarconversations) — List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read
 - [chat.conversation.history.starred](#chatconversationhistorystarred) — Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred
 - [chat.star.remove](#chatstarremove) — Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary
-- [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)
-- [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
+- [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space (single-request multipart or resumable chunked session behind hub.large_uploads). Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)
+- [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments (single-request multipart or resumable chunked session behind hub.large_uploads), reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
 - [chat.attachment.upload.agent](#chatattachmentuploadagent) — Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
 - [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
@@ -9243,13 +9243,18 @@
 
 **Domain:** chat
 
-**Description:** Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)
+**Description:** Upload chat attachments to a space (single-request multipart or resumable chunked session behind hub.large_uploads). Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/chat/attachments` |
+| http_route | POST | `/api/v1/chat/attachments/uploads` |
+| http_route | PUT | `/api/v1/chat/attachments/uploads/{sid}` |
+| http_route | GET | `/api/v1/chat/attachments/uploads/{sid}` |
+| http_route | POST | `/api/v1/chat/attachments/uploads/{sid}/complete` |
+| http_route | DELETE | `/api/v1/chat/attachments/uploads/{sid}` |
 
 **Principals:** `user`
 
@@ -9268,6 +9273,7 @@
 ### Tests
 
 - `pkg/hub:TestChatProjectUpload_RequiresInboxWriteAndProjectRead`
+- `pkg/hub:TestChatUploads_OwnerScopeBindingAndAuthz`
 
 ---
 
@@ -9275,13 +9281,18 @@
 
 **Domain:** chat
 
-**Description:** Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
+**Description:** Upload project-less chat attachments (single-request multipart or resumable chunked session behind hub.large_uploads), reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/chat/attachments` |
+| http_route | POST | `/api/v1/chat/attachments/uploads` |
+| http_route | PUT | `/api/v1/chat/attachments/uploads/{sid}` |
+| http_route | GET | `/api/v1/chat/attachments/uploads/{sid}` |
+| http_route | POST | `/api/v1/chat/attachments/uploads/{sid}/complete` |
+| http_route | DELETE | `/api/v1/chat/attachments/uploads/{sid}` |
 
 **Principals:** `user`
 
@@ -9301,6 +9312,7 @@
 
 - `pkg/hub:TestChatProjectlessUpload_RequiresHubBoundary`
 - `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
+- `pkg/hub:TestChatUploads_OwnerScopeBindingAndAuthz`
 
 ---
 

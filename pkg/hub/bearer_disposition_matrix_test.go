@@ -391,9 +391,49 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
 		Pin:    "TestChatProjectUpload_RequiresInboxWriteAndProjectRead",
 	},
+	{OperationID: "chat.attachment.upload.project", Method: "POST", Pattern: "/api/v1/chat/attachments/uploads"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.project", Method: "PUT", Pattern: "/api/v1/chat/attachments/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.project", Method: "GET", Pattern: "/api/v1/chat/attachments/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.project", Method: "POST", Pattern: "/api/v1/chat/attachments/uploads/{sid}/complete"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.project", Method: "DELETE", Pattern: "/api/v1/chat/attachments/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
 	{OperationID: "chat.attachment.upload.noproject", Method: "POST", Pattern: "/api/v1/chat/attachments"}: {
 		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
 		Pin:    "TestChatProjectlessUpload_RequiresHubBoundary",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "POST", Pattern: "/api/v1/chat/attachments/uploads"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project-less authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "PUT", Pattern: "/api/v1/chat/attachments/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project-less authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "GET", Pattern: "/api/v1/chat/attachments/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project-less authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "POST", Pattern: "/api/v1/chat/attachments/uploads/{sid}/complete"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project-less authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "DELETE", Pattern: "/api/v1/chat/attachments/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding, project-less authz, and agent refusal",
+		Pin:    "TestChatUploads_OwnerScopeBindingAndAuthz",
 	},
 	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}: {
 		Reason: "the matrix server configures no attachment store, so every caller gets 503 before the attachment is looked up",

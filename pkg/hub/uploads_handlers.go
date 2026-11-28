@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -32,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -58,9 +60,12 @@ const (
 	errCodeUploadBusy              = "upload_busy"
 	errCodeUploadChunkTooLarge     = "chunk_too_large"
 	errCodeUploadDeclaredExceeded  = "declared_size_exceeded"
-	errCodeUploadIncomplete        = "upload_incomplete"
-	errCodeUploadInvalidState      = "upload_invalid_state"
-	errCodeUploadIntegrityMismatch = "integrity_mismatch"
+	errCodeUploadIncomplete               = "upload_incomplete"
+	errCodeUploadInvalidState             = "upload_invalid_state"
+	errCodeUploadIntegrityMismatch        = "integrity_mismatch"
+	errCodeUploadDisallowedMediaType      = "disallowed_media_type"
+	errCodeArtifactAttachmentsRequired    = "artifact_attachments_required"
+	errCodeLargeUploadsUnsupportedStorage = "large_uploads_unsupported_storage"
 )
 
 // UploadStartRequest is the JSON body for POST …/uploads (§3.3).
@@ -70,6 +75,9 @@ type UploadStartRequest struct {
 	MediaType string `json:"mediaType"`
 	Path      string `json:"path,omitempty"`
 	Overwrite bool   `json:"overwrite,omitempty"`
+	// ProjectID optionally scopes a chat_attachment upload to a project space
+	// (matching POST /api/v1/chat/attachments's project_id form field).
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // UploadStartResponse is the 201 JSON response for POST …/uploads (§3.3).
@@ -122,6 +130,15 @@ func (s *Server) uploadHubID() string {
 		return id
 	}
 	return "local"
+}
+
+func (s *Server) uploadMaxFileBytes(ctx context.Context, kind store.UploadTargetKind) int64 {
+	switch kind {
+	case store.UploadTargetChatAttachment:
+		return s.attachmentMaxBytes(ctx, true)
+	default:
+		return s.WorkspaceUploadMaxFileBytes(ctx)
+	}
 }
 
 func effectiveUploadExpiry(idle, hard time.Time) time.Time {
@@ -633,16 +650,45 @@ func (s *Server) handleUploadChunk(
 		}
 	}
 
-	var headBuf []byte
-	bodyReader := io.LimitReader(r.Body, n+1)
-	tee := io.TeeReader(bodyReader, h)
-	if offset == 0 {
+	var (
+		headBuf    []byte
+		bodyReader io.Reader = io.LimitReader(r.Body, n+1)
+		tee        io.Reader
+	)
+	if offset == 0 && scope.kind == store.UploadTargetChatAttachment {
+		// Classify the first <=512 bytes before staging anything (§3.5).
 		capLen := n
 		if capLen > uploadHeadCaptureBytes {
 			capLen = uploadHeadCaptureBytes
 		}
-		headBuf = make([]byte, 0, capLen)
-		tee = io.TeeReader(tee, &headCaptureWriter{buf: &headBuf, limit: int(capLen)})
+		headBuf = make([]byte, capLen)
+		if _, rerr := io.ReadFull(bodyReader, headBuf); rerr != nil {
+			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
+			if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
+				BadRequest(w, "Chunk body shorter than Content-Length")
+				return
+			}
+			slog.WarnContext(ctx, "upload chunk head read failed", "session_id", sid, "error", rerr)
+			InternalError(w)
+			return
+		}
+		if _, cerr := ClassifyAttachment(claimed.FileName, headBuf); cerr != nil {
+			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
+			writeError(w, http.StatusBadRequest, errCodeUploadDisallowedMediaType, cerr.Error(), nil)
+			return
+		}
+		_, _ = h.Write(headBuf)
+		tee = io.MultiReader(bytes.NewReader(headBuf), io.TeeReader(bodyReader, h))
+	} else {
+		tee = io.TeeReader(bodyReader, h)
+		if offset == 0 {
+			capLen := n
+			if capLen > uploadHeadCaptureBytes {
+				capLen = uploadHeadCaptureBytes
+			}
+			headBuf = make([]byte, 0, capLen)
+			tee = io.TeeReader(tee, &headCaptureWriter{buf: &headBuf, limit: int(capLen)})
+		}
 	}
 
 	partRef, writeErr := sink.WriteChunk(chunkCtx, claimed, offset, token, tee, n)
@@ -765,7 +811,7 @@ func (s *Server) handleUploadComplete(
 	}
 
 	// Re-check effective per-file limit at complete (§3.4).
-	maxBytes := s.WorkspaceUploadMaxFileBytes(ctx)
+	maxBytes := s.uploadMaxFileBytes(ctx, scope.kind)
 	if sess.DeclaredSize > maxBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, errCodeUploadDeclaredExceeded,
 			fmt.Sprintf("File size %d exceeds maximum allowed size of %d bytes", sess.DeclaredSize, maxBytes),
@@ -849,6 +895,24 @@ func (s *Server) handleUploadComplete(
 			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
 			_ = sink.Cleanup(context.Background(), claimed)
 			writeWorkspaceFileError(w, "upload", claimed.DestPath, finErr)
+		case errors.Is(finErr, errUploadDisallowedMediaType):
+			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(context.Background(), claimed)
+			writeError(w, http.StatusBadRequest, errCodeUploadDisallowedMediaType, finErr.Error(), nil)
+		case errors.Is(finErr, artifacts.ErrAttachmentTooLarge):
+			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(context.Background(), claimed)
+			writeError(w, http.StatusRequestEntityTooLarge, errCodeUploadDeclaredExceeded,
+				fmt.Sprintf("File size %d exceeds maximum allowed size of %d bytes", claimed.DeclaredSize, maxBytes),
+				map[string]interface{}{"maxBytes": maxBytes})
+		case errors.Is(finErr, artifacts.ErrAttachmentName):
+			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(context.Background(), claimed)
+			BadRequest(w, "Invalid attachment filename")
+		case errors.Is(finErr, artifacts.ErrComposerUnsupported):
+			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
+			writeError(w, http.StatusNotImplemented, errCodeLargeUploadsUnsupportedStorage,
+				"Configured blob storage does not support compose required for large chat attachments", nil)
 		default:
 			// Transient error: release the finalize lease so a retry can re-claim.
 			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)

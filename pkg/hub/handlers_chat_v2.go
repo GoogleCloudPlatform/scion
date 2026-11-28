@@ -6668,11 +6668,20 @@ func (s *Server) handleChatAttachments(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleChatAttachmentByID dispatches /api/v1/chat/attachments/{id}.
+// handleChatAttachmentByID dispatches /api/v1/chat/attachments/{id} and
+// /api/v1/chat/attachments/uploads/... (ptone/scion#8654 §3.3).
 func (s *Server) handleChatAttachmentByID(w http.ResponseWriter, r *http.Request) {
-	// Extract attachment ID from path: /api/v1/chat/attachments/{id}
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/attachments/")
-	id := strings.TrimRight(path, "/")
+	// Extract attachment ID or literal "uploads" sub-resource from path:
+	// /api/v1/chat/attachments/{id} or /api/v1/chat/attachments/uploads[/...]
+	rawPath := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/attachments/")
+	trimmed := strings.TrimRight(rawPath, "/")
+	if trimmed == "uploads" || strings.HasPrefix(rawPath, "uploads/") {
+		subPath := strings.TrimPrefix(trimmed, "uploads")
+		subPath = strings.TrimPrefix(subPath, "/")
+		s.handleChatAttachmentUploads(w, r, subPath)
+		return
+	}
+	id := trimmed
 	if id == "" {
 		NotFound(w, "Attachment")
 		return

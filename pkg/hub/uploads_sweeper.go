@@ -178,8 +178,14 @@ func (s *Server) cleanupUploadSessionStaging(ctx context.Context, sess *store.Up
 		defer func() { _ = root.Close() }()
 		return newFileUploadSink(root).Cleanup(ctx, sess)
 
+	case store.UploadTargetChatAttachment:
+		blobs := s.artifactBackend().Blobs
+		if blobs == nil {
+			return nil
+		}
+		return newObjectUploadSink(blobs, nil).Cleanup(ctx, sess)
+
 	default:
-		// Phase 2 (UploadTargetChatAttachment / ObjectSink) plugs in here.
 		return nil
 	}
 }
