@@ -30,7 +30,7 @@ import (
 // project gate in a fresh HOME outside any project, without --global.
 func TestHubAndBrokerCommandsRunOutsideProject(t *testing.T) {
 	cmds := []*cobra.Command{
-		hubAuthLoginCmd, hubAuthLogoutCmd,
+		loginCmd, hubAuthLoginCmd, hubAuthLogoutCmd,
 		hubStatusCmd, hubEnableCmd, hubDisableCmd,
 		brokerRegisterCmd, brokerDeregisterCmd, brokerStartCmd, brokerStopCmd,
 		brokerRestartCmd, brokerStatusCmd, brokerHubsCmd, brokerJoinCmd,

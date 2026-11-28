@@ -121,6 +121,9 @@ commands to use (for example: gh auth login, gcloud auth login).
 Security: Keep credentials in $HOME — never in /workspace (which may
 be shared with other agents).
 
+Log in to Scion (lets approved commands use the scion CLI as you):
+  scion login
+
 Register as your default execution container:
   scion exec-container set %s
 

@@ -199,6 +199,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `hub notifications` | Y | - |
 | `init` | Y | - |
 | `list` | Y | Y (also with a target-hub profile, as for `create`) |
+| `login` | Y | - |
 | `logs` | Y | Y (also with a target-hub profile, as for `create`) |
 | `look` | Y | Y (also with a target-hub profile, as for `create`) |
 | `message` | Y | Y (not with a target-hub profile) |

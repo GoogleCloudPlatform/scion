@@ -66,6 +66,9 @@ func warnRemovedMode(source string) {
 // Deliberately absent: "label". Human-mode only (ptone/scion#9521): agent
 // identities are refused label edits on the Hub, and only human callers with
 // agent.update may curate agent labels.
+//
+// Deliberately absent: "login". Human-mode only (ptone/scion#9744): top-level
+// alias for 'scion hub auth login', which performs interactive user OAuth.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,

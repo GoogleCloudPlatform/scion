@@ -137,7 +137,7 @@ func runScion(t *testing.T, args ...string) (string, string, error) {
 			_ = f.Value.Set(f.DefValue)
 		}
 	}
-	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd, projectListCmd} {
+	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd, loginCmd, projectListCmd} {
 		c.Flags().VisitAll(func(f *pflag.Flag) {
 			f.Changed = false
 			_ = f.Value.Set(f.DefValue)
