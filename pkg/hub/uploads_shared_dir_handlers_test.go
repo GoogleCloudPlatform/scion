@@ -530,17 +530,18 @@ func TestSharedDirUploads_WriteGateRevocationStopsNextChunk(t *testing.T) {
 type sdProviderFaultStore struct {
 	store.Store
 	fault *storeFaultSwitch
+	fail  atomic.Bool
 }
 
 func (w *sdProviderFaultStore) GetProjectProviders(ctx context.Context, projectID string) ([]store.ProjectProvider, error) {
-	if w.fault.Active() {
+	if w.fault.Active() && w.fail.Load() {
 		return nil, errors.New("injected transient GetProjectProviders error")
 	}
 	return w.Store.GetProjectProviders(ctx, projectID)
 }
 
 func TestSharedDirUploads_SweeperRetriesOnGetProjectProvidersFault(t *testing.T) {
-	srv, st, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *sdProviderFaultStore {
+	srv, st, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *sdProviderFaultStore {
 		return &sdProviderFaultStore{Store: inner, fault: f}
 	})
 	ctx := context.Background()
@@ -577,6 +578,7 @@ func TestSharedDirUploads_SweeperRetriesOnGetProjectProvidersFault(t *testing.T)
 
 	// With a transient GetProjectProviders fault, sweeping past the 15m terminal
 	// retention window must keep the row (backing it off) rather than deleting it.
+	wrapped.fail.Store(true)
 	fault.Arm()
 	srv.sweepUploadSessions(ctx, now.Add(20*time.Minute))
 
@@ -587,7 +589,7 @@ func TestSharedDirUploads_SweeperRetriesOnGetProjectProvidersFault(t *testing.T)
 	// Once the fault clears, resolveSharedDirPath returns
 	// errSharedDirRequiresColocatedBroker (nothing to clean on this hub), so the
 	// next sweep past retention deletes the terminal row.
-	fault.Disarm()
+	wrapped.fail.Store(false)
 	srv.sweepUploadSessions(ctx, now.Add(40*time.Minute))
 
 	_, err = st.GetUploadSession(ctx, sess.ID)
