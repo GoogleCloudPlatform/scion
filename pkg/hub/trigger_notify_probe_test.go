@@ -208,6 +208,7 @@ func TestTriggerNotify_NoWakeSuppressesIdleAutoWake(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
 	setIdleSuspendExperiment(t, f.srv, true)
+	enableTriggersExperimentForTest(t, f.srv, true)
 	t.Cleanup(f.srv.waitAutoWakeIdle)
 
 	idleAgent := &store.Agent{
