@@ -53,12 +53,15 @@ var (
 const (
 	uploadTransportHubChunked = "hub_chunked"
 	uploadHeadCaptureBytes    = 512
+	uploadMinChunkBytes       = 1 << 20 // 1 MiB floor for non-final chunks
 
 	// Upload-specific API error codes (§3.3, §3.5, §3.6, §3.8).
 	errCodeUploadQuotaExceeded            = "upload_quota_exceeded"
 	errCodeUploadOffsetMismatch           = "offset_mismatch"
 	errCodeUploadBusy                     = "upload_busy"
 	errCodeUploadChunkTooLarge            = "chunk_too_large"
+	errCodeUploadChunkTooSmall            = "chunk_too_small"
+	errCodeUploadTooManyParts             = "too_many_parts"
 	errCodeUploadDeclaredExceeded         = "declared_size_exceeded"
 	errCodeUploadIncomplete               = "upload_incomplete"
 	errCodeUploadInvalidState             = "upload_invalid_state"
@@ -67,6 +70,24 @@ const (
 	errCodeArtifactAttachmentsRequired    = "artifact_attachments_required"
 	errCodeLargeUploadsUnsupportedStorage = "large_uploads_unsupported_storage"
 )
+
+// uploadMinChunk returns the minimum allowed non-final chunk size:
+// min(1 MiB, chunkBytes).
+func uploadMinChunk(chunkBytes int64) int64 {
+	if chunkBytes > 0 && chunkBytes < uploadMinChunkBytes {
+		return chunkBytes
+	}
+	return uploadMinChunkBytes
+}
+
+// uploadMaxParts returns the defensive upper bound on ObjectSink part count:
+// ceil(declaredSize/minChunk) + 1. Commits reaching this count are refused.
+func uploadMaxParts(declaredSize, minChunk int64) int {
+	if declaredSize <= 0 || minChunk <= 0 {
+		return 1
+	}
+	return int((declaredSize+minChunk-1)/minChunk) + 1
+}
 
 // UploadStartRequest is the JSON body for POST …/uploads (§3.3).
 type UploadStartRequest struct {
@@ -597,6 +618,17 @@ func (s *Server) handleUploadChunk(
 			map[string]interface{}{"declaredSize": sess.DeclaredSize})
 		return
 	}
+	// Enforce a minimum non-final chunk size on all upload targets so offset-0
+	// always carries min(512, declared_size) head bytes and bounds ObjectSink
+	// part counts (ptone decision p2-min-chunk-floor (2026-11-28), supersedes
+	// design §3.2 'server does not police chunk sizes').
+	minChunk := uploadMinChunk(cfg.ChunkBytes)
+	if offset+n < sess.DeclaredSize && n < minChunk {
+		writeError(w, http.StatusBadRequest, errCodeUploadChunkTooSmall,
+			fmt.Sprintf("Non-final chunk size %d is below minimum %d bytes", n, minChunk),
+			map[string]interface{}{"minChunkBytes": minChunk})
+		return
+	}
 
 	token, err := newUploadRandomHex(16)
 	if err != nil {
@@ -739,6 +771,16 @@ func (s *Server) handleUploadChunk(
 		parts := make([]string, len(claimed.Parts)+1)
 		copy(parts, claimed.Parts)
 		parts[len(claimed.Parts)] = partRef
+		maxParts := uploadMaxParts(claimed.DeclaredSize, minChunk)
+		if len(parts) >= maxParts {
+			relCtx, relCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.store.ReleaseUploadLease(relCtx, sid, token)
+			relCancel()
+			writeError(w, http.StatusBadRequest, errCodeUploadTooManyParts,
+				fmt.Sprintf("Upload part count %d reaches defensive limit %d for declared size %d", len(parts), maxParts, claimed.DeclaredSize),
+				map[string]interface{}{"maxParts": maxParts - 1})
+			return
+		}
 		commit.Parts = parts
 	}
 

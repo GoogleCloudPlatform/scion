@@ -189,7 +189,7 @@ func TestChatUploads_HappyPathSHA256AndPreAllocatedID(t *testing.T) {
 	env := newChatUploadEnv(t, true, true)
 	ctx := context.Background()
 
-	payload := bytes.Repeat([]byte("hello chat large attachment!\n"), 150) // 4350 bytes
+	payload := bytes.Repeat([]byte("hello chat large attachment!\n   "), (uploadMinChunkBytes/32)+64) // 1 MiB + 2 KiB
 	wantSum := sha256.Sum256(payload)
 	wantHex := hex.EncodeToString(wantSum[:])
 
@@ -214,13 +214,13 @@ func TestChatUploads_HappyPathSHA256AndPreAllocatedID(t *testing.T) {
 	preAllocID := sess.ArtifactID
 	stagingPrefix := sess.StagingRef
 
-	// 2. Chunk 0 (2000 bytes)
+	// 2. Chunk 0 (1 MiB non-final chunk)
 	chunkURL := "/api/v1/chat/attachments/uploads/" + started.ID
-	c0 := chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=0", payload[:2000])
+	c0 := chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=0", payload[:uploadMinChunkBytes])
 	require.Equal(t, http.StatusOK, c0.Code, "body: %s", c0.Body.String())
 	var c0Resp UploadChunkResponse
 	require.NoError(t, json.Unmarshal(c0.Body.Bytes(), &c0Resp))
-	assert.Equal(t, int64(2000), c0Resp.Received)
+	assert.Equal(t, int64(uploadMinChunkBytes), c0Resp.Received)
 
 	// GET status does not extend expiry.
 	afterC0, err := env.st.GetUploadSession(ctx, started.ID)
@@ -230,13 +230,13 @@ func TestChatUploads_HappyPathSHA256AndPreAllocatedID(t *testing.T) {
 	var stResp UploadStatusResponse
 	require.NoError(t, json.Unmarshal(stRec.Body.Bytes(), &stResp))
 	assert.Equal(t, store.UploadStateUploading, stResp.State)
-	assert.Equal(t, int64(2000), stResp.Received)
+	assert.Equal(t, int64(uploadMinChunkBytes), stResp.Received)
 	afterGet, err := env.st.GetUploadSession(ctx, started.ID)
 	require.NoError(t, err)
 	assert.True(t, afterC0.IdleExpiresAt.Equal(afterGet.IdleExpiresAt), "GET status must not extend idle_expires_at")
 
-	// 3. Chunk 1 (remaining bytes)
-	c1 := chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=2000", payload[2000:])
+	// 3. Chunk 1 (remaining 2 KiB final short chunk)
+	c1 := chatUploadChunkReq(t, env.srv, env.token, fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), payload[uploadMinChunkBytes:])
 	require.Equal(t, http.StatusOK, c1.Code, "body: %s", c1.Body.String())
 
 	// 4. Complete
@@ -457,17 +457,18 @@ func TestChatUploads_OwnerScopeBindingAndAuthz(t *testing.T) {
 
 	// (i) Project-A boundary token with inbox:write + project:read starts a projA session (201)
 	// and can PUT chunks on it (200).
+	minChunk := bytes.Repeat([]byte("a"), uploadMinChunkBytes)
 	startProjA := chatUploadJSONReq(t, env.srv, tokProjA, http.MethodPost, "/api/v1/chat/attachments/uploads",
-		UploadStartRequest{Name: "a.txt", Size: 10, ProjectID: projA.ID})
+		UploadStartRequest{Name: "a.txt", Size: uploadMinChunkBytes + 5, ProjectID: projA.ID})
 	require.Equal(t, http.StatusCreated, startProjA.Code, "case (i) start projA: %s", startProjA.Body.String())
 	var sessA UploadStartResponse
 	require.NoError(t, json.Unmarshal(startProjA.Body.Bytes(), &sessA))
-	putProjA := chatUploadChunkReq(t, env.srv, tokProjA, "/api/v1/chat/attachments/uploads/"+sessA.ID+"?offset=0", []byte("01234"))
+	putProjA := chatUploadChunkReq(t, env.srv, tokProjA, "/api/v1/chat/attachments/uploads/"+sessA.ID+"?offset=0", minChunk)
 	assert.Equal(t, http.StatusOK, putProjA.Code, "case (i) PUT projA: %s", putProjA.Body.String())
 
 	// Start a projB session with tokProjB so case (ii) can exercise PUT on an existing projB session.
 	startProjB := chatUploadJSONReq(t, env.srv, tokProjB, http.MethodPost, "/api/v1/chat/attachments/uploads",
-		UploadStartRequest{Name: "b.txt", Size: 10, ProjectID: projB.ID})
+		UploadStartRequest{Name: "b.txt", Size: 5, ProjectID: projB.ID})
 	require.Equal(t, http.StatusCreated, startProjB.Code, "setup projB: %s", startProjB.Body.String())
 	var sessB UploadStartResponse
 	require.NoError(t, json.Unmarshal(startProjB.Body.Bytes(), &sessB))
@@ -489,7 +490,7 @@ func TestChatUploads_OwnerScopeBindingAndAuthz(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokNoInboxWrite, http.MethodPost, "/api/v1/chat/attachments/uploads",
 		UploadStartRequest{Name: "no-scope.txt", Size: 5, ProjectID: projA.ID}).Code, "case (iii) start without inbox:write")
 	assert.Equal(t, http.StatusForbidden, chatUploadChunkReq(t, env.srv, tokNoInboxWrite,
-		"/api/v1/chat/attachments/uploads/"+sessA.ID+"?offset=5", []byte("56789")).Code, "case (iii) PUT without inbox:write")
+		fmt.Sprintf("/api/v1/chat/attachments/uploads/%s?offset=%d", sessA.ID, uploadMinChunkBytes), []byte("56789")).Code, "case (iii) PUT without inbox:write")
 
 	// (iv) Project-boundary token gets 403 on project-less start and on PUT of an existing
 	// project-less session; hub-boundary token with inbox:write gets 201 on start and 200 on PUT.
@@ -536,22 +537,23 @@ func TestChatUploads_ProjectMembershipRevocationStopsNextChunk(t *testing.T) {
 	require.NoError(t, err)
 	bindingID := binding.ID
 
-	// Member starts a project-scoped upload and uploads chunk 0.
+	// Member starts a project-scoped upload and uploads chunk 0 (>= 1 MiB).
+	chunk0 := bytes.Repeat([]byte("m"), uploadMinChunkBytes)
 	startRec := chatUploadJSONReq(t, env.srv, memberToken, http.MethodPost, "/api/v1/chat/attachments/uploads",
-		UploadStartRequest{Name: "revoked.txt", Size: 10, ProjectID: project.ID})
+		UploadStartRequest{Name: "revoked.txt", Size: uploadMinChunkBytes + 5, ProjectID: project.ID})
 	require.Equal(t, http.StatusCreated, startRec.Code, "body: %s", startRec.Body.String())
 	var started UploadStartResponse
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 
 	chunkURL := "/api/v1/chat/attachments/uploads/" + started.ID
-	c0 := chatUploadChunkReq(t, env.srv, memberToken, chunkURL+"?offset=0", []byte("01234"))
+	c0 := chatUploadChunkReq(t, env.srv, memberToken, chunkURL+"?offset=0", chunk0)
 	require.Equal(t, http.StatusOK, c0.Code, "body: %s", c0.Body.String())
 
 	// Revoke project membership mid-upload (§3.8).
 	require.NoError(t, env.st.DeleteRoleBinding(ctx, bindingID))
 
 	// Next chunk PUT and complete are refused with 403.
-	c1 := chatUploadChunkReq(t, env.srv, memberToken, chunkURL+"?offset=5", []byte("56789"))
+	c1 := chatUploadChunkReq(t, env.srv, memberToken, fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), []byte("56789"))
 	assert.Equal(t, http.StatusForbidden, c1.Code, "revoked member's next PUT must be refused; body: %s", c1.Body.String())
 	comp := chatUploadJSONReq(t, env.srv, memberToken, http.MethodPost, chunkURL+"/complete", nil)
 	assert.Equal(t, http.StatusForbidden, comp.Code, "revoked member's complete must be refused; body: %s", comp.Body.String())
@@ -561,7 +563,7 @@ func TestChatUploads_StaleWriterPartNeverReplacesCommittedPart(t *testing.T) {
 	env := newChatUploadEnv(t, true, true)
 	ctx := context.Background()
 
-	part0 := []byte("chunk-zero-")
+	part0 := bytes.Repeat([]byte("chunk-zero-00000"), uploadMinChunkBytes/16) // 1 MiB
 	goodPart1 := []byte("winning-part-1!")
 	stalePart1 := []byte("STALE-OVERWRITE")
 	require.Equal(t, len(goodPart1), len(stalePart1))
@@ -626,23 +628,24 @@ func TestChatUploads_WritersAbortOffsetMismatchAndSweeper(t *testing.T) {
 
 	// 1. Offset mismatch + premature complete do not extend idle_expires_at,
 	// and DELETE abort removes staging idempotently.
+	minChunk := bytes.Repeat([]byte("0"), uploadMinChunkBytes)
 	startRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
-		UploadStartRequest{Name: "abort.txt", Size: 20})
+		UploadStartRequest{Name: "abort.txt", Size: uploadMinChunkBytes + 10})
 	require.Equal(t, http.StatusCreated, startRec.Code)
 	var started UploadStartResponse
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	chunkURL := "/api/v1/chat/attachments/uploads/" + started.ID
 
-	require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=0", []byte("0123456789")).Code)
+	require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=0", minChunk).Code)
 	afterChunk, err := env.st.GetUploadSession(ctx, started.ID)
 	require.NoError(t, err)
 
-	// Wrong offset -> 409 offset_mismatch with details.received = 10.
-	omRec := chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=5", []byte("abcde"))
+	// Wrong offset -> 409 offset_mismatch with details.received = uploadMinChunkBytes.
+	omRec := chatUploadChunkReq(t, env.srv, env.token, chunkURL+"?offset=0", minChunk)
 	require.Equal(t, http.StatusConflict, omRec.Code)
 	omErr := chatUploadDecodeErr(t, omRec)
 	assert.Equal(t, errCodeUploadOffsetMismatch, omErr.Code)
-	assert.Equal(t, float64(10), omErr.Details["received"])
+	assert.Equal(t, float64(uploadMinChunkBytes), omErr.Details["received"])
 
 	// Premature complete -> 409 upload_incomplete.
 	incRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, chunkURL+"/complete", nil)
@@ -666,11 +669,11 @@ func TestChatUploads_WritersAbortOffsetMismatchAndSweeper(t *testing.T) {
 	// 2. Sweeper expires idle chat upload session and removes staging even when
 	// hub.large_uploads is toggled off mid-flight.
 	start2 := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
-		UploadStartRequest{Name: "sweep.txt", Size: 20})
+		UploadStartRequest{Name: "sweep.txt", Size: uploadMinChunkBytes + 10})
 	require.Equal(t, http.StatusCreated, start2.Code)
 	var s2 UploadStartResponse
 	require.NoError(t, json.Unmarshal(start2.Body.Bytes(), &s2))
-	require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, "/api/v1/chat/attachments/uploads/"+s2.ID+"?offset=0", []byte("0123456789")).Code)
+	require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, "/api/v1/chat/attachments/uploads/"+s2.ID+"?offset=0", minChunk).Code)
 
 	sess2, err := env.st.GetUploadSession(ctx, s2.ID)
 	require.NoError(t, err)
@@ -780,4 +783,141 @@ func TestChatUploads_OneGiBReachableViaAdminAPI(t *testing.T) {
 	assert.Equal(t, int64(32<<20), gotAfterNull.MaxFileBytes, "null max_file_bytes must clear back to 32 MiB default")
 	assert.Equal(t, oneGiB, gotAfterNull.MaxBundleBytes, "sibling max_bundle_bytes must remain stored")
 	assert.Equal(t, 50, gotAfterNull.MaxFiles, "sibling max_files must remain stored")
+}
+
+// TestChatUploads_MinChunkFloorAndHeadSniffing verifies R1 (ptone decision
+// p2-min-chunk-floor): sub-floor non-final chunks (1 byte and 511 bytes of
+// HTML) are refused with 400 chunk_too_small before lease claim or staging,
+// HTML split at >= 1 MiB is still classified and refused at the first chunk,
+// and a short final chunk is accepted.
+func TestChatUploads_MinChunkFloorAndHeadSniffing(t *testing.T) {
+	env := newChatUploadEnv(t, true, true)
+	ctx := context.Background()
+
+	htmlFull := append([]byte("<!doctype html><html><body><script>alert(1)</script></body></html>"),
+		bytes.Repeat([]byte(" "), uploadMinChunkBytes)...)
+
+	for _, firstLen := range []int{1, 511} {
+		t.Run(fmt.Sprintf("sub-floor-%d-bytes-refused", firstLen), func(t *testing.T) {
+			startRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
+				UploadStartRequest{Name: "innocent.bin", Size: int64(len(htmlFull))})
+			require.Equal(t, http.StatusCreated, startRec.Code)
+			var started UploadStartResponse
+			require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+
+			before, err := env.st.GetUploadSession(ctx, started.ID)
+			require.NoError(t, err)
+
+			// Advance clock so any unintended expiry extension is detectable.
+			origNow := uploadNowFn
+			t.Cleanup(func() { uploadNowFn = origNow })
+			uploadNowFn = func() time.Time { return time.Now().UTC().Add(5 * time.Minute).Truncate(time.Microsecond) }
+
+			rec := chatUploadChunkReq(t, env.srv, env.token,
+				"/api/v1/chat/attachments/uploads/"+started.ID+"?offset=0", htmlFull[:firstLen])
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			apiErr := chatUploadDecodeErr(t, rec)
+			assert.Equal(t, errCodeUploadChunkTooSmall, apiErr.Code)
+			assert.Equal(t, float64(uploadMinChunkBytes), apiErr.Details["minChunkBytes"])
+
+			after, err := env.st.GetUploadSession(ctx, started.ID)
+			require.NoError(t, err)
+			assert.Equal(t, int64(0), after.Received, "refused chunk must not advance received")
+			assert.Empty(t, after.Parts, "refused chunk must not commit parts")
+			assert.True(t, before.IdleExpiresAt.Equal(after.IdleExpiresAt), "refused chunk must not extend idle_expires_at")
+
+			listed, err := env.blobs.List(ctx, storage.ListOptions{Prefix: storage.DirPrefix(before.StagingRef)})
+			require.NoError(t, err)
+			assert.Empty(t, listed.Objects, "refused sub-floor chunk must not stage any object")
+		})
+	}
+
+	t.Run("html-split-at-1MiB-refused-at-first-chunk", func(t *testing.T) {
+		startRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
+			UploadStartRequest{Name: "innocent.bin", Size: int64(len(htmlFull))})
+		require.Equal(t, http.StatusCreated, startRec.Code)
+		var started UploadStartResponse
+		require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+
+		sess, err := env.st.GetUploadSession(ctx, started.ID)
+		require.NoError(t, err)
+
+		rec := chatUploadChunkReq(t, env.srv, env.token,
+			"/api/v1/chat/attachments/uploads/"+started.ID+"?offset=0", htmlFull[:uploadMinChunkBytes])
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, errCodeUploadDisallowedMediaType, chatUploadDecodeErr(t, rec).Code)
+
+		listed, err := env.blobs.List(ctx, storage.ListOptions{Prefix: storage.DirPrefix(sess.StagingRef)})
+		require.NoError(t, err)
+		assert.Empty(t, listed.Objects, "disallowed HTML must not stage any object")
+	})
+
+	t.Run("valid-1MiB-plus-short-final-chunk-accepted", func(t *testing.T) {
+		chunk0 := bytes.Repeat([]byte("a"), uploadMinChunkBytes)
+		chunk1 := []byte("final-short-chunk")
+		total := append(append([]byte(nil), chunk0...), chunk1...)
+
+		startRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
+			UploadStartRequest{Name: "ok.txt", Size: int64(len(total)), MediaType: "text/plain"})
+		require.Equal(t, http.StatusCreated, startRec.Code)
+		var started UploadStartResponse
+		require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+		u := "/api/v1/chat/attachments/uploads/" + started.ID
+
+		require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, u+"?offset=0", chunk0).Code)
+		require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token, fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), chunk1).Code)
+		compRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, u+"/complete", nil)
+		require.Equal(t, http.StatusOK, compRec.Code, "body: %s", compRec.Body.String())
+	})
+}
+
+// TestChatUploads_MinChunkFloorAndPartsCap verifies R2: repeated sub-floor
+// non-final chunks are refused before parts grows, and the defensive ObjectSink
+// parts cap refuses a commit when len(parts) >= ceil(declared_size/minChunk)+1.
+func TestChatUploads_MinChunkFloorAndPartsCap(t *testing.T) {
+	env := newChatUploadEnv(t, true, true)
+	ctx := context.Background()
+
+	// 1. Many sub-floor non-final chunks are refused before parts grows.
+	declared := int64(2*uploadMinChunkBytes + 10)
+	startRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "bounded.txt", Size: declared, MediaType: "text/plain"})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := "/api/v1/chat/attachments/uploads/" + started.ID
+
+	tiny := bytes.Repeat([]byte("x"), 100)
+	for i := 0; i < 10; i++ {
+		rec := chatUploadChunkReq(t, env.srv, env.token, u+"?offset=0", tiny)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, errCodeUploadChunkTooSmall, chatUploadDecodeErr(t, rec).Code)
+	}
+	sess, err := env.st.GetUploadSession(ctx, started.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sess.Parts, "parts must remain empty after refused sub-floor chunks")
+	assert.Equal(t, int64(0), sess.Received)
+
+	// 2. Defensive ObjectSink parts cap: for declared = 2*minChunk + 10,
+	// ceil(declared/minChunk) = 3, so maxParts = 4. Seed 3 already-committed
+	// parts at offset 2*minChunk and send the final 10-byte chunk -> len(parts)
+	// becomes 4 >= 4 and the commit is refused, with lease released.
+	claimed, err := env.st.ClaimUploadLease(ctx, started.ID, store.UploadStateUploading, 0, "seed-tok", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, env.st.CommitUploadChunk(ctx, started.ID, "seed-tok", store.UploadChunkCommit{
+		Received:      2 * uploadMinChunkBytes,
+		HashState:     claimed.HashState,
+		Parts:         []string{"p0", "p1", "p2"},
+		IdleExpiresAt: claimed.IdleExpiresAt,
+	}))
+
+	capRec := chatUploadChunkReq(t, env.srv, env.token,
+		fmt.Sprintf("%s?offset=%d", u, 2*uploadMinChunkBytes), []byte("0123456789"))
+	require.Equal(t, http.StatusBadRequest, capRec.Code, "body: %s", capRec.Body.String())
+	assert.Equal(t, errCodeUploadTooManyParts, chatUploadDecodeErr(t, capRec).Code)
+
+	afterCap, err := env.st.GetUploadSession(ctx, started.ID)
+	require.NoError(t, err)
+	assert.Len(t, afterCap.Parts, 3, "refused commit must not append to parts")
+	assert.Empty(t, afterCap.LeaseToken, "refused commit must release the lease")
 }
