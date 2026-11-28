@@ -451,7 +451,7 @@ func TestGCPSA_FlatByID_NoIdentity_HubAndUserAreIndistinguishable(t *testing.T) 
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, nil, nil)
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	hubSA := mkSA(t, s, "sa-flat-noid-hub", "hubwide@p.iam.gserviceaccount.com",
 		store.ScopeHub, "hub-instance-1", tid("user-stranger"))

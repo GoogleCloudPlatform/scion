@@ -1437,6 +1437,10 @@ var agentProjectReadRefusedForAllAgents = map[liveInventoryKey]agentProjectReadR
 		RequireScopeRefusal: false,
 		Reason:              "handleProjectWorkspaceUploads requires a user principal (404 while hub.large_uploads is off, 403 for agents when on)",
 	},
+	{"project.shareddir.read", http.MethodGet, "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}: {
+		RequireScopeRefusal: false,
+		Reason:              "resumable shared-dir uploads require a user principal (404 while hub.large_uploads is off, 403 for agents when on)",
+	},
 }
 
 // agentProjectReadFixturePending lists catalogued GET entry points that cannot
