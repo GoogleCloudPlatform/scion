@@ -2868,7 +2868,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Steps 4 and 5: inject the agent instructions and the system prompt.
-	systemPromptRendered, err := injectPromptFiles(h, agentHome, chain, finalScionCfg, inlineCfg)
+	systemPromptRendered, err := injectPromptFiles(h, agentHome, chain, finalScionCfg, inlineCfg, injCtx.ExperimentOn)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -3339,8 +3339,10 @@ func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionConte
 
 // loadMandatoryPreamble reads all .md files from the mandatory boilerplate FS
 // in lexical filename order and concatenates them separated by double newlines.
-// Returns nil if the FS contains no non-empty .md files.
-func loadMandatoryPreamble(boilerplateFS fs.FS) ([]byte, error) {
+// Each file's experiment gates are applied first (gateMarkdown, as for
+// platform skills), with isOn as the state source; nil isOn means every gate
+// is off. Returns nil if the FS contains no non-empty .md files.
+func loadMandatoryPreamble(boilerplateFS fs.FS, isOn func(string) bool) ([]byte, error) {
 	if boilerplateFS == nil {
 		return nil, nil
 	}
@@ -3348,6 +3350,7 @@ func loadMandatoryPreamble(boilerplateFS fs.FS) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read mandatory boilerplate: %w", err)
 	}
+	gate := skillExperimentGate(isOn)
 	var parts [][]byte
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
@@ -3356,6 +3359,10 @@ func loadMandatoryPreamble(boilerplateFS fs.FS) ([]byte, error) {
 		data, err := fs.ReadFile(boilerplateFS, e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("read mandatory boilerplate %s: %w", e.Name(), err)
+		}
+		data, keep := gateMarkdown(e.Name(), data, gate)
+		if !keep {
+			continue
 		}
 		if len(bytes.TrimSpace(data)) > 0 {
 			parts = append(parts, bytes.TrimRight(data, "\r\n"))
@@ -5350,11 +5357,12 @@ func worktreeInPlace(path string) bool {
 // inlineCfg sets is content, any other value is a file resolved in chain.
 // When cfg names no file, the template's agents.md and system-prompt.md are
 // picked up by convention and recorded in cfg. Instructions are rendered
-// before the system prompt, which a harness may prepend to them. It reports
-// whether a system prompt was rendered.
-func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template, finalScionCfg, inlineCfg *api.ScionConfig) (systemPromptRendered bool, err error) {
+// before the system prompt, which a harness may prepend to them. isOn drives
+// the preamble's experiment gates (experimentOn; nil: every gate off). It
+// reports whether a system prompt was rendered.
+func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template, finalScionCfg, inlineCfg *api.ScionConfig, isOn func(string) bool) (systemPromptRendered bool, err error) {
 	// Load mandatory preamble — prepended to all agent instructions.
-	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS(), isOn)
 	if err != nil {
 		return false, fmt.Errorf("failed to load mandatory boilerplate: %w", err)
 	}

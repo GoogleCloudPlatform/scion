@@ -173,6 +173,8 @@ To ensure consistent and reliable agent execution across the platform, Scion enf
 - **Embedded contents:**
   - **Workspace Orientation:** Clear explanations of `SCION_WORKSPACE_MODE` (`shared-plain`, `worktree-per-agent`, `clone-per-agent`, `empty-per-agent`), `SCION_WORKSPACE_GIT`, and how directories/shared volumes are mounted.
   - **Agent Status Signals:** Exact protocols directing the agent to explicitly declare its execution states via `sciontool status` (e.g. `sciontool status ask_user "<question>"`, `sciontool status blocked "<reason>"`, or `sciontool status task_completed "<task>"`). This prevents false stall timeouts, handles notifications routing, and tracks progress.
+  - **Key Platform Skills:** A short closing index of when to read `scion-messaging`: always for messaging and decisions, plus entries for decision prompts, secret requests and command requests while `web.decisions`, `hub.agent_secrets` and `hub.command_requests` are on.
+- **Experiment gates:** The preamble uses the same `<!-- scion:experiment <id> -->` blocks as platform skills (see [Experiment gating](/scion/local/skills/#experiment-gating-experiment-and-scionexperiment)), resolved from the agent's experiment state at provisioning and at a start that re-renders the instructions; text for an experiment that is off is not written.
 - **Template Isolation:** Because this preamble is injected programmatically by the Hub or CLI, it cannot be overridden, removed, or bypassed by custom templates, securing baseline platform behaviors across all agents.
 
 The final composition layers on top of the chosen harness-config:

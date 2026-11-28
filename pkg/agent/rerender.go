@@ -103,6 +103,9 @@ type rerenderInputs struct {
 	// WriteHome runs a write into the agent home (writeAgentHome at
 	// start); nil runs it directly.
 	WriteHome func(func() error) error
+	// ExperimentOn drives the mandatory preamble's experiment gates
+	// (experimentOn), as at provision; nil means every gate is off.
+	ExperimentOn func(id string) bool
 }
 
 // rerenderRecord is the rerender record.
@@ -292,7 +295,7 @@ func rerenderPrompts(in rerenderInputs, rec *rerenderRecord, write func(func() e
 			cfg.SystemPrompt = in.Inline.SystemPrompt
 		}
 	}
-	if _, err := injectPromptFiles(in.Harness, scratch, in.Chain, &cfg, in.Inline); err != nil {
+	if _, err := injectPromptFiles(in.Harness, scratch, in.Chain, &cfg, in.Inline, in.ExperimentOn); err != nil {
 		return "", "", err
 	}
 	files, err := readTree(scratch)

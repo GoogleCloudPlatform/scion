@@ -157,7 +157,7 @@ func TestRerender_AgentInstructions(t *testing.T) {
 	if !strings.HasSuffix(strings.TrimSpace(got), "do the thing") {
 		t.Fatalf("agents.md does not end with the new instructions: %q", got)
 	}
-	preamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	preamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
