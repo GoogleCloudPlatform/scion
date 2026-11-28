@@ -2243,6 +2243,7 @@ func SetTokenHome(dir string) func() {
 	tokenStoreMu.Lock()
 	origMode := tokenStoreMode
 	origRuntimePath := runtimeTokenPath
+	origRuntimeBase := runtimeTokenBase
 	origMem := memoryToken
 	origMemTransport := memoryTransportToken
 	origRuntimeOverridden := runtimeStoreOverridden
@@ -2256,6 +2257,7 @@ func SetTokenHome(dir string) func() {
 		tokenStoreMu.Lock()
 		tokenStoreMode = origMode
 		runtimeTokenPath = origRuntimePath
+		runtimeTokenBase = origRuntimeBase
 		memoryToken = origMem
 		memoryTransportToken = origMemTransport
 		runtimeStoreOverridden = origRuntimeOverridden
@@ -2310,7 +2312,9 @@ func WriteTokenFile(token string, uid, gid int) error {
 		if err := ensureRuntimeTokenDir(rPath); err != nil {
 			return fmt.Errorf("failed to prepare runtime token directory: %w", err)
 		}
-		if err := WriteFileNoFollowChown(rPath, []byte(token), tokenFileMode, uid, gid); err != nil {
+		// Force owner 0:0 inside the runtime store regardless of caller uid/gid
+		// so no caller can ever chown the isolated runtime token to a workload UID.
+		if err := WriteFileNoFollowChown(rPath, []byte(token), tokenFileMode, 0, 0); err != nil {
 			return fmt.Errorf("failed to write runtime token file: %w", err)
 		}
 		return nil

@@ -63,6 +63,7 @@ var (
 	tokenStoreMu           sync.RWMutex
 	tokenStoreMode         TokenStoreMode = TokenStoreHome
 	runtimeTokenPath       string
+	runtimeTokenBase       string = "/"
 	memoryToken            string
 	memoryTransportToken   string
 	runtimeStoreOverridden bool
@@ -108,20 +109,30 @@ func HandoffTransportTokenTmpFilePath() string {
 
 // SetRuntimeTokenStoreForTest permits tests to configure a runtime token store
 // path and automatically restores the previous token-store state on cleanup.
-func SetRuntimeTokenStoreForTest() func() {
+// An optional base directory anchors the trusted-ancestor ownership/mode walk
+// (defaults to filepath.Dir(filepath.Dir(runtimePath)) in tests, vs "/" in
+// production).
+func SetRuntimeTokenStoreForTest(base ...string) func() {
 	tokenStoreMu.Lock()
 	origMode := tokenStoreMode
 	origPath := runtimeTokenPath
+	origBase := runtimeTokenBase
 	origMem := memoryToken
 	origMemTransport := memoryTransportToken
 	origOverridden := runtimeStoreOverridden
 	runtimeStoreOverridden = true
+	if len(base) > 0 {
+		runtimeTokenBase = base[0]
+	} else {
+		runtimeTokenBase = ""
+	}
 	tokenStoreMu.Unlock()
 
 	return func() {
 		tokenStoreMu.Lock()
 		tokenStoreMode = origMode
 		runtimeTokenPath = origPath
+		runtimeTokenBase = origBase
 		memoryToken = origMem
 		memoryTransportToken = origMemTransport
 		runtimeStoreOverridden = origOverridden

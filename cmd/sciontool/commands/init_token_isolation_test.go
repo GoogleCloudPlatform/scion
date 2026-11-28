@@ -557,3 +557,207 @@ func TestRunInit_ShellIsolation_TransportTokenHandoffAbsentBeforeSupervisorRun(t
 		t.Fatalf("in-memory transport token = %q, want %q", memTransportTok, "pre-sup-transport-tok")
 	}
 }
+
+func TestRunInit_ShellIsolation_StagedHubTokenWritesOwnerZero(t *testing.T) {
+	home := t.TempDir()
+	base := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest(base))
+
+	runtimePath := filepath.Join(base, "run-scion", hub.TokenFile)
+	origRuntimePath := runtimeTokenPathForInit
+	origEUID := initEffectiveUID
+	origWrite := runWriteTokenFile
+	runtimeTokenPathForInit = runtimePath
+	initEffectiveUID = func() int { return 0 }
+	t.Cleanup(func() {
+		runtimeTokenPathForInit = origRuntimePath
+		initEffectiveUID = origEUID
+		runWriteTokenFile = origWrite
+	})
+
+	var stagedUID, stagedGID int
+	stagedUID, stagedGID = -1, -1
+	runWriteTokenFile = func(token string, uid, gid int) error {
+		stagedUID, stagedGID = uid, gid
+		return hub.WriteTokenFile(token, uid, gid)
+	}
+
+	// Stage before re-exec (TokenStoreHome) with owner 0:0, then take into RuntimeFile.
+	if _, err := stageHubToken("staged-runtime-tok", 0, 0); err != nil {
+		t.Fatalf("stageHubToken: %v", err)
+	}
+	if stagedUID != 0 || stagedGID != 0 {
+		t.Fatalf("stageHubToken wrote with uid=%d gid=%d, want 0:0", stagedUID, stagedGID)
+	}
+	if err := setupShellIsolatedTokenStore(1000, false); err != nil {
+		t.Fatalf("setupShellIsolatedTokenStore: %v", err)
+	}
+	if got := hub.CurrentTokenStoreMode(); got != hub.TokenStoreRuntimeFile {
+		t.Fatalf("mode = %v, want TokenStoreRuntimeFile", got)
+	}
+	if got := hub.ReadTokenFile(); got != "staged-runtime-tok" {
+		t.Fatalf("ReadTokenFile() = %q, want %q", got, "staged-runtime-tok")
+	}
+	if _, err := os.Lstat(hub.HandoffTokenFilePath()); !os.IsNotExist(err) {
+		t.Fatalf("handoff file still present after take: err=%v", err)
+	}
+}
+
+func TestAuthResetter_IsolatedMode_PendingCandidateSurvivesUncheckedAndRefused(t *testing.T) {
+	t.Run("watcher 503 then SIGUSR2 adopts pending candidate with no file on disk", func(t *testing.T) {
+		h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+		h.hub.set(func(ch *credHub) { ch.checkStatus = 503 })
+
+		handoff := writeHandoffTokenForTest(t, h.newTok)
+		h.r.reset(authResetFileChange)
+
+		// Handoff is unlinked, client stays on oldTok.
+		if _, err := os.Lstat(handoff); !os.IsNotExist(err) {
+			t.Fatalf("handoff still exists after watcher 503: err=%v", err)
+		}
+		if got := h.client.AuthToken(); got != h.oldTok {
+			t.Fatalf("client adopted token despite 503")
+		}
+
+		// Broker's SIGUSR2 arrives with no handoff file left on disk.
+		h.r.reset(authResetSignal)
+		if got := h.client.AuthToken(); got != h.newTok {
+			t.Fatalf("SIGUSR2 did not adopt pending candidate after watcher 503: got %q", got)
+		}
+		if got := hub.ReadTokenFile(); got != h.newTok {
+			t.Fatalf("runtime store not updated on SIGUSR2 adopt of pending candidate")
+		}
+		if _, err := os.Lstat(handoff); !os.IsNotExist(err) {
+			t.Fatalf("handoff path must never be written back: err=%v", err)
+		}
+	})
+
+	t.Run("watcher 401 then SIGUSR2 adopts pending candidate with no file on disk", func(t *testing.T) {
+		h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+		h.hub.set(func(ch *credHub) { ch.checkStatus = 401 })
+
+		handoff := writeHandoffTokenForTest(t, h.newTok)
+		h.r.reset(authResetFileChange)
+
+		if _, err := os.Lstat(handoff); !os.IsNotExist(err) {
+			t.Fatalf("handoff still exists after watcher 401: err=%v", err)
+		}
+		if got := h.client.AuthToken(); got != h.oldTok {
+			t.Fatalf("client adopted token despite 401")
+		}
+
+		// Broker's SIGUSR2 arrives and adopts under signal rules.
+		h.hub.set(func(ch *credHub) { ch.checkStatus = 0 })
+		h.r.reset(authResetSignal)
+		if got := h.client.AuthToken(); got != h.newTok {
+			t.Fatalf("SIGUSR2 did not adopt pending candidate after watcher 401: got %q", got)
+		}
+		if got := hub.ReadTokenFile(); got != h.newTok {
+			t.Fatalf("runtime store not updated on SIGUSR2 adopt after 401")
+		}
+	})
+
+	t.Run("watcher 503 then due retry adopts pending candidate with no file on disk", func(t *testing.T) {
+		h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+		h.hub.set(func(ch *credHub) { ch.checkStatus = 503 })
+
+		fc := clock.NewFake(h.now)
+		notify := make(chan struct{}, 1)
+		w := hub.NewTokenFileWatcher(hub.TokenWatchConfig{
+			Interval:    time.Second,
+			StableDelay: 100 * time.Millisecond,
+			Notify:      notify,
+			Clock:       fc,
+		})
+		h.r.watcher = w
+		ctx, cancel := context.WithCancel(context.Background())
+		done := w.Run(ctx)
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+
+		handoff := writeHandoffTokenForTest(t, h.newTok)
+		h.r.reset(authResetFileChange)
+
+		if _, err := os.Lstat(handoff); !os.IsNotExist(err) {
+			t.Fatalf("handoff still exists after watcher 503: err=%v", err)
+		}
+		if got := h.client.AuthToken(); got != h.oldTok {
+			t.Fatalf("client adopted token despite 503")
+		}
+
+		// Hub comes back up while no handoff file exists on disk.
+		h.hub.set(func(ch *credHub) { ch.checkStatus = 0 })
+
+		// Advance past credentialRecheckBase (5s) + interval + stable delay.
+		deadline := time.Now().Add(2 * time.Second)
+		notified := false
+		for !notified && time.Now().Before(deadline) {
+			fc.Advance(2 * time.Second)
+			select {
+			case <-notify:
+				notified = true
+			case <-time.After(15 * time.Millisecond):
+			}
+		}
+		if !notified {
+			t.Fatal("watcher did not fire due pending retry with no handoff file on disk")
+		}
+
+		h.r.reset(authResetFileChange)
+		if got := h.client.AuthToken(); got != h.newTok {
+			t.Fatalf("due retry did not adopt pending candidate: got %q", got)
+		}
+		if got := hub.ReadTokenFile(); got != h.newTok {
+			t.Fatalf("runtime store not updated on due retry adopt")
+		}
+	})
+}
+
+func TestRunInit_ShellIsolation_PreSupervisorVerifyRefusesLatePlantedHandoff(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+	origSetup := runSetupHostUser
+	origBeforeVerify := beforeVerifyHandoffAbsentForTest
+	origBeforeSup := beforeSupervisorRunForTest
+	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	t.Cleanup(func() {
+		runSetupHostUser = origSetup
+		beforeVerifyHandoffAbsentForTest = origBeforeVerify
+		beforeSupervisorRunForTest = origBeforeSup
+	})
+
+	// Plant a handoff token AFTER setupShellIsolatedTokenStore has already run,
+	// right before verifyShellHandoffTokenAbsent.
+	beforeVerifyHandoffAbsentForTest = func() {
+		writeHandoffTokenForTest(t, "late-planted-tok")
+	}
+
+	supReached := false
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		supReached = true
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_AGENT_ID", "")
+
+	code := RunInit([]string{"true"}, InitRunOptions{
+		DisableReExec:               true,
+		DisableTermSignalForwarding: true,
+		DisablePortForwarding:       true,
+	})
+	if code == 0 {
+		t.Fatal("RunInit exited 0, expected non-zero fail-closed exit on late-planted handoff")
+	}
+	if supReached {
+		t.Fatal("sup.Run was reached despite late-planted handoff token")
+	}
+}

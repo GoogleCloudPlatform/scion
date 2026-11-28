@@ -73,6 +73,12 @@ func hasUnresolvedScionEnvRef(args []string) bool {
 // production.
 var beforeSupervisorRunForTest func(cfg supervisor.Config)
 
+// beforeVerifyHandoffAbsentForTest, when non-nil, fires synchronously in
+// runInit immediately before verifyShellHandoffTokenAbsent (after
+// setupShellIsolatedTokenStore has already run) so tests can independently
+// verify the pre-sup.Run fail-closed check. Always nil in production.
+var beforeVerifyHandoffAbsentForTest func()
+
 // shellContextSeedChown is the fd-based chown callback used when seeding
 // context.yaml. Replaced only in unit tests so ownership handoff can be
 // verified without CAP_CHOWN.

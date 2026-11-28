@@ -32,13 +32,49 @@ import (
 )
 
 // ensureRuntimeTokenDir creates (if absent) and verifies the parent directory
-// of runtimePath through dirfd no-follow, enforcing mode 0700 and ownership by
-// the current effective UID (root:root when euid==0). Never follows symlinks.
+// of runtimePath through dirfd no-follow, verifying that every ancestor along
+// the chain is root-owned (or owned by this process) and free of group/other
+// write bits, and enforcing mode 0700 and ownership by the current effective
+// UID (root:root when euid==0) on the leaf directory. Never follows symlinks.
 func ensureRuntimeTokenDir(runtimePath string) error {
 	dir := filepath.Dir(runtimePath)
-	d, err := dirfd.EnsureDirNoFollow(dir, 0o700)
+	euid := os.Geteuid()
+
+	tokenStoreMu.RLock()
+	base := runtimeTokenBase
+	overridden := runtimeStoreOverridden
+	tokenStoreMu.RUnlock()
+
+	var (
+		parentFd int
+		leaf     string
+		err      error
+	)
+	switch {
+	case base == "/":
+		parentFd, leaf, err = dirfd.OpenParentNoFollowRootOwned(dir)
+	case base != "":
+		parentFd, leaf, err = dirfd.OpenParentNoFollowOwnedBy(base, dir, uint32(euid)) //nolint:gosec // euid is non-negative
+	case overridden:
+		// In tests that called SetRuntimeTokenStoreForTest() without an
+		// explicit base, anchor the owner/mode check at the parent of dir
+		// (typically t.TempDir()) so /tmp's 01777 does not reject the test.
+		parentFd, leaf, err = dirfd.OpenParentNoFollowOwnedBy(filepath.Dir(dir), dir, uint32(euid)) //nolint:gosec // euid is non-negative
+	default:
+		parentFd, leaf, err = dirfd.OpenParentNoFollowRootOwned(dir)
+	}
 	if err != nil {
-		return fmt.Errorf("ensure runtime token dir %s: %w", dir, err)
+		return fmt.Errorf("verify runtime token parent for %s: %w", dir, err)
+	}
+	defer func() { _ = dirfd.Close(parentFd) }()
+
+	if mkErr := unix.Mkdirat(parentFd, leaf, 0o700); mkErr != nil && !errors.Is(mkErr, syscall.EEXIST) {
+		return fmt.Errorf("mkdir runtime token dir %s: %w", dir, mkErr)
+	}
+
+	d, err := dirfd.OpenAt(parentFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open runtime token dir %s: %w", dir, err)
 	}
 	defer func() { _ = d.Close() }()
 
@@ -46,7 +82,6 @@ func ensureRuntimeTokenDir(runtimePath string) error {
 	if err := syscall.Fstat(int(d.Fd()), &st); err != nil {
 		return fmt.Errorf("stat runtime token dir %s: %w", dir, err)
 	}
-	euid := os.Geteuid()
 	if int(st.Uid) != euid {
 		return fmt.Errorf("runtime token dir %s owned by uid %d, expected %d", dir, st.Uid, euid)
 	}

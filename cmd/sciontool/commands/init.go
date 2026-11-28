@@ -606,8 +606,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// unconfigured client. Running stageHubToken only on failure here
 			// keeps normal staging below so a FileSecret can never overwrite
 			// the hub credential file.
+			stageHubUID, stageHubGID := targetUID, targetGID
+			if shellIsolation {
+				stageHubUID, stageHubGID = 0, 0
+			}
 			if staged.HubToken != "" {
-				if _, tokErr := stageHubToken(staged.HubToken, targetUID, targetGID); tokErr != nil {
+				if _, tokErr := stageHubToken(staged.HubToken, stageHubUID, stageHubGID); tokErr != nil {
 					log.Warn("Could not stage hub credential before reporting secret-staging failure: %v", tokErr)
 				}
 				staged.HubToken = ""
@@ -618,11 +622,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 		// A runtime whose instance cannot see the broker-written token file
 		// (Cloud Run) stages the hub-issued credential instead. It is
-		// written to the canonical token file, and a marker (not the
-		// credential) survives the re-exec below so this init removes the
-		// file again at exit. The errors name the step and path only.
+		// written to the canonical token file (handoff path under shell
+		// isolation, owned by 0:0, before the environ-purge re-exec; after
+		// re-exec setupShellIsolatedTokenStore takes and unlinks it), and a
+		// marker (not the credential) survives the re-exec below so this init
+		// removes the file again at exit. The errors name the step and path only.
 		if staged.HubToken != "" {
-			kept, err := stageHubToken(staged.HubToken, targetUID, targetGID)
+			stageHubUID, stageHubGID := targetUID, targetGID
+			if shellIsolation {
+				stageHubUID, stageHubGID = 0, 0
+			}
+			kept, err := stageHubToken(staged.HubToken, stageHubUID, stageHubGID)
 			staged.HubToken = ""
 			if err != nil {
 				log.Error("Failed to write the staged hub credential: %v", err)
@@ -1433,6 +1443,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	supChildArgs := childArgs
 	if shellIsolation {
+		if beforeVerifyHandoffAbsentForTest != nil {
+			beforeVerifyHandoffAbsentForTest()
+		}
 		if err := verifyShellHandoffTokenAbsent(); err != nil {
 			log.Error("Refusing to start workload: %v", err)
 			reportInitFailure(agentHome, err)
@@ -2665,6 +2678,13 @@ type authResetter struct {
 	uncheckedFP       hub.Fingerprint
 	uncheckedAttempts int
 	uncheckedLogged   bool
+
+	// pendingCandidate holds the last taken-but-unadopted handoff token in
+	// PID 1 memory when isolated is true (never written back to the handoff
+	// path). If the watcher took and unlinked a candidate that could not yet
+	// be confirmed by the hub (503/network error or 401 before the transport
+	// token landed), a subsequent SIGUSR2 or due retry falls back to it.
+	pendingCandidate string
 }
 
 func (r *authResetter) tokenChownOwner() (int, int) {
@@ -2761,13 +2781,16 @@ func (r *authResetter) reset(source authResetSource) {
 		}
 		if takeErr != nil {
 			if errors.Is(takeErr, os.ErrNotExist) {
-				if source == authResetFileChange {
+				if r.pendingCandidate != "" {
+					newToken = r.pendingCandidate
+				} else if source == authResetFileChange {
 					r.adoptTransportIfChanged(source)
 					return
 				}
 			} else {
 				log.Error("AUTH_RESET: Failed to take handoff credential (%s): %v", source, takeErr)
 				r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+				r.pendingCandidate = ""
 				if source == authResetFileChange {
 					r.adoptTransportIfChanged(source)
 				}
@@ -2775,6 +2798,8 @@ func (r *authResetter) reset(source authResetSource) {
 			}
 		} else {
 			newToken = taken
+			// A newer handoff file supersedes any older pending candidate.
+			r.pendingCandidate = ""
 		}
 	} else {
 		newToken = hub.ReadTokenFile()
@@ -2785,6 +2810,7 @@ func (r *authResetter) reset(source authResetSource) {
 		if newToken != "" && fp == hubClient.CredentialInfo().Fingerprint {
 			// The agent credential is the one in use; only the transport
 			// token file may have changed.
+			r.pendingCandidate = ""
 			r.adoptTransportIfChanged(source)
 			return
 		}
@@ -2796,6 +2822,9 @@ func (r *authResetter) reset(source authResetSource) {
 		if err == nil {
 			err = r.checkWithHub(newToken, false)
 			if errors.Is(err, hub.ErrCandidateUnchecked) {
+				if r.isolated {
+					r.pendingCandidate = newToken
+				}
 				r.recheckLater(fp, info)
 				r.adoptTransportIfChanged(source)
 				return
@@ -2806,7 +2835,18 @@ func (r *authResetter) reset(source authResetSource) {
 		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
 		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
 		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
-		if r.watcher != nil {
+		if r.isolated {
+			// Keep a locally valid candidate that the hub refused (e.g. 401
+			// before the transport token landed) or rejected as older so a
+			// subsequent SIGUSR2 can adopt it under signal rules without
+			// writing anything back to the handoff path.
+			if source == authResetFileChange && (errors.Is(err, hub.ErrCandidateRefused) || errors.Is(err, hub.ErrCandidateOlder)) {
+				r.pendingCandidate = newToken
+			} else {
+				r.pendingCandidate = ""
+			}
+		}
+		if r.watcher != nil && !r.isolated {
 			r.watcher.Refused(fp)
 		}
 		if source == authResetFileChange {
@@ -2815,6 +2855,7 @@ func (r *authResetter) reset(source authResetSource) {
 		return
 	}
 	r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+	r.pendingCandidate = ""
 	log.TaggedInfo("AUTH_RESET", "Adopting credential %s (%s)", info.LogID(), source)
 
 	// Cancel the existing token refresh loop if running.
@@ -2935,7 +2976,11 @@ func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
 		r.uncheckedLogged = true
 	}
 	if r.watcher != nil {
-		r.watcher.RetryAfter(fp, delay)
+		if r.isolated {
+			r.watcher.RetryPendingAfter(fp, delay)
+		} else {
+			r.watcher.RetryAfter(fp, delay)
+		}
 	}
 }
 
@@ -2955,7 +3000,11 @@ func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
 		// for want of this transport token; let the watcher report it
 		// again.
 		if r.watcher != nil {
-			r.watcher.RecheckAgent()
+			if r.isolated && r.pendingCandidate != "" {
+				r.watcher.RetryPendingAfter(hub.TokenFingerprint(r.pendingCandidate), 0)
+			} else {
+				r.watcher.RecheckAgent()
+			}
 		}
 	}
 }

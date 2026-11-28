@@ -468,15 +468,21 @@ func TestTokenFileWatcher_IsolatedWatchesHandoffPath(t *testing.T) {
 		<-done
 	})
 
-	// Writing to the runtime store must NOT trigger the watcher.
+	// Writing to the runtime store must NOT trigger the watcher, even after
+	// advancing past both Interval and StableDelay.
 	if err := WriteTokenFile("updated-runtime-tok", 0, 0); err != nil {
 		t.Fatalf("WriteTokenFile: %v", err)
 	}
-	fc.Advance(2 * time.Second)
+	for i := 0; i < 4; i++ {
+		fc.Advance(time.Second)
+		time.Sleep(15 * time.Millisecond)
+		fc.Advance(200 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
+	}
 	select {
 	case <-notify:
 		t.Fatal("watcher fired on runtime store write; it must watch only the handoff path")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	// Writing to the handoff path MUST trigger the watcher.
@@ -542,4 +548,79 @@ func TestRuntimeStoreGuard_PanicsOnDefaultPathWithoutOverride(t *testing.T) {
 		}
 	}()
 	_ = ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, DefaultRuntimeTokenPath)
+}
+
+func TestConfigureIsolatedTokenStore_TightensPreExistingDirAndRefusesUnsafeChain(t *testing.T) {
+	t.Run("tightens pre-existing 0755 runtime dir to 0700", func(t *testing.T) {
+		home := t.TempDir()
+		base := t.TempDir()
+		t.Cleanup(SetTokenHome(home))
+		t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+		runtimeDir := filepath.Join(base, "run-scion")
+		if err := os.Mkdir(runtimeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(runtimeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		runtimePath := filepath.Join(runtimeDir, TokenFile)
+		if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err != nil {
+			t.Fatalf("ConfigureIsolatedTokenStore: %v", err)
+		}
+		info, err := os.Stat(runtimeDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("pre-existing runtime dir mode = %04o, want 0700", perm)
+		}
+	})
+
+	t.Run("refuses group- or world-writable ancestor directory", func(t *testing.T) {
+		home := t.TempDir()
+		base := t.TempDir()
+		t.Cleanup(SetTokenHome(home))
+		t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+		runDir := filepath.Join(base, "run")
+		if err := os.Mkdir(runDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(runDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+		runtimePath := filepath.Join(runDir, "scion", TokenFile)
+		if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err == nil {
+			t.Fatal("expected error when ancestor directory is world-writable")
+		}
+	})
+}
+
+func TestWriteTokenFile_RuntimeFileForcesOwnerZero(t *testing.T) {
+	home := t.TempDir()
+	base := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+	runtimePath := filepath.Join(base, "run-scion", TokenFile)
+	if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err != nil {
+		t.Fatalf("ConfigureIsolatedTokenStore: %v", err)
+	}
+	// Passing an arbitrary non-zero uid/gid must be ignored in RuntimeFile mode
+	// (forced to 0:0, so non-root tests succeed without EPERM and root leaves
+	// the file owned by root:root).
+	if err := WriteTokenFile("owner-zero-tok", 65534, 65534); err != nil {
+		t.Fatalf("WriteTokenFile with non-zero uid in RuntimeFile mode failed: %v", err)
+	}
+	info, err := os.Stat(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		t.Fatalf("runtime token uid = %d, want %d (must ignore caller uid 65534)", st.Uid, os.Geteuid())
+	}
 }
