@@ -1228,6 +1228,16 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{CommandRequestsColumns[1], CommandRequestsColumns[30]},
 			},
+			{
+				Name:    "commandrequest_approver_user_id_resolved_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[13], CommandRequestsColumns[27]},
+			},
+			{
+				Name:    "commandrequest_approver_user_id_status_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[13], CommandRequestsColumns[18], CommandRequestsColumns[31]},
+			},
 		},
 	}
 	// CommandRunsColumns holds the columns for the "command_runs" table.

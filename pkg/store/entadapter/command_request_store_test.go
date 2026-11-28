@@ -1225,3 +1225,281 @@ func TestCommandRequest_PurgeDeletedAgentsWithdrawsPending(t *testing.T) {
 		t.Fatalf("live pending request = (%+v, %v), want pending", gotLive, err)
 	}
 }
+
+func TestCommandRequestStore_InboxListOpenResolvedAndBatchLookups(t *testing.T) {
+	ctx := context.Background()
+	cs, projA, agentA := newCommandRequestTestStore(t)
+
+	// Create a second project and agent to test FilterProjectID and FilterAgentID.
+	projB := uuid.New().String()
+	if err := cs.CreateProject(ctx, &store.Project{
+		ID:   projB,
+		Slug: "cr-proj-b-" + projB[:8],
+		Name: "CR Project B",
+	}); err != nil {
+		t.Fatalf("CreateProject B: %v", err)
+	}
+	agentB := uuid.New().String()
+	if err := cs.CreateAgent(ctx, &store.Agent{
+		ID:        agentB,
+		Slug:      "cr-agent-b",
+		Name:      "cr-agent-b",
+		ProjectID: projB,
+		Phase:     "running",
+	}); err != nil {
+		t.Fatalf("CreateAgent B: %v", err)
+	}
+
+	aliceID := uuid.New().String()
+	bobID := uuid.New().String()
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 1. Seed open pending rows for Alice (projA and projB) and Bob.
+	open1, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projA, agentA, aliceID, "open-1", "echo 1", false, base))
+	if err != nil {
+		t.Fatalf("open1: %v", err)
+	}
+	open2, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projB, agentB, aliceID, "open-2", "echo 2", false, base.Add(time.Second)))
+	if err != nil {
+		t.Fatalf("open2: %v", err)
+	}
+	// Other approver (Bob) must never appear for Alice.
+	if _, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projA, agentA, bobID, "bob-open", "echo bob", false, base.Add(2*time.Second))); err != nil {
+		t.Fatalf("bob open: %v", err)
+	}
+	// Expired pending row (TTL 1s, queried at base+10s).
+	expIn := makeCommandRequestPromptInput(t, projA, agentA, aliceID, "expired-unswept", "echo exp", false, base)
+	expIn.TTL = time.Second
+	if _, err := cs.CreateCommandRequestPrompt(ctx, expIn); err != nil {
+		t.Fatalf("expired unswept: %v", err)
+	}
+	// Replaced row (--update): v1 becomes replaced, v2 is pending.
+	repV1, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projA, agentA, aliceID, "rep-key", "echo v1", false, base.Add(3*time.Second)))
+	if err != nil {
+		t.Fatalf("repV1: %v", err)
+	}
+	repV2, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projA, agentA, aliceID, "rep-key", "echo v2", true, base.Add(4*time.Second)))
+	if err != nil {
+		t.Fatalf("repV2: %v", err)
+	}
+	// Pending row with NULL message_id must be excluded from both open and resolved lists.
+	projAUID, _ := uuid.Parse(projA)
+	agentAUID, _ := uuid.Parse(agentA)
+	if _, err := cs.client.CommandRequest.Create().
+		SetProjectID(projAUID).
+		SetAgentID(agentAUID).
+		SetAgentName("cr-agent").
+		SetKey("null-msg").
+		SetKeyNorm("null-msg").
+		SetVersion(1).
+		SetScript("echo null").
+		SetTimeoutS(messages.DefaultCommandRequestTimeoutS).
+		SetCommandSha256(messages.CommandRequestCanonicalHash("echo null", "", messages.DefaultCommandRequestTimeoutS)).
+		SetApproverUserID(aliceID).
+		SetCreatedAt(base.Add(5 * time.Second)).
+		SetExpiresAt(base.Add(24 * time.Hour)).
+		Save(ctx); err != nil {
+		t.Fatalf("create null message_id row: %v", err)
+	}
+
+	// Query ListOpenCommandRequests at base + 10s (past the 1s TTL of expired-unswept).
+	openRows, err := cs.ListOpenCommandRequests(ctx, aliceID, base.Add(10*time.Second), 50)
+	if err != nil {
+		t.Fatalf("ListOpenCommandRequests: %v", err)
+	}
+	if len(openRows) != 3 {
+		t.Fatalf("ListOpenCommandRequests len = %d, want 3 (repV2, open2, open1)", len(openRows))
+	}
+	if openRows[0].ID != repV2.Request.ID || openRows[1].ID != open2.Request.ID || openRows[2].ID != open1.Request.ID {
+		t.Fatalf("ListOpenCommandRequests order = [%s, %s, %s], want [%s, %s, %s]",
+			openRows[0].ID, openRows[1].ID, openRows[2].ID,
+			repV2.Request.ID, open2.Request.ID, open1.Request.ID)
+	}
+	// Limit and empty viewerID checks.
+	limited, err := cs.ListOpenCommandRequests(ctx, aliceID, base.Add(10*time.Second), 2)
+	if err != nil || len(limited) != 2 {
+		t.Fatalf("ListOpenCommandRequests(limit=2) = (%d, %v), want (2, nil)", len(limited), err)
+	}
+	emptyOpen, err := cs.ListOpenCommandRequests(ctx, "", base.Add(10*time.Second), 10)
+	if err != nil || len(emptyOpen) != 0 {
+		t.Fatalf("ListOpenCommandRequests(empty) = (%d, %v), want (0, nil)", len(emptyOpen), err)
+	}
+
+	// 2. Seed resolved rows: approved, dismissed, withdrawn, expired, plus markdown_block (excluded).
+	execAgentID := uuid.New().String()
+	appSrc, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projA, agentA, aliceID, "res-approved", "echo app", false, base))
+	if err != nil {
+		t.Fatalf("appSrc: %v", err)
+	}
+	appRes, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:     appSrc.Request.ID,
+		CommandSHA256: appSrc.Request.CommandSHA256,
+		UserID:        aliceID,
+		ExecAgentID:   execAgentID,
+		ExecProjectID: projA,
+		Surface:       msgaction.CommandRequestSurfaceNative,
+		Now:           base.Add(20 * time.Second),
+	})
+	if err != nil || appRes.Request == nil {
+		t.Fatalf("ApproveCommandRequest: %v", err)
+	}
+
+	disSrc, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projB, agentB, aliceID, "res-dismissed", "echo dis", false, base))
+	if err != nil {
+		t.Fatalf("disSrc: %v", err)
+	}
+	disRes, err := cs.DismissCommandRequest(ctx, &store.DismissCommandRequestInput{
+		RequestID: disSrc.Request.ID,
+		UserID:    aliceID,
+		Reason:    "no thanks",
+		Surface:   msgaction.CommandRequestSurfaceStandalonePage,
+		Now:       base.Add(30 * time.Second),
+	})
+	if err != nil || disRes.Request == nil {
+		t.Fatalf("DismissCommandRequest: %v", err)
+	}
+
+	if _, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projA, agentA, aliceID, "res-withdrawn", "echo wd", false, base)); err != nil {
+		t.Fatalf("wdSrc: %v", err)
+	}
+	wdRes, err := cs.WithdrawCommandRequest(ctx, &store.WithdrawCommandRequestInput{
+		AgentID: agentA,
+		Key:     "res-withdrawn",
+		Reason:  "obsolete",
+		Now:     base.Add(40 * time.Second),
+	})
+	if err != nil || wdRes.Request == nil {
+		t.Fatalf("WithdrawCommandRequest: %v", err)
+	}
+
+	// Expire the 1s-TTL row at base+50s.
+	expRows, err := cs.ExpireCommandRequests(ctx, base.Add(50*time.Second), 10)
+	if err != nil || len(expRows) != 1 {
+		t.Fatalf("ExpireCommandRequests = (%d, %v), want (1, nil)", len(expRows), err)
+	}
+	expRow := expRows[0]
+
+	// Markdown self-run row (surface=markdown_block) must be excluded from ListResolvedCommandRequests.
+	mdMsgID := uuid.New().String()
+	mdRes, err := cs.CreateAndApproveMarkdownCommandRequest(ctx, &store.CreateMarkdownCommandRequestInput{
+		ProjectID:     projA,
+		AgentID:       agentA,
+		AgentName:     "cr-agent",
+		MessageID:     mdMsgID,
+		Script:        "echo md",
+		UserID:        aliceID,
+		ExecAgentID:   execAgentID,
+		ExecProjectID: projA,
+		Now:           base.Add(60 * time.Second),
+	})
+	if err != nil || mdRes.Request == nil {
+		t.Fatalf("CreateAndApproveMarkdownCommandRequest: %v", err)
+	}
+
+	// Query ListResolvedCommandRequests: expect [expRow, wdRes, disRes, appRes] (excludes replaced repV1 and markdown_block mdRes).
+	resolved, err := cs.ListResolvedCommandRequests(ctx, store.CommandRequestHistoryQuery{
+		ViewerID: aliceID,
+		Limit:    50,
+	})
+	if err != nil {
+		t.Fatalf("ListResolvedCommandRequests: %v", err)
+	}
+	if len(resolved) != 4 {
+		t.Fatalf("ListResolvedCommandRequests len = %d, want 4", len(resolved))
+	}
+	wantIDs := []string{expRow.ID, wdRes.Request.ID, disRes.Request.ID, appRes.Request.ID}
+	for i, want := range wantIDs {
+		if resolved[i].ID != want {
+			t.Fatalf("resolved[%d].ID = %s, want %s", i, resolved[i].ID, want)
+		}
+	}
+
+	// Keyset cursor pagination: page 1 (2 rows) + page 2 (2 rows).
+	p1, err := cs.ListResolvedCommandRequests(ctx, store.CommandRequestHistoryQuery{
+		ViewerID: aliceID,
+		Limit:    2,
+	})
+	if err != nil || len(p1) != 2 {
+		t.Fatalf("page 1 = (%d, %v), want (2, nil)", len(p1), err)
+	}
+	p2, err := cs.ListResolvedCommandRequests(ctx, store.CommandRequestHistoryQuery{
+		ViewerID:   aliceID,
+		CursorTime: p1[1].ResolvedAt,
+		CursorID:   p1[1].ID,
+		Limit:      2,
+	})
+	if err != nil || len(p2) != 2 {
+		t.Fatalf("page 2 = (%d, %v), want (2, nil)", len(p2), err)
+	}
+	if p2[0].ID != disRes.Request.ID || p2[1].ID != appRes.Request.ID {
+		t.Fatalf("page 2 = [%s, %s], want [%s, %s]", p2[0].ID, p2[1].ID, disRes.Request.ID, appRes.Request.ID)
+	}
+
+	// Filters & malformed filter/cursor handling.
+	projBOnly, err := cs.ListResolvedCommandRequests(ctx, store.CommandRequestHistoryQuery{
+		ViewerID:        aliceID,
+		FilterProjectID: projB,
+		Limit:           10,
+	})
+	if err != nil || len(projBOnly) != 1 || projBOnly[0].ID != disRes.Request.ID {
+		t.Fatalf("FilterProjectID(projB) = (%+v, %v), want [disRes]", projBOnly, err)
+	}
+	badProj, err := cs.ListResolvedCommandRequests(ctx, store.CommandRequestHistoryQuery{
+		ViewerID:        aliceID,
+		FilterProjectID: "not-a-uuid",
+		Limit:           10,
+	})
+	if err != nil || len(badProj) != 0 {
+		t.Fatalf("malformed FilterProjectID = (%d, %v), want (0, nil)", len(badProj), err)
+	}
+	if _, err := cs.ListResolvedCommandRequests(ctx, store.CommandRequestHistoryQuery{
+		ViewerID:   aliceID,
+		CursorTime: &base,
+		CursorID:   "not-a-uuid",
+		Limit:      10,
+	}); !errors.Is(err, store.ErrInvalidInput) {
+		t.Fatalf("malformed CursorID err = %v, want ErrInvalidInput", err)
+	}
+
+	// 3. GetCommandRequestsByIDs batch lookup.
+	byIDs, err := cs.GetCommandRequestsByIDs(ctx, []string{repV1.Request.ID, repV2.Request.ID, "not-a-uuid", uuid.New().String(), repV1.Request.ID})
+	if err != nil {
+		t.Fatalf("GetCommandRequestsByIDs: %v", err)
+	}
+	if len(byIDs) != 2 || byIDs[repV1.Request.ID] == nil || byIDs[repV2.Request.ID] == nil {
+		t.Fatalf("GetCommandRequestsByIDs = %+v, want repV1 and repV2", byIDs)
+	}
+
+	// 4. HasActionRunOutputs batch lookup (presence only, owner_kind='action_run' only).
+	exitZero := 0
+	won, err := cs.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:        appRes.Run.ID,
+		Status:       store.CommandRunStatusSucceeded,
+		ExitCode:     &exitZero,
+		OutputStatus: "captured",
+		Output:       []byte("hello output"),
+		FinishedAt:   base.Add(25 * time.Second),
+	})
+	if err != nil || !won {
+		t.Fatalf("FinishCommandRun: (%v, %v)", won, err)
+	}
+	// Seed a non-action_run output row to verify owner_kind isolation.
+	schedRunID := uuid.New()
+	if _, err := cs.client.ExecRunOutput.Create().
+		SetID(schedRunID).
+		SetOwnerKind(execrunoutput.OwnerKindScheduledExec).
+		SetProjectID(projAUID).
+		SetCaptureMode("tail").
+		SetContent([]byte("scheduled output")).
+		SetCreatedAt(base).
+		Save(ctx); err != nil {
+		t.Fatalf("seed scheduled_exec output: %v", err)
+	}
+	hasMap, err := cs.HasActionRunOutputs(ctx, []string{appRes.Run.ID, schedRunID.String(), uuid.New().String(), "bad-id"})
+	if err != nil {
+		t.Fatalf("HasActionRunOutputs: %v", err)
+	}
+	if !hasMap[appRes.Run.ID] || hasMap[schedRunID.String()] {
+		t.Fatalf("HasActionRunOutputs = %+v, want only %s=true", hasMap, appRes.Run.ID)
+	}
+}

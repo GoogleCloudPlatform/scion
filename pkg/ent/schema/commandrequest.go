@@ -158,6 +158,8 @@ func (CommandRequest) Indexes() []ent.Index {
 		index.Fields("status", "expires_at"),
 		index.Fields("message_id"),
 		index.Fields("project_id", "created_at"),
+		index.Fields("approver_user_id", "resolved_at"),
+		index.Fields("approver_user_id", "status", "expires_at"),
 	}
 }
 

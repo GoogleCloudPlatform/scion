@@ -1286,6 +1286,31 @@ var chatOperations = []OperationSpec{
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 	{
+		ID:          "chat.usercommandrequests.list",
+		Domain:      "chat",
+		Description: "List open or resolved command-request cards where the caller is the named approver (excluding self-run markdown_block rows), with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors, federated callers and UATs get 403); each row requires command-request recipient eligibility matching GET /api/v1/command-requests/{id}. Unsupported methods get 405; 404 while hub.command_requests is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/command-requests", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserMeCommandRequests_AuthorizationAndScope"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The path lists only command requests where approver_user_id equals the authenticated session caller and passes recipient eligibility (matching GET /api/v1/command-requests/{id}); no agent.read permission applies",
+			Scope:  "caller's own approver-scoped command requests",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
+	},
+	{
 		ID:          "chat.commandrequest.read",
 		Domain:      "chat",
 		Description: "Read a command-request row and its run view (never output), plus the approver's resolved execution container state for the named approver only. Requires an interactive human session and card recipient membership. 404 while hub.command_requests is off",

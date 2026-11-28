@@ -273,7 +273,7 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 		run.Wake = store.CommandRunWakeResume
 		s.emitCommandRunAudit(context.WithoutCancel(ctx), req, run, msgaction.EventCmdRunWaking, "", nil)
 		if req != nil {
-			s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
+			s.notifyCommandRequestChanged(context.WithoutCancel(ctx), req, nil, run)
 		}
 		commandRunExecStage(commandRunStageWaking, run.ID)
 		if ctx.Err() != nil {
@@ -532,7 +532,7 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 			// the DB CAS first (R1).
 			run.Status = store.CommandRunStatusRunning
 			if terr == nil && wonRun && req != nil {
-				s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
+				s.notifyCommandRequestChanged(context.WithoutCancel(ctx), req, nil, run)
 			}
 		}
 		// Track via exec-status (even on a 200 finished replay, because
@@ -896,9 +896,9 @@ func (s *Server) finishCommandRun(
 		"reason", reason,
 		"output_status", fin.OutputStatus)
 
-	// 2. Publish live card update via SSE (uniform CommandRequestView shape, no output bytes or exec container IDs).
+	// 2. Publish live card update via SSE (uniform CommandRequestView shape, no output bytes or exec container IDs) and inbox hint.
 	if req != nil {
-		s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
+		s.notifyCommandRequestChanged(postCtx, req, nil, run)
 	}
 
 	// 3. Deliver command-response message to the asker agent (§4.9).
@@ -1278,6 +1278,7 @@ func (s *Server) sweepCommandRuns(ctx context.Context) {
 	budget := batch * execSeamInt(&commandRunSweepMaxPage)
 
 	// Expire pending command_requests past their 24h TTL (O2, design §4.12).
+	var expiredRows []*store.CommandRequest
 	for expiredReqs := 0; expiredReqs < budget && ctx.Err() == nil; {
 		rows, err := s.store.ExpireCommandRequests(ctx, time.Now().UTC(), batch)
 		if err != nil {
@@ -1306,13 +1307,15 @@ func (s *Server) sweepCommandRuns(ctx context.Context) {
 				},
 				Timestamp: now,
 			})
-			s.publishActionUpdated(msgaction.KindCommandRequest, row.ProjectID, row.MessageID, row.ChatKey, commandRequestView(row, nil, nil))
+			s.publishActionUpdated(msgaction.KindCommandRequest, row.ProjectID, row.MessageID, row.ChatKey, commandRequestSSEView(row, nil, nil))
 		}
+		expiredRows = append(expiredRows, rows...)
 		expiredReqs += len(rows)
 		if len(rows) < batch {
 			break
 		}
 	}
+	s.publishCommandRequestInboxHintsOnce(ctx, expiredRows)
 
 	// Purge action_run exec_run_outputs older than 7 days (design §4.9, carry-forward I1).
 	if ctx.Err() == nil {

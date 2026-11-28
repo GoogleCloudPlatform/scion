@@ -8692,6 +8692,9 @@ func (s *Server) registerRoutes() {
 	// Profile secret requests roll-up across member projects and DMs (/users/me/secret-requests)
 	s.mux.HandleFunc("/api/v1/users/me/secret-requests", s.guarded("/api/v1/users/me/secret-requests", s.handleUserMeActionInbox(&secretRequestActionInboxKind{srv: s})))
 
+	// Profile command requests roll-up for the caller as named approver (/users/me/command-requests)
+	s.mux.HandleFunc("/api/v1/users/me/command-requests", s.guarded("/api/v1/users/me/command-requests", s.handleUserMeActionInbox(&commandRequestActionInboxKind{srv: s})))
+
 	// Profile inbox summary across categories (/users/me/inbox/summary)
 	s.mux.HandleFunc("/api/v1/users/me/inbox/summary", s.guarded("/api/v1/users/me/inbox/summary", s.handleUserMeInboxSummary))
 

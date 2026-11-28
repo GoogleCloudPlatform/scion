@@ -173,6 +173,9 @@ var routeAuthzManifest = map[string]string{
 	// ── Profile secret requests roll-up ────────────────────────────────
 	"/api/v1/users/me/secret-requests": "authenticated", // GET: caller's open/resolved secret requests across member projects and DMs; interactive session only
 
+	// ── Profile command requests roll-up ───────────────────────────────
+	"/api/v1/users/me/command-requests": "authenticated", // GET: caller's open/resolved command requests as named approver; interactive session only
+
 	// ── Profile inbox summary ──────────────────────────────────────────
 	"/api/v1/users/me/inbox/summary": "authenticated", // GET: caller's inbox summary across categories; session or UAT with inbox:read
 
