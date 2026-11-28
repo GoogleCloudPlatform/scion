@@ -170,6 +170,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/validate", RouteID: "auth.validate",
 		Classification: RoutePublic,
 	},
+	// Logout accepts an authenticated session or succeeds idempotently without
+	// one, matching isUnauthenticatedEndpoint in auth.go.
+	"/api/v1/auth/logout": {
+		Pattern: "/api/v1/auth/logout", RouteID: "auth.logout",
+		Classification: RoutePublic,
+	},
 	"/api/v1/auth/providers": {
 		Pattern: "/api/v1/auth/providers", RouteID: "auth.providers",
 		Classification: RoutePublic,
@@ -230,10 +236,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// -------------------------------------------------------------------------
 	// Authenticated: User session endpoints
 	// -------------------------------------------------------------------------
-	"/api/v1/auth/logout": {
-		Pattern: "/api/v1/auth/logout", RouteID: "auth.logout",
-		Classification: RouteAuthenticated,
-	},
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,

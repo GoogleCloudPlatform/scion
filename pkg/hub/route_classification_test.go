@@ -41,7 +41,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/experiments":                                   "authenticated:experiments",
 	"/api/v1/profiling":                                     "authenticated:profiling",
 	"/api/v1/auth/admin-status":                             "authenticated:user",
-	"/api/v1/auth/logout":                                   "authenticated:user",
+	"/api/v1/auth/logout":                                   "public:auth",
 	"/api/v1/auth/me":                                       "authenticated:user",
 	"/api/v1/auth/tokens":                                   "authenticated:user-token",
 	"/api/v1/auth/tokens/":                                  "authenticated:user-token",
@@ -421,6 +421,33 @@ func TestRegisteredRoutesHaveRouteMetadata(t *testing.T) {
 	}
 }
 
+// TestUnauthenticatedEndpointsAgreeWithRouteMetadata guards against the
+// middleware/route-guard contradiction where isUnauthenticatedEndpoint skips
+// UnifiedAuthMiddleware (leaving no identity in context) while routeMetadataTable
+// classifies the same route as requiring an identity attached by middleware.
+func TestUnauthenticatedEndpointsAgreeWithRouteMetadata(t *testing.T) {
+	var conflicts []string
+	for pattern, meta := range routeMetadataTable {
+		path := pattern
+		if _, p, ok := strings.Cut(pattern, " "); ok {
+			path = p
+		}
+		if !isUnauthenticatedEndpoint(path) {
+			continue
+		}
+		switch meta.Classification {
+		case RoutePublic, RouteBrokerHMAC, RouteWebhook:
+			// Pass-through in routeGuard; handler performs its own auth or none.
+		default:
+			conflicts = append(conflicts, pattern+" (isUnauthenticatedEndpoint=true, routeMetadataTable="+string(meta.Classification)+")")
+		}
+	}
+	sort.Strings(conflicts)
+	if len(conflicts) > 0 {
+		t.Fatalf("routes skipped by UnifiedAuthMiddleware disagree with routeMetadataTable:\n%s", strings.Join(conflicts, "\n"))
+	}
+}
+
 func TestRouteMetadataPermissionsAreValid(t *testing.T) {
 	// Build set of valid permission IDs from the registry.
 	validPermissions := make(map[string]bool)
@@ -468,7 +495,7 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 		// RouteAuthenticated: no identity → 401
 		{
 			name:           "authenticated route denies unauthenticated",
-			route:          "/api/v1/auth/logout",
+			route:          "/api/v1/auth/me",
 			classification: RouteAuthenticated,
 			identity:       nil,
 			wantStatus:     http.StatusUnauthorized,
