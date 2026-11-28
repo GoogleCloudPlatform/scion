@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -214,27 +213,6 @@ func legacyAttachmentRefs(refs []AttachmentRef) []AttachmentRef {
 	}
 	return out
 }
-
-// stageArtifactAttachment copies artifact attachment ref, bound to message
-// messageID, into the agent staging directory and returns the agent-visible
-// path. It is part of the send path only (stageChatAttachments), after the
-// send was authorized and the message stored: the bytes are opened through
-// OpenBoundAttachment, which checks no caller, so it must never be reached
-// from a request that names an attachment.
-func (s *Server) stageArtifactAttachment(ctx context.Context, staging *attachmentStaging, messageID string, ref AttachmentRef) (string, error) {
-	if staging == nil {
-		return "", errNoAttachmentStaging
-	}
-	svc := s.attachmentService()
-	return staging.stageFrom(func() (io.ReadCloser, error) {
-		rc, _, err := svc.OpenBoundAttachment(ctx, ref.ID, messageID)
-		return rc, err
-	}, ref.ID, ref.Name)
-}
-
-// errNoAttachmentStaging: the project has no staging directory, and an
-// artifact attachment has no hub-local path to send instead.
-var errNoAttachmentStaging = errors.New("no attachment staging directory for this project")
 
 // mergeArtifactAttachments adds the artifact attachments of the messages
 // in msgIDs to byMessage (the AttachmentStore attachments of history),

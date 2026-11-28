@@ -25,26 +25,17 @@ import (
 	"testing"
 )
 
-// TestOpenBoundAttachmentReachableOnlyFromSendPath pins that the artifact
-// service's OpenBoundAttachment, which reads an attachment's bytes without
-// checking any caller, is reached from exactly one place in the hub: the
-// send path, after the send is authorized and the message stored. The call
-// chain must be
-//
-//	sendAgentRouted -> stageChatAttachments -> stageArtifactAttachment -> OpenBoundAttachment
-//
-// and nothing else in the package (and its guardScanSubdirs subpackages)
-// (no handler, no route) may call any link
-// of it; nor may any other package of the module reference the opener. A
-// new caller fails this test and needs a security review.
-func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
+// TestStageChatAttachmentsReachableOnlyFromSendPath pins that legacy
+// attachment staging (stageChatAttachments) is reached only from
+// sendAgentRouted, and that no caller-less OpenBoundAttachment opener
+// exists in the module (ptone/scion#9694).
+func TestStageChatAttachmentsReachableOnlyFromSendPath(t *testing.T) {
 	// pkgmove:scan-covers guardScanSubdirs
-	// callersInPackage and valueUsesInPackage read pkg/hub and every guardScanSubdirs entry through readGuardScanDirs (nonTestGoFiles); guards the OpenBoundAttachment call chain.
+	// callersInPackage and valueUsesInPackage read pkg/hub and every guardScanSubdirs entry through readGuardScanDirs (nonTestGoFiles); guards the stageChatAttachments call chain.
 	callers := callersInPackage(t, ".")
 	want := map[string][]string{
-		"OpenBoundAttachment":     {"stageArtifactAttachment"},
-		"stageArtifactAttachment": {"stageChatAttachments"},
-		"stageChatAttachments":    {"sendAgentRouted"},
+		"stageChatAttachments": {"sendAgentRouted"},
+		"ServeBoundAttachment": {"handleAttachmentDelivery"},
 	}
 	for callee, wantCallers := range want {
 		got := callers[callee]
@@ -52,20 +43,13 @@ func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
 			t.Errorf("%s is called from %v; want only %v", callee, got, wantCallers)
 		}
 	}
-	// The functions of the chain, the opener included, are never used as
-	// values (a handler or method value made from one would escape the
-	// call check above).
-	for name, n := range valueUsesInPackage(t, ".", []string{"OpenBoundAttachment", "stageArtifactAttachment", "stageChatAttachments"}) {
+	for name, n := range valueUsesInPackage(t, ".", []string{"stageChatAttachments", "ServeBoundAttachment"}) {
 		if n > 0 {
 			t.Errorf("%s is used as a value %d times; it may only be called", name, n)
 		}
 	}
-	// The opener is an exported method of the artifact service, so the rest
-	// of the module is checked too: outside its own declaration, the only
-	// reference to it in non-test code is the call above.
-	refs := moduleSymbolReferences(t, "../..", "OpenBoundAttachment")
-	if want := []string{"pkg/hub/attachments_artifacts.go:stageArtifactAttachment"}; strings.Join(refs, ",") != strings.Join(want, ",") {
-		t.Errorf("OpenBoundAttachment is referenced at %v; want only %v", refs, want)
+	if refs := moduleSymbolReferences(t, "../..", "OpenBoundAttachment"); len(refs) != 0 {
+		t.Errorf("OpenBoundAttachment must not be referenced in non-test code, found %v", refs)
 	}
 }
 

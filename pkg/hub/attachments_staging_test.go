@@ -354,7 +354,7 @@ func TestResolveAttachmentStaging_UnknownProject(t *testing.T) {
 func TestStageChatAttachments_LegacyOnLocal_DMStillStaged(t *testing.T) {
 	srv, _, project, sharedDir := agentAttachmentServer(t)
 	ref := saveLegacyAttachment(t, srv, project.ID, "dm.txt", "dm bytes")
-	paths, mounts := srv.stageChatAttachments(context.Background(), "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{ref})
+	paths, mounts := srv.stageChatAttachments(context.Background(), "dm:user:u1:agent:a1", project.ID, []AttachmentRef{ref})
 	require.Len(t, paths, 1)
 	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+ref.ID+"/dm.txt", paths[0])
 	assert.Equal(t, attachmentSharedDirName, mounts[paths[0]])
