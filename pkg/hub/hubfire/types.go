@@ -127,6 +127,10 @@ type FireRequest struct {
 	// and project live-agent caps in Stage 2 §7.4). Returning a non-empty
 	// skipReason with err == nil skips the fire without counting an error.
 	BeforeFire func(ctx context.Context) (skipReason string, err error)
+	// NoWake suppresses all wake paths (both explicit payload wake and
+	// auto-wake of hub-suspended agents), used by hub-authored failure
+	// notifications (Stage 2 §10).
+	NoWake bool
 }
 
 // FireStatus is the terminal outcome classification of a fire.

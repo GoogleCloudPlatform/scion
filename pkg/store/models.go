@@ -2996,6 +2996,12 @@ const (
 	// NotificationResourceDecisions and ResourceID stores the previous
 	// waiting count P as a decimal string ("0" when cleared).
 	NotificationKindDecisionsWaiting = "decisions_waiting"
+	// NotificationKindTriggerFireFailed: a trigger fire reached a failing
+	// outcome (failed, refused, expired, or opt-in skipped / project cap)
+	// and notified the definition's creator or delegating user (Stage 2 §10).
+	// ResourceType is NotificationResourceTrigger and ResourceID is the
+	// trigger UUID.
+	NotificationKindTriggerFireFailed = "trigger_fire_failed"
 )
 
 // Notification.ResourceType values.
@@ -3007,6 +3013,8 @@ const (
 	// NotificationResourceDecisions: ResourceID is the coalesced waiting
 	// decision count string for NotificationKindDecisionsWaiting.
 	NotificationResourceDecisions = "decisions"
+	// NotificationResourceTrigger: ResourceID is a trigger id.
+	NotificationResourceTrigger = "trigger"
 )
 
 // Notification.Status values of NotificationKindArtifactGrant rows.
@@ -3034,6 +3042,10 @@ const NotificationStatusSecretPending = "SECRET_PENDING"
 // NotificationStatusDecisionsWaiting is the Status of a
 // NotificationKindDecisionsWaiting row.
 const NotificationStatusDecisionsWaiting = "DECISIONS_WAITING"
+
+// NotificationStatusTriggerFireFailed is the Status of a
+// NotificationKindTriggerFireFailed row (Stage 2 §10).
+const NotificationStatusTriggerFireFailed = "TRIGGER_FIRE_FAILED"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.

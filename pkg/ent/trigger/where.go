@@ -225,6 +225,11 @@ func MaxConcurrentDispatches(v int) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldMaxConcurrentDispatches, v))
 }
 
+// Notify applies equality check predicate on the "notify" field. It's identical to NotifyEQ.
+func Notify(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldNotify, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldStatus, v))
@@ -2363,6 +2368,81 @@ func MaxConcurrentDispatchesLT(v int) predicate.Trigger {
 // MaxConcurrentDispatchesLTE applies the LTE predicate on the "max_concurrent_dispatches" field.
 func MaxConcurrentDispatchesLTE(v int) predicate.Trigger {
 	return predicate.Trigger(sql.FieldLTE(FieldMaxConcurrentDispatches, v))
+}
+
+// NotifyEQ applies the EQ predicate on the "notify" field.
+func NotifyEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldNotify, v))
+}
+
+// NotifyNEQ applies the NEQ predicate on the "notify" field.
+func NotifyNEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldNotify, v))
+}
+
+// NotifyIn applies the In predicate on the "notify" field.
+func NotifyIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldNotify, vs...))
+}
+
+// NotifyNotIn applies the NotIn predicate on the "notify" field.
+func NotifyNotIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldNotify, vs...))
+}
+
+// NotifyGT applies the GT predicate on the "notify" field.
+func NotifyGT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldNotify, v))
+}
+
+// NotifyGTE applies the GTE predicate on the "notify" field.
+func NotifyGTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldNotify, v))
+}
+
+// NotifyLT applies the LT predicate on the "notify" field.
+func NotifyLT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldNotify, v))
+}
+
+// NotifyLTE applies the LTE predicate on the "notify" field.
+func NotifyLTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldNotify, v))
+}
+
+// NotifyContains applies the Contains predicate on the "notify" field.
+func NotifyContains(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContains(FieldNotify, v))
+}
+
+// NotifyHasPrefix applies the HasPrefix predicate on the "notify" field.
+func NotifyHasPrefix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasPrefix(FieldNotify, v))
+}
+
+// NotifyHasSuffix applies the HasSuffix predicate on the "notify" field.
+func NotifyHasSuffix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasSuffix(FieldNotify, v))
+}
+
+// NotifyIsNil applies the IsNil predicate on the "notify" field.
+func NotifyIsNil() predicate.Trigger {
+	return predicate.Trigger(sql.FieldIsNull(FieldNotify))
+}
+
+// NotifyNotNil applies the NotNil predicate on the "notify" field.
+func NotifyNotNil() predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotNull(FieldNotify))
+}
+
+// NotifyEqualFold applies the EqualFold predicate on the "notify" field.
+func NotifyEqualFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEqualFold(FieldNotify, v))
+}
+
+// NotifyContainsFold applies the ContainsFold predicate on the "notify" field.
+func NotifyContainsFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContainsFold(FieldNotify, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

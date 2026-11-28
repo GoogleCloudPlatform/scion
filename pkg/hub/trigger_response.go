@@ -178,6 +178,15 @@ type TriggerSubjectSpec struct {
 	CoalesceWindow string `json:"coalesce_window,omitempty"`
 }
 
+// TriggerNotifySpec configures failure notifications on a trigger definition
+// (Stage 2 §10, matching web/src/components/triggers/types.ts TriggerNotifySpec).
+type TriggerNotifySpec struct {
+	OnOutcomes []string `json:"onOutcomes,omitempty"`
+	UserNotice *bool    `json:"userNotice,omitempty"`
+	AgentID    string   `json:"agentId,omitempty"`
+	AgentName  string   `json:"agentName,omitempty"`
+}
+
 // TriggerResponse is the API representation of a trigger definition.
 type TriggerResponse struct {
 	ID                      string              `json:"id"`
@@ -192,6 +201,7 @@ type TriggerResponse struct {
 	Subject                 TriggerSubjectSpec  `json:"subject"`
 	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec  `json:"notify,omitempty"`
 	Status                  string              `json:"status"`
 	StatusReason            string              `json:"statusReason,omitempty"`
 	AuthorizationRevision   int                 `json:"authorizationRevision"`
@@ -557,6 +567,21 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 	if tr.CoalesceWindowSeconds > 0 {
 		coalesceWindow = (time.Duration(tr.CoalesceWindowSeconds) * time.Second).String()
 	}
+	var notifySpec *TriggerNotifySpec
+	if tr.Notify != nil && !tr.Notify.IsEmpty() {
+		ns := &TriggerNotifySpec{
+			AgentID:   tr.Notify.AgentID,
+			AgentName: tr.Notify.AgentName,
+		}
+		if len(tr.Notify.OnOutcomes) > 0 {
+			ns.OnOutcomes = append([]string(nil), tr.Notify.OnOutcomes...)
+		}
+		if tr.Notify.UserNotice != nil {
+			v := *tr.Notify.UserNotice
+			ns.UserNotice = &v
+		}
+		notifySpec = ns
+	}
 	return TriggerResponse{
 		ID:          tr.ID,
 		ProjectID:   tr.ProjectID,
@@ -578,6 +603,7 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 		},
 		MaxFiresPerMinute:       tr.MaxFiresPerMinute,
 		MaxConcurrentDispatches: tr.MaxConcurrentDispatches,
+		Notify:                  notifySpec,
 		Status:                  tr.Status,
 		StatusReason:            tr.StatusReason,
 		AuthorizationRevision:   tr.AuthorizationRevision,

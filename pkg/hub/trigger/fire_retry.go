@@ -547,6 +547,7 @@ func (d *Dispatcher) recordWaitingFireTerminal(
 			DecidedDialect: fire.DecidedDialect,
 		})
 	}
+	d.notifyFireOutcome(ctx, nil, fire, status, errMsg)
 }
 
 func (d *Dispatcher) parkWaitingFire(
@@ -588,6 +589,7 @@ func (d *Dispatcher) parkWaitingFire(
 					Reason:         FireSkipReasonTargetNotRunning,
 				})
 			}
+			d.notifyFireOutcome(ctx, tr, fire, store.TriggerFireStatusSkipped, ErrFireTargetNotRunning)
 		}
 		return nil
 	}
@@ -679,6 +681,7 @@ func (d *Dispatcher) parkWaitingFire(
 					Reason:         FireSkipReasonOfflineQueueFull,
 				})
 			}
+			d.notifyFireOutcome(ctx, tr, fire, store.TriggerFireStatusSkipped, ErrFireOfflineQueueFull)
 		}
 		return nil
 	}

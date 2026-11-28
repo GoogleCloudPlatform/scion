@@ -360,6 +360,7 @@ type CreateTriggerRequest struct {
 	Subject                 *TriggerSubjectSpec  `json:"subject,omitempty"`
 	MaxFiresPerMinute       int                  `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches int                  `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec   `json:"notify,omitempty"`
 }
 
 // TriggerMatchFormPatch tracks explicit presence of match.form in PATCH
@@ -426,6 +427,14 @@ func authorizeTriggerReuseSubject(w http.ResponseWriter, subjectMode string, cei
 	return true
 }
 
+// TriggerNotifyPatchSpec holds partial updates to a trigger's notify block.
+type TriggerNotifyPatchSpec struct {
+	OnOutcomes *[]string `json:"onOutcomes,omitempty"`
+	UserNotice *bool     `json:"userNotice,omitempty"`
+	AgentID    *string   `json:"agentId,omitempty"`
+	AgentName  *string   `json:"agentName,omitempty"`
+}
+
 // UpdateTriggerRequest is the request body for PATCH /triggers/{id}.
 type UpdateTriggerRequest struct {
 	Name                    *string                  `json:"name,omitempty"`
@@ -437,6 +446,7 @@ type UpdateTriggerRequest struct {
 	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifyPatchSpec  `json:"notify,omitempty"`
 	ExpectedRevision        *int                     `json:"expectedRevision,omitempty"`
 }
 
@@ -918,6 +928,10 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	notifyPolicy, ok := s.authorizeTriggerNotifyAuthoring(w, r, projectID, sourceKind, req.Notify)
+	if !ok {
+		return
+	}
 
 	tr := store.Trigger{
 		ID:                      api.NewUUID(),
@@ -936,6 +950,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		CoalesceWindowSeconds:   coalesceSeconds,
 		MaxFiresPerMinute:       req.MaxFiresPerMinute,
 		MaxConcurrentDispatches: req.MaxConcurrentDispatches,
+		Notify:                  notifyPolicy,
 		Status:                  store.TriggerStatusActive,
 		CreatedBy:               identity.ID(),
 		InitiatorAttribution:    newInitiatorAttribution(ctx),
@@ -1396,6 +1411,43 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		}
 	}
 
+	var mergedNotifySpec *TriggerNotifySpec
+	if req.Notify != nil {
+		merged := &TriggerNotifySpec{}
+		if tr.Notify != nil {
+			if len(tr.Notify.OnOutcomes) > 0 {
+				merged.OnOutcomes = append([]string(nil), tr.Notify.OnOutcomes...)
+			}
+			if tr.Notify.UserNotice != nil {
+				v := *tr.Notify.UserNotice
+				merged.UserNotice = &v
+			}
+			merged.AgentID = tr.Notify.AgentID
+			merged.AgentName = tr.Notify.AgentName
+		}
+		if req.Notify.OnOutcomes != nil {
+			merged.OnOutcomes = append([]string(nil), (*req.Notify.OnOutcomes)...)
+		}
+		if req.Notify.UserNotice != nil {
+			v := *req.Notify.UserNotice
+			merged.UserNotice = &v
+		}
+		if req.Notify.AgentID != nil || req.Notify.AgentName != nil {
+			var newID, newName string
+			if req.Notify.AgentID != nil {
+				newID = strings.TrimSpace(*req.Notify.AgentID)
+			}
+			if req.Notify.AgentName != nil {
+				newName = strings.TrimSpace(*req.Notify.AgentName)
+			}
+			merged.AgentID = newID
+			merged.AgentName = newName
+		}
+		mergedNotifySpec = merged
+		fields.Notify = true
+		changesFutureDispatch = true
+	}
+
 	var newAttr *store.InitiatorAttribution
 	if changesFutureDispatch {
 		// Re-authorizing future dispatch requires the editor to hold access to
@@ -1537,6 +1589,26 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			fields.Actions = true
 			fields.ActionType = true
 			fields.ActionPayload = true
+		}
+		if mergedNotifySpec != nil {
+			normalizedNotify, ok := s.authorizeTriggerNotifyAuthoring(w, r, projectID, tr.SourceKind, mergedNotifySpec)
+			if !ok {
+				return
+			}
+			tr.Notify = normalizedNotify
+		} else if tr.Notify != nil && (tr.Notify.AgentID != "" || tr.Notify.AgentName != "") {
+			storedSpec := &TriggerNotifySpec{
+				OnOutcomes: tr.Notify.OnOutcomes,
+				UserNotice: tr.Notify.UserNotice,
+				AgentID:    tr.Notify.AgentID,
+				AgentName:  tr.Notify.AgentName,
+			}
+			normalizedNotify, ok := s.authorizeTriggerNotifyAuthoring(w, r, projectID, tr.SourceKind, storedSpec)
+			if !ok {
+				return
+			}
+			tr.Notify = normalizedNotify
+			fields.Notify = true
 		}
 		attr := reattributeInitiator(ctx, tr.InitiatorAttribution)
 		newAttr = &attr
@@ -1729,6 +1801,21 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
+	resumeFields := store.TriggerFieldMask{Status: true, Actions: true, ActionType: true, ActionPayload: true}
+	if tr.Notify != nil && (tr.Notify.AgentID != "" || tr.Notify.AgentName != "") {
+		storedSpec := &TriggerNotifySpec{
+			OnOutcomes: tr.Notify.OnOutcomes,
+			UserNotice: tr.Notify.UserNotice,
+			AgentID:    tr.Notify.AgentID,
+			AgentName:  tr.Notify.AgentName,
+		}
+		normalizedNotify, ok := s.authorizeTriggerNotifyAuthoring(w, r, projectID, tr.SourceKind, storedSpec)
+		if !ok {
+			return
+		}
+		tr.Notify = normalizedNotify
+		resumeFields.Notify = true
+	}
 
 	prevRevision := tr.AuthorizationRevision
 	prevRevisionKnown := tr.AuthorizationRevision != 0
@@ -1742,7 +1829,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	tr.InitiatorAttribution = newAttr
 	tr.AuthorityCeiling = ceiling
 
-	fields := store.TriggerFieldMask{Status: true, Actions: true, ActionType: true, ActionPayload: true}
+	fields := resumeFields
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr

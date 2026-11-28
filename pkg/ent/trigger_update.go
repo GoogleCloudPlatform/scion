@@ -585,6 +585,26 @@ func (_u *TriggerUpdate) AddMaxConcurrentDispatches(v int) *TriggerUpdate {
 	return _u
 }
 
+// SetNotify sets the "notify" field.
+func (_u *TriggerUpdate) SetNotify(v string) *TriggerUpdate {
+	_u.mutation.SetNotify(v)
+	return _u
+}
+
+// SetNillableNotify sets the "notify" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableNotify(v *string) *TriggerUpdate {
+	if v != nil {
+		_u.SetNotify(*v)
+	}
+	return _u
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (_u *TriggerUpdate) ClearNotify() *TriggerUpdate {
+	_u.mutation.ClearNotify()
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerUpdate) SetStatus(v string) *TriggerUpdate {
 	_u.mutation.SetStatus(v)
@@ -972,6 +992,12 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedMaxConcurrentDispatches(); ok {
 		_spec.AddField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.Notify(); ok {
+		_spec.SetField(trigger.FieldNotify, field.TypeString, value)
+	}
+	if _u.mutation.NotifyCleared() {
+		_spec.ClearField(trigger.FieldNotify, field.TypeString)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1597,6 +1623,26 @@ func (_u *TriggerUpdateOne) AddMaxConcurrentDispatches(v int) *TriggerUpdateOne 
 	return _u
 }
 
+// SetNotify sets the "notify" field.
+func (_u *TriggerUpdateOne) SetNotify(v string) *TriggerUpdateOne {
+	_u.mutation.SetNotify(v)
+	return _u
+}
+
+// SetNillableNotify sets the "notify" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableNotify(v *string) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetNotify(*v)
+	}
+	return _u
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (_u *TriggerUpdateOne) ClearNotify() *TriggerUpdateOne {
+	_u.mutation.ClearNotify()
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerUpdateOne) SetStatus(v string) *TriggerUpdateOne {
 	_u.mutation.SetStatus(v)
@@ -2014,6 +2060,12 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.AddedMaxConcurrentDispatches(); ok {
 		_spec.AddField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.Notify(); ok {
+		_spec.SetField(trigger.FieldNotify, field.TypeString, value)
+	}
+	if _u.mutation.NotifyCleared() {
+		_spec.ClearField(trigger.FieldNotify, field.TypeString)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)

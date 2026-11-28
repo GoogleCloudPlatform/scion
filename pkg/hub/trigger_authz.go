@@ -501,20 +501,81 @@ func (s *Server) resolveTriggerWebhookSource(w http.ResponseWriter, r *http.Requ
 	return ep, true
 }
 
+// resolveTriggerMessageTarget validates a trigger message or notify-agent
+// payload through messageAction.Validate and enforces the Stage 3 §8.1
+// self-only targeting rule for agent callers on github triggers.
+func (s *Server) resolveTriggerMessageTarget(
+	w http.ResponseWriter,
+	r *http.Request,
+	identity Identity,
+	projectID string,
+	sourceKind string,
+	payload MessageEventPayload,
+	denialPrefix string,
+) (string, MessageEventPayload, bool) {
+	ctx := r.Context()
+	var (
+		raw []byte
+		err error
+	)
+	if payload.UntrustedVars != nil && len(payload.UntrustedVars) == 0 {
+		// Preserve an explicitly supplied empty untrustedVars ([]) distinct from
+		// omitted (nil), since MessageEventPayload.UntrustedVars has omitempty.
+		type explicitEmptyUntrusted struct {
+			MessageEventPayload
+			UntrustedVars []string `json:"untrustedVars"`
+		}
+		raw, err = json.Marshal(explicitEmptyUntrusted{
+			MessageEventPayload: payload,
+			UntrustedVars:       []string{},
+		})
+	} else {
+		raw, err = json.Marshal(payload)
+	}
+	if err != nil {
+		InternalError(w)
+		return "", MessageEventPayload{}, false
+	}
+
+	action := &messageAction{srv: s}
+	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
+	if err != nil {
+		writeMessageAuthoringError(w, r, identity, err)
+		return "", MessageEventPayload{}, false
+	}
+
+	var resolved MessageEventPayload
+	if err := json.Unmarshal([]byte(normalized), &resolved); err != nil {
+		InternalError(w)
+		return "", MessageEventPayload{}, false
+	}
+	if sourceKind == store.TriggerSourceKindGitHub && isAgentCaller(ctx) && resolved.AgentID != identity.ID() {
+		logAuthzDenial(r, identity, Resource{
+			Type:       permissions.ResourceAgent,
+			ID:         resolved.AgentID,
+			ParentType: permissions.ResourceProject,
+			ParentID:   projectID,
+		}, ActionMessage, denialPrefix+": agent caller may only target itself")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"agent callers may only target themselves on github triggers", nil)
+		return "", MessageEventPayload{}, false
+	}
+	return normalized, resolved, true
+}
+
 // authorizeTriggerMessageAuthoring validates a Stage 1 message action spec
 // through the shared HTTP-free target rule (messageAction.Validate), enforcing
 // self-only targeting for agent callers on github triggers (Stage 3 §8.1),
 // updating spec with the authoritative AgentID and display AgentName, and
 // returning the canonical JSON action_payload.
 func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http.Request, projectID, sourceKind string, spec *TriggerActionSpec) (string, bool) {
-	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
+	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return "", false
 	}
 
-	raw, err := json.Marshal(MessageEventPayload{
+	normalized, resolved, ok := s.resolveTriggerMessageTarget(w, r, identity, projectID, sourceKind, MessageEventPayload{
 		AgentID:         spec.AgentID,
 		AgentName:       spec.AgentName,
 		Message:         spec.Message,
@@ -524,33 +585,8 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 		Offline:         spec.Offline,
 		QueueTTLSeconds: spec.QueueTTLSeconds,
 		UntrustedVars:   spec.UntrustedVars,
-	})
-	if err != nil {
-		InternalError(w)
-		return "", false
-	}
-
-	action := &messageAction{srv: s}
-	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
-	if err != nil {
-		writeMessageAuthoringError(w, r, identity, err)
-		return "", false
-	}
-
-	var resolved MessageEventPayload
-	if err := json.Unmarshal([]byte(normalized), &resolved); err != nil {
-		InternalError(w)
-		return "", false
-	}
-	if sourceKind == store.TriggerSourceKindGitHub && isAgentCaller(ctx) && resolved.AgentID != identity.ID() {
-		logAuthzDenial(r, identity, Resource{
-			Type:       permissions.ResourceAgent,
-			ID:         resolved.AgentID,
-			ParentType: permissions.ResourceProject,
-			ParentID:   projectID,
-		}, ActionMessage, "github trigger message authoring: agent caller may only target itself")
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"agent callers may only target themselves on github triggers", nil)
+	}, "github trigger message authoring")
+	if !ok {
 		return "", false
 	}
 	spec.AgentID = resolved.AgentID
@@ -559,6 +595,87 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	spec.QueueTTLSeconds = resolved.QueueTTLSeconds
 	spec.UntrustedVars = resolved.UntrustedVars
 	return normalized, true
+}
+
+// authorizeTriggerNotifyAuthoring validates and authorizes a trigger's notify
+// policy (Stage 2 §10): outcomes must be a subset of {failed, refused, expired,
+// skipped} (defaulting to failed/refused/expired), userNotice defaults to true,
+// and an optional agentId/agentName is validated through messageAction.Validate
+// under the caller's live authority so an author who cannot message that agent
+// cannot save, edit, or resume the rule.
+func (s *Server) authorizeTriggerNotifyAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	spec *TriggerNotifySpec,
+) (*store.TriggerNotifyPolicy, bool) {
+	if spec == nil {
+		return nil, true
+	}
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return nil, false
+	}
+
+	var normalizedOutcomes []string
+	if len(spec.OnOutcomes) == 0 {
+		normalizedOutcomes = []string{
+			store.TriggerFireStatusFailed,
+			store.TriggerFireStatusRefused,
+			store.TriggerFireStatusExpired,
+		}
+	} else {
+		seen := make(map[string]bool, len(spec.OnOutcomes))
+		for _, raw := range spec.OnOutcomes {
+			v := strings.TrimSpace(raw)
+			switch v {
+			case store.TriggerFireStatusFailed,
+				store.TriggerFireStatusRefused,
+				store.TriggerFireStatusExpired,
+				store.TriggerFireStatusSkipped:
+				if !seen[v] {
+					seen[v] = true
+					normalizedOutcomes = append(normalizedOutcomes, v)
+				}
+			default:
+				ValidationError(w, fmt.Sprintf("invalid notify.onOutcomes value %q (supported: failed, refused, expired, skipped)", v), map[string]any{
+					"field": "notify.onOutcomes",
+				})
+				return nil, false
+			}
+		}
+	}
+
+	userNotice := true
+	if spec.UserNotice != nil {
+		userNotice = *spec.UserNotice
+	}
+
+	agentID := strings.TrimSpace(spec.AgentID)
+	agentName := strings.TrimSpace(spec.AgentName)
+	if agentID != "" || agentName != "" {
+		_, resolved, ok := s.resolveTriggerMessageTarget(w, r, identity, projectID, sourceKind, MessageEventPayload{
+			AgentID:   agentID,
+			AgentName: agentName,
+			Message:   "Trigger failure notification",
+			Wake:      false,
+			Plain:     false,
+		}, "github trigger notify authoring")
+		if !ok {
+			return nil, false
+		}
+		agentID = resolved.AgentID
+		agentName = resolved.AgentName
+	}
+
+	return &store.TriggerNotifyPolicy{
+		OnOutcomes: normalizedOutcomes,
+		UserNotice: &userNotice,
+		AgentID:    agentID,
+		AgentName:  agentName,
+	}, true
 }
 
 // authorizeTriggerDispatchAgentAuthoring validates a Stage 2 dispatch_agent

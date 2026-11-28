@@ -468,6 +468,20 @@ func (_c *TriggerCreate) SetNillableMaxConcurrentDispatches(v *int) *TriggerCrea
 	return _c
 }
 
+// SetNotify sets the "notify" field.
+func (_c *TriggerCreate) SetNotify(v string) *TriggerCreate {
+	_c.mutation.SetNotify(v)
+	return _c
+}
+
+// SetNillableNotify sets the "notify" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableNotify(v *string) *TriggerCreate {
+	if v != nil {
+		_c.SetNotify(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *TriggerCreate) SetStatus(v string) *TriggerCreate {
 	_c.mutation.SetStatus(v)
@@ -1017,6 +1031,10 @@ func (_c *TriggerCreate) createSpec() (*Trigger, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.MaxConcurrentDispatches(); ok {
 		_spec.SetField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
 		_node.MaxConcurrentDispatches = value
+	}
+	if value, ok := _c.mutation.Notify(); ok {
+		_spec.SetField(trigger.FieldNotify, field.TypeString, value)
+		_node.Notify = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1593,6 +1611,24 @@ func (u *TriggerUpsert) UpdateMaxConcurrentDispatches() *TriggerUpsert {
 // AddMaxConcurrentDispatches adds v to the "max_concurrent_dispatches" field.
 func (u *TriggerUpsert) AddMaxConcurrentDispatches(v int) *TriggerUpsert {
 	u.Add(trigger.FieldMaxConcurrentDispatches, v)
+	return u
+}
+
+// SetNotify sets the "notify" field.
+func (u *TriggerUpsert) SetNotify(v string) *TriggerUpsert {
+	u.Set(trigger.FieldNotify, v)
+	return u
+}
+
+// UpdateNotify sets the "notify" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateNotify() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldNotify)
+	return u
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (u *TriggerUpsert) ClearNotify() *TriggerUpsert {
+	u.SetNull(trigger.FieldNotify)
 	return u
 }
 
@@ -2367,6 +2403,27 @@ func (u *TriggerUpsertOne) AddMaxConcurrentDispatches(v int) *TriggerUpsertOne {
 func (u *TriggerUpsertOne) UpdateMaxConcurrentDispatches() *TriggerUpsertOne {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateMaxConcurrentDispatches()
+	})
+}
+
+// SetNotify sets the "notify" field.
+func (u *TriggerUpsertOne) SetNotify(v string) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetNotify(v)
+	})
+}
+
+// UpdateNotify sets the "notify" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateNotify() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateNotify()
+	})
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (u *TriggerUpsertOne) ClearNotify() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.ClearNotify()
 	})
 }
 
@@ -3333,6 +3390,27 @@ func (u *TriggerUpsertBulk) AddMaxConcurrentDispatches(v int) *TriggerUpsertBulk
 func (u *TriggerUpsertBulk) UpdateMaxConcurrentDispatches() *TriggerUpsertBulk {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateMaxConcurrentDispatches()
+	})
+}
+
+// SetNotify sets the "notify" field.
+func (u *TriggerUpsertBulk) SetNotify(v string) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetNotify(v)
+	})
+}
+
+// UpdateNotify sets the "notify" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateNotify() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateNotify()
+	})
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (u *TriggerUpsertBulk) ClearNotify() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.ClearNotify()
 	})
 }
 

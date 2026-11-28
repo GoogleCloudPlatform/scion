@@ -78,6 +78,20 @@ const (
 	TriggerActionDispatchAgent = "dispatch_agent"
 	TriggerActionExec          = "exec"
 	TriggerActionGitHubComment = "github.comment"
+	// TriggerActionNotify marks a hub-authored failure-notification fire row
+	// recorded in trigger_fires (Stage 2 §10). Notify rows never re-notify and
+	// are excluded from per-trigger fire-rate limits.
+	TriggerActionNotify = "notify"
+
+	// TriggerFireActionIndexNotify is the reserved action_index stored on
+	// action_type = "notify" trigger_fires rows for the agent-message sink.
+	// TriggerFireActionIndexNotifyUser is the reserved action_index stored on
+	// action_type = "notify" trigger_fires rows for the user-notice sink.
+	// Real actions always use non-negative indices (0..MaxTriggerActions-1), so
+	// negative indices can never collide with real actions on the unique
+	// (event_id, trigger_id, action_index) key.
+	TriggerFireActionIndexNotify     = -1
+	TriggerFireActionIndexNotifyUser = -2
 
 	TriggerSubjectModeNew   = "new"
 	TriggerSubjectModeSkip  = "skip"
@@ -262,38 +276,53 @@ type TriggerAction struct {
 	Payload string `json:"payload"`
 }
 
+// TriggerNotifyPolicy configures failure notifications on a trigger definition
+// (Stage 2 §10, §12). Stored as JSON text in triggers.notify.
+type TriggerNotifyPolicy struct {
+	OnOutcomes []string `json:"onOutcomes,omitempty"`
+	UserNotice *bool    `json:"userNotice,omitempty"`
+	AgentID    string   `json:"agentId,omitempty"`
+	AgentName  string   `json:"agentName,omitempty"`
+}
+
+// IsEmpty reports whether all notify policy fields are unset.
+func (p *TriggerNotifyPolicy) IsEmpty() bool {
+	return p == nil || (len(p.OnOutcomes) == 0 && p.UserNotice == nil && p.AgentID == "" && p.AgentName == "")
+}
+
 // Trigger represents a project-scoped event trigger definition (§4.2).
 type Trigger struct {
-	ID                      string             `json:"id"`
-	ProjectID               string             `json:"projectId"`
-	Name                    string             `json:"name"`
-	Description             string             `json:"description,omitempty"`
-	SourceKind              string             `json:"sourceKind"`
-	SourceID                string             `json:"sourceId"`
-	MatchTypes              []string           `json:"matchTypes"`
-	MatchDialect            string             `json:"matchDialect,omitempty"`
-	MatchRule               string             `json:"matchRule,omitempty"`
-	MatchRules              []TriggerMatchRule `json:"matchRules"`
-	MatchForm               string             `json:"matchForm,omitempty"`
-	ActionType              string             `json:"actionType"`
-	ActionPayload           string             `json:"actionPayload"`
-	Actions                 []TriggerAction    `json:"actions"`
-	SubjectDialect          string             `json:"subjectDialect"`
-	SubjectRule             string             `json:"subjectRule,omitempty"`
-	SubjectMode             string             `json:"subjectMode"`
-	CoalesceWindowSeconds   int                `json:"coalesceWindowSeconds,omitempty"`
-	MaxFiresPerMinute       int                `json:"maxFiresPerMinute"`
-	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches"`
-	Status                  string             `json:"status"`
-	StatusReason            string             `json:"statusReason,omitempty"`
-	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
-	LastFireError           string             `json:"lastFireError,omitempty"`
-	FireCount               int                `json:"fireCount"`
-	ErrorCount              int                `json:"errorCount"`
-	CreatedBy               string             `json:"createdBy,omitempty"`
-	CreatedAt               time.Time          `json:"createdAt"`
-	UpdatedAt               time.Time          `json:"updatedAt"`
+	ID                      string               `json:"id"`
+	ProjectID               string               `json:"projectId"`
+	Name                    string               `json:"name"`
+	Description             string               `json:"description,omitempty"`
+	SourceKind              string               `json:"sourceKind"`
+	SourceID                string               `json:"sourceId"`
+	MatchTypes              []string             `json:"matchTypes"`
+	MatchDialect            string               `json:"matchDialect,omitempty"`
+	MatchRule               string               `json:"matchRule,omitempty"`
+	MatchRules              []TriggerMatchRule   `json:"matchRules"`
+	MatchForm               string               `json:"matchForm,omitempty"`
+	ActionType              string               `json:"actionType"`
+	ActionPayload           string               `json:"actionPayload"`
+	Actions                 []TriggerAction      `json:"actions"`
+	SubjectDialect          string               `json:"subjectDialect"`
+	SubjectRule             string               `json:"subjectRule,omitempty"`
+	SubjectMode             string               `json:"subjectMode"`
+	CoalesceWindowSeconds   int                  `json:"coalesceWindowSeconds,omitempty"`
+	MaxFiresPerMinute       int                  `json:"maxFiresPerMinute"`
+	MaxConcurrentDispatches int                  `json:"maxConcurrentDispatches"`
+	Notify                  *TriggerNotifyPolicy `json:"notify,omitempty"`
+	Status                  string               `json:"status"`
+	StatusReason            string               `json:"statusReason,omitempty"`
+	LastFireAt              *time.Time           `json:"lastFireAt,omitempty"`
+	LastFireStatus          string               `json:"lastFireStatus,omitempty"`
+	LastFireError           string               `json:"lastFireError,omitempty"`
+	FireCount               int                  `json:"fireCount"`
+	ErrorCount              int                  `json:"errorCount"`
+	CreatedBy               string               `json:"createdBy,omitempty"`
+	CreatedAt               time.Time            `json:"createdAt"`
+	UpdatedAt               time.Time            `json:"updatedAt"`
 
 	InitiatorAttribution `json:"-"`
 	AuthorityCeiling     EffectCeiling     `json:"-"`
@@ -345,6 +374,7 @@ type TriggerFieldMask struct {
 	CoalesceWindowSeconds   bool
 	MaxFiresPerMinute       bool
 	MaxConcurrentDispatches bool
+	Notify                  bool
 	Status                  bool
 }
 

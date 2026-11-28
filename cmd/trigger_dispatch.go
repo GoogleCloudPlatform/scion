@@ -561,16 +561,19 @@ var (
 	triggerUpdateMaxConcurrent     int
 	triggerUpdateRevision          int
 
-	triggerUpdateAction    string
-	triggerUpdateAgent     string
-	triggerUpdateMessage   string
-	triggerUpdateInterrupt bool
-	triggerUpdateWake      bool
-	triggerUpdatePlain     bool
-	triggerUpdateOffline   string
-	triggerUpdateQueueTTL  string
-	triggerUpdateDispatch  dispatchAgentFlagValues
-	updateActionCollector  triggerActionGroupCollector
+	triggerUpdateAction      string
+	triggerUpdateAgent       string
+	triggerUpdateMessage     string
+	triggerUpdateInterrupt   bool
+	triggerUpdateWake        bool
+	triggerUpdatePlain       bool
+	triggerUpdateOffline     string
+	triggerUpdateQueueTTL    string
+	triggerUpdateDispatch    dispatchAgentFlagValues
+	updateActionCollector    triggerActionGroupCollector
+	triggerUpdateNotifyUser  bool
+	triggerUpdateNotifyAgent string
+	triggerUpdateNotifyOn    []string
 )
 
 var triggerUpdateCmd = &cobra.Command{
@@ -634,6 +637,34 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		}
 		v := triggerUpdateMaxConcurrent
 		req.MaxConcurrentDispatches = &v
+		anyChange = true
+	}
+	if flags.Changed("notify-user") || flags.Changed("notify-agent") || flags.Changed("notify-on") {
+		patch := &hubclient.TriggerNotifyPatchSpec{}
+		if flags.Changed("notify-user") {
+			v := triggerUpdateNotifyUser
+			patch.UserNotice = &v
+		}
+		if flags.Changed("notify-agent") {
+			ref := strings.TrimSpace(triggerUpdateNotifyAgent)
+			empty := ""
+			if ref == "" {
+				patch.AgentID = &empty
+				patch.AgentName = &empty
+			} else if uuid.Validate(ref) == nil {
+				patch.AgentID = &ref
+			} else {
+				patch.AgentName = &ref
+			}
+		}
+		if flags.Changed("notify-on") {
+			outcomes, nErr := parseTriggerNotifyOutcomes(triggerUpdateNotifyOn)
+			if nErr != nil {
+				return nErr
+			}
+			patch.OnOutcomes = &outcomes
+		}
+		req.Notify = patch
 		anyChange = true
 	}
 	if flags.Changed("webhook") || flags.Changed("github") {
@@ -1033,6 +1064,9 @@ func init() {
 	f.StringVar(&triggerUpdateCoalesceWindow, "coalesce", "", "Updated coalescing window duration (0 or 0s clears, max 10m, e.g. 30s)")
 	f.IntVar(&triggerUpdateMaxFiresPerMinute, "max-per-minute", 0, "Updated maximum fires per minute (0 = unlimited; max 600)")
 	f.IntVar(&triggerUpdateMaxConcurrent, "max-concurrent", 0, "Updated maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
+	f.BoolVar(&triggerUpdateNotifyUser, "notify-user", true, "Notify the trigger creator on failure (use --notify-user=false to disable)")
+	f.StringVar(&triggerUpdateNotifyAgent, "notify-agent", "", "Updated agent ID or name to message on failure (empty clears)")
+	f.StringSliceVar(&triggerUpdateNotifyOn, "notify-on", nil, "Updated comma-separated outcomes to notify on (failed,refused,expired[,skipped])")
 	f.IntVar(&triggerUpdateRevision, "revision", 0, "Expected authorization revision for optimistic concurrency")
 
 	bindGroupedTriggerActionFlags(

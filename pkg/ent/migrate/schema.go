@@ -4457,6 +4457,7 @@ var (
 		{Name: "coalesce_window_seconds", Type: field.TypeInt, Default: 0},
 		{Name: "max_fires_per_minute", Type: field.TypeInt, Default: 0},
 		{Name: "max_concurrent_dispatches", Type: field.TypeInt, Default: 0},
+		{Name: "notify", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "last_fire_at", Type: field.TypeTime, Nullable: true},
@@ -4492,7 +4493,7 @@ var (
 			{
 				Name:    "trigger_project_id_source_kind_source_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[35]},
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[36]},
 			},
 			{
 				Name:    "trigger_initiator_principal_id",
