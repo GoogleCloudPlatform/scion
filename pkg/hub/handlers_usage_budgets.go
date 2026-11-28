@@ -176,7 +176,7 @@ func (s *Server) handleProjectUsageBudgets(w http.ResponseWriter, r *http.Reques
 		},
 	}
 
-	entries, err := s.buildBudgetEntries(ctx, newTokenLimitEvalCache(s.quotaService), specs, asOf, true)
+	entries, err := s.buildBudgetEntries(ctx, newTokenLimitEvalCache(s.quotaService), nil, specs, asOf, true)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -303,39 +303,66 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 	dayStart, dayEnd := utcDayWindow(asOf)
 	monthStart, monthEnd := utcMonthWindow(asOf)
 
-	userSpecs := []budgetEvalSpec{
-		{
-			limitName:      store.LimitLLMTokensPerUserDay,
-			scopeKind:      store.UsageScopeKindUser,
-			scopeID:        targetUserID,
-			counterScopeID: targetUserID,
-			bindingSubject: targetUserID,
-			bindingScope:   store.QuotaScopeSystem,
-			bindingScopeID: "",
-			windowStartUTC: dayStart,
-			windowEndUTC:   dayEnd,
-		},
-		{
-			limitName:      store.LimitLLMTokensPerUserMonth,
-			scopeKind:      store.UsageScopeKindUser,
-			scopeID:        targetUserID,
-			counterScopeID: targetUserID,
-			bindingSubject: targetUserID,
-			bindingScope:   store.QuotaScopeSystem,
-			bindingScopeID: "",
-			windowStartUTC: monthStart,
-			windowEndUTC:   monthEnd,
-		},
-	}
-
 	evalCache := newTokenLimitEvalCache(s.quotaService)
-	entries, err := s.buildBudgetEntries(ctx, evalCache, userSpecs, asOf, true)
+
+	// Load all open state rows for this user (both user and user_project scopes)
+	// in a single query so we avoid per-project point lookups.
+	openRows, err := s.store.ListOpenUsageBudgetStatesForUser(ctx, targetUserID, asOf)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	stateByKey := make(map[store.UsageBudgetStateKey]*store.UsageBudgetState, len(openRows))
+	for _, row := range openRows {
+		k := store.UsageBudgetStateKey{
+			LimitDefinitionID: row.LimitDefinitionID,
+			ScopeKind:         row.ScopeKind,
+			ScopeID:           row.ScopeID,
+			ProjectScopeID:    row.ProjectScopeID,
+			WindowStartUTC:    row.WindowStartUTC,
+		}
+		stateByKey[k] = row
+	}
 
-	visibleProjects, err := s.listVisibleProjectIDsForCaller(ctx, caller, boundaryProjectID)
+	entries := make([]UsageBudgetEntry, 0, 4)
+
+	// Project-boundary UATs are clamped strictly to their boundary project
+	// (matching P2 D7): omit hub-wide user-scope aggregate rows and return only
+	// that boundary project's user_project rows.
+	if boundaryProjectID == "" {
+		userSpecs := []budgetEvalSpec{
+			{
+				limitName:      store.LimitLLMTokensPerUserDay,
+				scopeKind:      store.UsageScopeKindUser,
+				scopeID:        targetUserID,
+				counterScopeID: targetUserID,
+				bindingSubject: targetUserID,
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			},
+			{
+				limitName:      store.LimitLLMTokensPerUserMonth,
+				scopeKind:      store.UsageScopeKindUser,
+				scopeID:        targetUserID,
+				counterScopeID: targetUserID,
+				bindingSubject: targetUserID,
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			},
+		}
+		userEntries, err := s.buildBudgetEntries(ctx, evalCache, stateByKey, userSpecs, asOf, true)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		entries = append(entries, userEntries...)
+	}
+
+	visibleProjects, err := s.listCandidateUserProjectsForCaller(ctx, caller, targetUserID, boundaryProjectID, evalCache, openRows)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -373,9 +400,8 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 			)
 		}
 		// Only include user_project rows where a finite cap applies OR an active
-		// state row already exists (avoiding 2*N empty unlimited rows across all
-		// projects on a large Hub).
-		upEntries, err := s.buildBudgetEntries(ctx, evalCache, upSpecs, asOf, false)
+		// state row already exists (avoiding empty unlimited rows).
+		upEntries, err := s.buildBudgetEntries(ctx, evalCache, stateByKey, upSpecs, asOf, false)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -390,7 +416,22 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 	})
 }
 
-func (s *Server) listVisibleProjectIDsForCaller(ctx context.Context, caller UserIdentity, boundaryProjectID string) ([]string, error) {
+// listCandidateUserProjectsForCaller returns the sorted project IDs for which
+// targetUserID may have an active user_project budget row or finite cap,
+// filtered to projects the caller is authorized to see.
+//
+// Driven from targetUserID's open user_project state rows plus project-scoped
+// user_project bindings (avoiding ListProjects enumeration and per-project
+// state lookups). Falls back to paginated ListProjects only when a hub-wide
+// user_project default cap (> 0) applies to all projects.
+func (s *Server) listCandidateUserProjectsForCaller(
+	ctx context.Context,
+	caller UserIdentity,
+	targetUserID string,
+	boundaryProjectID string,
+	evalCache *tokenLimitEvalCache,
+	openRows []*store.UsageBudgetState,
+) ([]string, error) {
 	if boundaryProjectID != "" {
 		// Verify the caller can actually read the boundary project.
 		proj, err := s.store.GetProject(ctx, boundaryProjectID)
@@ -422,26 +463,119 @@ func (s *Server) listVisibleProjectIDsForCaller(ctx context.Context, caller User
 		return nil, nil
 	}
 
-	isTemplate := false
-	filter := store.ProjectFilter{
-		IsTemplate: &isTemplate,
-	}
-	if !scopeResult.Scopes.IsAll() {
-		filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
-	}
-	if len(scopeResult.ExcludedProjectIDs) > 0 {
-		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
+	candidates := make(map[string]struct{})
+	for _, row := range openRows {
+		if row.ScopeKind == store.UsageScopeKindUserProject && row.ProjectScopeID != "" {
+			candidates[row.ProjectScopeID] = struct{}{}
+		}
 	}
 
-	res, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: 500})
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(res.Items))
-	for _, p := range res.Items {
-		if p.ID != "" {
-			ids = append(ids, p.ID)
+	// Collect project-scoped bindings for llm_tokens_per_user_project_{day,month}
+	// and detect whether a hub-wide default (>0) applies across all projects.
+	upDefIDs := make(map[string]bool, 2)
+	hasHubWideUPDefault := false
+	for _, limitName := range []string{store.LimitLLMTokensPerUserProjectDay, store.LimitLLMTokensPerUserProjectMonth} {
+		def, defErr := evalCache.lookupLimitDef(ctx, limitName)
+		if defErr != nil {
+			return nil, defErr
 		}
+		if def == nil {
+			continue
+		}
+		upDefIDs[def.ID] = true
+		if def.DefaultValue > 0 {
+			hasHubWideUPDefault = true
+		}
+	}
+
+	if len(upDefIDs) > 0 {
+		subjBindings, bErr := evalCache.loadSubjectBindings(ctx, targetUserID)
+		if bErr != nil {
+			return nil, bErr
+		}
+		for _, b := range subjBindings {
+			if !upDefIDs[b.LimitDefinitionID] || b.Value <= 0 {
+				continue
+			}
+			if b.ScopeType == store.QuotaScopeProject && b.ScopeID != "" {
+				candidates[b.ScopeID] = struct{}{}
+			} else if b.ScopeType == store.QuotaScopeSystem {
+				hasHubWideUPDefault = true
+			}
+		}
+		for _, b := range evalCache.loadSystemBindings(ctx) {
+			if !upDefIDs[b.LimitDefinitionID] || b.Value <= 0 {
+				continue
+			}
+			if b.ScopeType == store.QuotaScopeProject && b.ScopeID != "" {
+				candidates[b.ScopeID] = struct{}{}
+			} else if b.ScopeType == store.QuotaScopeSystem {
+				hasHubWideUPDefault = true
+			}
+		}
+	}
+
+	// If a hub-wide user_project cap > 0 exists, paginate through all visible
+	// non-template projects so every applicable project is included (no silent
+	// 500-project truncation).
+	if hasHubWideUPDefault {
+		isTemplate := false
+		filter := store.ProjectFilter{
+			IsTemplate: &isTemplate,
+		}
+		if !scopeResult.Scopes.IsAll() {
+			filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
+		}
+		if len(scopeResult.ExcludedProjectIDs) > 0 {
+			filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
+		}
+		cursor := ""
+		for {
+			res, listErr := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: 500, Cursor: cursor})
+			if listErr != nil {
+				return nil, listErr
+			}
+			for _, p := range res.Items {
+				if p.ID != "" {
+					candidates[p.ID] = struct{}{}
+				}
+			}
+			if res.NextCursor == "" {
+				break
+			}
+			cursor = res.NextCursor
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	excluded := make(map[string]struct{}, len(scopeResult.ExcludedProjectIDs))
+	for _, id := range scopeResult.ExcludedProjectIDs {
+		excluded[id] = struct{}{}
+	}
+
+	var allowed map[string]struct{}
+	if !scopeResult.Scopes.IsAll() {
+		allowedIDs := scopeResult.Scopes.ProjectIDs()
+		allowed = make(map[string]struct{}, len(allowedIDs))
+		for _, id := range allowedIDs {
+			allowed[id] = struct{}{}
+		}
+	}
+
+	ids := make([]string, 0, len(candidates))
+	for pid := range candidates {
+		if _, isExcl := excluded[pid]; isExcl {
+			continue
+		}
+		if allowed != nil {
+			if _, isAllowed := allowed[pid]; !isAllowed {
+				continue
+			}
+		}
+		ids = append(ids, pid)
 	}
 	sort.Strings(ids)
 	return ids, nil
@@ -450,6 +584,7 @@ func (s *Server) listVisibleProjectIDsForCaller(ctx context.Context, caller User
 func (s *Server) buildBudgetEntries(
 	ctx context.Context,
 	evalCache *tokenLimitEvalCache,
+	preloadedStates map[store.UsageBudgetStateKey]*store.UsageBudgetState,
 	specs []budgetEvalSpec,
 	asOf time.Time,
 	includeUnlimitedWithoutRow bool,
@@ -482,9 +617,14 @@ func (s *Server) buildBudgetEntries(
 			ProjectScopeID:    spec.projectScopeID,
 			WindowStartUTC:    spec.windowStartUTC,
 		}
-		row, err := s.store.GetUsageBudgetState(ctx, key)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, err
+		var row *store.UsageBudgetState
+		if preloadedStates != nil {
+			row = preloadedStates[key]
+		} else {
+			row, err = s.store.GetUsageBudgetState(ctx, key)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, err
+			}
 		}
 
 		if capVal <= 0 && row == nil && !includeUnlimitedWithoutRow {
@@ -524,6 +664,12 @@ func (s *Server) buildBudgetEntries(
 			entry.ThresholdsNotified = row.ThresholdsNotified
 			entry.OverrideUntil = row.OverrideUntil
 			entry.StateVersion = row.StateVersion
+			// If an override has already expired (override_until <= as_of),
+			// surface max(stored, computed) so UI/CLI do not display a stale ok
+			// before the next ingest or admission evaluation persists the rise.
+			if row.OverrideUntil != nil && !row.OverrideUntil.After(asOf) && capVal > 0 {
+				entry.State = maxBudgetState(row.State, computeBudgetState(consumed, capVal))
+			}
 		} else {
 			if capVal <= 0 {
 				entry.State = store.UsageBudgetStateOK

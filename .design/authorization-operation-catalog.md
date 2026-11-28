@@ -137,7 +137,7 @@
 - [project.metrics.read](#projectmetricsread) — Read a project's metrics summary, session metrics summary and metrics dashboard
 - [project.usage.read](#projectusageread) — Read a project's Track 1 token usage summary and aggregate meter health (behind tokenomics.usage_ledger)
 - [project.usage.budgets.read](#projectusagebudgetsread) — Read a project's raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets)
-- [project.usage.budgets.override](#projectusagebudgetsoverride) — Set or clear an admin override on a project-scoped raw-token budget state row (behind tokenomics.usage_ledger and tokenomics.token_budgets)
+- [project.usage.budgets.override](#projectusagebudgetsoverride) — Set or clear an admin override on a raw-token budget state row belonging to this project (either project scope or user_project scope for this project; behind tokenomics.usage_ledger and tokenomics.token_budgets)
 - [project.prestarthooks.read](#projectprestarthooksread) — List or read a project's pre-start hooks
 - [project.prestarthooks.write](#projectprestarthookswrite) — Create, update, delete or activate a project pre-start hook
 - [project.settings.read](#projectsettingsread) — Read a project's settings and its resolved settings
@@ -5738,7 +5738,7 @@
 
 **Domain:** project
 
-**Description:** Set or clear an admin override on a project-scoped raw-token budget state row (behind tokenomics.usage_ledger and tokenomics.token_budgets)
+**Description:** Set or clear an admin override on a raw-token budget state row belonging to this project (either project scope or user_project scope for this project; behind tokenomics.usage_ledger and tokenomics.token_budgets)
 
 ### Entry Points
 

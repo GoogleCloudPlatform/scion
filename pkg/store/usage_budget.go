@@ -197,9 +197,18 @@ type UsageBudgetStore interface {
 
 	// ListOpenUsageBudgetStatesByLimit returns up to limit open-window
 	// usage_budget_state rows (window_end_utc > activeAt) for limitDefinitionID,
-	// ordered by window_start_utc ASC, id ASC. When limit <= 0, no explicit cap
-	// is applied.
-	ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, limit int) ([]*UsageBudgetState, error)
+	// keyset-paginated by id > afterID (when afterID is non-empty) and ordered
+	// by id ASC. When projectID is non-empty, only rows belonging to that
+	// project are returned ((scope_kind = "project" AND scope_id = projectID)
+	// OR (scope_kind = "user_project" AND project_scope_id = projectID)).
+	// When limit <= 0, no explicit cap is applied.
+	ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, projectID, afterID string, limit int) ([]*UsageBudgetState, error)
+
+	// ListOpenUsageBudgetStatesForUser returns all open-window
+	// usage_budget_state rows (window_end_utc > activeAt) for userID across
+	// scope_kind IN ("user", "user_project"), ordered by window_start_utc ASC,
+	// id ASC.
+	ListOpenUsageBudgetStatesForUser(ctx context.Context, userID string, activeAt time.Time) ([]*UsageBudgetState, error)
 
 	// CreateUsageBudgetState inserts a new usage_budget_state row with
 	// state_version = 1 (or st.StateVersion if >= 1). Returns ErrAlreadyExists

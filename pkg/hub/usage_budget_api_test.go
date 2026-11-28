@@ -350,7 +350,8 @@ func TestMeUsageBudgetsRead_SelfTokenReadsOwn(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Project-boundary UAT scoped to projA restricts user_project rows to projA.
+	// Project-boundary UAT scoped to projA restricts response strictly to projA's
+	// user_project rows (no hub-wide user-scope aggregate rows, matching P2 D7).
 	projUAT := mintHubConfigToken(t, srv, member.ID, projectBoundary(projA.ID), "project:read")
 	recProj := doUATUsageGET(t, srv, "/api/v1/me/usage/budgets", projUAT)
 	require.Equal(t, http.StatusOK, recProj.Code, recProj.Body.String())
@@ -358,11 +359,26 @@ func TestMeUsageBudgetsRead_SelfTokenReadsOwn(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &resp))
 	var seenProjects []string
 	for _, b := range resp.Budgets {
-		if b.ScopeKind == store.UsageScopeKindUserProject {
-			seenProjects = append(seenProjects, b.ProjectScopeID)
-		}
+		assert.Equal(t, store.UsageScopeKindUserProject, b.ScopeKind,
+			"project-boundary UAT must not receive hub-wide user-scope rows")
+		seenProjects = append(seenProjects, b.ProjectScopeID)
 	}
 	assert.Equal(t, []string{projA.ID}, seenProjects)
+
+	// Hub-boundary UAT (without project:list) reads the user's own 2 user-scope rows.
+	hubUAT := mintHubConfigToken(t, srv, member.ID, hubBoundary(), "user:read")
+	recHub := doUATUsageGET(t, srv, "/api/v1/me/usage/budgets", hubUAT)
+	require.Equal(t, http.StatusOK, recHub.Code, recHub.Body.String())
+	var hubResp UsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(recHub.Body.Bytes(), &hubResp))
+	assert.Len(t, hubResp.Budgets, 2, "hub-boundary UAT without project:list sees 2 user-scope rows")
+
+	// Session JWT sees both user-scope rows and both visible projects' user_project rows.
+	recSess := doUserJSONRequest(t, srv, http.MethodGet, "/api/v1/me/usage/budgets", member, nil, nil)
+	require.Equal(t, http.StatusOK, recSess.Code, recSess.Body.String())
+	var sessResp UsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(recSess.Body.Bytes(), &sessResp))
+	assert.Len(t, sessResp.Budgets, 4, "session JWT sees 2 user + 2 user_project rows")
 }
 
 func TestUserUsageBudgetsRead_SelfTokenReadsOwn(t *testing.T) {
@@ -405,9 +421,9 @@ func TestUserUsageBudgetsRead_SelfTokenReadsOwn(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recSelf.Body.Bytes(), &resp))
 	var seenProjects []string
 	for _, b := range resp.Budgets {
-		if b.ScopeKind == store.UsageScopeKindUserProject {
-			seenProjects = append(seenProjects, b.ProjectScopeID)
-		}
+		assert.Equal(t, store.UsageScopeKindUserProject, b.ScopeKind,
+			"project-boundary UAT must not receive hub-wide user-scope rows")
+		seenProjects = append(seenProjects, b.ProjectScopeID)
 	}
 	assert.Equal(t, []string{projA.ID}, seenProjects)
 
@@ -795,6 +811,15 @@ func TestAdminEntitlements_IfMatchCAS(t *testing.T) {
 	require.NotEmpty(t, etag2)
 	assert.NotEqual(t, etag1, etag2)
 
+	// PUT with weak ETag W/"..." is rejected with 400 (RFC 9110 strong comparison).
+	recWeak := doUserJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+created.ID, admin, map[string]any{
+		"subjectType": store.EntitlementSubjectSystemDefault,
+		"scopeType":   store.QuotaScopeProject,
+		"scopeId":     "proj-cas-http",
+		"value":       25000,
+	}, map[string]string{"If-Match": "W/" + etag2})
+	assert.Equal(t, http.StatusBadRequest, recWeak.Code, recWeak.Body.String())
+
 	// PUT with stale If-Match returns 412 Precondition Failed.
 	recStale := doUserJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+created.ID, admin, map[string]any{
 		"subjectType": store.EntitlementSubjectSystemDefault,
@@ -817,4 +842,335 @@ func TestAdminEntitlements_IfMatchCAS(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recUncond.Body.Bytes(), &finalBinding))
 	assert.Equal(t, int64(40000), finalBinding.Value)
 	assert.Nil(t, finalBinding.TokenAction)
+}
+
+// budgetInterleaveStore wraps store.Store to inject a one-shot callback right
+// before GetUsageBudgetState, reproducing the R1 stale-cap race interleaving.
+type budgetInterleaveStore struct {
+	store.Store
+	mu       sync.Mutex
+	fired    bool
+	onGetRow func()
+}
+
+func (b *budgetInterleaveStore) GetUsageBudgetState(ctx context.Context, key store.UsageBudgetStateKey) (*store.UsageBudgetState, error) {
+	b.mu.Lock()
+	cb := b.onGetRow
+	shouldFire := cb != nil && !b.fired
+	if shouldFire {
+		b.fired = true
+	}
+	b.mu.Unlock()
+	if shouldFire {
+		cb()
+	}
+	return b.Store.GetUsageBudgetState(ctx, key)
+}
+
+func TestUsageBudgets_R1_StaleCapInterleavingAndBitClearing(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-r1")
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart, dayEnd := utcDayWindow(now)
+
+	proj := &store.Project{ID: tid("r1-proj"), Name: "r1-proj", Slug: "r1-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{ID: tid("r1-ag"), Slug: "r1-ag", Name: "r1-ag", ProjectID: proj.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-r1", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-r1", Generation: 1, HubID: "hub-bud-r1", ProjectID: proj.ID, AgentID: ag.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+
+	defProjDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	binding, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defProjDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	// Consume 1200 tokens -> exhausted under cap 1000.
+	srv.TokenBudgetEvaluator().nowFn = func() time.Time { return now }
+	ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-r1", "ev-r1-1", "run-r1", proj.ID, ag.ID, nil, now, 1200)
+
+	// (a) Interleaving: warm evalCache with old cap=1000, then right before
+	// GetUsageBudgetState runs, raise binding to 5000 and run re-evaluation
+	// (lowering row to ok with cap_at_eval=5000). evaluateSpec must NOT re-raise
+	// the row against the stale 1000 cap.
+	wrapped := &budgetInterleaveStore{Store: s}
+	wrappedQS := &QuotaService{store: wrapped}
+	localEval := NewTokenBudgetEvaluator(wrapped, wrappedQS, nil, func() bool { return true })
+	localEval.nowFn = func() time.Time { return now }
+
+	var hookFired bool
+	localEval.SetThresholdHook(func(_ context.Context, _ BudgetThresholdCrossing) {
+		hookFired = true
+	})
+
+	// Pre-warm evalCache with old cap=1000.
+	warmCache := newTokenLimitEvalCache(wrappedQS)
+	oldCap, _, err := warmCache.resolveForDef(ctx, defProjDay, "", store.QuotaScopeProject, proj.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), oldCap)
+
+	wrapped.onGetRow = func() {
+		binding.Value = 5000
+		updated, uErr := s.UpdateEntitlementBinding(ctx, binding)
+		require.NoError(t, uErr)
+		binding = updated
+		srv.TokenBudgetEvaluator().ReevaluateAfterEntitlementChange(ctx, defProjDay, updated)
+	}
+
+	spec := budgetEvalSpec{
+		limitName:      store.LimitLLMTokensPerProjectDay,
+		scopeKind:      store.UsageScopeKindProject,
+		scopeID:        proj.ID,
+		counterScopeID: proj.ID,
+		bindingScope:   store.QuotaScopeProject,
+		bindingScopeID: proj.ID,
+		windowStartUTC: dayStart,
+		windowEndUTC:   dayEnd,
+	}
+	res, _, err := localEval.evaluateSpec(ctx, spec, warmCache)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, store.UsageBudgetStateOK, res.State, "stale cap must not re-raise freshly lowered row")
+	assert.Equal(t, int64(5000), res.CapAtEval)
+	assert.False(t, hookFired, "no threshold hook should fire")
+
+	// (b) Variant: binding raised from 1000 -> 5000, an ingest lands BEFORE
+	// re-evaluation (writing CapAtEval=5000 without lowering state), and THEN
+	// re-evaluation runs. Re-evaluation must lower state AND clear unmet
+	// thresholds_notified bits even though CapAtEval already equals 5000.
+	binding.Value = 1000
+	binding, err = s.UpdateEntitlementBinding(ctx, binding)
+	require.NoError(t, err)
+	srv.TokenBudgetEvaluator().ReevaluateAfterEntitlementChange(ctx, defProjDay, binding)
+
+	row, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	require.Equal(t, store.UsageBudgetStateExhausted, row.State)
+	row.ThresholdsNotified = store.UsageBudgetThresholdBit50 | store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100
+	_, err = s.CompareAndSwapUsageBudgetState(ctx, row.StateVersion, row)
+	require.NoError(t, err)
+
+	// Commit cap=5000 in store without calling re-eval yet.
+	binding.Value = 5000
+	binding, err = s.UpdateEntitlementBinding(ctx, binding)
+	require.NoError(t, err)
+
+	// Ingest runs before re-eval: updates CapAtEval to 5000 while keeping exhausted.
+	ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-r1", "ev-r1-2", "run-r1", proj.ID, ag.ID, nil, now, 10)
+	midRow, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, midRow.State)
+	assert.Equal(t, int64(5000), midRow.CapAtEval)
+
+	// Now re-eval runs: must lower to ok AND clear all unmet bits.
+	srv.TokenBudgetEvaluator().ReevaluateAfterEntitlementChange(ctx, defProjDay, binding)
+	finalRow, err := s.GetUsageBudgetStateByID(ctx, midRow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateOK, finalRow.State)
+	assert.Equal(t, int64(0), finalRow.ThresholdsNotified, "unmet threshold bits must be cleared even when CapAtEval was already updated by a racing ingest")
+}
+
+func TestUsageBudgets_R2_PaginatedReevalAndProjectFilterAndDetachedCtx(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-r2")
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart, dayEnd := utcDayWindow(now)
+	eval := srv.TokenBudgetEvaluator()
+	eval.nowFn = func() time.Time { return now }
+	eval.reevalPageSize = 4 // force multi-page keyset pagination
+
+	// 1. System-wide user_day cap raised across >1 page (11 exhausted rows, page size 4),
+	//    invoked with a pre-cancelled request context (detached ctx must complete all pages).
+	defUserDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserDay)
+	require.NoError(t, err)
+	sysBinding, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defUserDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeSystem,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	userRowIDs := make([]string, 0, 11)
+	for i := 0; i < 11; i++ {
+		uid := uuid.NewString()
+		row, cErr := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+			LimitDefinitionID:  defUserDay.ID,
+			ScopeKind:          store.UsageScopeKindUser,
+			ScopeID:            uid,
+			WindowStartUTC:     dayStart,
+			WindowEndUTC:       dayEnd,
+			State:              store.UsageBudgetStateExhausted,
+			ConsumedAtEval:     1000,
+			CapAtEval:          1000,
+			ThresholdsNotified: store.UsageBudgetThresholdBit100,
+		})
+		require.NoError(t, cErr)
+		userRowIDs = append(userRowIDs, row.ID)
+	}
+
+	sysBinding.Value = 5000
+	sysBinding, err = s.UpdateEntitlementBinding(ctx, sysBinding)
+	require.NoError(t, err)
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	eval.ReevaluateAfterEntitlementChange(canceledCtx, defUserDay, sysBinding)
+
+	for _, id := range userRowIDs {
+		got, gErr := s.GetUsageBudgetStateByID(ctx, id)
+		require.NoError(t, gErr)
+		assert.Equal(t, store.UsageBudgetStateOK, got.State, "row %s past page boundary must be lowered", id)
+		assert.Equal(t, int64(0), got.ThresholdsNotified)
+	}
+	assert.Equal(t, int64(0), eval.ReevalUnprocessed())
+
+	// 2. Project-scoped binding whose project's rows sort AFTER the first page of
+	//    other projects' rows: DB-side project filter must find and lower all of them
+	//    without touching other projects' rows.
+	defUPDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserProjectDay)
+	require.NoError(t, err)
+	otherProjID := tid("r2-other-proj")
+	targetProjID := tid("r2-target-proj")
+
+	// Seed 6 rows for other-proj with low-sorting UUIDs (00000001-...) and
+	// 3 rows for target-proj with high-sorting UUIDs (ffffffff-...).
+	otherIDs := make([]string, 0, 6)
+	for i := 1; i <= 6; i++ {
+		id := uuid.MustParse("00000001-0000-4000-8000-00000000000" + string(rune('0'+i))).String()
+		row, cErr := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+			ID:                id,
+			LimitDefinitionID: defUPDay.ID,
+			ScopeKind:         store.UsageScopeKindUserProject,
+			ScopeID:           uuid.NewString(),
+			ProjectScopeID:    otherProjID,
+			WindowStartUTC:    dayStart,
+			WindowEndUTC:      dayEnd,
+			State:             store.UsageBudgetStateExhausted,
+			ConsumedAtEval:    1000,
+			CapAtEval:         1000,
+		})
+		require.NoError(t, cErr)
+		otherIDs = append(otherIDs, row.ID)
+	}
+	targetIDs := make([]string, 0, 3)
+	for i := 1; i <= 3; i++ {
+		id := uuid.MustParse("ffffffff-0000-4000-8000-00000000000" + string(rune('0'+i))).String()
+		row, cErr := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+			ID:                id,
+			LimitDefinitionID: defUPDay.ID,
+			ScopeKind:         store.UsageScopeKindUserProject,
+			ScopeID:           uuid.NewString(),
+			ProjectScopeID:    targetProjID,
+			WindowStartUTC:    dayStart,
+			WindowEndUTC:      dayEnd,
+			State:             store.UsageBudgetStateExhausted,
+			ConsumedAtEval:    1000,
+			CapAtEval:         1000,
+		})
+		require.NoError(t, cErr)
+		targetIDs = append(targetIDs, row.ID)
+	}
+
+	projBinding, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defUPDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           targetProjID,
+		Value:             5000,
+	})
+	require.NoError(t, err)
+	eval.ReevaluateAfterEntitlementChange(ctx, defUPDay, projBinding)
+
+	for _, id := range targetIDs {
+		got, gErr := s.GetUsageBudgetStateByID(ctx, id)
+		require.NoError(t, gErr)
+		assert.Equal(t, store.UsageBudgetStateOK, got.State, "target project row %s after page 1 must be lowered", id)
+	}
+	for _, id := range otherIDs {
+		got, gErr := s.GetUsageBudgetStateByID(ctx, id)
+		require.NoError(t, gErr)
+		assert.Equal(t, store.UsageBudgetStateExhausted, got.State, "other project row %s must remain untouched", id)
+	}
+}
+
+func TestUsageBudgets_ExpiredOverrideDisplaysComputedState(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-exp")
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	admin := &store.User{ID: uuid.NewString(), Email: "exp-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+
+	proj := &store.Project{ID: tid("exp-proj"), Name: "exp-proj", Slug: "exp-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{ID: tid("exp-ag"), Slug: "exp-ag", Name: "exp-ag", ProjectID: proj.ID, OwnerID: admin.ID, CreatedBy: admin.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-exp", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-exp", Generation: 1, HubID: "hub-bud-exp", ProjectID: proj.ID, AgentID: ag.ID, BillingUserID: &admin.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+
+	defProjDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defProjDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+	ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-exp", "ev-exp-1", "run-exp", proj.ID, ag.ID, &admin.ID, dbNow, 1500)
+
+	// Persist state=ok with an already-expired override_until (in the past).
+	dayStart, _ := utcDayWindow(dbNow)
+	row, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	expired := dbNow.Add(-time.Minute)
+	row.State = store.UsageBudgetStateOK
+	row.OverrideUntil = &expired
+	_, err = s.CompareAndSwapUsageBudgetState(ctx, row.StateVersion, row)
+	require.NoError(t, err)
+
+	// Read API must surface exhausted (not stale ok) even before next ingest.
+	rec := doUserJSONRequest(t, srv, http.MethodGet, "/api/v1/projects/"+proj.ID+"/usage/budgets", admin, nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp UsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	for _, b := range resp.Budgets {
+		if b.LimitName == store.LimitLLMTokensPerProjectDay {
+			assert.Equal(t, store.UsageBudgetStateExhausted, b.State,
+				"expired override must surface computed exhausted state on read")
+		}
+	}
 }

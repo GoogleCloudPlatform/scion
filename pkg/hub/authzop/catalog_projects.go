@@ -2489,7 +2489,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.usage.budgets.override",
 		Domain:      "project",
-		Description: "Set or clear an admin override on a project-scoped raw-token budget state row (behind tokenomics.usage_ledger and tokenomics.token_budgets)",
+		Description: "Set or clear an admin override on a raw-token budget state row belonging to this project (either project scope or user_project scope for this project; behind tokenomics.usage_ledger and tokenomics.token_budgets)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/usage/budgets/{budgetId}:override", Method: "POST"},
 		},

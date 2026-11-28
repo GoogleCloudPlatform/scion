@@ -24,12 +24,39 @@ import (
 )
 
 const (
-	// maxReevalRowsPerLimit bounds system-wide/group limit-change re-evaluation
-	// to existing open-window usage_budget_state rows so a single admin write
-	// cannot scan unbounded tables. Any untouched scope self-heals on the next
-	// ingest or admission evaluation.
-	maxReevalRowsPerLimit = 1000
+	// defaultReevalPageSize is the keyset pagination page size used when
+	// re-evaluating existing open-window usage_budget_state rows after a
+	// system-wide, group, or project-default limit change.
+	defaultReevalPageSize = 500
+
+	// defaultReevalTimeout bounds background/detached limit-change re-evaluation
+	// so it survives client HTTP disconnects without running unboundedly.
+	defaultReevalTimeout = 30 * time.Second
 )
+
+// ReevalUnprocessed returns the cumulative count of open-window rows that could
+// not be processed during limit-change re-evaluation (e.g. due to timeout or
+// store errors).
+func (e *TokenBudgetEvaluator) ReevalUnprocessed() int64 {
+	if e == nil {
+		return 0
+	}
+	return e.reevalUnprocessed.Load()
+}
+
+func (e *TokenBudgetEvaluator) getReevalPageSize() int {
+	if e != nil && e.reevalPageSize > 0 {
+		return e.reevalPageSize
+	}
+	return defaultReevalPageSize
+}
+
+func (e *TokenBudgetEvaluator) getReevalTimeout() time.Duration {
+	if e != nil && e.reevalTimeout > 0 {
+		return e.reevalTimeout
+	}
+	return defaultReevalTimeout
+}
 
 var (
 	// ErrBudgetWindowClosed is returned when an override targets a closed window.
@@ -226,7 +253,10 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 
 // ReevaluateAfterEntitlementChange re-evaluates affected open-window budget
 // states after an llm_tokens EntitlementBinding is created, updated, or deleted.
-// Errors are logged and counted via evalErrors; they never fail the admin write.
+// Runs on a context detached from client HTTP cancellation with a bounded
+// timeout so a client disconnect does not abandon remaining open rows. Errors
+// are logged and counted via evalErrors / reevalUnprocessed; they never fail
+// the already-committed admin write.
 func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 	ctx context.Context,
 	def *store.LimitDefinition,
@@ -235,6 +265,9 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 	if !e.enabled() || def == nil || binding == nil || def.ResourceType != store.LimitResourceTypeLLMTokens {
 		return
 	}
+	reevalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.getReevalTimeout())
+	defer cancel()
+
 	now := e.now()
 	winStart, winEnd, ok := budgetWindowForLimit(def.Name, now)
 	if !ok {
@@ -260,7 +293,8 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(reevalCtx, evalCache, spec, def, now); err != nil {
+			e.reevalUnprocessed.Add(1)
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -279,7 +313,8 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(reevalCtx, evalCache, spec, def, now); err != nil {
+			e.reevalUnprocessed.Add(1)
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -301,59 +336,109 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(reevalCtx, evalCache, spec, def, now); err != nil {
+			e.reevalUnprocessed.Add(1)
 			e.recordReevalError(spec, err)
 		}
 		return
 	}
 
 	// System-wide, project-default-for-user_project, or group bindings:
-	// re-evaluate existing open-window state rows for this limit (bounded).
-	e.reevaluateOpenRowsForLimit(ctx, evalCache, def, binding.ScopeType, binding.ScopeID, now)
+	// keyset-paginate through all existing open-window state rows for this
+	// limit (pushing any project scope filter into the DB query).
+	projectFilter := ""
+	if binding.ScopeType == store.QuotaScopeProject && binding.ScopeID != "" {
+		projectFilter = binding.ScopeID
+	}
+	e.reevaluateOpenRowsForLimit(reevalCtx, evalCache, def, projectFilter, now)
 }
 
-// ReevaluateAfterLimitDefaultChange re-evaluates existing open-window budget
-// states for an llm_tokens LimitDefinition after its default_value changes.
-// Bounded to existing open-window rows; other scopes self-heal on next ingest
-// or admission evaluation.
+// ReevaluateAfterLimitDefaultChange re-evaluates all existing open-window
+// budget states for an llm_tokens LimitDefinition after its default_value
+// changes. Runs on a context detached from client HTTP cancellation with a
+// bounded timeout and keyset-paginates over every open row for the limit.
+// Scopes with no state row yet are evaluated on their next ingest or admission.
 func (e *TokenBudgetEvaluator) ReevaluateAfterLimitDefaultChange(ctx context.Context, def *store.LimitDefinition) {
 	if !e.enabled() || def == nil || def.ResourceType != store.LimitResourceTypeLLMTokens {
 		return
 	}
-	e.reevaluateOpenRowsForLimit(ctx, newTokenLimitEvalCache(e.quota), def, "", "", e.now())
+	reevalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.getReevalTimeout())
+	defer cancel()
+
+	e.reevaluateOpenRowsForLimit(reevalCtx, newTokenLimitEvalCache(e.quota), def, "", e.now())
 }
 
 func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 	ctx context.Context,
 	evalCache *tokenLimitEvalCache,
 	def *store.LimitDefinition,
-	filterScopeType string,
-	filterScopeID string,
+	projectFilter string,
 	now time.Time,
 ) {
-	rows, err := e.store.ListOpenUsageBudgetStatesByLimit(ctx, def.ID, now, maxReevalRowsPerLimit)
-	if err != nil {
-		e.evalErrors.Add(1)
-		e.logger.Warn("token budget re-evaluation failed to list open rows",
-			"limit", def.Name, "limit_id", def.ID, "error", err)
-		return
-	}
-	for _, row := range rows {
-		if filterScopeType == store.QuotaScopeProject && filterScopeID != "" {
-			if row.ScopeKind == store.UsageScopeKindProject && row.ScopeID != filterScopeID {
+	pageSize := e.getReevalPageSize()
+	afterID := ""
+	var processed int
+
+	for {
+		if err := ctx.Err(); err != nil {
+			e.evalErrors.Add(1)
+			e.reevalUnprocessed.Add(1)
+			e.logger.Warn("token budget re-evaluation interrupted before completing all open rows",
+				"limit", def.Name,
+				"limit_id", def.ID,
+				"project_filter", projectFilter,
+				"processed", processed,
+				"after_id", afterID,
+				"error", err)
+			return
+		}
+
+		rows, err := e.store.ListOpenUsageBudgetStatesByLimit(ctx, def.ID, now, projectFilter, afterID, pageSize)
+		if err != nil {
+			e.evalErrors.Add(1)
+			e.reevalUnprocessed.Add(1)
+			e.logger.Warn("token budget re-evaluation failed to list open rows",
+				"limit", def.Name,
+				"limit_id", def.ID,
+				"project_filter", projectFilter,
+				"processed", processed,
+				"after_id", afterID,
+				"error", err)
+			return
+		}
+		if len(rows) == 0 {
+			return
+		}
+
+		for i, row := range rows {
+			if err := ctx.Err(); err != nil {
+				remaining := int64(len(rows) - i)
+				e.evalErrors.Add(1)
+				e.reevalUnprocessed.Add(remaining)
+				e.logger.Warn("token budget re-evaluation timed out with unprocessed rows in page",
+					"limit", def.Name,
+					"limit_id", def.ID,
+					"project_filter", projectFilter,
+					"processed", processed,
+					"unprocessed_in_page", remaining,
+					"error", err)
+				return
+			}
+			spec, ok := budgetEvalSpecFromRow(def, row)
+			if !ok {
 				continue
 			}
-			if row.ScopeKind == store.UsageScopeKindUserProject && row.ProjectScopeID != filterScopeID {
-				continue
+			if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
+				e.reevalUnprocessed.Add(1)
+				e.recordReevalError(spec, err)
 			}
+			processed++
 		}
-		spec, ok := budgetEvalSpecFromRow(def, row)
-		if !ok {
-			continue
+
+		if len(rows) < pageSize {
+			return
 		}
-		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
-			e.recordReevalError(spec, err)
-		}
+		afterID = rows[len(rows)-1].ID
 	}
 }
 
@@ -468,13 +553,13 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 			nextState = computeBudgetState(consumed, capVal)
 		}
 
-		// When a cap is raised or removed, clear thresholds_notified bits for
-		// thresholds no longer met so a subsequent re-crossing notifies again.
-		nextNotified := existing.ThresholdsNotified
-		capRaisedOrRemoved := capVal <= 0 || (existing.CapAtEval > 0 && capVal > existing.CapAtEval)
-		if capRaisedOrRemoved {
-			nextNotified = clearUnmetThresholdBits(existing.ThresholdsNotified, consumed, capVal)
-		}
+		// Clear thresholds_notified bits for any threshold no longer met under
+		// the current effective cap (including when an ingest between the
+		// binding commit and re-evaluation already updated CapAtEval). Because
+		// consumption never decreases within a window, an unmet previously-set
+		// bit can only result from a cap raise or removal.
+		// Admin overrides do NOT call reevaluateSpec and preserve bits.
+		nextNotified := clearUnmetThresholdBits(existing.ThresholdsNotified, consumed, capVal)
 
 		if nextState == existing.State &&
 			consumed == existing.ConsumedAtEval &&

@@ -108,8 +108,11 @@ type TokenBudgetEvaluator struct {
 	hookMu        sync.RWMutex
 	thresholdHook BudgetThresholdHook
 
-	evalErrors atomic.Int64
-	hookPanics atomic.Int64
+	evalErrors        atomic.Int64
+	hookPanics        atomic.Int64
+	reevalUnprocessed atomic.Int64
+	reevalPageSize    int
+	reevalTimeout     time.Duration
 }
 
 // NewTokenBudgetEvaluator constructs a TokenBudgetEvaluator.
@@ -765,25 +768,6 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		return nil, "", nil
 	}
 
-	var capVal int64
-	var action string
-	if spec.scopeKind == store.UsageScopeKindGroup {
-		capVal, action, err = evalCache.resolveGroupForDef(
-			ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
-		)
-	} else {
-		capVal, action, err = evalCache.resolveForDef(
-			ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-		)
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
-	}
-	// Cap <= 0 means unlimited for llm_tokens limits; no state row is created (D3).
-	if capVal <= 0 {
-		return nil, action, nil
-	}
-
 	key := store.UsageBudgetStateKey{
 		LimitDefinitionID: def.ID,
 		ScopeKind:         spec.scopeKind,
@@ -793,6 +777,66 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 	}
 
 	for attempt := 0; attempt < maxBudgetEvalCASRetries; attempt++ {
+		existing, err := e.store.GetUsageBudgetState(ctx, key)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, "", fmt.Errorf("get usage budget state: %w", err)
+		}
+
+		// Resolve the effective cap inside the CAS loop AFTER reading the row.
+		// Because limit-change re-evaluation can lower a row after a binding
+		// commit, resolving before the row read (or reusing a stale cache on
+		// retry or cap mismatch) could re-raise a freshly lowered row against
+		// the old cap.
+		var capVal int64
+		var action string
+		if attempt == 0 {
+			if spec.scopeKind == store.UsageScopeKindGroup {
+				capVal, action, err = evalCache.resolveGroupForDef(
+					ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+				)
+			} else {
+				capVal, action, err = evalCache.resolveForDef(
+					ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+				)
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+			}
+			if existing != nil && capVal != existing.CapAtEval {
+				freshCache := newTokenLimitEvalCache(e.quota)
+				if spec.scopeKind == store.UsageScopeKindGroup {
+					capVal, action, err = freshCache.resolveGroupByID(
+						ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+					)
+				} else {
+					capVal, action, err = freshCache.resolveByID(
+						ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+					)
+				}
+				if err != nil {
+					return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+				}
+			}
+		} else {
+			freshCache := newTokenLimitEvalCache(e.quota)
+			if spec.scopeKind == store.UsageScopeKindGroup {
+				capVal, action, err = freshCache.resolveGroupByID(
+					ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+				)
+			} else {
+				capVal, action, err = freshCache.resolveByID(
+					ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+				)
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+			}
+		}
+		// Cap <= 0 means unlimited for llm_tokens limits; no state row is created (D3).
+		if capVal <= 0 {
+			return nil, action, nil
+		}
+
 		var consumed int64
 		if spec.scopeKind == store.UsageScopeKindGroup {
 			consumed, err = e.store.SumUsageGroupRollupTokens(
@@ -807,11 +851,6 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 			return nil, "", fmt.Errorf("sum scope counter tokens: %w", err)
 		}
 		computedState := computeBudgetState(consumed, capVal)
-
-		existing, err := e.store.GetUsageBudgetState(ctx, key)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, "", fmt.Errorf("get usage budget state: %w", err)
-		}
 
 		if existing == nil {
 			created, createErr := e.store.CreateUsageBudgetState(ctx, &store.UsageBudgetState{

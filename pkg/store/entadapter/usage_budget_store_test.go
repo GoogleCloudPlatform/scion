@@ -480,15 +480,45 @@ func TestUsageBudgetStore_GetByIDAndListOpenByLimit(t *testing.T) {
 	_, err = cs.GetUsageBudgetStateByID(ctx, "00000000-0000-0000-0000-000000000001")
 	require.ErrorIs(t, err, store.ErrNotFound)
 
-	// ListOpenUsageBudgetStatesByLimit
-	openRows, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, 10)
+	// ListOpenUsageBudgetStatesByLimit (full + keyset pagination + project filter)
+	openRows, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, openRows, 2)
 
-	// Respects limit cap.
-	limited, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, 1)
+	// Keyset pagination: page 1 (limit 1) then page 2 with afterID.
+	page1, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", "", 1)
 	require.NoError(t, err)
-	require.Len(t, limited, 1)
+	require.Len(t, page1, 1)
+	page2, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", page1[0].ID, 1)
+	require.NoError(t, err)
+	require.Len(t, page2, 1)
+	assert.NotEqual(t, page1[0].ID, page2[0].ID)
+	page3, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", page2[0].ID, 1)
+	require.NoError(t, err)
+	assert.Empty(t, page3)
+
+	// DB-side project filter returns only matching project row.
+	projOnly, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "proj-2", "", 10)
+	require.NoError(t, err)
+	require.Len(t, projOnly, 1)
+	assert.Equal(t, "proj-2", projOnly[0].ScopeID)
+
+	// ListOpenUsageBudgetStatesForUser returns open user + user_project rows for user-1.
+	_, err = cs.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: def2.ID,
+		ScopeKind:         store.UsageScopeKindUserProject,
+		ScopeID:           "user-1",
+		ProjectScopeID:    "proj-1",
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    900,
+		CapAtEval:         800,
+	})
+	require.NoError(t, err)
+	userRows, err := cs.ListOpenUsageBudgetStatesForUser(ctx, "user-1", now)
+	require.NoError(t, err)
+	require.Len(t, userRows, 2)
 }
 
 func TestQuotaStore_UpdateEntitlementBindingIfMatch(t *testing.T) {

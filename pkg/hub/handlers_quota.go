@@ -689,11 +689,14 @@ func setEntitlementETag(w http.ResponseWriter, binding *store.EntitlementBinding
 	w.Header().Set("ETag", `"`+entitlementRevision(binding.UpdatedAt)+`"`)
 }
 
-// parseEntitlementIfMatch parses an If-Match header containing a quoted or
-// unquoted RFC3339/RFC3339Nano timestamp revision (optionally prefixed with W/).
+// parseEntitlementIfMatch parses an If-Match header containing a strong quoted
+// or unquoted RFC3339/RFC3339Nano timestamp revision. Per RFC 9110 §13.1.1,
+// If-Match uses strong comparison so weak tags (W/...) are rejected.
 func parseEntitlementIfMatch(raw string) (time.Time, error) {
 	v := strings.TrimSpace(raw)
-	v = strings.TrimPrefix(v, "W/")
+	if strings.HasPrefix(v, "W/") || strings.HasPrefix(v, "w/") {
+		return time.Time{}, fmt.Errorf("weak ETags are not allowed in If-Match")
+	}
 	v = strings.Trim(v, `"`)
 	v = strings.TrimSpace(v)
 	if v == "" || v == "*" {
