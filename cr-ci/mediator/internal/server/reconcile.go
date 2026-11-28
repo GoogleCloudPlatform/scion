@@ -31,6 +31,7 @@ type ReconcileResult struct {
 	Skipped            []string `json:"skipped,omitempty"`
 	CapacityFullAtStop bool     `json:"capacity_full,omitempty"`
 	BudgetStopped      bool     `json:"budget_stopped,omitempty"`
+	ChecksDeferred     int      `json:"checks_deferred,omitempty"`
 }
 
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
@@ -134,16 +135,57 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 	gv := newView()
 	for _, rj := range onRunners {
 		out, err := s.checkRunnerJobLocked(ctx, gv, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, 0, &rj.run, "reconcile")
-		if err != nil {
+		switch {
+		case errors.Is(err, errDeferred):
+			res.ChecksDeferred++
+		case err != nil:
 			addErr("runner_check "+rj.job.RunnerName, err)
-		}
-		if out == "killed" {
+		case out == "killed":
 			res.HijacksKilled++
 			gv = newView() // the kill changed registrations and executions
 		}
 	}
 
 	now := s.o.Now()
+	// Sweep deferred hijack checks not already resolved by discovery above.
+	if len(s.unverified) > 0 {
+		names := make([]string, 0, len(s.unverified))
+		for name := range s.unverified {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			u, ok := s.unverified[name]
+			if !ok {
+				continue
+			}
+			out, err := s.checkRunnerJobLocked(ctx, gv, u.repo, u.jobID, u.runID, name, u.runnerID, nil, "reconcile_unverified")
+			switch {
+			case errors.Is(err, errDeferred):
+				res.ChecksDeferred++
+				if now.Sub(u.since) > s.o.TaskTimeout+s.o.ReapAfter {
+					if execs, lerr := s.execsIn(ctx, gv); lerr == nil {
+						live, _ := s.live(execs)
+						hasLive := false
+						for _, e := range live {
+							if e.RunnerName == name {
+								hasLive = true
+								break
+							}
+						}
+						if !hasLive {
+							delete(s.unverified, name)
+						}
+					}
+				}
+			case err != nil:
+				addErr("runner_check_unverified "+name, err)
+			case out == "killed":
+				res.HijacksKilled++
+				gv = newView()
+			}
+		}
+	}
 	for k := range s.noticed {
 		if !notices[k] {
 			delete(s.noticed, k)
@@ -213,7 +255,7 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 
 	s.log().Info("reconcile finished", "event", logging.EventReconcile,
 		"claims_expired", res.ClaimsExpired, "runners_reaped", res.RunnersReaped, "executions_reaped", res.ExecutionsReaped,
-		"hijacks_killed", res.HijacksKilled, "backfilled", res.Backfilled, "left_queued", res.LeftQueued,
+		"hijacks_killed", res.HijacksKilled, "checks_deferred", res.ChecksDeferred, "backfilled", res.Backfilled, "left_queued", res.LeftQueued,
 		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors), "skipped", len(res.Skipped),
 		"budget_stopped", res.BudgetStopped, "rate_limit_remaining", rateLimitRemaining)
 	return res
@@ -281,6 +323,7 @@ func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func
 				listed++
 			}
 			for _, run := range runs {
+				s.rememberRun(run)
 				prio := 2
 				switch {
 				case s.lastRunnerRuns[run.ID]:

@@ -17,12 +17,13 @@ import (
 // Event names. They are part of the operational contract documented in
 // cr-ci/docs/operations.md; rename them only together with that page.
 const (
-	EventStartup         = "startup"
-	EventWebhookIgnored  = "webhook_ignored"
-	EventWebhookRejected = "webhook_rejected"
-	EventRejectFork      = "SECURITY_REJECT_FORK_PR"
-	EventKillHijacked    = "SECURITY_KILL_HIJACKED_RUNNER"
-	EventRunnerSwap      = "runner_swap"
+	EventStartup             = "startup"
+	EventWebhookIgnored      = "webhook_ignored"
+	EventWebhookRejected     = "webhook_rejected"
+	EventRejectFork          = "SECURITY_REJECT_FORK_PR"
+	EventKillHijacked        = "SECURITY_KILL_HIJACKED_RUNNER"
+	EventRunnerCheckDeferred = "runner_check_deferred"
+	EventRunnerSwap          = "runner_swap"
 	// EventRunnerSwapLowBudget (WARNING) follows runner_swap when the job that
 	// took the runner inherits less than 20 minutes of the task timeout.
 	EventRunnerSwapLowBudget = "runner_swap_low_budget"

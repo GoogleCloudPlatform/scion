@@ -81,10 +81,11 @@ type GitHub struct {
 	// Failure injection.
 	FailJIT    bool
 	FailDelete bool
-	// FailListRuns / FailListJobs: HTTP status to answer for a repo's runs list
-	// (key "owner/repo") or a run's jobs list (key run ID).
+	// FailListRuns / FailListJobs / FailGetRun: HTTP status to answer for a
+	// repo's runs list (key "owner/repo"), a run's jobs list, or GetRun (key run ID).
 	FailListRuns  map[string]int
 	FailListJobs  map[int64]int
+	FailGetRun    map[int64]int
 	BusyOnDelete  bool          // DELETE answers 422 as if the runner just picked up a job
 	TokenLifetime time.Duration // default 1 h
 	OnListRuns    func()        // optional hook invoked during listRuns (outside mu)
@@ -517,6 +518,10 @@ func (g *GitHub) getRun(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.RunGets++
+	if code := g.FailGetRun[id]; code != 0 {
+		writeJSON(w, code, map[string]string{"message": "injected failure"})
+		return
+	}
 	run, ok := g.runs[id]
 	if !ok || !strings.EqualFold(run.Repo, full) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})

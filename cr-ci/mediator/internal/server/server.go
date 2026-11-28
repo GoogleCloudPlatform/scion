@@ -55,6 +55,13 @@ const (
 	// executions.list does not show yet.
 	launchListLag = 2 * time.Minute
 	cancelledTTL  = time.Hour
+	// runMetaMaxEntries and runMetaTTL bound the in-memory cache of immutable
+	// run metadata (event, repository, head_repository) used by forkReason.
+	runMetaMaxEntries = 10000
+	runMetaTTL        = 24 * time.Hour
+	// unverifiedMax bounds how long a transient GetRun failure can defer a
+	// hijack check before failing closed.
+	unverifiedMax = 15 * time.Minute
 )
 
 // GitHub is the subset of the GitHub API the server needs
@@ -130,6 +137,19 @@ type runnerRecord struct {
 	reassigned bool
 }
 
+type runMetaEntry struct {
+	run githubapp.Run
+	at  time.Time
+}
+
+type unverifiedRec struct {
+	repo     string
+	jobID    int64
+	runID    int64
+	runnerID int64
+	since    time.Time
+}
+
 // Server is the mediator HTTP server.
 type Server struct {
 	o Options
@@ -142,6 +162,11 @@ type Server struct {
 	prevSecret    []byte
 	prevUntil     time.Time
 	secretAttempt time.Time
+
+	// runMetaMu guards runMeta, an in-memory cache of immutable workflow-run
+	// verdict inputs (event, repository, head_repository).
+	runMetaMu sync.Mutex
+	runMeta   map[int64]runMetaEntry
 
 	// reconcileMu makes reconcile passes single-flight. /reconcile uses TryLock
 	// so overlapping scheduler ticks skip cleanly; Server.Reconcile blocks.
@@ -167,6 +192,9 @@ type Server struct {
 	// Reconcile skips them (its discovery may predate the webhook); pruned after
 	// cancelledTTL.
 	forgotten map[string]time.Time
+	// unverified: runners whose hijack-guard GetRun lookup hit a transient error
+	// and was deferred; retried by reconcile and bounded by unverifiedMax.
+	unverified map[string]unverifiedRec
 }
 
 // New returns a Server.
@@ -188,6 +216,7 @@ func New(o Options) *Server {
 	}
 	return &Server{
 		o:              o,
+		runMeta:        map[int64]runMetaEntry{},
 		lastRunnerRuns: map[int64]bool{},
 		runners:        map[string]*runnerRecord{},
 		cancelled:      map[string]time.Time{},
@@ -195,7 +224,77 @@ func New(o Options) *Server {
 		noticed:        map[string]bool{},
 		hijacked:       map[string]time.Time{},
 		forgotten:      map[string]time.Time{},
+		unverified:     map[string]unverifiedRec{},
 	}
+}
+
+func cloneRunMeta(r githubapp.Run) githubapp.Run {
+	cp := githubapp.Run{
+		ID:        r.ID,
+		Event:     r.Event,
+		CreatedAt: r.CreatedAt,
+		// Status is mutable and intentionally omitted from cached verdict metadata.
+	}
+	if r.Repository != nil {
+		ref := *r.Repository
+		cp.Repository = &ref
+	}
+	if r.HeadRepository != nil {
+		ref := *r.HeadRepository
+		cp.HeadRepository = &ref
+	}
+	return cp
+}
+
+// rememberRun caches immutable run metadata (event, repository, head_repository)
+// for run r.ID, evicting entries older than runMetaTTL and bounding size at
+// runMetaMaxEntries.
+func (s *Server) rememberRun(r githubapp.Run) {
+	if r.ID == 0 {
+		return
+	}
+	now := s.o.Now()
+	cp := cloneRunMeta(r)
+	s.runMetaMu.Lock()
+	defer s.runMetaMu.Unlock()
+	if len(s.runMeta) >= runMetaMaxEntries {
+		for id, e := range s.runMeta {
+			if now.Sub(e.at) > runMetaTTL {
+				delete(s.runMeta, id)
+			}
+		}
+		if len(s.runMeta) >= runMetaMaxEntries {
+			var oldestID int64
+			var oldestAt time.Time
+			for id, e := range s.runMeta {
+				if oldestID == 0 || e.at.Before(oldestAt) {
+					oldestID = id
+					oldestAt = e.at
+				}
+			}
+			if oldestID != 0 {
+				delete(s.runMeta, oldestID)
+			}
+		}
+	}
+	s.runMeta[r.ID] = runMetaEntry{run: cp, at: now}
+}
+
+// cachedRun returns cached immutable metadata for runID if present and fresh.
+func (s *Server) cachedRun(runID int64) (*githubapp.Run, bool) {
+	now := s.o.Now()
+	s.runMetaMu.Lock()
+	defer s.runMetaMu.Unlock()
+	e, ok := s.runMeta[runID]
+	if !ok {
+		return nil, false
+	}
+	if now.Sub(e.at) > runMetaTTL {
+		delete(s.runMeta, runID)
+		return nil, false
+	}
+	cp := cloneRunMeta(e.run)
+	return &cp, true
 }
 
 // Handler returns the HTTP handler.

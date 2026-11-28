@@ -1305,3 +1305,20 @@ func TestReconcile_InProgressInQueuedRunIsGuarded(t *testing.T) {
 	}
 	h.wantLog(logging.EventKillHijacked)
 }
+
+func TestOnQueued_UsesRunCache(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	if code, _ := h.queued(100, 10); code != http.StatusOK {
+		t.Fatalf("first queued: %d", code)
+	}
+	if h.gh.RunGets != 1 {
+		t.Fatalf("RunGets after first queued = %d, want 1", h.gh.RunGets)
+	}
+	if code, _ := h.queued(101, 10); code != http.StatusOK {
+		t.Fatalf("second queued: %d", code)
+	}
+	if h.gh.RunGets != 1 {
+		t.Errorf("RunGets after second queued of same run = %d, want 1 (cached)", h.gh.RunGets)
+	}
+}

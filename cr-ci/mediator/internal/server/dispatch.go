@@ -282,6 +282,7 @@ func (s *Server) stopRunner(repo githubapp.Repo, name string, requireIdle bool) 
 		}
 	}
 	delete(s.runners, name)
+	delete(s.unverified, name)
 	if id, ok := parseRunnerName(name); ok {
 		s.o.Claims.DropJob(id)
 	}
@@ -345,6 +346,9 @@ func (s *Server) recordLive(rn string, rec *runnerRecord, live, execs []launcher
 func (s *Server) forgetRunner(name string, runnerID int64, attrs []any) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
+	if u, ok := s.unverified[name]; ok && (runnerID == 0 || u.runnerID == 0 || u.runnerID == runnerID) {
+		delete(s.unverified, name)
+	}
 	rec := s.runners[name]
 	if runnerID == 0 || rec == nil || rec.runnerID != runnerID {
 		reason, recorded := "runner_id_mismatch", int64(0)
