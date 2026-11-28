@@ -1,5 +1,5 @@
 /**
- * Tests for Project Settings -> GitHub card (M1.1):
+ * Tests for Project GitHub App card (M1.1, extracted in M1.5):
  * - Read-only permissions table rendering including cap reasons
  * - Bind installation button shown only when can.bind is true
  * - Client-side candidate filtering (active + case-insensitive owner match)
@@ -11,22 +11,14 @@ import type { ProjectGitHubInfo, GitHubInstallation } from '../../shared/types.j
 import {
   filterBindableGitHubInstallations,
   formatGitHubCapReason,
-  type ScionPageProjectSettings,
-} from './project-settings.js';
+  type ScionProjectGithubCard,
+} from './project-github-card.js';
 
-vi.mock('../shared/confirm-dialog.js', () => ({
+vi.mock('./confirm-dialog.js', () => ({
   showConfirm: vi.fn(),
 }));
 
-import { showConfirm } from '../shared/confirm-dialog.js';
-
-const GITHUB_PROJECT = {
-  id: 'proj-gh-1',
-  name: 'Acme API',
-  slug: 'acme-api',
-  gitRemote: 'https://github.com/Acme/api.git',
-  _capabilities: { actions: ['read', 'update', 'manage'] },
-};
+import { showConfirm } from './confirm-dialog.js';
 
 function makeProjectGitHub(overrides?: Partial<ProjectGitHubInfo>): ProjectGitHubInfo {
   return {
@@ -120,24 +112,6 @@ function createFetchHandler(opts: {
       );
     }
 
-    if (path.match(/\/api\/v1\/projects\/[^/]+$/) || path.match(/\/api\/v1\/projects\/[^/]+\?/)) {
-      return Promise.resolve(
-        new Response(JSON.stringify(GITHUB_PROJECT), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      );
-    }
-
-    if (path.includes('/settings/resolved')) {
-      return Promise.resolve(
-        new Response(JSON.stringify({ project: {}, settings: {} }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      );
-    }
-
     return Promise.resolve(
       new Response(JSON.stringify({}), {
         status: 200,
@@ -147,11 +121,11 @@ function createFetchHandler(opts: {
   };
 }
 
-async function mountSettings(
+async function mountCard(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
-): Promise<ScionPageProjectSettings> {
+): Promise<ScionProjectGithubCard> {
   vi.stubGlobal('fetch', vi.fn(fetchHandler));
-  const el = document.createElement('scion-page-project-settings') as ScionPageProjectSettings;
+  const el = document.createElement('scion-project-github-card') as ScionProjectGithubCard;
   el.projectId = 'proj-gh-1';
   document.body.appendChild(el);
   await el.updateComplete;
@@ -160,9 +134,9 @@ async function mountSettings(
   return el;
 }
 
-describe('Project Settings — GitHub App card (M1.1)', () => {
+describe('Project GitHub App card (M1.1)', () => {
   beforeAll(async () => {
-    await import('./project-settings.js');
+    await import('./project-github-card.js');
   });
 
   afterEach(() => {
@@ -214,7 +188,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
   });
 
   it('renders the read-only permissions table with cap reasons and mode badge', async () => {
-    const el = await mountSettings(createFetchHandler({ githubInfo: makeProjectGitHub() }));
+    const el = await mountCard(createFetchHandler({ githubInfo: makeProjectGitHub() }));
     const root = el.shadowRoot!;
 
     const table = root.querySelector('[data-testid="github-permissions-table"]');
@@ -234,7 +208,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
   });
 
   it('shows Bind installation button only when can.bind is true', async () => {
-    const elDenied = await mountSettings(
+    const elDenied = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           can: {
@@ -251,7 +225,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     expect(elDenied.shadowRoot!.querySelector('[data-testid="github-bind-button"]')).toBeNull();
     elDenied.remove();
 
-    const elAllowed = await mountSettings(
+    const elAllowed = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           can: {
@@ -271,7 +245,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
   });
 
   it('hides all write buttons on a connected project when can flags are all false', async () => {
-    const el = await mountSettings(
+    const el = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           can: {
@@ -294,7 +268,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
   });
 
   it('shows unloaded App permissions note, neutral unverified copy, bound_by_name, and install link', async () => {
-    const elUnloaded = await mountSettings(
+    const elUnloaded = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           association: {
@@ -331,7 +305,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     expect(rootUnloaded.textContent).not.toContain('App not granted');
     elUnloaded.remove();
 
-    const elBound = await mountSettings(
+    const elBound = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           association: {
@@ -355,7 +329,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     );
     elBound.remove();
 
-    const elUnassoc = await mountSettings(
+    const elUnassoc = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           association: {
@@ -382,7 +356,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     const boundBodies: Array<{ installation_id: number }> = [];
     vi.mocked(showConfirm).mockResolvedValueOnce(true);
 
-    const el = await mountSettings(
+    const el = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           association: {
@@ -445,7 +419,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     const boundBodies: Array<{ installation_id: number }> = [];
     vi.mocked(showConfirm).mockResolvedValueOnce(true);
 
-    const el = await mountSettings(
+    const el = await mountCard(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
           association: {
