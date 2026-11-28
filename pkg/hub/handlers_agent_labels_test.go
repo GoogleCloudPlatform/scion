@@ -1363,6 +1363,127 @@ func TestPatchAgentLabels_CreatorAgentMatrix(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "curated-by-human", got.Labels["orphan"])
 	})
+
+	t.Run("bounded V1 delegation ceiling excluding agent.update admits direct-child label merge and refuses full PATCH", func(t *testing.T) {
+		boundedParent := &store.Agent{
+			ID: tid("lbl-bounded-parent"), Slug: "lbl-bounded-parent", Name: "lbl-bounded-parent",
+			ProjectID: f.project.ID, Phase: string(state.PhaseRunning),
+			OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Ancestry: []string{f.owner.ID}, StateVersion: 1,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, boundedParent))
+		recordLabelTestDelegationEdge(t, f.s, store.DelegationPrincipalUser, f.owner.ID, boundedParent.ID, f.project.ID,
+			store.EffectCeiling{
+				Kind:          store.EffectCeilingBounded,
+				Version:       permissions.CeilingVersionV1,
+				PermissionIDs: []string{"agent.create", "agent.read"},
+			})
+
+		boundedChild := &store.Agent{
+			ID: tid("lbl-bounded-child"), Slug: "lbl-bounded-child", Name: "lbl-bounded-child",
+			ProjectID: f.project.ID, Phase: string(state.PhaseRunning),
+			OwnerID: boundedParent.ID, CreatedBy: boundedParent.ID, Ancestry: []string{f.owner.ID, boundedParent.ID},
+			Labels: map[string]string{"tier": "worker"}, StateVersion: 1,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, boundedChild))
+
+		boundedTok := f.srv.generateRecordedAgentToken(t, boundedParent.ID, f.project.ID, []AgentTokenScope{
+			ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
+		}, []string{f.owner.ID})
+
+		// Direct creator is admitted on the label merge route despite agent.update
+		// being absent from the bounded V1 edge's frozen PermissionIDs.
+		recMerge := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+boundedChild.ID+"/labels", PatchAgentLabelsRequest{
+			Set: map[string]string{"role": "bounded-ok"},
+		}, boundedTok)
+		require.Equal(t, http.StatusOK, recMerge.Code, recMerge.Body.String())
+
+		got, err := f.s.GetAgent(ctx, boundedChild.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"tier": "worker", "role": "bounded-ok"}, got.Labels)
+
+		// Full PATCH (with labels and with non-label fields) remains refused 403.
+		for _, tc := range []struct {
+			name string
+			body any
+		}{
+			{"full PATCH with labels", map[string]any{"labels": map[string]string{"role": "nope"}}},
+			{"full PATCH non-label field", map[string]any{"taskSummary": "nope"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+boundedChild.ID, tc.body, boundedTok)
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			})
+		}
+
+		after, err := f.s.GetAgent(ctx, boundedChild.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"tier": "worker", "role": "bounded-ok"}, after.Labels)
+		assert.Empty(t, after.TaskSummary)
+	})
+
+	t.Run("intermediate agent-delegator project check refuses cross-project delegator", func(t *testing.T) {
+		cases := []struct {
+			name             string
+			delegatorID      string
+			permissionID     string
+			scopeType        string
+			scopeID          string
+			creatorLabelEdit bool
+			wantAllowed      bool
+			wantReasonSubstr string
+		}{
+			{
+				name:             "same-project delegator allowed for creator label edit",
+				delegatorID:      f.agent.ID,
+				permissionID:     permissionAgentUpdate,
+				scopeType:        store.RoleScopeProject,
+				scopeID:          f.project.ID,
+				creatorLabelEdit: true,
+				wantAllowed:      true,
+			},
+			{
+				name:             "cross-project delegator denied for creator label edit",
+				delegatorID:      f.otherAgent.ID,
+				permissionID:     permissionAgentUpdate,
+				scopeType:        store.RoleScopeProject,
+				scopeID:          f.project.ID,
+				creatorLabelEdit: true,
+				wantAllowed:      false,
+				wantReasonSubstr: "outside project",
+			},
+			{
+				name:             "non-project scope denied for creator label edit",
+				delegatorID:      f.agent.ID,
+				permissionID:     permissionAgentUpdate,
+				scopeType:        store.RoleScopeSystem,
+				scopeID:          "",
+				creatorLabelEdit: true,
+				wantAllowed:      false,
+				wantReasonSubstr: "outside project",
+			},
+			{
+				name:             "same-project delegator denied when creatorLabelEdit is false",
+				delegatorID:      f.agent.ID,
+				permissionID:     permissionAgentUpdate,
+				scopeType:        store.RoleScopeProject,
+				scopeID:          f.project.ID,
+				creatorLabelEdit: false,
+				wantAllowed:      false,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				allowed, reason, err := f.srv.authzService.checkAgentHoldsPermissionFor(
+					ctx, tc.delegatorID, tc.permissionID, tc.scopeType, tc.scopeID, tc.creatorLabelEdit,
+				)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantAllowed, allowed, "reason=%q", reason)
+				if tc.wantReasonSubstr != "" {
+					assert.Contains(t, reason, tc.wantReasonSubstr)
+				}
+			})
+		}
+	})
 }
 
 func TestPatchAgentLabels_ReservedKeysAndUnauthenticated(t *testing.T) {
