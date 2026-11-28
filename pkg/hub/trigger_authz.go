@@ -514,7 +514,24 @@ func (s *Server) resolveTriggerMessageTarget(
 	denialPrefix string,
 ) (string, MessageEventPayload, bool) {
 	ctx := r.Context()
-	raw, err := json.Marshal(payload)
+	var (
+		raw []byte
+		err error
+	)
+	if payload.UntrustedVars != nil && len(payload.UntrustedVars) == 0 {
+		// Preserve an explicitly supplied empty untrustedVars ([]) distinct from
+		// omitted (nil), since MessageEventPayload.UntrustedVars has omitempty.
+		type explicitEmptyUntrusted struct {
+			MessageEventPayload
+			UntrustedVars []string `json:"untrustedVars"`
+		}
+		raw, err = json.Marshal(explicitEmptyUntrusted{
+			MessageEventPayload: payload,
+			UntrustedVars:       []string{},
+		})
+	} else {
+		raw, err = json.Marshal(payload)
+	}
 	if err != nil {
 		InternalError(w)
 		return "", MessageEventPayload{}, false
