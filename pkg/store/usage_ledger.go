@@ -523,7 +523,6 @@ type UsageCoverageFilter struct {
 // (deriveMeasurementStatus) without per-agent queries.
 type UsageCoverageBucket struct {
 	HarnessConfig       string
-	Harness             string
 	CapabilityProjectID string
 	IsRunning           bool
 	HasMeterHealth      bool
