@@ -3678,6 +3678,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     this.addHubObservability(hub, ok);
+    this.addHubUploads(hub, ok);
     server.hub = hub;
 
     // Broker

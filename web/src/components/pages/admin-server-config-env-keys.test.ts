@@ -118,6 +118,16 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
         gcp_iam_check_mode: 'enforce',
         gcp_iam_deny_unknown_policy: 'fail-closed',
         observability: { metrics_enabled: true, tracing_enabled: false },
+        uploads: {
+          max_attachment_size: 10485760,
+          max_workspace_file_size: 52428800,
+          chunk_bytes: 8388608,
+          session_idle_ttl: '1h',
+          session_max_lifetime: '24h',
+          max_sessions_per_user: 4,
+          max_pending_bytes_per_user: 2147483648,
+          max_pending_bytes_hub: 17179869184,
+        },
       },
       broker: {
         enabled: true,
