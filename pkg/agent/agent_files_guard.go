@@ -59,6 +59,19 @@ var ErrAgentFilesDeleteRefused = errors.New("refusing to delete agent files")
 // since it holds nothing to protect and cannot contain an existing path.
 // Containment compares path elements (filepath.Rel), so /proj never
 // contains /project2.
+type verifiedAgentRoot struct {
+	anchorLex  string // lexical, cleaned absolute anchor
+	anchorReal string // resolved real anchor
+	rootLex    string // lexical, cleaned absolute agent root
+	rootReal   string // resolved real agent root
+}
+
+// agentFilesRemoveAll removes rel within rootDir, confined to an os.Root
+// opened on rootDir. Tests may replace it to inject removal errors.
+var agentFilesRemoveAll = func(rootDir, rel string) error {
+	return removeAllInRoot(rootDir, rel, true)
+}
+
 type agentFilesGuard struct {
 	// lazy, when set, builds the guard on its first check (see
 	// projectAgentFilesGuard), so a caller that removes nothing pays
@@ -67,9 +80,9 @@ type agentFilesGuard struct {
 	resolved *agentFilesGuard
 
 	agentName    string
-	anchors      []string // lexical, cleaned absolute
-	agentRoots   []string // resolved and verified against an anchor
-	projectRoots []string // resolved
+	anchors      []string            // lexical, cleaned absolute
+	agentRoots   []verifiedAgentRoot // resolved and verified against an anchor
+	projectRoots []string            // resolved
 	// err is a failure to resolve a root; every check then refuses.
 	err error
 }
@@ -124,10 +137,10 @@ func newAgentFilesGuard(agentName string, anchors, agentRoots, projectRoots []st
 // reports false, without an error, for a root that does not exist, has no
 // anchor, or resolves elsewhere; such a root contains nothing that may be
 // removed. An anchor that cannot be resolved is an error.
-func (g *agentFilesGuard) verifiedAgentRoot(root string) (string, bool, error) {
+func (g *agentFilesGuard) verifiedAgentRoot(root string) (verifiedAgentRoot, bool, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return "", false, fmt.Errorf("cannot resolve the agent directory %s: %w", root, err)
+		return verifiedAgentRoot{}, false, fmt.Errorf("cannot resolve the agent directory %s: %w", root, err)
 	}
 	abs = filepath.Clean(abs)
 	anchor := ""
@@ -138,32 +151,37 @@ func (g *agentFilesGuard) verifiedAgentRoot(root string) (string, bool, error) {
 	}
 	if anchor == "" {
 		slog.Warn("Agent files delete: agent directory has no anchor; treated as not the agent's", "agent", g.agentName, "path", abs)
-		return "", false, nil
+		return verifiedAgentRoot{}, false, nil
 	}
 	anchorReal, err := resolveRealPath(anchor)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
+		return verifiedAgentRoot{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("cannot resolve %s: %w", anchor, err)
+		return verifiedAgentRoot{}, false, fmt.Errorf("cannot resolve %s: %w", anchor, err)
 	}
 	real, err := resolveRealPath(abs)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
+		return verifiedAgentRoot{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("cannot resolve the agent directory %s: %w", abs, err)
+		return verifiedAgentRoot{}, false, fmt.Errorf("cannot resolve the agent directory %s: %w", abs, err)
 	}
 	rel, err := filepath.Rel(anchor, abs)
 	if err != nil {
-		return "", false, nil
+		return verifiedAgentRoot{}, false, nil
 	}
 	if want := filepath.Join(anchorReal, rel); real != want {
 		slog.Warn("Agent files delete: agent directory resolves elsewhere; treated as not the agent's",
 			"agent", g.agentName, "path", abs, "resolves_to", real, "expected", want)
-		return "", false, nil
+		return verifiedAgentRoot{}, false, nil
 	}
-	return real, true, nil
+	return verifiedAgentRoot{
+		anchorLex:  anchor,
+		anchorReal: anchorReal,
+		rootLex:    abs,
+		rootReal:   real,
+	}, true, nil
 }
 
 // check decides whether path, an existing path about to be removed, may be
@@ -375,6 +393,279 @@ func CheckAgentWorktreeRemoval(agentName, base, worktreePath string) (string, er
 	return newAgentFilesGuard(agentName, []string{base}, []string{worktreePath}, []string{base}).check(worktreePath)
 }
 
+// RemoveAgentWorktreeDir applies the agent files guard to worktreePath under
+// base and removes it confined to base via os.Root, never following an
+// intermediate symbolic link. Unlike removeAll, it does not chmod read-only
+// directories before removal, preserving os.RemoveAll permission semantics.
+func RemoveAgentWorktreeDir(agentName, base, worktreePath string) error {
+	return newAgentFilesGuard(agentName, []string{base}, []string{worktreePath}, []string{base}).removeAllMode(worktreePath, nil, false, false)
+}
+
+// removeAll checks path with the guard and removes it confined to the verified
+// agent files root via os.Root. Every intermediate component between the root
+// and path must be a real directory; a symbolic link at any intermediate
+// component is refused (wrapping ErrAgentFilesDeleteRefused) rather than
+// followed or repaired.
+func (g *agentFilesGuard) removeAll(path string, extraAgentRoots ...string) error {
+	return g.removeAllMode(path, extraAgentRoots, false, true)
+}
+
+// removeAllLeaf is removeAll for a directory entry removed as it is (see
+// checkLeaf): intermediate components are still verified as real directories
+// inside os.Root, while a symbolic link at the leaf itself is unlinked without
+// being followed.
+func (g *agentFilesGuard) removeAllLeaf(path string) error {
+	return g.removeAllMode(path, nil, true, true)
+}
+
+func (g *agentFilesGuard) removeAllMode(path string, extraAgentRoots []string, leaf, makeWritable bool) error {
+	if g.lazy != nil {
+		return g.built().removeAllMode(path, extraAgentRoots, leaf, makeWritable)
+	}
+	if err := g.classify(path, extraAgentRoots, leaf); err != nil {
+		err = fmt.Errorf("%w %s for agent %s: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
+			"agent", g.agentName, "path", path, "error", err)
+		return err
+	}
+	rootDir, rel, err := g.confinedTarget(path, extraAgentRoots)
+	if err != nil {
+		err = fmt.Errorf("%w %s for agent %s: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
+			"agent", g.agentName, "path", path, "error", err)
+		return err
+	}
+	var rmErr error
+	if makeWritable {
+		rmErr = agentFilesRemoveAll(rootDir, rel)
+	} else {
+		rmErr = removeAllInRoot(rootDir, rel, false)
+	}
+	if rmErr != nil {
+		if errors.Is(rmErr, ErrAgentFilesDeleteRefused) {
+			slog.Warn("Agent files delete refused; traversal confined to agent files root",
+				"agent", g.agentName, "path", path, "error", rmErr)
+		}
+		return rmErr
+	}
+	return nil
+}
+
+// confinedTarget maps path to a verified root directory and a clean relative
+// path beneath it so removal can open rootDir with os.OpenRoot and walk every
+// component within that root without OS-level symlink traversal.
+func (g *agentFilesGuard) confinedTarget(path string, extraAgentRoots []string) (string, string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", "", fmt.Errorf("the path is not absolute")
+	}
+	if hasDotDotSegment(path) {
+		return "", "", fmt.Errorf("the path contains a parent-directory traversal component")
+	}
+	abs := filepath.Clean(path)
+
+	roots := g.agentRoots
+	for _, root := range extraAgentRoots {
+		if root == "" {
+			continue
+		}
+		r, ok, err := g.verifiedAgentRoot(root)
+		if err != nil {
+			return "", "", err
+		}
+		if ok {
+			roots = append(roots[:len(roots):len(roots)], r)
+		}
+	}
+
+	// Prefer a lexical match against a verified agent root so intermediate
+	// symlinks inside the root are preserved in rel and caught by the os.Root
+	// walk rather than silently collapsed before opening the root.
+	var matched *verifiedAgentRoot
+	bestLen := -1
+	useReal := false
+	for i := range roots {
+		vr := &roots[i]
+		if guardPathWithin(abs, vr.rootLex) && len(vr.rootLex) > bestLen {
+			matched = vr
+			bestLen = len(vr.rootLex)
+		}
+	}
+	if matched == nil {
+		for i := range roots {
+			vr := &roots[i]
+			if guardPathWithin(abs, vr.rootReal) && len(vr.rootReal) > bestLen {
+				matched = vr
+				bestLen = len(vr.rootReal)
+				useReal = true
+			}
+		}
+	}
+	if matched == nil {
+		return "", "", fmt.Errorf("cannot confine %s to a verified agent files root", abs)
+	}
+
+	var rootDir, base string
+	if !useReal {
+		if matched.anchorLex != "" && guardPathWithin(abs, matched.anchorLex) && abs != matched.anchorLex {
+			rootDir = matched.anchorReal
+			base = matched.anchorLex
+		} else if abs != matched.rootLex {
+			rootDir = matched.rootReal
+			base = matched.rootLex
+		} else {
+			parent := filepath.Dir(matched.rootReal)
+			leaf := filepath.Base(matched.rootReal)
+			if parent == matched.rootReal || leaf == "" || leaf == "." || leaf == ".." {
+				return "", "", fmt.Errorf("cannot confine root directory %s", abs)
+			}
+			return parent, leaf, nil
+		}
+	} else {
+		if matched.anchorReal != "" && guardPathWithin(abs, matched.anchorReal) && abs != matched.anchorReal {
+			rootDir = matched.anchorReal
+			base = matched.anchorReal
+		} else if abs != matched.rootReal {
+			rootDir = matched.rootReal
+			base = matched.rootReal
+		} else {
+			parent := filepath.Dir(matched.rootReal)
+			leaf := filepath.Base(matched.rootReal)
+			if parent == matched.rootReal || leaf == "" || leaf == "." || leaf == ".." {
+				return "", "", fmt.Errorf("cannot confine root directory %s", abs)
+			}
+			return parent, leaf, nil
+		}
+	}
+
+	rel, err := filepath.Rel(base, abs)
+	if err != nil || rel == "" || rel == "." || filepath.IsAbs(rel) || hasDotDotSegment(rel) {
+		return "", "", fmt.Errorf("cannot compute confined relative path for %s", abs)
+	}
+	return rootDir, rel, nil
+}
+
+// removeAllInRoot removes rel inside rootDir using os.Root so every path
+// component is resolved within the root rather than through the OS. Every
+// intermediate component must be a real directory; a symbolic link at an
+// intermediate component is refused (ErrAgentFilesDeleteRefused) without
+// following or removing it. A symbolic link at the leaf itself is unlinked
+// without being followed.
+func removeAllInRoot(rootDir, rel string, makeWritable bool) error {
+	cleanRel := filepath.Clean(rel)
+	if cleanRel == "" || cleanRel == "." || filepath.IsAbs(cleanRel) || hasDotDotSegment(cleanRel) {
+		return fmt.Errorf("%w: invalid relative path %q", ErrAgentFilesDeleteRefused, rel)
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return fmt.Errorf("%w: open root %s: %w", ErrAgentFilesDeleteRefused, rootDir, err)
+	}
+	cur := root
+	defer func() {
+		if cur != nil {
+			_ = cur.Close()
+		}
+	}()
+
+	parts := strings.Split(cleanRel, string(filepath.Separator))
+	for i, part := range parts[:len(parts)-1] {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("%w: invalid path component %q in %q", ErrAgentFilesDeleteRefused, part, rel)
+		}
+		fi, err := cur.Lstat(part)
+		if err != nil {
+			return fmt.Errorf("%w: intermediate path %s: %w", ErrAgentFilesDeleteRefused, filepath.Join(parts[:i+1]...), err)
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%w: intermediate path %s is a symbolic link", ErrAgentFilesDeleteRefused, filepath.Join(parts[:i+1]...))
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%w: intermediate path %s is not a directory", ErrAgentFilesDeleteRefused, filepath.Join(parts[:i+1]...))
+		}
+		next, err := cur.OpenRoot(part)
+		if err != nil {
+			return fmt.Errorf("%w: open intermediate directory %s: %w", ErrAgentFilesDeleteRefused, filepath.Join(parts[:i+1]...), err)
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !os.SameFile(fi, opened) {
+			_ = next.Close()
+			return fmt.Errorf("%w: intermediate directory %s changed while opening", ErrAgentFilesDeleteRefused, filepath.Join(parts[:i+1]...))
+		}
+		_ = cur.Close()
+		cur = next
+	}
+
+	leaf := parts[len(parts)-1]
+	if leaf == "" || leaf == "." || leaf == ".." {
+		return fmt.Errorf("%w: invalid target component %q", ErrAgentFilesDeleteRefused, leaf)
+	}
+	fi, err := cur.Lstat(leaf)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if makeWritable && fi.IsDir() {
+		makeWritableInRoot(cur, leaf, fi)
+	}
+	return cur.RemoveAll(leaf)
+}
+
+// makeWritableInRoot walks name inside parent via os.Root, making real
+// directories and regular files writable so RemoveAll can delete read-only
+// entries (such as git pack/object files). Symbolic links are skipped and
+// never followed. Errors are ignored because the subsequent RemoveAll surfaces
+// any remaining permission failure.
+func makeWritableInRoot(parent *os.Root, name string, expected fs.FileInfo) {
+	if expected.Mode().Perm()&0o700 != 0o700 {
+		_ = parent.Chmod(name, 0o700) //winsec:not-protection makes the entry writable or removable before deletion
+	}
+	child, err := parent.OpenRoot(name)
+	if err != nil {
+		return
+	}
+	defer func() { _ = child.Close() }()
+	opened, err := child.Stat(".")
+	if err != nil || !os.SameFile(expected, opened) {
+		return
+	}
+	f, err := child.Open(".")
+	if err != nil {
+		return
+	}
+	entries, readErr := f.ReadDir(-1)
+	_ = f.Close()
+	if readErr != nil {
+		return
+	}
+	for _, e := range entries {
+		n := e.Name()
+		cfi, err := child.Lstat(n)
+		if err != nil {
+			continue
+		}
+		if cfi.Mode()&fs.ModeSymlink != 0 {
+			continue
+		}
+		if cfi.IsDir() {
+			makeWritableInRoot(child, n, cfi)
+		} else if cfi.Mode().Perm()&0o200 == 0 {
+			_ = child.Chmod(n, cfi.Mode().Perm()|0o200) //winsec:not-protection makes the entry writable or removable before deletion
+		}
+	}
+}
+
+func hasDotDotSegment(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // classify decides path's place: leaf false classifies its real location
 // (every symlink resolved), leaf true its parent's real location joined
 // with its name (the entry itself is not resolved).
@@ -417,7 +708,7 @@ func (g *agentFilesGuard) classify(path string, extraAgentRoots []string, leaf b
 		}
 	}
 	for _, root := range agentRoots {
-		if guardPathWithin(real, root) {
+		if guardPathWithin(real, root.rootReal) {
 			return nil
 		}
 	}
