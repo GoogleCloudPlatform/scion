@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
@@ -32,7 +34,70 @@ const (
 	mutationTypeAgentLabelsUpdate = "agent.labels.update"
 	maxLabelMergeRetries          = 8
 	errMsgAgentsCannotEditLabels  = "agents cannot modify agent labels"
+	errCodeReservedLabelKey       = "reserved_label_key"
 )
+
+// agentReservedExactLabelKeys are system/trigger/runtime label keys that agent
+// callers may never set or remove (ptone/scion#9867). Humans keep full power.
+var agentReservedExactLabelKeys = map[string]bool{
+	triggerLabelKeyTrigger:       true,
+	triggerLabelKeyTriggerEvent:  true,
+	triggerLabelKeyTriggerSource: true,
+	"scion_project_id":           true,
+	"agent_id":                   true,
+}
+
+// isAgentReservedLabelKey reports whether key is reserved for human callers
+// only (ptone/scion#9867): any key starting with "scion." (covering the
+// scion.dev and legacy scion.io namespaces as well as scion.* runtime keys,
+// case-insensitively), plus system/trigger/runtime exact keys.
+func isAgentReservedLabelKey(key string) bool {
+	lower := strings.ToLower(key)
+	if strings.HasPrefix(lower, "scion.") {
+		return true
+	}
+	return agentReservedExactLabelKeys[lower]
+}
+
+// firstAgentReservedLabelKey returns the lexicographically first reserved key
+// touched by req.Set or req.Remove, or "" if none are reserved.
+func firstAgentReservedLabelKey(req *PatchAgentLabelsRequest) string {
+	var reserved []string
+	for k := range req.Set {
+		if isAgentReservedLabelKey(k) {
+			reserved = append(reserved, k)
+		}
+	}
+	for _, k := range req.Remove {
+		if isAgentReservedLabelKey(k) {
+			reserved = append(reserved, k)
+		}
+	}
+	if len(reserved) == 0 {
+		return ""
+	}
+	sort.Strings(reserved)
+	return reserved[0]
+}
+
+// isDirectCreatorAgent reports whether ctx carries a local agent identity that
+// directly created agent in the same project (excluding self, federated,
+// delegated, and internal hub-delivery identities). Used as defence-in-depth
+// alongside the creator_label authz rule.
+func isDirectCreatorAgent(ctx context.Context, agent *store.Agent) bool {
+	id := GetIdentityFromContext(ctx)
+	if id == nil || agent == nil {
+		return false
+	}
+	if principalContextForIdentity(id).Kind != PrincipalKindAgent {
+		return false
+	}
+	caller, ok := id.(AgentIdentity)
+	if !ok {
+		return false
+	}
+	return creatorLabelEditHolds(caller, agentLabelsUpdateResource(agent), ActionUpdate, permissionAgentUpdate)
+}
 
 // PatchAgentLabelsRequest is the request body for PATCH /api/v1/agents/{id}/labels
 // and PATCH /api/v1/projects/{projectId}/agents/{id}/labels.
@@ -83,10 +148,6 @@ func (s *Server) handleAgentLabels(w http.ResponseWriter, r *http.Request, id st
 		MethodNotAllowed(w, http.MethodPatch)
 		return
 	}
-	if isAgentDerivedCaller(r.Context()) {
-		writeForbidden(w, errMsgAgentsCannotEditLabels)
-		return
-	}
 	agent, err := s.store.GetAgent(r.Context(), id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -101,10 +162,6 @@ func (s *Server) handleProjectAgentLabels(w http.ResponseWriter, r *http.Request
 		MethodNotAllowed(w, http.MethodPatch)
 		return
 	}
-	if isAgentDerivedCaller(r.Context()) {
-		writeForbidden(w, errMsgAgentsCannotEditLabels)
-		return
-	}
 	agent, err := s.resolveProjectAgent(r.Context(), projectID, agentID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -116,11 +173,18 @@ func (s *Server) handleProjectAgentLabels(w http.ResponseWriter, r *http.Request
 func (s *Server) applyAgentLabelsMerge(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
-	if isAgentDerivedCaller(ctx) {
-		writeForbidden(w, errMsgAgentsCannotEditLabels)
+	// Authorize before reading the request body: unauthenticated requests get
+	// 401 and unauthorized callers get 403 without any body read. Local agent
+	// creators are admitted via the creator_label relationship rule
+	// (authz_agent_labels.go) and still pass delegation-ceiling checks.
+	if !s.authorize(w, r, agentLabelsUpdateResource(agent), ActionUpdate) {
 		return
 	}
-	if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
+	// Defence-in-depth: even if agent.update were ever granted an agent JWT
+	// scope in permissions.Registry, only a local direct-creator agent may
+	// mutate labels on the merge route.
+	if isAgentDerivedCaller(ctx) && !isDirectCreatorAgent(ctx, agent) {
+		writeForbidden(w, errMsgAgentsCannotEditLabels)
 		return
 	}
 
@@ -141,6 +205,16 @@ func (s *Server) applyAgentLabelsMerge(w http.ResponseWriter, r *http.Request, a
 	if err := validateLabelMergeRequest(&req); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
+	}
+
+	// Reserved label keys are human-only (ptone/scion#9867). Refuse the whole
+	// request atomically before entering the update transaction.
+	if isAgentDerivedCaller(ctx) {
+		if rk := firstAgentReservedLabelKey(&req); rk != "" {
+			writeError(w, http.StatusForbidden, errCodeReservedLabelKey,
+				fmt.Sprintf("agents cannot set or remove reserved label key %q", rk), nil)
+			return
+		}
 	}
 
 	attempts := maxLabelMergeRetries

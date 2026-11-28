@@ -209,6 +209,13 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		out = append(out, c)
 	}
 
+	// Creator label edit: a local agent editing non-reserved labels on a
+	// direct child in the same project (authz_agent_labels.go). Decided
+	// from the target's stored record only.
+	if c, ok := a.creatorLabelCandidate(principal, resource, action, permissionID); ok {
+		out = append(out, c)
+	}
+
 	// Owner: a user principal that owns the resource. Assign on a hub-scoped
 	// service account is governed by hub membership instead.
 	if isUserPrincipal(principal.Kind) && resource.OwnerID != "" && resource.OwnerID == principal.ID &&

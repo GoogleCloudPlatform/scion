@@ -159,6 +159,12 @@ type Resource struct {
 	// alone. It is unexported so no decoded request can carry it.
 	launchedTarget *store.Agent
 
+	// labelEditTarget is the agent record the merge label PATCH handlers
+	// read from the store, set only by agentLabelsUpdateResource. The
+	// creator_label rule (authz_agent_labels.go) decides from it alone.
+	// It is unexported so no decoded request can carry it.
+	labelEditTarget *store.Agent
+
 	// deliveryItem names the stored material record a deliver request is
 	// for, set only by materialDeliveryResource (material_resources.go).
 	// The association rules (authz_material_association.go) re-read the

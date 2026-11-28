@@ -385,13 +385,13 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.labels.update",
 		Domain:      "agent",
-		Description: "Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Refuses agent principals and audits every label change atomically",
+		Description: "Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Admits human callers with agent.update and local agents editing non-reserved keys on their direct children in the same project (never self, orphans, or reserved scion.*/system keys); audits every label change atomically",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/labels", Method: "PATCH", Response: ResponseCallerSpecific},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/labels", Method: "PATCH", Response: ResponseCallerSpecific},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
@@ -408,6 +408,8 @@ var agentOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"},
 			{Package: "pkg/hub", Function: "TestPatchAgentLabels_Authorization"},
+			{Package: "pkg/hub", Function: "TestPatchAgentLabels_CreatorAgentMatrix"},
+			{Package: "pkg/hub", Function: "TestPatchAgentLabels_ReservedKeysAndUnauthenticated"},
 			{Package: "pkg/hub", Function: "TestPatchAgentLabels_ConcurrentMerge"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),

@@ -1086,6 +1086,11 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 	// (TestLauncherRead_OnlySingleAgentReadWidened).
 	{"launcher", "agent", "agent"}: {"agent.read"},
 
+	// A local agent edits non-reserved labels on its direct children in
+	// the same project, on the merge label PATCH routes only
+	// (ptone/scion#9867, TestPatchAgentLabels_CreatorAgentMatrix).
+	{"creator_label", "agent", "agent"}: {"agent.update"},
+
 	// Progeny read of an ancestor's opted-in user-scoped secret, plus the
 	// reviewed exact pairs (reviewedProgenyExactPairs): runtime use and launch
 	// delivery of opted-in user-scope secrets and env vars.
@@ -1167,6 +1172,7 @@ var knownRelationshipNames = map[string]bool{
 	"progeny":              true,
 	"hub_member_sa_assign": true,
 	"launcher":             true,
+	"creator_label":        true,
 	"project_association":  true,
 	"hub_association":      true,
 	"broker_association":   true,

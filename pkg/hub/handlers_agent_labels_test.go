@@ -399,7 +399,7 @@ func TestPatchAgentLabels_Authorization(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, recProj.Code, recProj.Body.String())
 	})
 
-	t.Run("agent caller cannot edit own, child, sibling, cross-project, or unscoped labels via merge or PATCH", func(t *testing.T) {
+	t.Run("agent caller cannot edit own, sibling, cross-project, or unscoped labels via merge, or any labels via PATCH", func(t *testing.T) {
 		selfToken := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
 		}, nil)
@@ -415,26 +415,28 @@ func TestPatchAgentLabels_Authorization(t *testing.T) {
 			token string
 			path  string
 			body  any
+			msg   string
 		}{
-			{"self merge by-id", selfToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
-			{"self merge project", selfToken, "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
-			{"child merge by-id", selfToken, "/api/v1/agents/" + f.child.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
-			{"sibling merge by-id", selfToken, "/api/v1/agents/" + f.sibling.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
-			{"unscoped merge by-id", unscopedToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
-			{"other-project merge by-id", otherToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
-			{"self PATCH with labels by-id", selfToken, "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}},
-			{"self PATCH with labels project", selfToken, "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug, map[string]any{"labels": map[string]string{"x": "1"}}},
-			{"child PATCH with labels by-id", selfToken, "/api/v1/agents/" + f.child.ID, map[string]any{"labels": map[string]string{"x": "1"}}},
-			{"sibling PATCH with labels by-id", selfToken, "/api/v1/agents/" + f.sibling.ID, map[string]any{"labels": map[string]string{"x": "1"}}},
-			{"unscoped PATCH with labels by-id", unscopedToken, "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}},
-			{"other-project PATCH with labels by-id", otherToken, "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}},
+			{"self merge by-id", selfToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, ""},
+			{"self merge project", selfToken, "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, ""},
+			{"sibling merge by-id", selfToken, "/api/v1/agents/" + f.sibling.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, ""},
+			{"unscoped self merge by-id", unscopedToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, ""},
+			{"other-project merge by-id", otherToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, ""},
+			{"self PATCH with labels by-id", selfToken, "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}, errMsgAgentsCannotEditLabels},
+			{"self PATCH with labels project", selfToken, "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug, map[string]any{"labels": map[string]string{"x": "1"}}, errMsgAgentsCannotEditLabels},
+			{"child PATCH with labels by-id", selfToken, "/api/v1/agents/" + f.child.ID, map[string]any{"labels": map[string]string{"x": "1"}}, errMsgAgentsCannotEditLabels},
+			{"sibling PATCH with labels by-id", selfToken, "/api/v1/agents/" + f.sibling.ID, map[string]any{"labels": map[string]string{"x": "1"}}, errMsgAgentsCannotEditLabels},
+			{"unscoped PATCH with labels by-id", unscopedToken, "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}, errMsgAgentsCannotEditLabels},
+			{"other-project PATCH with labels by-id", otherToken, "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}, errMsgAgentsCannotEditLabels},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, tc.path, tc.body, tc.token)
 				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-				assert.Contains(t, rec.Body.String(), errMsgAgentsCannotEditLabels,
-					"agent label refusal must come from the explicit agent-caller guard")
+				if tc.msg != "" {
+					assert.Contains(t, rec.Body.String(), tc.msg,
+						"agent label refusal must come from the explicit agent-caller guard")
+				}
 			})
 		}
 
@@ -473,7 +475,6 @@ func TestPatchAgentLabels_Authorization(t *testing.T) {
 				rec1 := httptest.NewRecorder()
 				f.srv.handleAgentLabels(rec1, req1, f.agent.ID)
 				assert.Equal(t, http.StatusForbidden, rec1.Code, rec1.Body.String())
-				assert.Contains(t, rec1.Body.String(), errMsgAgentsCannotEditLabels)
 
 				// 2. PATCH /api/v1/projects/{projectId}/agents/{id}/labels
 				req2 := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+f.project.ID+"/agents/"+f.agent.Slug+"/labels", bytes.NewReader(bodyMerge))
@@ -481,7 +482,6 @@ func TestPatchAgentLabels_Authorization(t *testing.T) {
 				rec2 := httptest.NewRecorder()
 				f.srv.handleProjectAgentLabels(rec2, req2, f.project.ID, f.agent.Slug)
 				assert.Equal(t, http.StatusForbidden, rec2.Code, rec2.Body.String())
-				assert.Contains(t, rec2.Body.String(), errMsgAgentsCannotEditLabels)
 
 				// 3. PATCH /api/v1/agents/{id} with labels
 				bodyPatch, err := json.Marshal(map[string]any{"labels": map[string]string{"x": "1"}})
@@ -1101,4 +1101,429 @@ func TestUpdateAgent_PatchBodyLimit(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "normal-update", got.TaskSummary)
 	})
+}
+
+func recordLabelTestDelegationEdge(t *testing.T, s store.Store, delegatorType, delegatorID, delegateID, projectID string, ceiling store.EffectCeiling) {
+	t.Helper()
+	require.NoError(t, s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
+		DelegatorType: delegatorType,
+		DelegatorID:   delegatorID,
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    delegateID,
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       projectID,
+		Role:          string(AgentRoleFull),
+		Active:        true,
+		EffectCeiling: ceiling,
+	}))
+}
+
+// TestPatchAgentLabels_CreatorAgentMatrix verifies ptone/scion#9867:
+// a local agent may edit non-reserved labels on its direct children in the
+// same project via PATCH .../labels, while self, sibling, parent, grandparent,
+// cross-project, federated, delegated, hub-delivery, broken-chain, orphaned,
+// reserved-key, and full-PATCH requests are refused.
+func TestPatchAgentLabels_CreatorAgentMatrix(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+
+	// Wire delegation chain: owner -> agent -> child -> grandchild.
+	recordLabelTestDelegationEdge(t, f.s, store.DelegationPrincipalUser, f.owner.ID, f.agent.ID, f.project.ID,
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+	recordLabelTestDelegationEdge(t, f.s, store.DelegationPrincipalAgent, f.agent.ID, f.child.ID, f.project.ID,
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+
+	grandchild := &store.Agent{
+		ID:           tid("lbl-grandchild"),
+		Slug:         "lbl-grandchild",
+		Name:         "lbl-grandchild",
+		ProjectID:    f.project.ID,
+		Phase:        string(state.PhaseRunning),
+		OwnerID:      f.child.ID,
+		CreatedBy:    f.child.ID,
+		Ancestry:     []string{f.owner.ID, f.agent.ID, f.child.ID},
+		Labels:       map[string]string{"tier": "leaf"},
+		StateVersion: 1,
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, grandchild))
+	recordLabelTestDelegationEdge(t, f.s, store.DelegationPrincipalAgent, f.child.ID, grandchild.ID, f.project.ID,
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+
+	// Cross-project agent whose CreatedBy happens to match f.agent.ID.
+	crossProjChild := &store.Agent{
+		ID:           tid("lbl-cross-proj-child"),
+		Slug:         "lbl-cross-proj-child",
+		Name:         "lbl-cross-proj-child",
+		ProjectID:    f.otherProject.ID,
+		Phase:        string(state.PhaseRunning),
+		OwnerID:      f.agent.ID,
+		CreatedBy:    f.agent.ID,
+		Ancestry:     []string{f.owner.ID, f.agent.ID},
+		Labels:       map[string]string{"env": "other"},
+		StateVersion: 1,
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, crossProjChild))
+
+	agentToken := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.project.ID, []AgentTokenScope{
+		ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
+	}, []string{f.owner.ID})
+	childToken := f.srv.generateRecordedAgentToken(t, f.child.ID, f.project.ID, []AgentTokenScope{
+		ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
+	}, []string{f.owner.ID, f.agent.ID})
+	otherToken := f.srv.generateRecordedAgentToken(t, f.otherAgent.ID, f.otherProject.ID, []AgentTokenScope{
+		ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
+	}, []string{f.outsider.ID})
+
+	t.Run("direct creator agent allowed on by-id and project routes and audited with acting agent", func(t *testing.T) {
+		// By-id route: set + remove.
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+f.child.ID+"/labels", PatchAgentLabelsRequest{
+			Set:    map[string]string{"role": "lead", "team": "alpha"},
+			Remove: []string{"tier"},
+		}, agentToken)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, f.child.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"role": "lead", "team": "alpha"}, got.Labels)
+
+		// Verify audit names the acting agent.
+		audits := f.labelAudits(t, f.child.ID)
+		require.Len(t, audits, 1)
+		assert.Equal(t, mutationTypeAgentLabelsUpdate, audits[0].MutationType)
+		assert.Equal(t, "agent", audits[0].ActorPrincipalKind)
+		assert.Equal(t, f.agent.ID, audits[0].ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindAgentJWT), audits[0].ActorCredentialType)
+		assert.NotEmpty(t, audits[0].ActorCredentialID)
+
+		// Project-scoped route.
+		recProj := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/projects/"+f.project.ID+"/agents/"+f.child.Slug+"/labels", PatchAgentLabelsRequest{
+			Set:    map[string]string{"team": "beta"},
+			Remove: []string{"role"},
+		}, agentToken)
+		require.Equal(t, http.StatusOK, recProj.Code, recProj.Body.String())
+
+		got, err = f.s.GetAgent(ctx, f.child.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"team": "beta"}, got.Labels)
+		assert.Len(t, f.labelAudits(t, f.child.ID), 2)
+	})
+
+	t.Run("multi-hop direct creator allowed (child edits its direct child grandchild)", func(t *testing.T) {
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+grandchild.ID+"/labels", PatchAgentLabelsRequest{
+			Set: map[string]string{"role": "worker"},
+		}, childToken)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, grandchild.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"tier": "leaf", "role": "worker"}, got.Labels)
+
+		audits := f.labelAudits(t, grandchild.ID)
+		require.Len(t, audits, 1)
+		assert.Equal(t, "agent", audits[0].ActorPrincipalKind)
+		assert.Equal(t, f.child.ID, audits[0].ActorPrincipalID)
+	})
+
+	t.Run("self, sibling, parent, grandparent, cross-project, and full PATCH denied 403", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			token  string
+			path   string
+			body   any
+			target string
+		}{
+			{"self by-id", agentToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, f.agent.ID},
+			{"self project", agentToken, "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, f.agent.ID},
+			{"sibling by-id", agentToken, "/api/v1/agents/" + f.sibling.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, f.sibling.ID},
+			{"parent by-id (child editing creator)", childToken, "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, f.agent.ID},
+			{"grandparent by-id (direct children only)", agentToken, "/api/v1/agents/" + grandchild.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, grandchild.ID},
+			{"grandparent project (direct children only)", agentToken, "/api/v1/projects/" + f.project.ID + "/agents/" + grandchild.Slug + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, grandchild.ID},
+			{"cross-project other agent", otherToken, "/api/v1/agents/" + f.child.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, f.child.ID},
+			{"cross-project target with matching CreatedBy", agentToken, "/api/v1/agents/" + crossProjChild.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}, crossProjChild.ID},
+			{"direct creator on full PATCH /agents/{id} stays closed", agentToken, "/api/v1/agents/" + f.child.ID, map[string]any{"labels": map[string]string{"x": "1"}}, f.child.ID},
+			{"direct creator on full PATCH project route stays closed", agentToken, "/api/v1/projects/" + f.project.ID + "/agents/" + f.child.Slug, map[string]any{"labels": map[string]string{"x": "1"}}, f.child.ID},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				before, err := f.s.GetAgent(ctx, tc.target)
+				require.NoError(t, err)
+				beforeAudits := len(f.labelAudits(t, tc.target))
+
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, tc.path, tc.body, tc.token)
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+				after, err := f.s.GetAgent(ctx, tc.target)
+				require.NoError(t, err)
+				assert.Equal(t, before.Labels, after.Labels)
+				assert.Equal(t, beforeAudits, len(f.labelAudits(t, tc.target)))
+			})
+		}
+	})
+
+	t.Run("federated, delegated, and hub-delivery identities denied even when CreatedBy matches", func(t *testing.T) {
+		fedID := tid("lbl-fed-creator")
+		delID := tid("lbl-del-creator")
+		hubDelID := tid("lbl-hubdel-creator")
+
+		makeTarget := func(slug, createdBy string) *store.Agent {
+			a := &store.Agent{
+				ID: tid(slug), Slug: slug, Name: slug, ProjectID: f.project.ID,
+				Phase: string(state.PhaseRunning), OwnerID: f.owner.ID, CreatedBy: createdBy,
+				Ancestry: []string{f.owner.ID, createdBy}, Labels: map[string]string{"k": "v"}, StateVersion: 1,
+			}
+			require.NoError(t, f.s.CreateAgent(ctx, a))
+			return a
+		}
+		fedTarget := makeTarget("lbl-fed-child", fedID)
+		delTarget := makeTarget("lbl-del-child", delID)
+		hubDelTarget := makeTarget("lbl-hubdel-child", hubDelID)
+
+		identities := []struct {
+			name   string
+			id     Identity
+			target *store.Agent
+		}{
+			{"federated_agent", NewFederatedAgentIdentity("https://peer.example", fedID, f.project.ID, "fed", f.owner.ID, []string{f.owner.ID}, nil), fedTarget},
+			{"agent_delegated", &DelegatedAgentIdentity{agentID: delID, authorizingUserID: f.owner.ID}, delTarget},
+			{"hub_delivery", &hubDeliveryIdentity{agentID: hubDelID, projectID: f.project.ID, ancestry: []string{f.owner.ID}}, hubDelTarget},
+		}
+		for _, tc := range identities {
+			t.Run(tc.name, func(t *testing.T) {
+				body, err := json.Marshal(PatchAgentLabelsRequest{Set: map[string]string{"role": "hijack"}})
+				require.NoError(t, err)
+				req := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+tc.target.ID+"/labels", bytes.NewReader(body))
+				req = req.WithContext(contextWithIdentity(req.Context(), tc.id))
+				rec := httptest.NewRecorder()
+				f.srv.handleAgentLabels(rec, req, tc.target.ID)
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+				after, err := f.s.GetAgent(ctx, tc.target.ID)
+				require.NoError(t, err)
+				assert.Equal(t, map[string]string{"k": "v"}, after.Labels)
+			})
+		}
+	})
+
+	t.Run("broken delegation chain denied 403", func(t *testing.T) {
+		// Create a separate parent/child whose delegation edge points to a non-existent user.
+		brokenParent := &store.Agent{
+			ID: tid("lbl-broken-parent"), Slug: "lbl-broken-parent", Name: "lbl-broken-parent",
+			ProjectID: f.project.ID, Phase: string(state.PhaseRunning),
+			OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Ancestry: []string{f.owner.ID}, StateVersion: 1,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, brokenParent))
+		recordLabelTestDelegationEdge(t, f.s, store.DelegationPrincipalUser, tid("lbl-missing-user"), brokenParent.ID, f.project.ID,
+			store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+
+		brokenChild := &store.Agent{
+			ID: tid("lbl-broken-child"), Slug: "lbl-broken-child", Name: "lbl-broken-child",
+			ProjectID: f.project.ID, Phase: string(state.PhaseRunning),
+			OwnerID: brokenParent.ID, CreatedBy: brokenParent.ID, Ancestry: []string{f.owner.ID, brokenParent.ID},
+			Labels: map[string]string{"k": "v"}, StateVersion: 1,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, brokenChild))
+
+		brokenTok := f.srv.generateRecordedAgentToken(t, brokenParent.ID, f.project.ID, []AgentTokenScope{
+			ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
+		}, []string{f.owner.ID})
+
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+brokenChild.ID+"/labels", PatchAgentLabelsRequest{
+			Set: map[string]string{"role": "worker"},
+		}, brokenTok)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		after, err := f.s.GetAgent(ctx, brokenChild.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"k": "v"}, after.Labels)
+	})
+
+	t.Run("orphaned child (creator deleted) is human-only", func(t *testing.T) {
+		// Soft-delete f.child (creator of grandchild):
+		// 1. Grandparent (f.agent) is still denied.
+		// 2. Deleted creator (f.child) cannot edit (delegation/standing denied).
+		// 3. Human owner/editor can still edit grandchild.
+		require.NoError(t, f.s.DeleteAgent(ctx, f.child.ID))
+
+		recGrandparent := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+grandchild.ID+"/labels", PatchAgentLabelsRequest{
+			Set: map[string]string{"orphan": "by-grandparent"},
+		}, agentToken)
+		assert.Equal(t, http.StatusForbidden, recGrandparent.Code, recGrandparent.Body.String())
+
+		recDeletedCreator := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+grandchild.ID+"/labels", PatchAgentLabelsRequest{
+			Set: map[string]string{"orphan": "by-deleted-creator"},
+		}, childToken)
+		assert.True(t, recDeletedCreator.Code == http.StatusUnauthorized || recDeletedCreator.Code == http.StatusForbidden,
+			"deleted creator must be refused (401 or 403), got %d: %s", recDeletedCreator.Code, recDeletedCreator.Body.String())
+
+		recHuman := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+grandchild.ID+"/labels", PatchAgentLabelsRequest{
+			Set: map[string]string{"orphan": "curated-by-human"},
+		})
+		require.Equal(t, http.StatusOK, recHuman.Code, recHuman.Body.String())
+		got, err := f.s.GetAgent(ctx, grandchild.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "curated-by-human", got.Labels["orphan"])
+	})
+}
+
+func TestPatchAgentLabels_ReservedKeysAndUnauthenticated(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+
+	recordLabelTestDelegationEdge(t, f.s, store.DelegationPrincipalUser, f.owner.ID, f.agent.ID, f.project.ID,
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+
+	// Seed a reserved label on child via human owner first so we can test Remove too.
+	seedRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.child.ID+"/labels", PatchAgentLabelsRequest{
+		Set: map[string]string{
+			"scion.io/template":                     "default",
+			"scion.dev/github-token-source-project": "proj-x",
+			"scion.run_id":                          "run-1",
+			"trigger":                               "t1",
+			"trigger_event":                         "push",
+			"trigger_source":                        "github",
+			"scion_project_id":                      "p1",
+			"agent_id":                              "a1",
+		},
+	})
+	require.Equal(t, http.StatusOK, seedRec.Code, "humans must be allowed to set reserved keys: %s", seedRec.Body.String())
+
+	agentToken := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.project.ID, []AgentTokenScope{
+		ScopeAgentStatusUpdate, ScopeAgentLifecycle, ScopeAgentCreate,
+	}, []string{f.owner.ID})
+
+	reservedKeys := []string{
+		"scion.io/template",
+		"scion.dev/github-token-source-project",
+		"scion.run_id",
+		"Scion.Dev/MixedCase",
+		"trigger",
+		"trigger_event",
+		"trigger_source",
+		"scion_project_id",
+		"agent_id",
+	}
+
+	t.Run("agent cannot set or remove any reserved key (atomic whole-request refusal)", func(t *testing.T) {
+		for _, rk := range reservedKeys {
+			t.Run("set_"+rk, func(t *testing.T) {
+				before, err := f.s.GetAgent(ctx, f.child.ID)
+				require.NoError(t, err)
+				beforeAudits := len(f.labelAudits(t, f.child.ID))
+
+				// Mixed request: one valid key + one reserved key must be refused atomically.
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+f.child.ID+"/labels", PatchAgentLabelsRequest{
+					Set: map[string]string{"role": "should-not-apply", rk: "spoof"},
+				}, agentToken)
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "reserved_label_key")
+
+				after, err := f.s.GetAgent(ctx, f.child.ID)
+				require.NoError(t, err)
+				assert.Equal(t, before.Labels, after.Labels, "no partial apply allowed")
+				assert.Equal(t, beforeAudits, len(f.labelAudits(t, f.child.ID)))
+			})
+
+			t.Run("remove_"+rk, func(t *testing.T) {
+				before, err := f.s.GetAgent(ctx, f.child.ID)
+				require.NoError(t, err)
+				beforeAudits := len(f.labelAudits(t, f.child.ID))
+
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+f.child.ID+"/labels", PatchAgentLabelsRequest{
+					Set:    map[string]string{"role": "should-not-apply"},
+					Remove: []string{rk},
+				}, agentToken)
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "reserved_label_key")
+
+				after, err := f.s.GetAgent(ctx, f.child.ID)
+				require.NoError(t, err)
+				assert.Equal(t, before.Labels, after.Labels, "no partial apply allowed")
+				assert.Equal(t, beforeAudits, len(f.labelAudits(t, f.child.ID)))
+			})
+		}
+	})
+
+	t.Run("human can remove reserved keys", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.child.ID+"/labels", PatchAgentLabelsRequest{
+			Remove: []string{"scion.io/template", "scion.dev/github-token-source-project", "scion.run_id"},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := f.s.GetAgent(ctx, f.child.ID)
+		require.NoError(t, err)
+		_, hasIO := got.Labels["scion.io/template"]
+		_, hasDev := got.Labels["scion.dev/github-token-source-project"]
+		_, hasDot := got.Labels["scion.run_id"]
+		assert.False(t, hasIO)
+		assert.False(t, hasDev)
+		assert.False(t, hasDot)
+	})
+
+	t.Run("unauthenticated request returns 401 before any body read", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			path string
+		}{
+			{"by-id route", "/api/v1/agents/" + f.child.ID + "/labels"},
+			{"project route", "/api/v1/projects/" + f.project.ID + "/agents/" + f.child.Slug + "/labels"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				body := &countingReadCloser{r: bytes.NewReader([]byte(`{"set":{"role":"x"}}`))}
+				req := httptest.NewRequest(http.MethodPatch, tc.path, body)
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+
+				assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+				assert.Zero(t, body.n.Load(), "unauthenticated caller must not trigger any body read")
+			})
+		}
+	})
+}
+
+func TestCreatorLabelEditHolds_Unit(t *testing.T) {
+	projID := tid("cl-unit-proj")
+	otherProjID := tid("cl-unit-other-proj")
+	ownerID := tid("cl-unit-owner")
+	parentID := tid("cl-unit-parent")
+	childID := tid("cl-unit-child")
+	grandchildID := tid("cl-unit-grandchild")
+
+	parent := progenyPairAgent(parentID, projID, []string{ownerID}, []AgentTokenScope{ScopeAgentStatusUpdate})
+
+	child := &store.Agent{ID: childID, ProjectID: projID, CreatedBy: parentID, Ancestry: []string{ownerID, parentID}}
+	grandchild := &store.Agent{ID: grandchildID, ProjectID: projID, CreatedBy: childID, Ancestry: []string{ownerID, parentID, childID}}
+	self := &store.Agent{ID: parentID, ProjectID: projID, CreatedBy: parentID, Ancestry: []string{ownerID}}
+	otherProj := &store.Agent{ID: tid("cl-unit-xproj"), ProjectID: otherProjID, CreatedBy: parentID, Ancestry: []string{ownerID, parentID}}
+	sibling := &store.Agent{ID: tid("cl-unit-sib"), ProjectID: projID, CreatedBy: ownerID, Ancestry: []string{ownerID}}
+
+	assert.True(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(child), ActionUpdate, permissionAgentUpdate),
+		"direct child in same project must be admitted")
+	assert.False(t, creatorLabelEditHolds(parent, agentResource(child), ActionUpdate, permissionAgentUpdate),
+		"plain agentResource without labelEditTarget must be refused")
+	assert.False(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(child), ActionRead, permissionAgentUpdate),
+		"wrong action must be refused")
+	assert.False(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(child), ActionUpdate, "agent.read"),
+		"wrong permission must be refused")
+	assert.False(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(grandchild), ActionUpdate, permissionAgentUpdate),
+		"grandchild must be refused (direct children only)")
+	assert.False(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(self), ActionUpdate, permissionAgentUpdate),
+		"self-edit must be refused even if CreatedBy equals self")
+	assert.False(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(otherProj), ActionUpdate, permissionAgentUpdate),
+		"cross-project target must be refused")
+	assert.False(t, creatorLabelEditHolds(parent, agentLabelsUpdateResource(sibling), ActionUpdate, permissionAgentUpdate),
+		"sibling must be refused")
+	assert.False(t, creatorLabelEditHolds(&hubDeliveryIdentity{agentID: parentID, projectID: projID}, agentLabelsUpdateResource(child), ActionUpdate, permissionAgentUpdate),
+		"hubDeliveryIdentity must be refused")
+
+	// creatorLabelCandidate refuses federated and delegated principals even when ID matches CreatedBy.
+	svc := &AuthzService{}
+	fed := NewFederatedAgentIdentity("https://peer.example", parentID, projID, "fed", ownerID, []string{ownerID}, nil)
+	_, ok := svc.creatorLabelCandidate(PrincipalContext{Kind: PrincipalKindFederatedAgent, ID: parentID, Identity: fed}, agentLabelsUpdateResource(child), ActionUpdate, permissionAgentUpdate)
+	assert.False(t, ok, "federated agent must be refused")
+	_, ok = svc.creatorLabelCandidate(PrincipalContext{Kind: PrincipalKindFederatedAgent, ID: parentID, Identity: parent}, agentLabelsUpdateResource(child), ActionUpdate, permissionAgentUpdate)
+	assert.False(t, ok, "non-local principal kind must be refused even with AgentIdentity")
+	_, ok = svc.creatorLabelCandidate(PrincipalContext{Kind: PrincipalKindAgentDelegated, ID: parentID, Identity: &DelegatedAgentIdentity{agentID: parentID}}, agentLabelsUpdateResource(child), ActionUpdate, permissionAgentUpdate)
+	assert.False(t, ok, "delegated agent must be refused")
+	_, ok = svc.creatorLabelCandidate(PrincipalContext{Kind: PrincipalKindAgent, ID: parentID, Identity: parent}, agentLabelsUpdateResource(child), ActionUpdate, permissionAgentUpdate)
+	assert.True(t, ok, "local agent creator must produce creator_label candidate")
 }

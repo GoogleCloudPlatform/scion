@@ -72,6 +72,8 @@ func TestResourceEqual_MutationCoversEveryField(t *testing.T) {
 				switch field.Name {
 				case "launchedTarget":
 					mutated.launchedTarget = &store.Agent{ID: "x"}
+				case "labelEditTarget":
+					mutated.labelEditTarget = &store.Agent{ID: "x"}
 				case "deliveryItem":
 					mutated.deliveryItem = &materialDeliveryItem{Key: "x"}
 				default:
