@@ -125,14 +125,25 @@ func TestResolveConversationRef_AtAgent_PeerExistsNoConversationYet(t *testing.T
 }
 
 func TestResolveConversationRef_AtAgent_NotFound(t *testing.T) {
+	listCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v1/conversations/resolve":
 			_ = json.NewEncoder(w).Encode(hubclient.ConversationResolveResult{Exists: false})
 		case "/api/v1/conversations":
+			listCalled = true
+			// Even if the caller has a DM with an agent of the same name in
+			// another project, a project-scoped resolve miss must not silently
+			// resolve to another project's agent.
 			_ = json.NewEncoder(w).Encode(hubclient.ConversationListResult{
-				Conversations: []hubclient.ConversationDetail{},
+				Conversations: []hubclient.ConversationDetail{
+					{
+						Conversation: store.Conversation{ID: "99999999-aaaa-bbbb-cccc-dddddddddddd", Kind: "direct"},
+						DMPeer:       &hubclient.ConversationPeer{Kind: "agent", ID: "other-proj-agent", Name: "missing-agent"},
+					},
+				},
+				Total: 1,
 			})
 		default:
 			http.NotFound(w, r)
@@ -148,6 +159,7 @@ func TestResolveConversationRef_AtAgent_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "no direct conversation found for @missing-agent")
 	assert.Contains(t, err.Error(), "scion conversation list")
 	assert.Contains(t, err.Error(), "conv:<uuid>")
+	assert.False(t, listCalled, "project-scoped resolve miss must not fall back to unscoped DM listing")
 }
 
 func TestResolveConversationRef_AtAgent_FallbackToListByDMPeer(t *testing.T) {
@@ -156,23 +168,36 @@ func TestResolveConversationRef_AtAgent_FallbackToListByDMPeer(t *testing.T) {
 		agentID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 	)
 
-	t.Run("resolve_returns_not_exists_without_peer_matches_dm_peer_name", func(t *testing.T) {
+	t.Run("missing_project_400_falls_back_to_list_and_resolves_unique_match_by_name_or_id", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch r.URL.Path {
 			case "/api/v1/conversations/resolve":
-				// e.g. historical DM with a deleted agent
-				_ = json.NewEncoder(w).Encode(hubclient.ConversationResolveResult{Exists: false})
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]string{
+						"code":    "invalid_request",
+						"message": "Project ID is required when resolving @agent references",
+					},
+				})
 			case "/api/v1/conversations":
 				assert.Equal(t, "direct", r.URL.Query().Get("kind"))
 				_ = json.NewEncoder(w).Encode(hubclient.ConversationListResult{
 					Conversations: []hubclient.ConversationDetail{
 						{
+							Conversation: store.Conversation{ID: "33333333-4444-5555-6666-777777777777", Kind: "direct"},
+							DMPeer:       &hubclient.ConversationPeer{Kind: "agent", ID: "other-agent-id", Name: "other-agent"},
+						},
+						{
+							Conversation: store.Conversation{ID: "44444444-5555-6666-7777-888888888888", Kind: "direct"},
+							DMPeer:       &hubclient.ConversationPeer{Kind: "user", ID: "user-1", Name: "solo-agent"},
+						},
+						{
 							Conversation: store.Conversation{ID: convID, Kind: "direct"},
-							DMPeer:       &hubclient.ConversationPeer{Kind: "agent", ID: agentID, Name: "deleted-agent"},
+							DMPeer:       &hubclient.ConversationPeer{Kind: "agent", ID: agentID, Name: "solo-agent"},
 						},
 					},
-					Total: 1,
+					Total: 3,
 				})
 			default:
 				http.NotFound(w, r)
@@ -183,17 +208,18 @@ func TestResolveConversationRef_AtAgent_FallbackToListByDMPeer(t *testing.T) {
 		client, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
 
-		got, err := resolveConversationRef(context.Background(), client, "proj-1", "@deleted-agent")
+		got, err := resolveConversationRef(context.Background(), client, "", "@solo-agent")
 		require.NoError(t, err)
 		assert.Equal(t, convID, got)
 
-		// Also resolves by agent UUID via DMPeer.ID.
-		gotByID, err := resolveConversationRef(context.Background(), client, "proj-1", "@"+agentID)
+		// Also resolves by agent UUID via DMPeer.ID (e.g. a DM whose peer name
+		// is empty because the agent was soft-deleted).
+		gotByID, err := resolveConversationRef(context.Background(), client, "", "@"+agentID)
 		require.NoError(t, err)
 		assert.Equal(t, convID, gotByID)
 	})
 
-	t.Run("missing_project_400_falls_back_to_list_and_resolves_unique_match", func(t *testing.T) {
+	t.Run("missing_project_400_ignores_different_agent_dm", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch r.URL.Path {
@@ -210,7 +236,7 @@ func TestResolveConversationRef_AtAgent_FallbackToListByDMPeer(t *testing.T) {
 					Conversations: []hubclient.ConversationDetail{
 						{
 							Conversation: store.Conversation{ID: convID, Kind: "direct"},
-							DMPeer:       &hubclient.ConversationPeer{Kind: "agent", ID: agentID, Name: "solo-agent"},
+							DMPeer:       &hubclient.ConversationPeer{Kind: "agent", ID: agentID, Name: "different-agent"},
 						},
 					},
 					Total: 1,
@@ -224,9 +250,49 @@ func TestResolveConversationRef_AtAgent_FallbackToListByDMPeer(t *testing.T) {
 		client, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
 
-		got, err := resolveConversationRef(context.Background(), client, "", "@solo-agent")
+		_, err = resolveConversationRef(context.Background(), client, "", "@target-agent")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no direct conversation found for @target-agent")
+	})
+
+	t.Run("missing_project_400_ignores_user_peer_with_matching_name_or_id", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/conversations/resolve":
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]string{
+						"code":    "invalid_request",
+						"message": "Project ID is required when resolving @agent references",
+					},
+				})
+			case "/api/v1/conversations":
+				_ = json.NewEncoder(w).Encode(hubclient.ConversationListResult{
+					Conversations: []hubclient.ConversationDetail{
+						{
+							Conversation: store.Conversation{ID: convID, Kind: "direct"},
+							DMPeer:       &hubclient.ConversationPeer{Kind: "user", ID: agentID, Name: "target-agent"},
+						},
+					},
+					Total: 1,
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		client, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
-		assert.Equal(t, convID, got)
+
+		_, err = resolveConversationRef(context.Background(), client, "", "@target-agent")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no direct conversation found for @target-agent")
+
+		_, err = resolveConversationRef(context.Background(), client, "", "@"+agentID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no direct conversation found for @"+agentID)
 	})
 
 	t.Run("missing_project_400_with_no_match_hints_project_flag", func(t *testing.T) {

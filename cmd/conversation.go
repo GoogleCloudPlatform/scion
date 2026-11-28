@@ -1120,10 +1120,10 @@ func optionalProjectID(settings *config.Settings) string {
 
 // resolveConversationRef resolves a conversation reference string to a conversation ID.
 // Supports conv:<uuid> and bare 36-character <uuid> directly. For @agent it
-// uses the hub's canonical conversation resolution endpoint (falling back to
-// direct-conversation listing by DMPeer when no project context is set or no
-// live agent matched). For #thread it lists group conversations and matches by
-// display name.
+// uses the hub's canonical conversation resolution endpoint, falling back to
+// direct-conversation listing by DMPeer only when no project context is set
+// (a human caller outside a linked project). For #thread it lists group
+// conversations and matches by display name.
 func resolveConversationRef(ctx context.Context, client hubclient.Client, projectID, refStr string) (string, error) {
 	if len(refStr) == 36 {
 		if id, err := uuid.Parse(refStr); err == nil {
@@ -1168,12 +1168,14 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, projec
 }
 
 // resolveAgentConversationRef resolves an @<agent> reference to the caller's
-// direct conversation with that agent. It first queries the hub's canonical
-// read-only GET /api/v1/conversations/resolve endpoint (the same canonical
-// agent + DM-key resolution path used by messaging). When the hub reports no
-// live agent match or requires a project ID (e.g. a human caller outside a
-// linked project), it falls back to matching direct conversations by DMPeer
-// (and DisplayName) from Conversations().List.
+// direct conversation with that agent. It queries the hub's canonical read-only
+// GET /api/v1/conversations/resolve endpoint (the same canonical agent + DM-key
+// resolution path used by messaging). When a project context is in scope (either
+// projectID or an agent caller's token project), a not-found result from resolve
+// is authoritative and does not fall back to cross-project listing. Only when
+// the hub reports that a project ID is required (a human caller outside a linked
+// project) does it fall back to matching direct conversations by DMPeer (and
+// DisplayName) from Conversations().List.
 func resolveAgentConversationRef(ctx context.Context, client hubclient.Client, projectID string, ref *messaging.Reference) (string, error) {
 	res, err := client.Messaging().ResolveConversation(ctx, ref.Raw, projectID)
 	if err == nil {
@@ -1183,20 +1185,17 @@ func resolveAgentConversationRef(ctx context.Context, client hubclient.Client, p
 		if res != nil && !res.Exists && res.PeerAgent != nil {
 			return "", fmt.Errorf("no direct conversation exists with @%s yet; send a message with 'scion message @%s ...' to start one, or run 'scion conversation list' to see existing conversations", ref.Value, ref.Value)
 		}
-		// PeerAgent is nil (agent not found as a live agent in projectID, e.g.
-		// historical DM with a deleted agent): fall back to listing the caller's
-		// direct conversations by DMPeer.
-		return resolveAgentDMFromList(ctx, client, ref.Value, false)
+		return "", fmt.Errorf("no direct conversation found for @%s (run 'scion conversation list' to see existing conversations, or pass conv:<uuid>)", ref.Value)
 	}
 
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) && apiErr.IsBadRequest() && strings.Contains(apiErr.Message, "Project ID is required") {
-		return resolveAgentDMFromList(ctx, client, ref.Value, true)
+		return resolveAgentDMFromList(ctx, client, ref.Value)
 	}
 	return "", fmt.Errorf("failed to resolve conversation for @%s: %w", ref.Value, err)
 }
 
-func resolveAgentDMFromList(ctx context.Context, client hubclient.Client, agentRef string, missingProject bool) (string, error) {
+func resolveAgentDMFromList(ctx context.Context, client hubclient.Client, agentRef string) (string, error) {
 	convs, listErr := client.Conversations().List(ctx, &hubclient.ListConversationsOptions{
 		Kind: "direct",
 	})
@@ -1218,10 +1217,7 @@ func resolveAgentDMFromList(ctx context.Context, client hubclient.Client, agentR
 	case 1:
 		return matches[0].ID, nil
 	case 0:
-		if missingProject {
-			return "", fmt.Errorf("no direct conversation found for @%s (specify --project <id> or pass conv:<uuid> from 'scion conversation list')", agentRef)
-		}
-		return "", fmt.Errorf("no direct conversation found for @%s (run 'scion conversation list' to see existing conversations, or pass conv:<uuid>)", agentRef)
+		return "", fmt.Errorf("no direct conversation found for @%s (specify --project <id> or pass conv:<uuid> from 'scion conversation list')", agentRef)
 	default:
 		ids := make([]string, 0, len(matches))
 		for _, m := range matches {
