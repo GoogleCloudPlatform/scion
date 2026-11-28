@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -163,4 +164,66 @@ func TestHandleExistingAgent_ClearsStaleExitReason(t *testing.T) {
 		assert.Equal(t, "", got.ExitReason, "starting a created agent must clear a stale exit reason")
 		assert.Nil(t, got.ExitCode)
 	})
+}
+
+// TestHandleExistingAgent_ResumeAnchorsLastActivityEvent covers the sync
+// create-endpoint resume/restart paths (handleExistingAgent with async start
+// unavailable): resuming a suspended or stopped agent whose LastActivityEvent
+// is hours old must anchor LastActivityEvent at now so an immediate stall
+// sweep does not mark it STALLED, while a sweep after StalledThreshold still
+// catches a silent hang (ptone/scion#8304).
+func TestHandleExistingAgent_ResumeAnchorsLastActivityEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase state.Phase
+	}{
+		{name: "suspended agent", phase: state.PhaseSuspended},
+		{name: "stopped agent", phase: state.PhaseStopped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := handleExistingAgentAuthzSetup(t)
+			f.srv.SetDispatcher(&createAgentDispatcher{})
+
+			agent := f.agent(t, "hea-lae-"+string(tc.phase), string(tc.phase))
+			staleAct := time.Now().Add(-6 * time.Hour)
+			agent.LastActivityEvent = staleAct
+			agent.LastSeen = time.Now()
+			require.NoError(t, f.store.UpdateAgent(ctx, agent))
+
+			beforeResume := time.Now().Add(-time.Second)
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+				"name":      agent.Slug,
+				"projectId": f.project.ID,
+				"resume":    true,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := f.store.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			assert.False(t, got.LastActivityEvent.Before(beforeResume),
+				"resuming %s via create endpoint must anchor LastActivityEvent at now (got %v, want >= %v)",
+				tc.phase, got.LastActivityEvent, beforeResume)
+
+			// Immediate stall sweep must not mark the freshly resumed agent stalled.
+			now := time.Now()
+			stalled, err := f.store.MarkStalledAgents(ctx, store.StallCutoffs{
+				Activity: now.Add(-5 * time.Minute),
+				Thinking: now.Add(-20 * time.Minute),
+			}, now.Add(-2*time.Minute))
+			require.NoError(t, err)
+			assert.Empty(t, stalled, "immediate stall sweep must not mark freshly resumed %s agent stalled", tc.phase)
+
+			// Once StalledThreshold elapses with no activity report, the silent
+			// resumed agent IS marked stalled.
+			stalledLater, err := f.store.MarkStalledAgents(ctx, store.StallCutoffs{
+				Activity: time.Now().Add(time.Second),
+				Thinking: time.Now().Add(time.Second),
+			}, now.Add(-2*time.Minute))
+			require.NoError(t, err)
+			require.Len(t, stalledLater, 1)
+			assert.Equal(t, agent.ID, stalledLater[0].ID)
+		})
+	}
 }

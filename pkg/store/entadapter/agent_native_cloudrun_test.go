@@ -300,7 +300,7 @@ func TestAgentStore_UpdateAgentRacesNativeRecord(t *testing.T) {
 	cur.Phase = "stopped"
 	uid := uuid.MustParse(a.ID)
 
-	update, err := buildAgentUpdate(ctx, s.client.Agent, uid, cur, cur.StateVersion, cur.StateVersion+1, time.Now(), false)
+	update, _, err := buildAgentUpdate(ctx, s.client.Agent, uid, cur, cur.StateVersion, cur.StateVersion+1, time.Now(), false)
 	require.NoError(t, err)
 	require.NoError(t, s.SetAgentNativeCloudRun(ctx, a.ID, true))
 	n, err := update.Save(ctx)
