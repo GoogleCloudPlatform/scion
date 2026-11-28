@@ -161,6 +161,7 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		"sender_kind", senderKindLabel(msg.Sender),
 		"type", msg.Type,
 		"surface", target.Surface,
+		"kind", target.Kind,
 	)
 	b.mu.RLock()
 	h := b.handler
