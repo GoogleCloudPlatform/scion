@@ -113,7 +113,6 @@ func newMPChainP1Fixture(t *testing.T, policiesOn, chainsOn bool) *mpChainP1Fixt
 		ProjectID:   &project.ID,
 		Kind:        "group",
 		Surface:     "native",
-		ExternalRef: "thread:team-chat",
 		DisplayName: "team-chat",
 		DriftState:  "active",
 	}
