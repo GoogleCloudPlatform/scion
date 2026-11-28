@@ -123,14 +123,14 @@ func TestLocalStorage_Compose(t *testing.T) {
 // 32-source limit on Compose calls and tracks every Compose and Delete call.
 type fakeGCSCompose struct {
 	mu           sync.Mutex
-	objects      map[string]fakeGCSObject
+	objects      map[string]fakeComposeGCSObject
 	composeCalls int
 	maxBatchSeen int
 	deleted      []string
 	failOnCall   int // if > 0, fail the Nth compose call with 500
 }
 
-type fakeGCSObject struct {
+type fakeComposeGCSObject struct {
 	data        []byte
 	contentType string
 	generation  int64
@@ -138,7 +138,7 @@ type fakeGCSObject struct {
 
 func newFakeGCSCompose() *fakeGCSCompose {
 	return &fakeGCSCompose{
-		objects: make(map[string]fakeGCSObject),
+		objects: make(map[string]fakeComposeGCSObject),
 	}
 }
 
@@ -146,7 +146,7 @@ func (f *fakeGCSCompose) put(name string, data []byte, contentType string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	gen := f.objects[name].generation + 1
-	f.objects[name] = fakeGCSObject{
+	f.objects[name] = fakeComposeGCSObject{
 		data:        append([]byte(nil), data...),
 		contentType: contentType,
 		generation:  gen,
@@ -219,7 +219,7 @@ func (f *fakeGCSCompose) serve(t *testing.T) *httptest.Server {
 				combined.Write(obj.data)
 			}
 			gen := f.objects[dst].generation + 1
-			f.objects[dst] = fakeGCSObject{
+			f.objects[dst] = fakeComposeGCSObject{
 				data:        combined.Bytes(),
 				contentType: req.Destination.ContentType,
 				generation:  gen,
