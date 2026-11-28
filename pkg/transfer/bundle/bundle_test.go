@@ -152,6 +152,28 @@ func TestT1_RoundTrip_EmptyRoot(t *testing.T) {
 	assertDirEmpty(t, scratch)
 }
 
+// runTestGit runs git in dir with background maintenance and auto-gc disabled
+// so detached child processes (such as `git maintenance run --auto --detach`)
+// cannot asynchronously create and unlink `.git/objects/maintenance.lock`
+// while Estimate and Write walk the repository.
+func runTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}, args...)
+	cmd := exec.Command("git", fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
 // TestT1_RoundTrip_GitRepo verifies that a real git repo (with commit,
 // uncommitted change, untracked file, empty dirs) round-trips intact and
 // WorkspaceExcluder keeps .git while dropping root .scion.
@@ -164,29 +186,12 @@ func TestT1_RoundTrip_GitRepo(t *testing.T) {
 	dstDir := t.TempDir()
 	scratch := t.TempDir()
 
-	runGit := func(dir string, args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=Test",
-			"GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=Test",
-			"GIT_COMMITTER_EMAIL=test@example.com",
-		)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
-		return string(out)
-	}
-
-	runGit(srcDir, "init")
+	runTestGit(t, srcDir, "init")
 	if err := os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("hello world\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGit(srcDir, "add", "README.md")
-	runGit(srcDir, "commit", "-m", "initial commit")
+	runTestGit(t, srcDir, "add", "README.md")
+	runTestGit(t, srcDir, "commit", "-m", "initial commit")
 
 	// Uncommitted modification + untracked file + empty dir + root .scion (excluded) + nested .scion (kept).
 	if err := os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("hello modified\n"), 0o644); err != nil {
@@ -258,16 +263,36 @@ func TestT1_RoundTrip_GitRepo(t *testing.T) {
 	}
 
 	// Verify git history and working tree status survived intact.
-	srcLog := runGit(srcDir, "log", "--oneline")
-	dstLog := runGit(dstDir, "log", "--oneline")
+	srcLog := runTestGit(t, srcDir, "log", "--oneline")
+	dstLog := runTestGit(t, dstDir, "log", "--oneline")
 	if srcLog != dstLog {
 		t.Fatalf("git log mismatch:\nsrc: %s\ndst: %s", srcLog, dstLog)
 	}
-	srcStatus := runGit(srcDir, "status", "--porcelain")
-	dstStatus := runGit(dstDir, "status", "--porcelain")
+	srcStatus := runTestGit(t, srcDir, "status", "--porcelain")
+	dstStatus := runTestGit(t, dstDir, "status", "--porcelain")
 	wantStatus := strings.ReplaceAll(srcStatus, "?? .scion/\n", "")
 	if dstStatus != wantStatus {
 		t.Fatalf("git status mismatch:\nwant: %s\ndst: %s", wantStatus, dstStatus)
+	}
+}
+
+// TestT1_RoundTrip_GitRepo_DisablesAutoMaintenance is a deterministic
+// regression test for ptone/scion#9703: runTestGit must disable automatic
+// background maintenance and gc so git commit cannot leave a detached
+// `git maintenance` process mutating `.git/objects/maintenance.lock` between
+// Estimate and Write.
+func TestT1_RoundTrip_GitRepo_DisablesAutoMaintenance(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+	dir := t.TempDir()
+	runTestGit(t, dir, "init")
+
+	if got := strings.TrimSpace(runTestGit(t, dir, "config", "--get", "maintenance.auto")); got != "false" {
+		t.Fatalf("maintenance.auto = %q, want %q", got, "false")
+	}
+	if got := strings.TrimSpace(runTestGit(t, dir, "config", "--get", "gc.auto")); got != "0" {
+		t.Fatalf("gc.auto = %q, want %q", got, "0")
 	}
 }
 
