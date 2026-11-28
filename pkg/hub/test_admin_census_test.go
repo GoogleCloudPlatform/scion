@@ -300,6 +300,9 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"seed.go:removeProjectMembersGroupRoleBindings:ListRoleBindingsForPrincipal":      "startup: members-group binding cleanup",
 	"seed.go:removeSystemHubMembershipTx:GetGroupMembership":                          "mutation: hub grant sync",
 	"seed.go:warnOwnerOnlyLegacyProject:ListRoleBindingsForScope":                     "startup: legacy owner warning",
+
+	// Tokenomics pooled-group billing read (never grants authorization).
+	"token_budget_groups.go:ResolveForUsers:GetEffectiveGroupsForUsers": "billing: billing user's effective groups for pooled-group token budget charging; never grants authorization",
 }
 
 // testAdminAdminEmailsCensus classifies every function that reads the

@@ -18,7 +18,9 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -319,4 +321,99 @@ func TestUsageGroupRollupStore_SweepUsageGroupRollupsDailyBatch(t *testing.T) {
 	remaining, err := client.UsageGroupRollupDaily.Query().Where(usagegrouprollupdaily.GroupIDEQ(g1)).Count(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, remaining)
+}
+
+func TestUsageGroupRollupStore_ConcurrentReversedBatches(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	proj1 := uuid.NewString()
+	proj2 := uuid.NewString()
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+	runID := "run-conc-grp-" + uuid.NewString()
+	gA := "group-a-" + uuid.NewString()
+	gB := "group-b-" + uuid.NewString()
+	day := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         runID,
+		AgentID:       agentID,
+		ProjectID:     proj1,
+		BillingUserID: &userID,
+		Harness:       "claude",
+		CreatedAt:     day,
+	})
+	require.NoError(t, err)
+
+	// 8 concurrent writers ingesting batches with reversed group ordering
+	// ([gA, gB] vs [gB, gA]) across two projects must remain deadlock-free
+	// and produce exact totals on both SQLite and PostgreSQL (O3).
+	const workers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			groups := []string{gA, gB}
+			proj := proj1
+			if idx%2 == 1 {
+				groups = []string{gB, gA}
+				proj = proj2
+			}
+			_, e := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+				AgentID: agentID,
+				Events: []*store.UsageEvent{
+					{
+						HubID:           "hub-1",
+						EventID:         fmt.Sprintf("conc-ev-%d", idx),
+						RunID:           runID,
+						ProjectID:       proj,
+						AgentID:         agentID,
+						BillingUserID:   &userID,
+						Harness:         "claude",
+						Model:           "claude-sonnet-4-6",
+						ModelSource:     telemetrycontract.ModelSourceEvent,
+						UsageSource:     telemetrycontract.UsageSourceNative,
+						Status:          telemetrycontract.StatusSuccess,
+						Calls:           1,
+						Input:           i64Ptr(100),
+						Output:          i64Ptr(50),
+						TokenStatus:     telemetrycontract.TokenStatusReported,
+						EventTS:         day,
+						ProducerEpoch:   fmt.Sprintf("ep-%d", idx),
+						ProducerSeq:     1,
+						ChargedGroupIDs: groups,
+					},
+				},
+			})
+			errs <- e
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		require.NoError(t, e)
+	}
+
+	dayStart := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+
+	// Each of the 8 workers added 150 tokens to both gA and gB (4 in proj1, 4 in proj2).
+	for _, g := range []string{gA, gB} {
+		sumAll, err := cs.SumUsageGroupRollupTokens(ctx, g, "", dayStart, dayEnd)
+		require.NoError(t, err)
+		assert.Equal(t, int64(8*150), sumAll)
+
+		sumP1, err := cs.SumUsageGroupRollupTokens(ctx, g, proj1, dayStart, dayEnd)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4*150), sumP1)
+
+		sumP2, err := cs.SumUsageGroupRollupTokens(ctx, g, proj2, dayStart, dayEnd)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4*150), sumP2)
+	}
 }

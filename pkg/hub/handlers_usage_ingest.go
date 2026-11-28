@@ -520,6 +520,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 			if resolver := s.PooledGroupResolver(); resolver != nil {
 				groupsByUser, resolveErr := resolver.ResolveForUsers(ctx, distinctUsers)
 				if resolveErr != nil {
+					resolver.RecordResolveError(ctx)
 					slog.Warn("usage ingest: failed to resolve pooled budget groups",
 						"agent_id", agentID, "error", resolveErr)
 				} else {

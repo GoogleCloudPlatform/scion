@@ -20,7 +20,11 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -41,10 +45,11 @@ type pooledGroupCacheEntry struct {
 // one active pooledGroupLimit binding (value > 0).
 //
 // Caching: per-replica 60s TTL cache for both the active pooled-group ID set
-// and per-user resolved slices. In-process mutations (group membership edits,
-// group deletes, and pooled entitlement binding CRUD) invalidate immediately.
-// Cross-replica staleness is bounded by the 60s TTL (covered by the +2m seeder
-// pass in C2 / D6).
+// and per-user resolved slices. Per-user entries are capped at the active set's
+// expiry and cleared whenever the active set reloads, so cross-replica staleness
+// is strictly bounded by the 60s TTL (covered by the +2m seeder pass in C2 / D6).
+// In-process mutations (group membership edits, group deletes, and pooled
+// entitlement binding CRUD) invalidate immediately.
 type PooledGroupResolver struct {
 	store store.Store
 	ttl   time.Duration
@@ -55,6 +60,10 @@ type PooledGroupResolver struct {
 	activeExpiresAt time.Time
 	activeGroupSet  map[string]struct{}
 	userCache       map[string]pooledGroupCacheEntry
+
+	resolveErrors        atomic.Int64
+	resolveErrorsOnce    sync.Once
+	resolveErrorsCounter metric.Int64Counter
 }
 
 // NewPooledGroupResolver constructs a PooledGroupResolver with the default 60s TTL.
@@ -65,6 +74,40 @@ func NewPooledGroupResolver(st store.Store) *PooledGroupResolver {
 		nowFn:     func() time.Time { return time.Now().UTC() },
 		userCache: make(map[string]pooledGroupCacheEntry),
 	}
+}
+
+// RecordResolveError increments the observable pooled-group resolution error
+// counter (atomic + OTel metric) so ingest-time resolver failures are never
+// silently dropped.
+func (r *PooledGroupResolver) RecordResolveError(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.resolveErrors.Add(1)
+	r.resolveErrorsOnce.Do(func() {
+		c, err := otel.GetMeterProvider().
+			Meter("github.com/GoogleCloudPlatform/scion/pkg/hub").
+			Int64Counter(
+				"scion.hub.usage.pooled_group_resolve_errors",
+				metric.WithDescription("Count of pooled-group resolution failures during usage ingest"),
+				metric.WithUnit("{error}"),
+			)
+		if err == nil {
+			r.resolveErrorsCounter = c
+		}
+	})
+	if r.resolveErrorsCounter != nil {
+		r.resolveErrorsCounter.Add(ctx, 1)
+	}
+}
+
+// ResolveErrorCount returns the number of ingest-time pooled-group resolution
+// errors recorded on this replica.
+func (r *PooledGroupResolver) ResolveErrorCount() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.resolveErrors.Load()
 }
 
 func (r *PooledGroupResolver) now() time.Time {
@@ -101,15 +144,17 @@ func (r *PooledGroupResolver) InvalidateUser(userID string) {
 }
 
 // activePooledGroups returns the set of explicit group IDs that currently hold
-// at least one positive pooledGroupLimit entitlement binding.
-func (r *PooledGroupResolver) activePooledGroups(ctx context.Context) (map[string]struct{}, error) {
+// at least one positive pooledGroupLimit entitlement binding, along with the
+// expiry timestamp of that active-set snapshot.
+func (r *PooledGroupResolver) activePooledGroups(ctx context.Context) (map[string]struct{}, time.Time, error) {
 	now := r.now()
 
 	r.mu.RLock()
 	if r.activeLoaded && now.Before(r.activeExpiresAt) {
 		set := r.activeGroupSet
+		exp := r.activeExpiresAt
 		r.mu.RUnlock()
-		return set, nil
+		return set, exp, nil
 	}
 	r.mu.RUnlock()
 
@@ -124,14 +169,14 @@ func (r *PooledGroupResolver) activePooledGroups(ctx context.Context) (map[strin
 			if errors.Is(err, store.ErrNotFound) {
 				continue
 			}
-			return nil, fmt.Errorf("lookup limit definition %q: %w", name, err)
+			return nil, time.Time{}, fmt.Errorf("lookup limit definition %q: %w", name, err)
 		}
 		if def == nil {
 			continue
 		}
 		bindings, err := r.store.ListEntitlementBindings(ctx, def.ID)
 		if err != nil {
-			return nil, fmt.Errorf("list entitlement bindings for %q: %w", name, err)
+			return nil, time.Time{}, fmt.Errorf("list entitlement bindings for %q: %w", name, err)
 		}
 		for _, b := range bindings {
 			if b != nil && b.SubjectType == store.EntitlementSubjectGroup && b.SubjectID != "" && b.Value > 0 {
@@ -148,7 +193,7 @@ func (r *PooledGroupResolver) activePooledGroups(ctx context.Context) (map[strin
 		}
 		groups, err := r.store.GetGroupsByIDs(ctx, ids)
 		if err != nil {
-			return nil, fmt.Errorf("load pooled groups: %w", err)
+			return nil, time.Time{}, fmt.Errorf("load pooled groups: %w", err)
 		}
 		for i := range groups {
 			// Skip project_agents groups defensively; only explicit user groups
@@ -159,12 +204,16 @@ func (r *PooledGroupResolver) activePooledGroups(ctx context.Context) (map[strin
 		}
 	}
 
+	activeExp := now.Add(r.ttl)
 	r.mu.Lock()
 	r.activeLoaded = true
-	r.activeExpiresAt = now.Add(r.ttl)
+	r.activeExpiresAt = activeExp
 	r.activeGroupSet = activeSet
+	// Clear per-user cache whenever the active set reloads so no user entry
+	// can outlive the active set it was computed against (R1).
+	r.userCache = make(map[string]pooledGroupCacheEntry)
 	r.mu.Unlock()
-	return activeSet, nil
+	return activeSet, activeExp, nil
 }
 
 // ResolveForUser returns the sorted, deduplicated list of active pooled group
@@ -188,7 +237,7 @@ func (r *PooledGroupResolver) ResolveForUsers(ctx context.Context, userIDs []str
 	if r == nil || r.store == nil || len(userIDs) == 0 {
 		return nil, nil
 	}
-	activeSet, err := r.activePooledGroups(ctx)
+	activeSet, activeExp, err := r.activePooledGroups(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +280,12 @@ func (r *PooledGroupResolver) ResolveForUsers(ctx context.Context, userIDs []str
 		return nil, fmt.Errorf("resolve effective groups for users: %w", err)
 	}
 
+	// Cap per-user cache entry expiry at the active set's expiry so staleness
+	// never exceeds 1×TTL (R1).
 	exp := now.Add(r.ttl)
+	if !activeExp.IsZero() && activeExp.Before(exp) {
+		exp = activeExp
+	}
 	computed := make(map[string][]string, len(misses))
 	for _, uid := range misses {
 		eff := effByUser[uid]

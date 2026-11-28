@@ -627,6 +627,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 							"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
 					}
 				}
+				s.InvalidatePooledGroupCacheForUser(user.ID)
 				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
 		}
@@ -1804,7 +1805,11 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		ensureSuperAdminBinding: s.ensureSuperAdminBinding,
 		deleteSuperAdminBinding: s.deleteSuperAdminBinding,
 		syncGrants: func(ctx context.Context, userID, role string) error {
-			return syncHubRoleGrants(ctx, s.store, userID, role, store.SystemReconcileCreatedBy)
+			err := syncHubRoleGrants(ctx, s.store, userID, role, store.SystemReconcileCreatedBy)
+			if err == nil {
+				s.InvalidatePooledGroupCacheForUser(userID)
+			}
+			return err
 		},
 		applyDefaultGrants: func(ctx context.Context, userID, role string) error {
 			return applyDefaultUserRoleGrants(ctx, s.store, userID, role, s.DefaultUserRole(), s.CustomDefaultRoleEnabled())

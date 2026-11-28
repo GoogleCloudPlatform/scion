@@ -559,3 +559,79 @@ func TestPooledGroupBudget_E2E_NestedLeaveJoinOverlapAndAdmission(t *testing.T) 
 	hookMu.Unlock()
 	assert.Equal(t, []string{store.UsageBudgetStateWarn, store.UsageBudgetStateExhausted}, groupGCrossings)
 }
+
+func TestPooledGroupResolver_ActiveSetExpiryCapsUserCache(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	setTokenomicsExperimentsForTest(t, srv, true, true)
+	srv.reconcileTokenBudgets(ctx)
+
+	t0 := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	now := t0
+	resolver := srv.PooledGroupResolver()
+	require.NotNil(t, resolver)
+	resolver.nowFn = func() time.Time { return now }
+
+	gSeed := createTestGroupForBudgets(t, st, "r1-seed", store.GroupTypeExplicit, "")
+	gNew := createTestGroupForBudgets(t, st, "r1-new", store.GroupTypeExplicit, "")
+	u1 := createTestUserForBudgets(t, st, "r1-u1@example.com")
+	u2 := createTestUserForBudgets(t, st, "r1-u2@example.com")
+	require.NoError(t, st.AddGroupMember(ctx, &store.GroupMember{GroupID: gSeed.ID, MemberType: store.GroupMemberTypeUser, MemberID: u1.ID, Role: store.GroupMemberRoleMember}))
+	require.NoError(t, st.AddGroupMember(ctx, &store.GroupMember{GroupID: gNew.ID, MemberType: store.GroupMemberTypeUser, MemberID: u2.ID, Role: store.GroupMemberRoleMember}))
+
+	monthDef, err := st.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupMonth)
+	require.NoError(t, err)
+	// Seed one existing active group so ResolveForUsers does not short-circuit on empty activeSet.
+	_, err = st.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		ID: uuid.NewString(), LimitDefinitionID: monthDef.ID,
+		SubjectType: store.EntitlementSubjectGroup, SubjectID: gSeed.ID,
+		ScopeType: store.QuotaScopeSystem, ScopeID: "", Value: 1000,
+	})
+	require.NoError(t, err)
+
+	// t0: load the active set on replica B (expires at t0+60s).
+	got, err := resolver.ResolveForUser(ctx, u1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{gSeed.ID}, got)
+
+	// t0+0.1s: binding for gNew created directly in store (simulating peer replica A, skipping in-process invalidation).
+	newBind, err := st.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		ID: uuid.NewString(), LimitDefinitionID: monthDef.ID,
+		SubjectType: store.EntitlementSubjectGroup, SubjectID: gNew.ID,
+		ScopeType: store.QuotaScopeSystem, ScopeID: "", Value: 2000,
+	})
+	require.NoError(t, err)
+
+	// t0+59s: cache miss for u2 computed against stale active set -> gNew absent,
+	//         and u2's entry must expire at t0+60s (NOT t0+119s).
+	now = t0.Add(59 * time.Second)
+	gotU2At59, err := resolver.ResolveForUser(ctx, u2.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotU2At59, "at t0+59s stale active set has not expired yet")
+
+	// t0+61s: active set has reloaded -> u2 MUST see gNew immediately (staleness <= 1xTTL, R1).
+	now = t0.Add(61 * time.Second)
+	gotU2At61, err := resolver.ResolveForUser(ctx, u2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{gNew.ID}, gotU2At61, "at t0+61s gNew must be visible (R1)")
+
+	// Mirror for deleted binding: delete gNew directly in store at t0+61s.
+	require.NoError(t, st.DeleteEntitlementBinding(ctx, newBind.ID))
+
+	// At t0+120s (59s after reload at t0+61s): u2 still cached as [gNew.ID].
+	now = t0.Add(120 * time.Second)
+	gotU2At120, err := resolver.ResolveForUser(ctx, u2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{gNew.ID}, gotU2At120)
+
+	// At t0+122s (61s after reload at t0+61s): active set reloads -> gNew MUST be absent.
+	now = t0.Add(122 * time.Second)
+	gotU2At122, err := resolver.ResolveForUser(ctx, u2.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotU2At122, "deleted binding must clear within 1xTTL (R1)")
+
+	// O1: verify observable resolve error counter increments cleanly.
+	assert.Equal(t, int64(0), resolver.ResolveErrorCount())
+	resolver.RecordResolveError(ctx)
+	assert.Equal(t, int64(1), resolver.ResolveErrorCount())
+}

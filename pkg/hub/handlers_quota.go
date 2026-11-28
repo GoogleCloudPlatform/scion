@@ -582,7 +582,11 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		return
 	}
 	if err := s.validatePooledGroupBindingShape(r.Context(), limitDef.Name, req.SubjectType, req.SubjectID, req.ScopeType, req.ScopeID); err != nil {
-		BadRequest(w, err.Error())
+		if errors.Is(err, store.ErrInvalidInput) {
+			BadRequest(w, err.Error())
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -697,7 +701,11 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	if err := s.validatePooledGroupBindingShape(r.Context(), limitDef.Name, req.SubjectType, req.SubjectID, req.ScopeType, req.ScopeID); err != nil {
-		BadRequest(w, err.Error())
+		if errors.Is(err, store.ErrInvalidInput) {
+			BadRequest(w, err.Error())
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -768,29 +776,29 @@ func (s *Server) validatePooledGroupBindingShape(ctx context.Context, limitName,
 		return nil
 	}
 	if subjectType != store.EntitlementSubjectGroup || subjectID == "" {
-		return fmt.Errorf("%s requires subject_type %q and a non-empty group subject_id", limitName, store.EntitlementSubjectGroup)
+		return fmt.Errorf("%w: %s requires subject_type %q and a non-empty group subject_id", store.ErrInvalidInput, limitName, store.EntitlementSubjectGroup)
 	}
 	switch scopeType {
 	case store.QuotaScopeSystem:
 		if scopeID != "" {
-			return fmt.Errorf("%s with scope_type %q requires an empty scope_id", limitName, store.QuotaScopeSystem)
+			return fmt.Errorf("%w: %s with scope_type %q requires an empty scope_id", store.ErrInvalidInput, limitName, store.QuotaScopeSystem)
 		}
 	case store.QuotaScopeProject:
 		if scopeID == "" {
-			return fmt.Errorf("%s with scope_type %q requires a non-empty project scope_id", limitName, store.QuotaScopeProject)
+			return fmt.Errorf("%w: %s with scope_type %q requires a non-empty project scope_id", store.ErrInvalidInput, limitName, store.QuotaScopeProject)
 		}
 	default:
-		return fmt.Errorf("%s requires scope_type %q or %q", limitName, store.QuotaScopeSystem, store.QuotaScopeProject)
+		return fmt.Errorf("%w: %s requires scope_type %q or %q", store.ErrInvalidInput, limitName, store.QuotaScopeSystem, store.QuotaScopeProject)
 	}
 	grp, err := s.store.GetGroup(ctx, subjectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("group %q not found", subjectID)
+			return fmt.Errorf("%w: group %q not found", store.ErrInvalidInput, subjectID)
 		}
 		return fmt.Errorf("failed to verify group %q: %w", subjectID, err)
 	}
 	if grp.GroupType != store.GroupTypeExplicit {
-		return fmt.Errorf("%s applies only to explicit user groups (not %q)", limitName, grp.GroupType)
+		return fmt.Errorf("%w: %s applies only to explicit user groups (not %q)", store.ErrInvalidInput, limitName, grp.GroupType)
 	}
 	return nil
 }
