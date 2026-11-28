@@ -18,7 +18,7 @@
  * Durable artifact review drafts journey (ptone/scion#7116, ptone/scion#8471),
  * in each engine:
  * - Context A (reviewer) opens Review mode, types marks, saves the draft
- *   (PUT /review-draft), verifies "Draft saved HH:MM", and closes the context.
+ *   (PUT /review-draft), verifies "Draft saved <date+time>", and closes the context.
  *   No version is published, no owner notification is emitted, and no draft
  *   data is stored in browser storage (C8).
  * - Context B (fresh browser context, simulating another device) enters Review
@@ -198,14 +198,16 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
     const saveDraftBtn = pageA.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn).not.toHaveAttribute('disabled', '', { timeout: 15_000 });
     const putDone = pageA.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
     );
     await saveDraftBtn.click();
     expect((await putDone).status()).toBe(200);
-    await expect(statusA).toContainText(/Draft saved \d{2}:\d{2}/, { timeout: 15_000 });
+    await expect(statusA).toContainText(/Draft saved [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}/, {
+      timeout: 15_000,
+    });
 
     savedDraftBody = await editorText(pageA);
     expect(savedDraftBody).toContain('Carefully.');
@@ -277,13 +279,13 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
     expect(await editorText(pageB)).toBe(savedDraftBody);
     await expect(
       pageB.locator('scion-page-artifact-detail .g-toolbar .draft-status')
-    ).toContainText(/Draft saved \d{2}:\d{2}/);
+    ).toContainText(/Draft saved [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}/);
 
     // Submit Review publishes v2 and conditionally deletes the draft.
     const submitBtn = pageB.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Submit Review',
     });
-    await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(submitBtn).not.toHaveAttribute('disabled', '', { timeout: 15_000 });
     const delDone = pageB.waitForResponse(
       (r) => r.request().method() === 'DELETE' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -347,7 +349,7 @@ test('two-context: Draft badge is private to the author and Discard from History
     const saveDraftBtn = page.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn).not.toHaveAttribute('disabled', '', { timeout: 15_000 });
     const putDone = page.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -485,7 +487,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     const saveDraftBtn = pageA.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn).not.toHaveAttribute('disabled', '', { timeout: 15_000 });
     const putDone = pageA.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -546,7 +548,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     const saveDraftBtn = pageB.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Save Draft',
     });
-    await expect(saveDraftBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(saveDraftBtn).not.toHaveAttribute('disabled', '', { timeout: 15_000 });
     const putMoved = pageB.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -588,7 +590,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
     const submitBtn = pageC.locator('scion-page-artifact-detail .edit-footer sl-button', {
       hasText: 'Submit Review',
     });
-    await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(submitBtn).not.toHaveAttribute('disabled', '', { timeout: 15_000 });
     const delDone = pageC.waitForResponse(
       (r) => r.request().method() === 'DELETE' && r.url().includes('/review-draft'),
       { timeout: 30_000 }

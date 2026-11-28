@@ -624,6 +624,10 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private draftDiscardBusy = false;
   @state() private draftDiscardConflict = false;
   @state() private draftDiscardError: string | null = null;
+  @state() private draftAbandonOpen = false;
+  @state() private draftAbandonBusy = false;
+  @state() private draftAbandonConflict = false;
+  @state() private draftAbandonError: string | null = null;
   @state() private staleDraft: { draft: ReviewDraft; currentSeq: number } | null = null;
   @state() private staleDraftBusy = false;
   @state() private staleDraftError: string | null = null;
@@ -889,12 +893,14 @@ export class ScionPageArtifactDetail extends LitElement {
       }
       .edit-footer {
         display: flex;
+        flex-wrap: wrap;
         gap: 0.5rem;
         align-items: flex-end;
         margin-top: 0.75rem;
       }
       .edit-footer sl-input {
         flex: 1;
+        min-width: 12rem;
       }
       sl-tab-group {
         margin-bottom: 0.5rem;
@@ -1315,8 +1321,8 @@ export class ScionPageArtifactDetail extends LitElement {
         }
         .g-toolbar {
           flex-wrap: nowrap;
-          gap: 0.2rem;
-          padding: 0.3rem 0.25rem;
+          gap: 0.125rem;
+          padding: 0.3rem 0.2rem;
         }
         .g-toolbar .sep,
         .g-toolbar .spacer,
@@ -1347,7 +1353,7 @@ export class ScionPageArtifactDetail extends LitElement {
           white-space: nowrap;
         }
         .g-toolbar sl-button::part(base) {
-          padding-inline: 0.25rem;
+          padding-inline: 0.2rem;
         }
         .g-toolbar sl-button::part(prefix) {
           padding-inline-end: 0;
@@ -1365,8 +1371,11 @@ export class ScionPageArtifactDetail extends LitElement {
           padding: 0;
         }
         .g-review-actions {
-          gap: 0.2rem;
+          gap: 0.125rem;
           margin-left: auto;
+        }
+        .g-review-actions sl-icon-button::part(base) {
+          padding: 0.125rem;
         }
         /* Visually hidden, still the buttons' accessible names. */
         .g-toolbar .lbl {
@@ -2324,6 +2333,10 @@ export class ScionPageArtifactDetail extends LitElement {
     this.draftCancelOpen = false;
     this.draftDiscardTarget = null;
     this.draftDiscardConflict = false;
+    this.draftAbandonOpen = false;
+    this.draftAbandonBusy = false;
+    this.draftAbandonConflict = false;
+    this.draftAbandonError = null;
     this.staleDraft = null;
     this.staleReviewError = false;
     this.requestReviewOpen = false;
@@ -2910,6 +2923,10 @@ export class ScionPageArtifactDetail extends LitElement {
     this.releaseChoice();
     this.disposeDraftController();
     this.draftCancelOpen = false;
+    this.draftAbandonOpen = false;
+    this.draftAbandonBusy = false;
+    this.draftAbandonConflict = false;
+    this.draftAbandonError = null;
     this.reviewing = false;
     this.discardedReview = null;
     this.carriedReview = null;
@@ -3006,8 +3023,62 @@ export class ScionPageArtifactDetail extends LitElement {
   };
 
   private draftChipTooltip(d: ReviewDraft): string {
-    const hhmm = formatDraftTime(d.savedAt);
-    return hhmm ? `Your saved review draft, saved ${hhmm}` : 'Your saved review draft';
+    const formatted = formatDraftTime(d.savedAt);
+    return formatted ? `Your saved review draft, saved ${formatted}` : 'Your saved review draft';
+  }
+
+  private openAbandonReviewDialog = (): void => {
+    if (this.reviewBusy || this.draftAbandonOpen) return;
+    this.draftAbandonError = null;
+    this.draftAbandonConflict = false;
+    this.draftAbandonOpen = true;
+  };
+
+  private closeAbandonReviewDialog(): void {
+    this.draftAbandonOpen = false;
+    this.draftAbandonConflict = false;
+    this.draftAbandonError = null;
+    this.draftController?.resumeFromQuiesce();
+  }
+
+  private async confirmAbandonReview(): Promise<void> {
+    if (!this.draftAbandonOpen || this.draftAbandonBusy || this.draftAbandonConflict) return;
+    this.draftAbandonBusy = true;
+    this.draftAbandonError = null;
+    const draftCtrl = this.draftController;
+    const abandonGen = this.draftLoadGen;
+    try {
+      if (draftCtrl) {
+        await draftCtrl.quiesce();
+        if (
+          !this.reviewing ||
+          this.draftController !== draftCtrl ||
+          this.draftLoadGen !== abandonGen
+        ) {
+          return;
+        }
+      }
+      const rev = draftCtrl ? draftCtrl.currentRev : (this.savedDraft?.rev ?? 0);
+      if (rev > 0) {
+        await deleteReviewDraft(this.artifactId, { rev });
+        if (!this.reviewing || this.draftLoadGen !== abandonGen) return;
+      }
+      this.clearMyDraftState();
+      this.closeReviewMode();
+    } catch (err) {
+      if (!this.reviewing || this.draftLoadGen !== abandonGen) return;
+      if (err instanceof DraftConflictError) {
+        this.draftAbandonConflict = true;
+        this.draftAbandonError =
+          'This draft was updated on another device or tab. Close this dialog and review the latest draft before abandoning.';
+        void this.loadSavedDraft(this.loadGen);
+      } else {
+        this.draftAbandonError =
+          err instanceof Error ? err.message : 'Could not abandon the review';
+      }
+    } finally {
+      this.draftAbandonBusy = false;
+    }
   }
 
   private openDiscardDraftDialog(): void {
@@ -5215,7 +5286,32 @@ export class ScionPageArtifactDetail extends LitElement {
                   <sl-icon slot="prefix" name="send"></sl-icon>
                   <span class="lbl">Submit Review</span>
                 </sl-button>
-              </sl-tooltip>`
+              </sl-tooltip>
+              <sl-dropdown class="review-actions-overflow" placement="bottom-end" distance="4">
+                <sl-icon-button
+                  slot="trigger"
+                  class="review-actions-overflow-btn"
+                  name="three-dots-vertical"
+                  label="More review actions"
+                  ?disabled=${this.reviewBusy}
+                ></sl-icon-button>
+                <sl-menu
+                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void => {
+                    if (e.detail.item.value === 'abandon') {
+                      this.openAbandonReviewDialog();
+                    }
+                  }}
+                >
+                  <sl-menu-item
+                    class="abandon-review-menu-item"
+                    value="abandon"
+                    ?disabled=${this.reviewBusy}
+                  >
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Abandon review
+                  </sl-menu-item>
+                </sl-menu>
+              </sl-dropdown>`
           : html`<sl-tooltip content="Save review">
               <sl-button
                 size="small"
@@ -5255,6 +5351,17 @@ export class ScionPageArtifactDetail extends LitElement {
         >
         ${this.reviewDraftsEnabled
           ? html`<sl-button
+                size="small"
+                variant="danger"
+                outline
+                class="abandon-review-btn"
+                ?disabled=${this.reviewBusy}
+                @click=${this.openAbandonReviewDialog}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Abandon review
+              </sl-button>
+              <sl-button
                 size="small"
                 class="save-draft-btn"
                 ?loading=${this.draftSnapshot?.inFlight ?? false}
@@ -5501,6 +5608,50 @@ export class ScionPageArtifactDetail extends LitElement {
                 ?loading=${this.draftDiscardBusy}
                 @click=${(): void => void this.confirmDiscardDraft()}
                 >Discard draft</sl-button
+              >
+            </div>
+          </sl-dialog>`
+        : nothing}
+      ${this.draftAbandonOpen
+        ? html`<sl-dialog
+            class="draft-abandon-dialog"
+            label="Abandon review?"
+            open
+            @sl-request-close=${(e: Event): void => {
+              if (e.target !== e.currentTarget) return;
+              if (this.draftAbandonBusy) e.preventDefault();
+              else this.closeAbandonReviewDialog();
+            }}
+          >
+            <p>
+              ${(this.draftSnapshot?.rev ?? 0) > 0 || this.savedDraft !== null
+                ? "Delete your saved review draft and discard any unsaved changes without submitting? This can't be undone."
+                : "Discard your review edits and exit Review mode without submitting? This can't be undone."}
+            </p>
+            ${this.draftAbandonError
+              ? html`<sl-alert variant="danger" open>
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  ${this.draftAbandonError}
+                </sl-alert>`
+              : nothing}
+            <div slot="footer" class="dialog-footer">
+              <sl-button
+                size="small"
+                class="draft-abandon-cancel"
+                ?disabled=${this.draftAbandonBusy}
+                @click=${(): void => {
+                  this.closeAbandonReviewDialog();
+                }}
+                >${this.draftAbandonConflict ? 'Close' : 'Cancel'}</sl-button
+              >
+              <sl-button
+                size="small"
+                class="draft-abandon-confirm"
+                variant="danger"
+                ?disabled=${this.draftAbandonConflict}
+                ?loading=${this.draftAbandonBusy}
+                @click=${(): void => void this.confirmAbandonReview()}
+                >Abandon review</sl-button
               >
             </div>
           </sl-dialog>`

@@ -38,6 +38,27 @@ import {
   formatDraftTime,
   type DraftSnapshot,
 } from './review-draft.js';
+import { formatInstant } from '../utils/time.js';
+
+describe('formatDraftTime', () => {
+  it('formats an ISO instant as compact date+time via formatInstant and returns empty on invalid input', () => {
+    const iso = '2026-11-27T23:45:00Z';
+    const formatted = formatDraftTime(iso);
+    expect(formatted).toBe(formatInstant(iso, 'datetime'));
+    expect(formatted).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}$/);
+    expect(formatDraftTime('not-a-date')).toBe('');
+    expect(
+      draftStatusText({
+        status: 'saved',
+        rev: 1,
+        savedAt: iso,
+        inFlight: false,
+        dirty: false,
+        conflict: null,
+      })
+    ).toBe(`Draft saved ${formatted}`);
+  });
+});
 
 describe('safeReviewDownloadName (C6)', () => {
   it('uses only the final path element and strips .md', () => {
