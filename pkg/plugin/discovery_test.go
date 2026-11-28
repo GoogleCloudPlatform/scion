@@ -15,6 +15,7 @@
 package plugin
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -360,4 +361,75 @@ func TestDefaultPluginsDir(t *testing.T) {
 
 	home, _ := os.UserHomeDir()
 	assert.Equal(t, filepath.Join(home, ".scion", "plugins"), dir)
+}
+
+func TestIsValidPluginName(t *testing.T) {
+	valid := []string{
+		"discord",
+		"telegram",
+		"googlechat",
+		"my-plugin",
+		"my_plugin_2",
+		"a",
+		"0abc",
+	}
+	for _, name := range valid {
+		assert.True(t, IsValidPluginName(name), "expected %q to be valid", name)
+	}
+
+	invalid := []string{
+		"",
+		"discord.bak",
+		"discord.bak.20261128",
+		"discord.old",
+		"discord~",
+		"Discord",
+		"-discord",
+		"_discord",
+		"discord.exe",
+		"foo/bar",
+		"foo bar",
+	}
+	for _, name := range invalid {
+		assert.False(t, IsValidPluginName(name), "expected %q to be invalid", name)
+	}
+}
+
+func TestScanPluginDir_SkipsInvalidAndBackupNamesWithLog(t *testing.T) {
+	dir := t.TempDir()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	validFiles := []string{
+		"scion-plugin-discord",
+		"scion-plugin-my_broker-2",
+	}
+	for _, f := range validFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte("#!/bin/sh\n"), 0755))
+	}
+
+	invalidFiles := []string{
+		"scion-plugin-discord.bak",
+		"scion-plugin-discord.bak.20261128T100000Z",
+		"scion-plugin-telegram.old",
+		"scion-plugin-slack~",
+		"scion-plugin--leadingdash",
+		"scion-plugin-UpperCase",
+	}
+	for _, f := range invalidFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte("#!/bin/sh\n"), 0755))
+	}
+
+	plugins := scanPluginDir(dir, PluginTypeBroker, logger)
+	names := make([]string, 0, len(plugins))
+	for _, p := range plugins {
+		names = append(names, p.Name)
+	}
+	assert.ElementsMatch(t, []string{"discord", "my_broker-2"}, names)
+
+	logOutput := logBuf.String()
+	for _, f := range invalidFiles {
+		assert.Contains(t, logOutput, "Skipping plugin file with invalid name")
+		assert.Contains(t, logOutput, f, "log should mention skipped file %s", f)
+	}
 }

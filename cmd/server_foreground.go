@@ -1123,6 +1123,29 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Printf("Warning: failed to load settings; message broker is not started: %v", err)
 		}
 
+		// Prune stale integration records (runtime_brokers rows with
+		// scion.io/plugin) once on startup: any record not reported by a live
+		// hub instance, not loaded locally, not configured in
+		// server.plugins.broker, and without a valid executable binary on disk
+		// is removed so doctor/health summary no longer shows orphaned entries.
+		if vs, vsErr := loadServerVersionedSettings(); vsErr == nil {
+			configuredPlugins := make(map[string]bool)
+			if vs != nil && vs.Server != nil && vs.Server.Plugins != nil {
+				for name := range vs.Server.Plugins.Broker {
+					configuredPlugins[name] = true
+				}
+			}
+			if pluginsDir, dirErr := scionplugin.DefaultPluginsDir(); dirErr != nil {
+				log.Printf("Warning: skipping stale integration record prune: failed to resolve plugins directory: %v", dirErr)
+			} else if pruned, pruneErr := hubSrv.PruneStalePluginRecords(ctx, configuredPlugins, pluginsDir); pruneErr != nil {
+				log.Printf("Warning: stale integration record prune encountered errors: %v", pruneErr)
+			} else if len(pruned) > 0 {
+				log.Printf("Pruned %d stale integration record(s): %v", len(pruned), pruned)
+			}
+		} else {
+			log.Printf("Warning: skipping stale integration record prune: failed to load settings: %v", vsErr)
+		}
+
 		// Watch the broker plugin sessions: a lost session is respawned
 		// (hub-managed) or re-dialled (self-managed) with backoff, and the
 		// plugin's fan-out spoke is then replaced (hooks wired by

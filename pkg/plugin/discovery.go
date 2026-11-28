@@ -20,8 +20,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// pluginNameRE limits the <name> of scion-plugin-<name> to a valid identifier
+// (matching pkg/hub/maintenance's pluginNameRE). It rejects backup suffixes
+// such as .bak / .bak.<timestamp>, dots, tildes, and leading punctuation.
+var pluginNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// IsValidPluginName reports whether name is a valid plugin identifier.
+func IsValidPluginName(name string) bool {
+	return pluginNameRE.MatchString(name)
+}
 
 // DiscoveredPlugin represents a plugin found during discovery.
 type DiscoveredPlugin struct {
@@ -164,6 +175,11 @@ func scanPluginDir(dir, pluginType string, logger *slog.Logger) []DiscoveredPlug
 		// Check if executable
 		if info.Mode()&0111 == 0 {
 			logger.Debug("Plugin file is not executable", "path", fullPath)
+			continue
+		}
+
+		if !IsValidPluginName(pluginName) {
+			logger.Warn("Skipping plugin file with invalid name", "type", pluginType, "name", pluginName, "path", fullPath)
 			continue
 		}
 
