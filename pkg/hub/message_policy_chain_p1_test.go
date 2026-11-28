@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,9 +113,10 @@ func newMPChainP1Fixture(t *testing.T, policiesOn, chainsOn bool) *mpChainP1Fixt
 		ID:          tid("mp-chain-p1-conv"),
 		ProjectID:   &project.ID,
 		Kind:        "group",
-		Surface:     "web",
+		Surface:     "native",
 		ExternalRef: "thread:team-chat",
 		DisplayName: "team-chat",
+		DriftState:  "active",
 	}
 	require.NoError(t, s.CreateConversation(ctx, conv))
 	require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
@@ -153,7 +155,9 @@ func (f *mpChainP1Fixture) ownerReq(t *testing.T, method, path string, body any)
 	ident := NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, f.owner.Role, "session")
 	req = req.WithContext(contextWithIdentity(req.Context(), ident))
 	rr := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(rr, req)
+	prefix := "/api/v1/projects/" + f.project.ID + "/message-policies"
+	rest := strings.TrimPrefix(path, prefix)
+	f.srv.handleProjectMessagePolicies(rr, req, f.project.ID, rest)
 	return rr
 }
 
@@ -325,7 +329,7 @@ func TestMessagePolicyChainsP1_E1E2Gate_SkipRejectDisabledAndUnsupported(t *test
 	// 1. E2 conversation send: guard false -> skip_policy, send admitted (200),
 	// decision row carries content-free chain provenance.
 	rr = f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "thread:team-chat",
+		Recipient: "conv:" + f.conv.ID,
 		Msg:       "contains SECRET_WORD in group chat",
 	})
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
