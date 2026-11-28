@@ -19,17 +19,18 @@ while (($#)); do
 done
 crci_help_exit "$USAGE"
 crci_start
-[[ -n ${CFG[MEDIATOR_URL]} ]] || crci_die "MEDIATOR_URL is empty; run deploy-mediator.sh and put the printed URL into the config"
+URL=$(crci_cfg MEDIATOR_URL)
+[[ -n $URL ]] || crci_die "MEDIATOR_URL is empty; run deploy-mediator.sh and put the printed URL into the config"
 
-P=${CFG[GCP_PROJECT]}
-R=${CFG[REGION]}
-NAME=${CFG[RECONCILER_JOB_NAME]}
-URL=${CFG[MEDIATOR_URL]}
-SCHEDULER=$(crci_sa_email "${CFG[SCHEDULER_SA_NAME]}")
+P=$(crci_cfg GCP_PROJECT)
+R=$(crci_cfg REGION)
+NAME=$(crci_cfg RECONCILER_JOB_NAME)
+SCHEDULER=$(crci_sa_email "$(crci_cfg SCHEDULER_SA_NAME)")
+SCHEDULE=$(crci_cfg RECONCILE_SCHEDULE)
 
 FLAGS=(
   --location="$R" --project="$P"
-  --schedule="${CFG[RECONCILE_SCHEDULE]}" --time-zone=Etc/UTC
+  --schedule="$SCHEDULE" --time-zone=Etc/UTC
   --uri="$URL/reconcile" --http-method=POST
   --oidc-service-account-email="$SCHEDULER" --oidc-token-audience="$URL"
   --attempt-deadline=300s

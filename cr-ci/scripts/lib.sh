@@ -10,7 +10,7 @@
 #     unknown and duplicate keys, fills defaults from config.example.env (the
 #     single contract), and validates the same rules as mediator/config.go
 #     (kept in lockstep by a parity test in mediator/config_test.go). Values
-#     land in the associative array CFG.
+#     are stored via crci_cfg / CRCI_CFG_<KEY>.
 #   - crci_run CMD...: prints "+ <command>" (shell-quoted) and, with --apply
 #     only, runs it. A failure stops the script and names the step.
 #   - crci_exists CMD...: a read-only describe used for idempotency. Prints
@@ -25,8 +25,8 @@
 # No function here ever prints or passes a secret value: secrets reach gcloud
 # only on stdin (see set-secrets.sh).
 
-if ((BASH_VERSINFO[0] < 4)); then
-  echo "cr-ci scripts need bash >= 4 (macOS: brew install bash)" >&2
+if ((BASH_VERSINFO[0] < 3 || (BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] < 2))); then
+  echo "cr-ci scripts need bash >= 3.2" >&2
   exit 1
 fi
 
@@ -46,8 +46,33 @@ CRCI_MIN_GCLOUD=530.0.0
 CRCI_MIN_DOCKER=20.10.0
 CRCI_MIN_GH=2.40.0
 
-declare -gA CFG=()
-declare -ga CRCI_KEYS=()
+# Config storage (bash 3.2 compatible; avoids associative arrays):
+# every key matches ^[A-Z][A-Z0-9_]*$, so values live in CRCI_CFG_<KEY>,
+# defaults in CRCI_DEFAULT_<KEY>, and seen flags in CRCI_SEEN_<KEY>.
+CRCI_KEYS=()
+
+crci_cfg() {
+  local _var="CRCI_CFG_$1"
+  printf '%s' "${!_var}"
+}
+
+crci_cfg_into() {
+  local _var="CRCI_CFG_$2"
+  printf -v "$1" '%s' "${!_var}"
+}
+
+crci_cfg_set() {
+  printf -v "CRCI_CFG_$1" '%s' "$2"
+}
+
+crci_is_known_key() {
+  [[ $1 =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+  local _var="CRCI_DEFAULT_$1"
+  [[ -n ${!_var+x} ]]
+}
+
+_crci_lower() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
+_crci_upper() { printf '%s' "$1" | LC_ALL=C tr '[:lower:]' '[:upper:]'; }
 
 crci_die() {
   printf '%s: error: %s\n' "$CRCI_PROG" "$*" >&2
@@ -58,12 +83,12 @@ crci_note() { printf '# %s\n' "$*"; }
 
 # crci_quote ARG...: POSIX shell quoting; plain words stay bare.
 crci_quote() {
-  local out="" a q
+  local out="" a q sq="'" rep="'\\''"
   for a in "$@"; do
     if [[ -n $a && $a =~ ^[A-Za-z0-9_./:=@%+,^-]+$ ]]; then
       q=$a
     else
-      q="'${a//\'/\'\\\'\'}'"
+      q="'${a//$sq/$rep}'"
     fi
     out+="${out:+ }$q"
   done
@@ -212,7 +237,7 @@ crci_start() {
     crci_require_tool gcloud "$CRCI_MIN_GCLOUD"
   fi
   cd "$CRCI_ROOT" || crci_die "cannot cd to $CRCI_ROOT"
-  crci_note "cr-ci $CRCI_PROG ($CRCI_MODE) project=${CFG[GCP_PROJECT]} region=${CFG[REGION]}"
+  crci_note "cr-ci $CRCI_PROG ($CRCI_MODE) project=$(crci_cfg GCP_PROJECT) region=$(crci_cfg REGION)"
   if [[ $CRCI_MODE != apply ]]; then
     crci_note "dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing"
   fi
@@ -272,33 +297,34 @@ crci_parse_env_file() {
   done <"$file"
 }
 
-declare -gA CRCI_DEFAULTS=()
-declare -gA CRCI_SEEN=()
-
 _crci_example_cb() {
   CRCI_KEYS+=("$1")
-  CRCI_DEFAULTS[$1]=$2
+  printf -v "CRCI_DEFAULT_$1" '%s' "$2"
 }
 
 _crci_config_cb() {
   local key=$1 value=$2 n=$3
-  [[ -v CRCI_DEFAULTS[$key] ]] || crci_die "$CRCI_CONFIG:$n: unknown key $key (not in config.example.env)"
-  [[ -v CRCI_SEEN[$key] ]] && crci_die "$CRCI_CONFIG:$n: $key is set twice"
-  CRCI_SEEN[$key]=1
-  [[ -n $value ]] && CFG[$key]=$value
+  crci_is_known_key "$key" || crci_die "$CRCI_CONFIG:$n: unknown key $key (not in config.example.env)"
+  local _seen="CRCI_SEEN_$key"
+  [[ -n ${!_seen+x} ]] && crci_die "$CRCI_CONFIG:$n: $key is set twice"
+  printf -v "CRCI_SEEN_$key" '%s' 1
+  [[ -n $value ]] && crci_cfg_set "$key" "$value"
   return 0
 }
 
 crci_load_config() {
   CRCI_CONFIG=$1
+  local k _def
+  if ((${#CRCI_KEYS[@]} > 0)); then
+    for k in "${CRCI_KEYS[@]}"; do
+      unset "CRCI_CFG_$k" "CRCI_DEFAULT_$k" "CRCI_SEEN_$k"
+    done
+  fi
   CRCI_KEYS=()
-  CRCI_DEFAULTS=()
-  CRCI_SEEN=()
-  CFG=()
   crci_parse_env_file "$CRCI_EXAMPLE" _crci_example_cb
-  local k
   for k in "${CRCI_KEYS[@]}"; do
-    CFG[$k]=${CRCI_DEFAULTS[$k]}
+    _def="CRCI_DEFAULT_$k"
+    crci_cfg_set "$k" "${!_def}"
   done
   crci_parse_env_file "$CRCI_CONFIG" _crci_config_cb
   crci_validate_config || exit 1
@@ -306,25 +332,28 @@ crci_load_config() {
 
 # ---- validation (mirrors mediator/config.go) ---------------------------------------
 
-declare -ga CRCI_ERRORS=()
+CRCI_ERRORS=()
 _crci_fail() { CRCI_ERRORS+=("$1: $2"); }
 
 _crci_match() { # KEY ERE WHAT
-  local v=${CFG[$1]}
+  local v=""
+  crci_cfg_into v "$1"
   if [[ -n $v ]] && ! [[ $v =~ $2 ]]; then
     _crci_fail "$1" "\"$v\" is not a valid $3"
   fi
 }
 
 _crci_required() {
-  [[ -n ${CFG[$1]} ]] || _crci_fail "$1" "required"
+  local v=""
+  crci_cfg_into v "$1"
+  [[ -n $v ]] || _crci_fail "$1" "required"
 }
 
 # _crci_int VALUE: prints the value of a Go strconv-style int64 (optional +,
 # leading zeros) and returns 0, or returns 1.
 _crci_int() {
   local v=$1
-  [[ $v =~ ^\+?[0-9]+$ ]] || return 1
+  [[ $v =~ ^[+]?[0-9]+$ ]] || return 1
   v=${v#+}
   v=${v#"${v%%[!0]*}"}
   [[ -z $v ]] && v=0
@@ -337,11 +366,12 @@ _crci_int() {
 }
 
 _crci_posint() { # KEY -> prints value or empty
-  local n
-  if n=$(_crci_int "${CFG[$1]}") && ((n >= 1)); then
+  local v="" n
+  crci_cfg_into v "$1"
+  if n=$(_crci_int "$v") && ((n >= 1)); then
     printf '%s' "$n"
   else
-    _crci_fail "$1" "\"${CFG[$1]}\" is not a positive integer"
+    _crci_fail "$1" "\"$v\" is not a positive integer"
   fi
 }
 
@@ -360,8 +390,9 @@ _crci_duration_ms() {
   }
   [[ -n $s ]] || return 1
   local -a parts=()
+  local re='^([0-9]*(\.[0-9]*)?)(ns|us|µs|ms|s|m|h)(.*)$'
   while [[ -n $s ]]; do
-    if [[ $s =~ ^([0-9]*(\.[0-9]*)?)(ns|us|µs|ms|s|m|h)(.*)$ ]]; then
+    if [[ $s =~ $re ]]; then
       num=${BASH_REMATCH[1]}
       unit=${BASH_REMATCH[3]}
       s=${BASH_REMATCH[4]}
@@ -391,14 +422,15 @@ _crci_duration_ms() {
 # returns 1 if there are any.
 crci_validate_config() {
   CRCI_ERRORS=()
-  local k v n
+  local k v="" n
 
   # TARGET_REPOS
   _crci_required TARGET_REPOS
   local -a owners=()
-  if [[ -n ${CFG[TARGET_REPOS]} ]]; then
-    local raw=${CFG[TARGET_REPOS]} part owner name
-    local -A seen=()
+  crci_cfg_into v TARGET_REPOS
+  if [[ -n $v ]]; then
+    local raw=$v part owner name
+    local seen=$'\n'
     local IFS=,
     local -a entries
     read -r -a entries <<<"$raw,"
@@ -419,30 +451,33 @@ crci_validate_config() {
         _crci_fail TARGET_REPOS "\"$part\" is not owner/repo"
         continue
       fi
-      k=${part,,}
-      if [[ -v seen[$k] ]]; then
+      k=$(_crci_lower "$part")
+      if [[ $seen == *$'\n'"$k"$'\n'* ]]; then
         _crci_fail TARGET_REPOS "\"$part\" is listed twice"
         continue
       fi
-      seen[$k]=1
+      seen+="$k"$'\n'
       owners+=("$owner")
     done
   fi
 
   _crci_required GITHUB_APP_ID
-  if [[ -n ${CFG[GITHUB_APP_ID]} ]]; then
-    if ! n=$(_crci_int "${CFG[GITHUB_APP_ID]}") || ((n < 1)); then
-      _crci_fail GITHUB_APP_ID "\"${CFG[GITHUB_APP_ID]}\" is not a positive integer"
+  crci_cfg_into v GITHUB_APP_ID
+  if [[ -n $v ]]; then
+    if ! n=$(_crci_int "$v") || ((n < 1)); then
+      _crci_fail GITHUB_APP_ID "\"$v\" is not a positive integer"
     fi
   fi
 
-  v=${CFG[GITHUB_APP_INSTALLATION_SCOPE]}
+  crci_cfg_into v GITHUB_APP_INSTALLATION_SCOPE
   if [[ $v != repo && $v != org ]]; then
     _crci_fail GITHUB_APP_INSTALLATION_SCOPE "\"$v\" must be \"repo\" or \"org\""
   fi
-  if [[ $v == org && ${#owners[@]} -gt 0 ]]; then
+  if [[ $v == org && ${#owners[@]} -gt 1 ]]; then
+    local first_owner
+    first_owner=$(_crci_lower "${owners[0]}")
     for k in "${owners[@]:1}"; do
-      [[ ${k,,} == "${owners[0],,}" ]] ||
+      [[ $(_crci_lower "$k") == "$first_owner" ]] ||
         _crci_fail GITHUB_APP_INSTALLATION_SCOPE "org scope serves a single org, but owner \"$k\" is not \"${owners[0]}\""
     done
   fi
@@ -453,8 +488,9 @@ crci_validate_config() {
   _crci_match REGION '^[a-z]+-[a-z]+[0-9]+$' "GCP region"
 
   _crci_match RUNNER_LABEL '^[A-Za-z0-9._-]{1,64}$' "runner label"
-  case ${CFG[RUNNER_LABEL],,} in
-    self-hosted | linux | x64 | arm64) _crci_fail RUNNER_LABEL "\"${CFG[RUNNER_LABEL]}\" is a default self-hosted runner label; use a unique label" ;;
+  crci_cfg_into v RUNNER_LABEL
+  case $(_crci_lower "$v") in
+    self-hosted | linux | x64 | arm64) _crci_fail RUNNER_LABEL "\"$v\" is a default self-hosted runner label; use a unique label" ;;
   esac
   local cloudrun='^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$'
   local resid='^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
@@ -466,12 +502,13 @@ crci_validate_config() {
 
   local cpu="" mi=""
   cpu=$(_crci_posint RUNNER_CPU) || true
-  [[ -n $cpu ]] || _crci_fail RUNNER_CPU "\"${CFG[RUNNER_CPU]}\" is not a positive integer"
+  crci_cfg_into v RUNNER_CPU
+  [[ -n $cpu ]] || _crci_fail RUNNER_CPU "\"$v\" is not a positive integer"
   case $cpu in
     "" | 1 | 2 | 4 | 6 | 8) ;;
     *) _crci_fail RUNNER_CPU "$cpu is not a Cloud Run Jobs CPU value (1, 2, 4, 6 or 8)" ;;
   esac
-  v=${CFG[RUNNER_MEMORY]}
+  crci_cfg_into v RUNNER_MEMORY
   if [[ $v =~ ^([0-9]+)(Mi|Gi)$ ]] && n=$(_crci_int "${BASH_REMATCH[1]}"); then
     if [[ ${BASH_REMATCH[2]} == Gi ]]; then
       if ((${#n} > 6 || n > 32)); then mi=$((32 * 1024 + 1)); else mi=$((n * 1024)); fi
@@ -498,64 +535,75 @@ crci_validate_config() {
   fi
 
   n=$(_crci_posint RUNNER_DISK_GI) || true
-  [[ -n $n ]] || _crci_fail RUNNER_DISK_GI "\"${CFG[RUNNER_DISK_GI]}\" is not a positive integer"
+  crci_cfg_into v RUNNER_DISK_GI
+  [[ -n $n ]] || _crci_fail RUNNER_DISK_GI "\"$v\" is not a positive integer"
   [[ -n $n ]] && ((n > 100)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 100 GiB ephemeral-disk maximum"
   n=$(_crci_posint MAX_CONCURRENT_RUNNERS) || true
-  [[ -n $n ]] || _crci_fail MAX_CONCURRENT_RUNNERS "\"${CFG[MAX_CONCURRENT_RUNNERS]}\" is not a positive integer"
-  case ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} in
+  crci_cfg_into v MAX_CONCURRENT_RUNNERS
+  [[ -n $n ]] || _crci_fail MAX_CONCURRENT_RUNNERS "\"$v\" is not a positive integer"
+  local cache_in_ram=""
+  crci_cfg_into cache_in_ram RUNNER_BUILD_CACHE_IN_RAM
+  case $cache_in_ram in
     true | false) ;;
-    *) _crci_fail RUNNER_BUILD_CACHE_IN_RAM "\"${CFG[RUNNER_BUILD_CACHE_IN_RAM]}\" must be true or false" ;;
+    *) _crci_fail RUNNER_BUILD_CACHE_IN_RAM "\"$cache_in_ram\" must be true or false" ;;
   esac
-  case ${CFG[MEDIATOR_MIN_INSTANCES]} in
+  crci_cfg_into v MEDIATOR_MIN_INSTANCES
+  case $v in
     0 | 1) ;;
-    *) _crci_fail MEDIATOR_MIN_INSTANCES "\"${CFG[MEDIATOR_MIN_INSTANCES]}\" must be 0 or 1 (max-instances is always 1)" ;;
+    *) _crci_fail MEDIATOR_MIN_INSTANCES "\"$v\" must be 0 or 1 (max-instances is always 1)" ;;
   esac
   # The in-RAM cache (~9.5 GB) plus the ~21 GB compile need the 32 GiB shape (P6 run 4).
-  if [[ ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} == true && -n $mi ]] && ((mi >= 512 && mi < 32 * 1024)); then
-    _crci_fail RUNNER_BUILD_CACHE_IN_RAM "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got ${CFG[RUNNER_MEMORY]}"
+  crci_cfg_into v RUNNER_MEMORY
+  if [[ $cache_in_ram == true && -n $mi ]] && ((mi >= 512 && mi < 32 * 1024)); then
+    _crci_fail RUNNER_BUILD_CACHE_IN_RAM "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got $v"
   fi
 
   _crci_duration_check TASK_TIMEOUT $((60 * 1000)) $((168 * 3600 * 1000)) "1m" "168h"
   _crci_duration_check CLAIM_TTL $((30 * 1000)) $((3600 * 1000)) "30s" "1h0m0s"
   # RUNNER_IDLE_TIMEOUT: at least 1m and at most half of TASK_TIMEOUT (Load does the same).
-  local idle_ms task_ms
-  if [[ -n ${CFG[RUNNER_IDLE_TIMEOUT]} ]]; then
-    if ! idle_ms=$(_crci_duration_ms "${CFG[RUNNER_IDLE_TIMEOUT]}"); then
-      _crci_fail RUNNER_IDLE_TIMEOUT "\"${CFG[RUNNER_IDLE_TIMEOUT]}\" is not a duration"
+  local idle_ms task_ms task_val=""
+  crci_cfg_into v RUNNER_IDLE_TIMEOUT
+  crci_cfg_into task_val TASK_TIMEOUT
+  if [[ -n $v ]]; then
+    if ! idle_ms=$(_crci_duration_ms "$v"); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "\"$v\" is not a duration"
     elif ((idle_ms < 60 * 1000)); then
-      _crci_fail RUNNER_IDLE_TIMEOUT "${CFG[RUNNER_IDLE_TIMEOUT]} must be at least 1m"
-    elif task_ms=$(_crci_duration_ms "${CFG[TASK_TIMEOUT]}") && ((task_ms >= 60 * 1000 && task_ms <= 168 * 3600 * 1000 && idle_ms * 2 > task_ms)); then
-      _crci_fail RUNNER_IDLE_TIMEOUT "${CFG[RUNNER_IDLE_TIMEOUT]} must be at most half of TASK_TIMEOUT (${CFG[TASK_TIMEOUT]})"
+      _crci_fail RUNNER_IDLE_TIMEOUT "$v must be at least 1m"
+    elif task_ms=$(_crci_duration_ms "$task_val") && ((task_ms >= 60 * 1000 && task_ms <= 168 * 3600 * 1000 && idle_ms * 2 > task_ms)); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "$v must be at most half of TASK_TIMEOUT ($task_val)"
     fi
   fi
 
   _crci_match ARTIFACT_REPO "$resid" "Artifact Registry repository ID"
   _crci_match BUILD_STAGING_BUCKET '^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$' "Cloud Storage bucket name"
   # Cloud Storage forbids the "goog" prefix and "google" anywhere in a name.
-  if [[ ${CFG[BUILD_STAGING_BUCKET]} == goog* || ${CFG[BUILD_STAGING_BUCKET]} == *google* || ${CFG[BUILD_STAGING_BUCKET]} == *..* ]]; then
-    _crci_fail BUILD_STAGING_BUCKET "\"${CFG[BUILD_STAGING_BUCKET]}\" is not a valid Cloud Storage bucket name"
+  crci_cfg_into v BUILD_STAGING_BUCKET
+  if [[ $v == goog* || $v == *google* || $v == *..* ]]; then
+    _crci_fail BUILD_STAGING_BUCKET "\"$v\" is not a valid Cloud Storage bucket name"
   fi
   _crci_match MEDIATOR_SERVICE_NAME "$cloudrun" "Cloud Run service name"
   _crci_match RECONCILER_JOB_NAME "$resid" "Cloud Scheduler job ID"
   _crci_match RECONCILE_SCHEDULE '^[0-9*,/-]+( [0-9*,/-]+){4}$' "five-field cron schedule"
 
-  v=${CFG[MEDIATOR_URL]}
+  crci_cfg_into v MEDIATOR_URL
   if [[ -n $v ]]; then
     if [[ $v =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?/?$ ]]; then
-      CFG[MEDIATOR_URL]=${v%/}
+      crci_cfg_set MEDIATOR_URL "${v%/}"
     else
       _crci_fail MEDIATOR_URL "\"$v\" must be a bare https:// origin such as https://cr-runner-mediator-abc123-uc.a.run.app"
     fi
   fi
 
-  if [[ -n ${CFG[GITHUB_RUNNER_GROUP_ID]} ]]; then
-    if ! n=$(_crci_int "${CFG[GITHUB_RUNNER_GROUP_ID]}") || ((n < 1)); then
-      _crci_fail GITHUB_RUNNER_GROUP_ID "\"${CFG[GITHUB_RUNNER_GROUP_ID]}\" is not a positive integer"
+  crci_cfg_into v GITHUB_RUNNER_GROUP_ID
+  if [[ -n $v ]]; then
+    if ! n=$(_crci_int "$v") || ((n < 1)); then
+      _crci_fail GITHUB_RUNNER_GROUP_ID "\"$v\" is not a positive integer"
     fi
   fi
   _crci_match ROUTING_VARIABLE_NAME '^[A-Za-z_][A-Za-z0-9_]*$' "GitHub Actions variable name"
-  [[ ${CFG[ROUTING_VARIABLE_NAME]^^} == GITHUB_* ]] &&
-    _crci_fail ROUTING_VARIABLE_NAME "\"${CFG[ROUTING_VARIABLE_NAME]}\": names starting with GITHUB_ are reserved by GitHub"
+  crci_cfg_into v ROUTING_VARIABLE_NAME
+  [[ $(_crci_upper "$v") == GITHUB_* ]] &&
+    _crci_fail ROUTING_VARIABLE_NAME "\"$v\": names starting with GITHUB_ are reserved by GitHub"
 
   for k in BUILD_SA_NAME MEDIATOR_SA_NAME SCHEDULER_SA_NAME EXEC_SA_NAME; do
     _crci_match "$k" '^[a-z][a-z0-9-]{4,28}[a-z0-9]$' "service account ID"
@@ -575,7 +623,8 @@ crci_validate_config() {
 }
 
 _crci_duration_check() { # KEY MIN_MS MAX_MS MIN_TEXT MAX_TEXT
-  local v=${CFG[$1]} ms
+  local v="" ms
+  crci_cfg_into v "$1"
   [[ -n $v ]] || return 0
   if ! ms=$(_crci_duration_ms "$v"); then
     _crci_fail "$1" "\"$v\" is not a duration"
@@ -586,17 +635,25 @@ _crci_duration_check() { # KEY MIN_MS MAX_MS MIN_TEXT MAX_TEXT
 
 # _crci_distinct WHAT KEY...: keys sorted; the later duplicate is reported.
 _crci_distinct() {
-  local what=$1 k
+  local what=$1 k v="" i dup
   shift
-  local -A owner=()
+  local -a vals=() keys=()
   for k in "$@"; do
-    local v=${CFG[$k]}
+    crci_cfg_into v "$k"
     [[ -n $v ]] || continue
-    if [[ -v owner[$v] ]]; then
-      _crci_fail "$k" "$what name \"$v\" is also used by ${owner[$v]}; each must be distinct"
+    dup=""
+    for ((i = 0; i < ${#vals[@]}; i++)); do
+      if [[ ${vals[i]} == "$v" ]]; then
+        dup=${keys[i]}
+        break
+      fi
+    done
+    if [[ -n $dup ]]; then
+      _crci_fail "$k" "$what name \"$v\" is also used by $dup; each must be distinct"
       continue
     fi
-    owner[$v]=$k
+    vals+=("$v")
+    keys+=("$k")
   done
 }
 
@@ -611,22 +668,24 @@ crci_abspath() {
 
 # ---- derived names ------------------------------------------------------------------
 
-crci_sa_email() { printf '%s@%s.iam.gserviceaccount.com' "$1" "${CFG[GCP_PROJECT]}"; }
+crci_sa_email() { printf '%s@%s.iam.gserviceaccount.com' "$1" "$(crci_cfg GCP_PROJECT)"; }
 
 # crci_staging_bucket: BUILD_STAGING_BUCKET, or <GCP_PROJECT>-cr-ci-staging.
 crci_staging_bucket() {
-  if [[ -n ${CFG[BUILD_STAGING_BUCKET]} ]]; then
-    printf '%s' "${CFG[BUILD_STAGING_BUCKET]}"
+  local bucket=""
+  crci_cfg_into bucket BUILD_STAGING_BUCKET
+  if [[ -n $bucket ]]; then
+    printf '%s' "$bucket"
   else
-    printf '%s-cr-ci-staging' "${CFG[GCP_PROJECT]}"
+    printf '%s-cr-ci-staging' "$(crci_cfg GCP_PROJECT)"
   fi
 }
 
-crci_registry() { printf '%s-docker.pkg.dev' "${CFG[REGION]}"; }
+crci_registry() { printf '%s-docker.pkg.dev' "$(crci_cfg REGION)"; }
 
 # crci_image_ref IMAGE_NAME TAG
 crci_image_ref() {
-  printf '%s/%s/%s/%s:%s' "$(crci_registry)" "${CFG[GCP_PROJECT]}" "${CFG[ARTIFACT_REPO]}" "$1" "$2"
+  printf '%s/%s/%s/%s:%s' "$(crci_registry)" "$(crci_cfg GCP_PROJECT)" "$(crci_cfg ARTIFACT_REPO)" "$1" "$2"
 }
 
 # crci_duration_seconds VALUE: whole seconds, rounded up (for gcloud flags).
@@ -678,9 +737,9 @@ crci_try_default_tag() {
 
 # crci_check_exec_sa_has_no_roles: EXEC_SA_NAME must hold no project roles.
 crci_check_exec_sa_has_no_roles() {
-  local email roles
-  email=$(crci_sa_email "${CFG[EXEC_SA_NAME]}")
-  crci_read roles "" gcloud projects get-iam-policy "${CFG[GCP_PROJECT]}" \
+  local email roles=""
+  email=$(crci_sa_email "$(crci_cfg EXEC_SA_NAME)")
+  crci_read roles "" gcloud projects get-iam-policy "$(crci_cfg GCP_PROJECT)" \
     --flatten=bindings[].members --filter="bindings.members:serviceAccount:$email" --format='value(bindings.role)'
   if [[ -n $roles ]]; then
     crci_die "$email holds project roles ($(tr '\n' ' ' <<<"$roles")); it must hold none (permissions-matrix 2.2)"
@@ -691,10 +750,12 @@ crci_check_exec_sa_has_no_roles() {
 # ARTIFACT_REPO/NAME:TAG as BUILD_SA_NAME, skipping the build if the tag exists.
 crci_build_image() {
   local name=$1 dockerfile=$2 context=$3 tag=$4 local_build=$5
-  local ref build_sa
+  local ref build_sa project region
   ref=$(crci_image_ref "$name" "$tag")
-  build_sa=$(crci_sa_email "${CFG[BUILD_SA_NAME]}")
-  if crci_exists gcloud artifacts docker images describe "$ref" --project="${CFG[GCP_PROJECT]}" --format='value(image_summary.digest)'; then
+  build_sa=$(crci_sa_email "$(crci_cfg BUILD_SA_NAME)")
+  project=$(crci_cfg GCP_PROJECT)
+  region=$(crci_cfg REGION)
+  if crci_exists gcloud artifacts docker images describe "$ref" --project="$project" --format='value(image_summary.digest)'; then
     crci_note "image $ref already exists; not rebuilding"
     return 0
   fi
@@ -725,7 +786,7 @@ crci_build_image() {
     crci_run gcloud builds submit "$context" --config=scripts/cloudbuild.yaml \
       --substitutions="_IMAGE=$ref,_DOCKERFILE=$dockerfile" \
       --gcs-source-staging-dir="gs://$(crci_staging_bucket)/source" \
-      --service-account="projects/${CFG[GCP_PROJECT]}/serviceAccounts/$build_sa" \
-      --region="${CFG[REGION]}" --project="${CFG[GCP_PROJECT]}"
+      --service-account="projects/$project/serviceAccounts/$build_sa" \
+      --region="$region" --project="$project"
   fi
 }

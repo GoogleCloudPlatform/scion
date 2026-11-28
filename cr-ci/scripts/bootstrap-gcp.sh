@@ -25,11 +25,18 @@ done
 crci_help_exit "$USAGE"
 crci_start
 
-P=${CFG[GCP_PROJECT]}
-R=${CFG[REGION]}
-BUILD=$(crci_sa_email "${CFG[BUILD_SA_NAME]}")
-MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
-EXEC=$(crci_sa_email "${CFG[EXEC_SA_NAME]}")
+P=$(crci_cfg GCP_PROJECT)
+R=$(crci_cfg REGION)
+ART_REPO=$(crci_cfg ARTIFACT_REPO)
+BUILD_SA=$(crci_cfg BUILD_SA_NAME)
+MEDIATOR_SA=$(crci_cfg MEDIATOR_SA_NAME)
+SCHEDULER_SA=$(crci_cfg SCHEDULER_SA_NAME)
+EXEC_SA=$(crci_cfg EXEC_SA_NAME)
+KEY_SECRET=$(crci_cfg GITHUB_APP_PRIVATE_KEY_SECRET_NAME)
+HOOK_SECRET=$(crci_cfg GITHUB_WEBHOOK_SECRET_NAME)
+BUILD=$(crci_sa_email "$BUILD_SA")
+MEDIATOR=$(crci_sa_email "$MEDIATOR_SA")
+EXEC=$(crci_sa_email "$EXEC_SA")
 
 crci_note "C1: APIs (only the missing ones are enabled, so serviceusage.services.enable is needed only then)"
 APIS=(run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
@@ -58,16 +65,16 @@ create_sa() { # NAME DESCRIPTION
       --display-name="cr-ci $2" --description="cr-ci: $2"
   fi
 }
-create_sa "${CFG[BUILD_SA_NAME]}" "image builds (Cloud Build)"
-create_sa "${CFG[MEDIATOR_SA_NAME]}" "mediator service"
-create_sa "${CFG[SCHEDULER_SA_NAME]}" "reconcile scheduler"
-create_sa "${CFG[EXEC_SA_NAME]}" "runner executions (no roles)"
+create_sa "$BUILD_SA" "image builds (Cloud Build)"
+create_sa "$MEDIATOR_SA" "mediator service"
+create_sa "$SCHEDULER_SA" "reconcile scheduler"
+create_sa "$EXEC_SA" "runner executions (no roles)"
 
 crci_note "C3: Artifact Registry repository"
-if crci_exists gcloud artifacts repositories describe "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --format='value(name)'; then
-  crci_note "repository ${CFG[ARTIFACT_REPO]} exists"
+if crci_exists gcloud artifacts repositories describe "$ART_REPO" --location="$R" --project="$P" --format='value(name)'; then
+  crci_note "repository $ART_REPO exists"
 else
-  crci_run gcloud artifacts repositories create "${CFG[ARTIFACT_REPO]}" --repository-format=docker \
+  crci_run gcloud artifacts repositories create "$ART_REPO" --repository-format=docker \
     --location="$R" --project="$P" --description="cr-ci runner and mediator images"
 fi
 
@@ -82,7 +89,7 @@ else
 fi
 
 crci_note "C5: secret containers (versions come from set-secrets.sh)"
-for s in "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}"; do
+for s in "$KEY_SECRET" "$HOOK_SECRET"; do
   if crci_exists gcloud secrets describe "$s" --project="$P" --format='value(name)'; then
     crci_note "secret $s exists"
   else
@@ -91,7 +98,7 @@ for s in "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "${CFG[GITHUB_WEBHOOK_SECR
 done
 
 crci_note "C4: BUILD_SA_NAME may push to ARTIFACT_REPO only"
-crci_run gcloud artifacts repositories add-iam-policy-binding "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" \
+crci_run gcloud artifacts repositories add-iam-policy-binding "$ART_REPO" --location="$R" --project="$P" \
   --member="serviceAccount:$BUILD" --role=roles/artifactregistry.writer --format=none
 crci_note "C19: BUILD_SA_NAME reads the uploaded build sources in the staging bucket only"
 crci_run gcloud storage buckets add-iam-policy-binding "$BUCKET" --project="$P" \
@@ -101,7 +108,7 @@ crci_run gcloud projects add-iam-policy-binding "$P" \
   --member="serviceAccount:$BUILD" --role=roles/logging.logWriter --condition=None --format=none
 
 crci_note "C6: MEDIATOR_SA_NAME reads the two secrets only"
-for s in "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}"; do
+for s in "$KEY_SECRET" "$HOOK_SECRET"; do
   crci_run gcloud secrets add-iam-policy-binding "$s" --project="$P" \
     --member="serviceAccount:$MEDIATOR" --role=roles/secretmanager.secretAccessor --format=none
 done

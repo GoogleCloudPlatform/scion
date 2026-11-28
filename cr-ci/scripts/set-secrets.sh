@@ -94,7 +94,9 @@ KEY_SHOW=$KEY_FILE HOOK_SHOW=$HOOK_FILE GEN_SHOW=$GEN_FILE
 [[ -n $GEN_FILE ]] && GEN_FILE=$(crci_abspath "$GEN_FILE")
 
 crci_start
-P=${CFG[GCP_PROJECT]}
+P=$(crci_cfg GCP_PROJECT)
+KEY_SECRET=$(crci_cfg GITHUB_APP_PRIVATE_KEY_SECRET_NAME)
+HOOK_SECRET=$(crci_cfg GITHUB_WEBHOOK_SECRET_NAME)
 
 # add_version SECRET SOURCE_TEXT: prints the command with its input source
 # (never the content); with --apply runs it with the caller's stdin.
@@ -120,34 +122,34 @@ strip_one_newline() {
 }
 
 if [[ -n $KEY_FILE ]]; then
-  crci_note "C5/C9: App private key -> ${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}"
+  crci_note "C5/C9: App private key -> $KEY_SECRET"
   if [[ $KEY_FILE != - ]]; then
     grep -q -- '-----BEGIN .*PRIVATE KEY-----' "$KEY_FILE" || crci_die "$KEY_SHOW does not look like a PEM private key"
     src=$(crci_quote "$KEY_SHOW")
-    add_version "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "$src" <"$KEY_FILE"
+    add_version "$KEY_SECRET" "$src" <"$KEY_FILE"
   else
-    add_version "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "(stdin)"
+    add_version "$KEY_SECRET" "(stdin)"
   fi
 fi
 
 if [[ -n $HOOK_FILE ]]; then
-  crci_note "C5/C9: webhook secret -> ${CFG[GITHUB_WEBHOOK_SECRET_NAME]} (one trailing newline stripped)"
+  crci_note "C5/C9: webhook secret -> $HOOK_SECRET (one trailing newline stripped)"
   if [[ $CRCI_MODE == apply ]]; then
     if [[ $HOOK_FILE == - ]]; then
-      strip_one_newline | add_version "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}" "(stdin)"
+      strip_one_newline | add_version "$HOOK_SECRET" "(stdin)"
     else
       src=$(crci_quote "$HOOK_SHOW")
-      strip_one_newline <"$HOOK_FILE" | add_version "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}" "$src"
+      strip_one_newline <"$HOOK_FILE" | add_version "$HOOK_SECRET" "$src"
     fi
   else
     src="(stdin)"
     [[ $HOOK_FILE != - ]] && src=$(crci_quote "$HOOK_SHOW")
-    add_version "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}" "$src"
+    add_version "$HOOK_SECRET" "$src"
   fi
 fi
 
 if [[ -n $GEN_FILE ]]; then
-  crci_note "C5/C9: generated webhook secret -> ${CFG[GITHUB_WEBHOOK_SECRET_NAME]}"
+  crci_note "C5/C9: generated webhook secret -> $HOOK_SECRET"
   if [[ $CRCI_MODE == apply ]]; then
     (
       umask 077
@@ -161,10 +163,10 @@ if [[ -n $GEN_FILE ]]; then
   fi
   if [[ $CRCI_MODE == apply ]]; then
     src=$(crci_quote "$GEN_SHOW")
-    add_version "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}" "$src" <"$GEN_FILE"
+    add_version "$HOOK_SECRET" "$src" <"$GEN_FILE"
   else
     src=$(crci_quote "$GEN_SHOW")
-    add_version "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}" "$src" </dev/null
+    add_version "$HOOK_SECRET" "$src" </dev/null
   fi
   crci_note "paste the content of $GEN_SHOW into the GitHub App's webhook secret, then delete $GEN_SHOW"
 fi

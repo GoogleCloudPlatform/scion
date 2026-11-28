@@ -59,18 +59,19 @@ crci_help_exit "$USAGE"
 crci_load_config "$CRCI_CONFIG"
 [[ $CRCI_MODE == apply ]] && crci_require_tool gh "$CRCI_MIN_GH"
 
-NAME=${CFG[ROUTING_VARIABLE_NAME]}
-[[ -n $VALUE ]] || VALUE=${CFG[RUNNER_LABEL]}
+NAME=$(crci_cfg ROUTING_VARIABLE_NAME)
+[[ -n $VALUE ]] || VALUE=$(crci_cfg RUNNER_LABEL)
 # Same rule as RUNNER_LABEL in mediator/config.go: one label, no spaces or
 # commas (runs-on would split them), at most 64 characters.
 [[ $VALUE =~ ^[A-Za-z0-9._-]{1,64}$ ]] || crci_die "--value '$VALUE' is not a single runner label"
 
 # Target repos from config (comma-separated, spaces allowed around entries).
-declare -A TARGET=()
-IFS=',' read -r -a _targets <<<"${CFG[TARGET_REPOS]}"
+TARGET_REPOS_RAW=$(crci_cfg TARGET_REPOS)
+TARGET_LIST=$'\n'
+IFS=',' read -r -a _targets <<<"$TARGET_REPOS_RAW"
 for t in "${_targets[@]}"; do
   t=${t//[[:space:]]/}
-  [[ -n $t ]] && TARGET[${t,,}]=$t
+  [[ -n $t ]] && TARGET_LIST+="$(_crci_lower "$t")"$'\n'
 done
 if ((${#REPOS[@]} == 0)); then
   for t in "${_targets[@]}"; do
@@ -82,8 +83,8 @@ fi
 for r in "${REPOS[@]}"; do
   [[ $r =~ ^[A-Za-z0-9](-?[A-Za-z0-9])*/[A-Za-z0-9._-]+$ && ${#r} -le 140 ]] ||
     crci_die "--repo '$r' is not OWNER/REPO"
-  if ((CLEAR == 0)) && [[ -z ${TARGET[${r,,}]+x} ]]; then
-    crci_die "$r is not in TARGET_REPOS (${CFG[TARGET_REPOS]}); the mediator would reject its jobs, so they would never get a runner"
+  if ((CLEAR == 0)) && [[ $TARGET_LIST != *$'\n'"$(_crci_lower "$r")"$'\n'* ]]; then
+    crci_die "$r is not in TARGET_REPOS ($TARGET_REPOS_RAW); the mediator would reject its jobs, so they would never get a runner"
   fi
 done
 

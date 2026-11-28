@@ -56,8 +56,16 @@ done
 crci_help_exit "$USAGE"
 crci_start
 
-P=${CFG[GCP_PROJECT]}
-R=${CFG[REGION]}
+P=$(crci_cfg GCP_PROJECT)
+R=$(crci_cfg REGION)
+RECONCILER_JOB=$(crci_cfg RECONCILER_JOB_NAME)
+MEDIATOR_SVC=$(crci_cfg MEDIATOR_SERVICE_NAME)
+RUNNER_JOB=$(crci_cfg RUNNER_JOB_NAME)
+ART_REPO=$(crci_cfg ARTIFACT_REPO)
+BUILD_SA=$(crci_cfg BUILD_SA_NAME)
+MEDIATOR_SA=$(crci_cfg MEDIATOR_SA_NAME)
+KEY_SECRET=$(crci_cfg GITHUB_APP_PRIVATE_KEY_SECRET_NAME)
+HOOK_SECRET=$(crci_cfg GITHUB_WEBHOOK_SECRET_NAME)
 
 if [[ $REGIONAL_ONLY == 1 && $KEEP_SECRETS == 1 ]]; then
   crci_die "--keep-secrets has no effect with --regional-only (secrets are always kept)"
@@ -89,38 +97,38 @@ delete_if_exists() {
   fi
 }
 
-crci_note "reconciler ${CFG[RECONCILER_JOB_NAME]}"
-delete_if_exists gcloud scheduler jobs describe "${CFG[RECONCILER_JOB_NAME]}" --location="$R" --project="$P" --format='value(name)' -- \
-  gcloud scheduler jobs delete "${CFG[RECONCILER_JOB_NAME]}" --location="$R" --project="$P" --quiet
+crci_note "reconciler $RECONCILER_JOB"
+delete_if_exists gcloud scheduler jobs describe "$RECONCILER_JOB" --location="$R" --project="$P" --format='value(name)' -- \
+  gcloud scheduler jobs delete "$RECONCILER_JOB" --location="$R" --project="$P" --quiet
 
-crci_note "mediator service ${CFG[MEDIATOR_SERVICE_NAME]}"
-delete_if_exists gcloud run services describe "${CFG[MEDIATOR_SERVICE_NAME]}" --region="$R" --project="$P" --format='value(metadata.name)' -- \
-  gcloud run services delete "${CFG[MEDIATOR_SERVICE_NAME]}" --region="$R" --project="$P" --quiet
+crci_note "mediator service $MEDIATOR_SVC"
+delete_if_exists gcloud run services describe "$MEDIATOR_SVC" --region="$R" --project="$P" --format='value(metadata.name)' -- \
+  gcloud run services delete "$MEDIATOR_SVC" --region="$R" --project="$P" --quiet
 
-crci_note "runner job ${CFG[RUNNER_JOB_NAME]}"
-delete_if_exists gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --format='value(name)' -- \
-  gcloud run jobs delete "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --quiet
+crci_note "runner job $RUNNER_JOB"
+delete_if_exists gcloud run jobs describe "$RUNNER_JOB" --region="$R" --project="$P" --format='value(name)' -- \
+  gcloud run jobs delete "$RUNNER_JOB" --region="$R" --project="$P" --quiet
 
 if [[ $REGIONAL_ONLY == 1 ]]; then
   if [[ $KEEP_IMAGES == 1 ]]; then
-    crci_note "keeping repository ${CFG[ARTIFACT_REPO]} in $R"
+    crci_note "keeping repository $ART_REPO in $R"
   else
-    crci_note "repository ${CFG[ARTIFACT_REPO]} in $R and its images"
-    delete_if_exists gcloud artifacts repositories describe "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --format='value(name)' -- \
-      gcloud artifacts repositories delete "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --quiet
+    crci_note "repository $ART_REPO in $R and its images"
+    delete_if_exists gcloud artifacts repositories describe "$ART_REPO" --location="$R" --project="$P" --format='value(name)' -- \
+      gcloud artifacts repositories delete "$ART_REPO" --location="$R" --project="$P" --quiet
   fi
   crci_note "done (--regional-only); kept the service accounts, secrets, build staging bucket and project IAM binding; APIs were left enabled"
   exit 0
 fi
 
 if [[ $KEEP_IMAGES == 1 ]]; then
-  crci_note "keeping repository ${CFG[ARTIFACT_REPO]}; removing BUILD_SA_NAME's writer binding"
-  crci_run_unless_missing gcloud artifacts repositories remove-iam-policy-binding "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" \
-    --member="serviceAccount:$(crci_sa_email "${CFG[BUILD_SA_NAME]}")" --role=roles/artifactregistry.writer --format=none
+  crci_note "keeping repository $ART_REPO; removing BUILD_SA_NAME's writer binding"
+  crci_run_unless_missing gcloud artifacts repositories remove-iam-policy-binding "$ART_REPO" --location="$R" --project="$P" \
+    --member="serviceAccount:$(crci_sa_email "$BUILD_SA")" --role=roles/artifactregistry.writer --format=none
 else
-  crci_note "repository ${CFG[ARTIFACT_REPO]} and its images"
-  delete_if_exists gcloud artifacts repositories describe "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --format='value(name)' -- \
-    gcloud artifacts repositories delete "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --quiet
+  crci_note "repository $ART_REPO and its images"
+  delete_if_exists gcloud artifacts repositories describe "$ART_REPO" --location="$R" --project="$P" --format='value(name)' -- \
+    gcloud artifacts repositories delete "$ART_REPO" --location="$R" --project="$P" --quiet
 fi
 
 BUCKET="gs://$(crci_staging_bucket)"
@@ -128,11 +136,11 @@ crci_note "build staging bucket $BUCKET (uploaded sources only)"
 delete_if_exists gcloud storage buckets describe "$BUCKET" --project="$P" --format='value(name)' -- \
   gcloud storage rm --recursive "$BUCKET" --project="$P"
 
-for s in "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}"; do
+for s in "$KEY_SECRET" "$HOOK_SECRET"; do
   if [[ $KEEP_SECRETS == 1 ]]; then
     crci_note "keeping secret $s; removing MEDIATOR_SA_NAME's access"
     crci_run_unless_missing gcloud secrets remove-iam-policy-binding "$s" --project="$P" \
-      --member="serviceAccount:$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")" --role=roles/secretmanager.secretAccessor --format=none
+      --member="serviceAccount:$(crci_sa_email "$MEDIATOR_SA")" --role=roles/secretmanager.secretAccessor --format=none
   else
     crci_note "secret $s"
     delete_if_exists gcloud secrets describe "$s" --project="$P" --format='value(name)' -- \
@@ -142,10 +150,10 @@ done
 
 crci_note "project binding of BUILD_SA_NAME (logging.logWriter)"
 crci_run_unless_missing gcloud projects remove-iam-policy-binding "$P" \
-  --member="serviceAccount:$(crci_sa_email "${CFG[BUILD_SA_NAME]}")" --role=roles/logging.logWriter --condition=None --format=none
+  --member="serviceAccount:$(crci_sa_email "$BUILD_SA")" --role=roles/logging.logWriter --condition=None --format=none
 
 for k in EXEC_SA_NAME SCHEDULER_SA_NAME MEDIATOR_SA_NAME BUILD_SA_NAME; do
-  email=$(crci_sa_email "${CFG[$k]}")
+  email=$(crci_sa_email "$(crci_cfg "$k")")
   crci_note "service account $email"
   delete_if_exists gcloud iam service-accounts describe "$email" --project="$P" --format='value(email)' -- \
     gcloud iam service-accounts delete "$email" --project="$P" --quiet
