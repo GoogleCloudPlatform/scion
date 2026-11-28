@@ -64,16 +64,22 @@ func sqlBigIntSumExpr(dialectName, innerExpr string) string {
 	return fmt.Sprintf("COALESCE(SUM(%s), 0)", innerExpr)
 }
 
-// acquireGroupEpisodeAdvisoryLock takes a single per-group transaction-scoped
-// PostgreSQL advisory lock so every episode lifecycle transition (open, close,
-// seed pass) for groupID serializes cleanly across Hub replicas (D6a, O4).
-// On SQLite, transactions are already serialized by the single writer connection.
+// acquireGroupEpisodeAdvisoryLock takes a two-key per-group transaction-scoped
+// PostgreSQL advisory lock (store.LockUsageGroupEpisode, StableProjectHash(groupID))
+// so every episode lifecycle transition (open, close, seed pass) for groupID
+// serializes cleanly across Hub replicas without sharing the single-key int8
+// singleton lock space (D6a, O4, O5). On SQLite, transactions are already
+// serialized by the single writer connection.
 func acquireGroupEpisodeAdvisoryLock(ctx context.Context, drv dialect.Driver, groupID string) error {
 	if drv.Dialect() != dialect.Postgres {
 		return nil
 	}
-	lockKey := "usage_group_episode:" + groupID
-	return drv.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", []any{lockKey}, nil)
+	return drv.Exec(
+		ctx,
+		"SELECT pg_advisory_xact_lock($1, $2)",
+		[]any{int32(store.LockUsageGroupEpisode), store.StableProjectHash(groupID)},
+		nil,
+	)
 }
 
 func entUsageGroupSeedToStore(r *ent.UsageGroupBudgetSeed) *store.UsageGroupSeedEpisode {
@@ -150,15 +156,16 @@ func computeUnchargedGroupEpisodeRollupSeedWithDriver(
 	sumCalls := sqlBigIntSumExpr(dialectName, "COALESCE(calls, 0)")
 	cntEvents := "COUNT(*)"
 
-	placeholders := strings.Repeat("?,", len(memberUserIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-
-	args := make([]any, 0, len(memberUserIDs)+3)
-	args = append(args, fromUTC, toUTC)
-	for _, uid := range memberUserIDs {
-		args = append(args, uid)
+	membersJSON, err := json.Marshal(memberUserIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal member user ids: %w", err)
 	}
-	args = append(args, groupParam)
+	memberClause := "billing_user_id IN (SELECT value FROM json_each(?))"
+	if dialectName == dialect.Postgres {
+		memberClause = "billing_user_id IN (SELECT jsonb_array_elements_text(CAST(? AS jsonb)))"
+	}
+
+	args := []any{fromUTC, toUTC, string(membersJSON), groupParam}
 
 	query := fmt.Sprintf(`
 SELECT
@@ -173,12 +180,12 @@ SELECT
 	%s AS events_cnt
 FROM usage_events
 WHERE event_ts >= ? AND event_ts < ?
-  AND billing_user_id IN (%s)
+  AND %s
   AND %s
 GROUP BY %s, COALESCE(project_id, '')
 ORDER BY day_str ASC, proj_id ASC`,
 		dayExpr, sumTok, sumIn, sumOut, sumCR, sumCW, sumCalls, cntEvents,
-		placeholders, notChargedClause, dayExpr,
+		memberClause, notChargedClause, dayExpr,
 	)
 	query = usageRebindSQL(dialectName, query)
 
@@ -352,7 +359,10 @@ func (s *UsageLedgerStore) OpenUsageGroupChargingEpisode(
 		return entUsageGroupSeedToStore(existingOpen), false, nil
 	}
 
-	// Determine seed_from_utc = max(current UTC month start, previous episode's ended_at).
+	// Determine seed_from_utc = max(current UTC month start, previous episode's
+	// ended_at, previous episode's cutoff_at) so a rapid close-before-cutoff and
+	// reopen never overlaps the previous episode's [seed_from, cutoff_at) seed
+	// window (D6a, R1).
 	seedFrom := utcMonthStart(activatedAt)
 	prevClosed, err := txClient.UsageGroupBudgetSeed.Query().
 		Where(
@@ -364,10 +374,16 @@ func (s *UsageLedgerStore) OpenUsageGroupChargingEpisode(
 	if err != nil && !ent.IsNotFound(err) {
 		return nil, false, mapError(err)
 	}
-	if prevClosed != nil && prevClosed.EndedAt != nil {
-		prevEnd := prevClosed.EndedAt.UTC().Truncate(time.Microsecond)
-		if prevEnd.After(seedFrom) {
-			seedFrom = prevEnd
+	if prevClosed != nil {
+		if prevClosed.EndedAt != nil {
+			prevEnd := prevClosed.EndedAt.UTC().Truncate(time.Microsecond)
+			if prevEnd.After(seedFrom) {
+				seedFrom = prevEnd
+			}
+		}
+		prevCutoff := prevClosed.CutoffAt.UTC().Truncate(time.Microsecond)
+		if prevCutoff.After(seedFrom) {
+			seedFrom = prevCutoff
 		}
 		// Guarantee strict uniqueness on (group_id, activated_at) if a rapid
 		// close+reopen occurs within the same microsecond.
@@ -763,7 +779,14 @@ func (s *UsageLedgerStore) QueryGroupMemberUsageBreakdown(
 		args = append(args, projectScopeID)
 	}
 
-	// Build OR clause across all overlapping episodes with non-empty member snapshots.
+	// Build OR clause across all overlapping episodes with non-empty member
+	// snapshots, using a single JSON array parameter per episode (O2) and
+	// clamping finalized episodes by received_at <= ep.UpdatedAt so late
+	// uncharged uploads after finalization do not inflate the breakdown (O3).
+	memberClause := "billing_user_id IN (SELECT value FROM json_each(?))"
+	if dialectName == dialect.Postgres {
+		memberClause = "billing_user_id IN (SELECT jsonb_array_elements_text(CAST(? AS jsonb)))"
+	}
 	var epClauses []string
 	var epArgs []any
 	for _, ep := range episodes {
@@ -781,12 +804,16 @@ func (s *UsageLedgerStore) QueryGroupMemberUsageBreakdown(
 		if !effTo.After(effFrom) {
 			continue
 		}
-		placeholders := strings.Repeat("?,", len(ep.FrozenMemberIDs))
-		placeholders = placeholders[:len(placeholders)-1]
-		epClauses = append(epClauses, fmt.Sprintf("(event_ts >= ? AND event_ts < ? AND billing_user_id IN (%s))", placeholders))
-		epArgs = append(epArgs, effFrom, effTo)
-		for _, uid := range ep.FrozenMemberIDs {
-			epArgs = append(epArgs, uid)
+		membersJSON, err := json.Marshal(ep.FrozenMemberIDs)
+		if err != nil {
+			return nil, fmt.Errorf("marshal episode member user ids: %w", err)
+		}
+		if ep.Finalized {
+			epClauses = append(epClauses, fmt.Sprintf("(event_ts >= ? AND event_ts < ? AND received_at <= ? AND %s)", memberClause))
+			epArgs = append(epArgs, effFrom, effTo, ep.CutoffAt.UTC().Truncate(time.Microsecond), string(membersJSON))
+		} else {
+			epClauses = append(epClauses, fmt.Sprintf("(event_ts >= ? AND event_ts < ? AND %s)", memberClause))
+			epArgs = append(epArgs, effFrom, effTo, string(membersJSON))
 		}
 	}
 

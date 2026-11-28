@@ -681,9 +681,13 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 		assert.Empty(t, resp.Budgets[1].Members, "regular member %s must NOT receive per-member breakdown", u.Email)
 	}
 
-	// 4. R4: Scoped UAT ceiling enforcement on membership branches.
+	// 4. R4 / O4: Scoped UAT ceiling enforcement across group.update and membership branches.
 	recNoQuota := doScopedUserGETRequest(t, srv, uOwner, TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:read"}, []string{"agent.read"}, groupG.ID)
 	assert.Equal(t, http.StatusForbidden, recNoQuota.Code, "scoped UAT lacking quota:read must be denied even for group owner (R4)")
+
+	// O4: Scoped UAT with group.update ceiling (but NOT quota.read) must be denied on branch 2 as well.
+	recGroupUpdateOnly := doScopedUserGETRequest(t, srv, uOwner, TokenBoundary{Kind: BoundaryKindHub}, []string{"group:update"}, []string{"group.update"}, groupG.ID)
+	assert.Equal(t, http.StatusForbidden, recGroupUpdateOnly.Code, "scoped UAT with group.update but without quota.read must be denied (O4)")
 
 	recProjBound := doScopedUserGETRequest(t, srv, uOwner, TokenBoundary{Kind: BoundaryKindProject, ProjectID: proj.ID}, []string{"quota:read"}, []string{"quota.read"}, groupG.ID)
 	assert.Equal(t, http.StatusForbidden, recProjBound.Code, "project-bounded UAT must be denied on hub/group quota read (R4)")

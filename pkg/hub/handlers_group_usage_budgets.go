@@ -358,13 +358,9 @@ func (s *Server) authorizeGroupUsageBudgets(
 		return true, true, nil
 	}
 
-	// 2. Callers with group.update on this group get full breakdown.
-	if updDec := s.authzService.CheckAccess(ctx, identity, groupResource(group), ActionUpdate); updDec.Allowed {
-		return true, true, nil
-	}
-
-	// R4: Membership-based branches below must honor the scoped-UAT ceiling
-	// and boundary (mirroring projectCloneTokenDenial / uatListPermitted).
+	// R4 / O4: All non-quota.read fallback branches below (group.update and
+	// membership-based branches) must honor the scoped-UAT ceiling and boundary
+	// for the route's base permission ("quota.read").
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
 		if scoped == nil || !scoped.Ceiling().Allows("quota.read") {
 			return false, false, nil
@@ -373,6 +369,11 @@ func (s *Server) authorizeGroupUsageBudgets(
 		if !boundary.Valid() || !permissionEligibleForBoundary("quota.read", boundary.Kind) {
 			return false, false, nil
 		}
+	}
+
+	// 2. Callers with group.update on this group get full breakdown.
+	if updDec := s.authzService.CheckAccess(ctx, identity, groupResource(group), ActionUpdate); updDec.Allowed {
+		return true, true, nil
 	}
 
 	// R3: Apply the admin-kind test-identity decide-time clamp before trusting
