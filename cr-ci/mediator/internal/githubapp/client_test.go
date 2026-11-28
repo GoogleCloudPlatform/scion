@@ -259,6 +259,14 @@ func TestDo_RateLimitClassification(t *testing.T) {
 			wantRetryAfter:  now.Add(90 * time.Second),
 		},
 		{
+			name:            "bare 429 with no headers and empty body",
+			status:          http.StatusTooManyRequests,
+			body:            ``,
+			wantRateLimited: true,
+			wantTransient:   true,
+			wantRetryAfter:  now.Add(time.Minute),
+		},
+		{
 			name:            "403 with rate limit body only",
 			status:          http.StatusForbidden,
 			body:            `{"message":"You have exceeded a secondary rate limit."}`,
@@ -543,5 +551,47 @@ func TestBreaker_SecondaryWithoutRetryAfterReopensAfterOneMinute(t *testing.T) {
 	}
 	if got := gh.Calls(jobsPath); got != callsAfterTrip+1 {
 		t.Errorf("at +61s calls = %d, want %d", got, callsAfterTrip+1)
+	}
+}
+
+func TestBreaker_Bare429TripsForOneMinute(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	ck := &clock{t: now}
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New(Options{BaseURL: srv.URL, AppID: 1, Scope: ScopeRepo, Now: ck.now})
+	c.mu.Lock()
+	c.installIDs[c.installKey(repo)] = 77
+	c.tokens[77] = installToken{token: "ghs_test", expires: now.Add(time.Hour)}
+	c.mu.Unlock()
+
+	err := c.api(context.Background(), repo, http.MethodGet, "/test", nil, nil)
+	if !IsRateLimited(err) || !IsTransient(err) {
+		t.Fatalf("bare 429 err = %v, want IsRateLimited && IsTransient", err)
+	}
+	if hits != 1 {
+		t.Fatalf("hits = %d, want 1", hits)
+	}
+
+	// Within 60s, breaker blocks without an HTTP call.
+	ck.add(30 * time.Second)
+	err = c.api(context.Background(), repo, http.MethodGet, "/test", nil, nil)
+	if !IsRateLimited(err) || !IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("at +30s err = %v, want synthetic 429", err)
+	}
+	if hits != 1 {
+		t.Fatalf("at +30s hits = %d, want 1 (breaker open)", hits)
+	}
+
+	// After 60s, breaker allows a real HTTP call again.
+	ck.add(31 * time.Second)
+	_ = c.api(context.Background(), repo, http.MethodGet, "/test", nil, nil)
+	if hits != 2 {
+		t.Errorf("at +61s hits = %d, want 2 (breaker closed)", hits)
 	}
 }

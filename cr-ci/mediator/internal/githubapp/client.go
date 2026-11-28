@@ -604,7 +604,7 @@ func (c *Client) parseAPIError(method, path string, resp *http.Response, now tim
 		remZero := strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0"
 		retryHeader := strings.TrimSpace(resp.Header.Get("Retry-After"))
 		bodyMentions := strings.Contains(strings.ToLower(bodyStr), "rate limit")
-		if remZero || retryHeader != "" || bodyMentions {
+		if resp.StatusCode == http.StatusTooManyRequests || remZero || retryHeader != "" || bodyMentions {
 			ae.RateLimited = true
 			if retryHeader != "" {
 				if secs, err := strconv.ParseInt(retryHeader, 10, 64); err == nil && secs >= 0 {

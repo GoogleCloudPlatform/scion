@@ -105,7 +105,9 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 	// Every GitHub call in a pass concerns one repo, run or job. A GitHub 5xx
 	// or rate-limit response skips that item only: the rest of the pass goes
 	// on (or stops discovery on rate limit), and the next pass retries it.
-	// Anything else is an error and makes /reconcile answer 500.
+	// Transport and context errors intentionally stay Errors (unlike IsTransient
+	// in the hijack guard) so persistent connectivity or timeout failures turn
+	// /reconcile 500 and alert Cloud Scheduler.
 	addErr := func(stage string, err error) {
 		if githubServerError(err) || githubapp.IsRateLimited(err) {
 			res.Skipped = append(res.Skipped, stage+": "+err.Error())
@@ -116,7 +118,7 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 		s.log().Error("reconcile step failed", "event", logging.EventError, "stage", stage, "error", err.Error())
 	}
 
-	cands, onRunners, notices, listed := s.discover(ctx, &res, addErr)
+	cands, onRunners, notices, listed, earlyStop := s.discover(ctx, &res, addErr)
 	// Skipping one repo's or run's 5xx keeps a pass green, but a pass that could
 	// list no repo at all (a sustained GitHub outage) must turn /reconcile red.
 	// (Other errors already make it red.)
@@ -171,9 +173,11 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 			}
 		}
 	}
-	for k := range s.noticed {
-		if !notices[k] {
-			delete(s.noticed, k)
+	if !earlyStop {
+		for k := range s.noticed {
+			if !notices[k] {
+				delete(s.noticed, k)
+			}
 		}
 	}
 	res.ClaimsExpired = s.o.Claims.Sweep()
@@ -274,7 +278,7 @@ func budgetReserve(rl githubapp.RateLimit) int {
 // the fork guard (oldest first, deduplicated) and the jobs currently running
 // on cr-ci runners. listed counts the repos for which at least one runs list
 // succeeded.
-func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func(string, error)) (cands []candidate, onRunners []runnerJob, notices map[string]bool, listed int) {
+func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func(string, error)) (cands []candidate, onRunners []runnerJob, notices map[string]bool, listed int, earlyStop bool) {
 	notices = map[string]bool{}
 	notice := func(key string) bool { // true the first time a notice is seen
 		notices[key] = true
@@ -419,7 +423,8 @@ func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func
 		}
 		return a.ID < b.ID
 	})
-	return cands, onRunners, notices, listed
+	earlyStop = rateLimited || res.BudgetStopped
+	return cands, onRunners, notices, listed, earlyStop
 }
 
 // runnerScopes returns one repo per distinct runner list: every repo with

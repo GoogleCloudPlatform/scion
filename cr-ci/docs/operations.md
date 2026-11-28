@@ -453,6 +453,11 @@ actively changing runs has outgrown the installation's hourly quota. The fix is
 workflow gating or a smaller job fan-out to reduce the backlog, not a faster
 `RECONCILE_SCHEDULE`.
 
+Because the ETag cache (up to 4,000 pages, 1 MiB max body, 30 min idle TTL) and
+run-metadata cache (up to 10,000 runs, 24 h TTL) live in mediator memory, also
+monitor mediator memory utilisation against its container memory limit (`512Mi`)
+during rollout and periods of high backlog churn.
+
 ## Troubleshooting
 
 - **Testing the job guard live:** a refused job only lands on a runner launched for

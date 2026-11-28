@@ -1342,3 +1342,34 @@ func TestOnQueued_UsesRunCache(t *testing.T) {
 		t.Errorf("RunGets after second queued of same run = %d, want 1 (cached)", h.gh.RunGets)
 	}
 }
+
+func TestReconcile_EarlyStopPreservesNoticed(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	// Run 100 holds an in_progress cr-job (P0 after pass 1); run 200 is a fork run (P2).
+	h.addSameRepoRun(100, fakes.GitHubJob{ID: 1000, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-1000"})
+	h.gh.AddRun(fakes.GitHubRun{
+		ID: 200, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "queued",
+		CreatedAt: h.clock.Now().Add(time.Minute),
+		Jobs:      []fakes.GitHubJob{{ID: 2000, Status: "queued", Labels: []string{testLabel}}},
+	})
+
+	// Pass 1 (full): notices fork run 200 and logs SECURITY_REJECT_FORK_PR once.
+	h.reconcile()
+	if got := h.countEvent(logging.EventRejectFork); got != 1 {
+		t.Fatalf("pass 1 SECURITY_REJECT_FORK_PR count = %d, want 1", got)
+	}
+
+	// Pass 2 (budget-stopped after P0 run 100): does not visit run 200, must not prune its notice.
+	h.gh.RateLimitInitialRemaining = 400
+	res := h.reconcile()
+	if !res.BudgetStopped {
+		t.Fatalf("pass 2 BudgetStopped = false, want true")
+	}
+
+	// Pass 3 (full again): visits fork run 200, must not re-fire SECURITY_REJECT_FORK_PR.
+	h.gh.RateLimitInitialRemaining = 5000
+	h.reconcile()
+	if got := h.countEvent(logging.EventRejectFork); got != 1 {
+		t.Errorf("pass 3 SECURITY_REJECT_FORK_PR count = %d, want still 1 (early stop pruned noticed)", got)
+	}
+}

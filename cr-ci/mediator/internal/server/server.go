@@ -257,7 +257,7 @@ func (s *Server) rememberRun(r githubapp.Run) {
 	cp := cloneRunMeta(r)
 	s.runMetaMu.Lock()
 	defer s.runMetaMu.Unlock()
-	if len(s.runMeta) >= runMetaMaxEntries {
+	if _, exists := s.runMeta[r.ID]; !exists && len(s.runMeta) >= runMetaMaxEntries {
 		for id, e := range s.runMeta {
 			if now.Sub(e.at) > runMetaTTL {
 				delete(s.runMeta, id)
