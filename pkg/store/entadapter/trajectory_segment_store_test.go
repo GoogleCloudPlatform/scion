@@ -286,3 +286,128 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, sumBeforeShrink, sumAfterShrink, "SumTrajectoryRunRawBytes must not decrease after shrinking a pending row")
 }
+
+func TestTrajectorySegmentStore_ListCommittedFiltersAndPaging(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	makeCommitted := func(runID, relPath string, gen int, byteStart, byteEnd int64, hashChar string) *store.TrajectorySegment {
+		t.Helper()
+		rawHash := strings.Repeat(hashChar, 64)
+		compHash := strings.Repeat("f", 64)
+		objPath := telemetrycontract.TrajectoryRawObjectPath("hub-1", "proj-1", "agent-1", runID, "claude", relPath, gen, byteStart)
+		prep, err := cs.PrepareTrajectorySegment(ctx, &store.TrajectorySegment{
+			HubID:              "hub-1",
+			OriginHubID:        "hub-1",
+			ProjectID:          "proj-1",
+			AgentID:            "agent-1",
+			RunID:              runID,
+			Harness:            "claude",
+			NativeRelativePath: relPath,
+			ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+			Generation:         gen,
+			ByteStart:          byteStart,
+			ByteEnd:            byteEnd,
+			RawSHA256:          rawHash,
+			CompressedSize:     128,
+			CompressedSHA256:   compHash,
+			ObjectPath:         objPath,
+			CreatedAt:          now,
+			PrepareExpiresAt:   now.Add(15 * time.Minute),
+		})
+		require.NoError(t, err)
+		committed, err := cs.CommitTrajectorySegment(ctx, prep.ID, telemetrycontract.TrajectoryRawManifestPath(objPath), now.Add(time.Second), store.TrajectorySegmentCommitExpectation{
+			ByteEnd:          byteEnd,
+			RawSHA256:        rawHash,
+			CompressedSize:   128,
+			CompressedSHA256: compHash,
+		})
+		require.NoError(t, err)
+		return committed
+	}
+
+	s1 := makeCommitted("run-1", ".claude/projects/-workspace/a.jsonl", 0, 0, 100, "1")
+	s2 := makeCommitted("run-1", ".claude/projects/-workspace/a.jsonl", 0, 100, 250, "2")
+	s3 := makeCommitted("run-1", ".claude/projects/-workspace/a.jsonl", 1, 0, 300, "3")
+	s4 := makeCommitted("run-2", ".claude/projects/-workspace/b.jsonl", 0, 0, 400, "4")
+
+	// Pending segment must never appear in ListCommittedTrajectorySegments.
+	_, err := cs.PrepareTrajectorySegment(ctx, &store.TrajectorySegment{
+		HubID:              "hub-1",
+		ProjectID:          "proj-1",
+		AgentID:            "agent-1",
+		RunID:              "run-2",
+		Harness:            "claude",
+		NativeRelativePath: ".claude/projects/-workspace/b.jsonl",
+		ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+		Generation:         0,
+		ByteStart:          400,
+		ByteEnd:            500,
+		RawSHA256:          strings.Repeat("5", 64),
+		CompressedSize:     64,
+		CompressedSHA256:   strings.Repeat("6", 64),
+		ObjectPath:         "hub-1/pending.seg.gz",
+		CreatedAt:          now,
+		PrepareExpiresAt:   now.Add(15 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	// Unfiltered list returns all 4 committed segments in deterministic order.
+	all, hasMore, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		AgentID: "agent-1",
+		Limit:   10,
+	})
+	require.NoError(t, err)
+	assert.False(t, hasMore)
+	require.Len(t, all, 4)
+	assert.Equal(t, []string{s1.ID, s2.ID, s3.ID, s4.ID}, []string{all[0].ID, all[1].ID, all[2].ID, all[3].ID})
+
+	// Pagination with limit=2.
+	page1, more1, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		AgentID: "agent-1",
+		Limit:   2,
+		Offset:  0,
+	})
+	require.NoError(t, err)
+	assert.True(t, more1)
+	require.Len(t, page1, 2)
+	assert.Equal(t, s1.ID, page1[0].ID)
+	assert.Equal(t, s2.ID, page1[1].ID)
+
+	page2, more2, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		AgentID: "agent-1",
+		Limit:   2,
+		Offset:  2,
+	})
+	require.NoError(t, err)
+	assert.False(t, more2)
+	require.Len(t, page2, 2)
+	assert.Equal(t, s3.ID, page2[0].ID)
+	assert.Equal(t, s4.ID, page2[1].ID)
+
+	// Filters by project_id, run_id, generation, native_relative_path.
+	gen1 := 1
+	filtered, moreF, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		ProjectID:          "proj-1",
+		AgentID:            "agent-1",
+		RunID:              "run-1",
+		Generation:         &gen1,
+		NativeRelativePath: ".claude/projects/-workspace/a.jsonl",
+		Limit:              10,
+	})
+	require.NoError(t, err)
+	assert.False(t, moreF)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, s3.ID, filtered[0].ID)
+
+	// Mismatched ProjectID returns empty.
+	wrongProj, moreWP, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		ProjectID: "proj-other",
+		AgentID:   "agent-1",
+		Limit:     10,
+	})
+	require.NoError(t, err)
+	assert.False(t, moreWP)
+	assert.Empty(t, wrongProj)
+}

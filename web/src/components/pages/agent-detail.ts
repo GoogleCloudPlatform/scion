@@ -134,6 +134,8 @@ import '../shared/agent-schedules-tab.js';
 import type { ScionAgentSchedulesTab } from '../shared/agent-schedules-tab.js';
 import '../shared/agent-usage-panel.js';
 import type { ScionAgentUsagePanel } from '../shared/agent-usage-panel.js';
+import '../shared/agent-trajectory-panel.js';
+import type { ScionAgentTrajectoryPanel } from '../shared/agent-trajectory-panel.js';
 import '../shared/agent-suspend-screen.js';
 import { conversationChatPath } from '../../client/chat-routes.js';
 import {
@@ -389,6 +391,10 @@ export class ScionPageAgentDetail extends LitElement {
 
   private get trajectoryCaptureEnabled(): boolean {
     return trajectoryCaptureEnabled();
+  }
+
+  private get trajectoryTabVisible(): boolean {
+    return trajectoryCaptureEnabled() && can(this.project?._capabilities, 'trajectory_read');
   }
 
   /** Whether an agent uses the built-in shell execution container harness. */
@@ -1979,6 +1985,12 @@ export class ScionPageAgentDetail extends LitElement {
       ) as ScionAgentUsagePanel | null;
       void usagePanel?.loadIfNeeded();
     }
+    if (e.detail.name === 'trajectory') {
+      const trajectoryPanel = this.shadowRoot?.querySelector(
+        'scion-agent-trajectory-panel'
+      ) as ScionAgentTrajectoryPanel | null;
+      void trajectoryPanel?.loadIfNeeded();
+    }
     if (e.detail.name === 'schedules') {
       const schedulesTab = this.shadowRoot?.querySelector(
         'scion-agent-schedules-tab'
@@ -2235,6 +2247,11 @@ export class ScionPageAgentDetail extends LitElement {
         ${this.usageLedgerEnabled
           ? html`<sl-tab slot="nav" panel="usage" data-testid="agent-usage-tab">Usage</sl-tab>`
           : nothing}
+        ${this.trajectoryTabVisible
+          ? html`<sl-tab slot="nav" panel="trajectory" data-testid="agent-trajectory-tab"
+              >Trajectory</sl-tab
+            >`
+          : nothing}
         <sl-tab slot="nav" panel="metrics">Metrics</sl-tab>
         <sl-tab slot="nav" panel="logs">Logs</sl-tab>
         ${!isShell ? html`<sl-tab slot="nav" panel="messages">Messages</sl-tab>` : nothing}
@@ -2250,6 +2267,11 @@ export class ScionPageAgentDetail extends LitElement {
         ${this.usageLedgerEnabled
           ? html`<sl-tab-panel name="usage" data-testid="agent-usage-panel">
               <scion-agent-usage-panel agentId=${this.agent.id}></scion-agent-usage-panel>
+            </sl-tab-panel>`
+          : nothing}
+        ${this.trajectoryTabVisible
+          ? html`<sl-tab-panel name="trajectory" data-testid="agent-trajectory-panel">
+              <scion-agent-trajectory-panel agentId=${this.agent.id}></scion-agent-trajectory-panel>
             </sl-tab-panel>`
           : nothing}
         <sl-tab-panel name="metrics">${this.renderMetricsTab()}</sl-tab-panel>

@@ -2772,6 +2772,56 @@ export interface AgentUsageWindow {
 }
 
 /**
+ * Track 2 raw trajectory segment metadata returned by
+ * GET /api/v1/agents/{id}/trajectory/segments (behind tokenomics.trajectory_capture).
+ */
+export interface TrajectorySegmentSummary {
+  segment_id: string;
+  run_id: string;
+  harness: string;
+  native_relative_path: string;
+  artifact_kind: string;
+  generation: number;
+  byte_start: number;
+  byte_end: number;
+  raw_size: number;
+  compressed_size: number;
+  raw_sha256: string;
+  compressed_sha256: string;
+  incomplete_tail: boolean;
+  session_id?: string;
+  committed_at?: string;
+}
+
+export interface TrajectorySegmentsListResponse {
+  agent_id: string;
+  project_id: string;
+  segments: TrajectorySegmentSummary[];
+  next_cursor?: string;
+}
+
+export interface TrajectorySegmentDownloadLink {
+  object_path: string;
+  url: string;
+  method: string;
+  expires_at: string;
+  content_type: string;
+}
+
+export interface TrajectorySegmentDownloadResponse {
+  segment_id: string;
+  object_path: string;
+  url: string;
+  method: string;
+  expires_at: string;
+  content_type: string;
+  compressed_size: number;
+  raw_sha256: string;
+  compressed_sha256: string;
+  manifest?: TrajectorySegmentDownloadLink;
+}
+
+/**
  * Track 1 operational token usage summary for a single agent.
  * Response from GET /api/v1/agents/{id}/usage (behind tokenomics.usage_ledger).
  */

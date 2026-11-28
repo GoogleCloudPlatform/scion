@@ -4947,6 +4947,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentTrajectorySegmentsPrepare(w, r, id)
 	case AgentRouteTrajectoryCommit:
 		s.handleAgentTrajectorySegmentsCommit(w, r, id)
+	case AgentRouteTrajectorySegments:
+		s.handleAgentTrajectorySegmentsList(w, r, id)
+	case AgentRouteTrajectoryDownload:
+		s.handleAgentTrajectorySegmentDownload(w, r, id, route.Suffix.Param)
 	case AgentRouteTrajectoryContent:
 		s.handleAgentTrajectorySegmentContent(w, r, id, route.Suffix.Param)
 

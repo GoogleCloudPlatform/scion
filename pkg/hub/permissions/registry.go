@@ -101,6 +101,7 @@ const (
 	ActionMessage        = "message"
 	ActionSend           = "send"
 	ActionSetMessageMode = "set_message_mode"
+	ActionTrajectoryRead = "trajectory_read" // project.trajectory.read: list and download Track 2 raw trajectory segments (ptone/scion#9250)
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
 	ActionUpdateGlobal   = "update_global"
@@ -275,6 +276,11 @@ var Registry = []Permission{
 	// by token needs inbox:write, and project.chat_post is decided on the
 	// token holder's account (chatPostIdentity).
 	{ID: "project.chat_post", Resource: ResourceProject, Action: "chat_post", CapabilityKind: CapabilityResource, UATScope: "project:chat_post", Description: "Keep project.chat_post on the token so it can grant roles that include it, such as project-member. It does not post: a token posts in a project's chat threads with inbox:write, and project.chat_post is checked on the account (project owner/admin/member, hub admin)", Enforcement: []string{"pkg/hub/chat_access.go:func (s *Server) chatUserAccess"}},
+	// project.trajectory.read governs Track 2 raw trajectory segment listing
+	// and signed downloads (ptone/scion#9250). Never bundled into agent.read or
+	// member/viewer roles; downloads write a mandatory read-audit row.
+	// Session-only in P5 (no UATScope); UAT delegation is deferred to P7.
+	{ID: "project.trajectory.read", Resource: ResourceProject, Action: ActionTrajectoryRead, CapabilityKind: CapabilityResource, Description: "List and download unredacted Track 2 raw agent trajectory segments for a project (audit-logged; project owner/admin or hub admin)", Enforcement: []string{"pkg/hub/handlers_trajectory_read.go"}},
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},

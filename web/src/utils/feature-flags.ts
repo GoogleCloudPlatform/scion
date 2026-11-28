@@ -495,9 +495,12 @@ export function usageLedgerEnabled(): boolean {
 /**
  * Tokenomics Track 2 trajectory capture (tokenomics.trajectory_capture,
  * ptone/scion#9250): shows trajectory capture policy controls in project
- * settings and the Hub opt-out lock toggle in admin server configuration.
- * Presentation only: the hub enforces the experiment on capture policy
- * read/write endpoints and segment prepare/commit routes. Default OFF.
+ * settings, the Hub opt-out lock toggle in admin server configuration, and
+ * the Trajectory tab on the agent detail page for users who also hold
+ * project.trajectory.read. Presentation only: the hub enforces the experiment
+ * and permissions on capture policy read/write endpoints, segment prepare/commit
+ * routes, and trajectory segment list/download routes (404 while off, 403
+ * without permission). Default OFF.
  */
 export const TOKENOMICS_TRAJECTORY_CAPTURE_FLAG = 'tokenomics.trajectory_capture';
 
