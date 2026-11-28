@@ -229,13 +229,16 @@ export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
  */
 export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
   private readonly basePath: string;
+  private readonly uploadsPath: string;
   private readonly projectId: string;
   private readonly dirName: string;
 
   constructor(projectId: string, dirName: string) {
     this.projectId = projectId;
     this.dirName = dirName;
-    this.basePath = `/api/v1/projects/${projectId}/shared-dirs/${encodeURIComponent(dirName)}/files`;
+    const encodedDir = encodeURIComponent(dirName);
+    this.basePath = `/api/v1/projects/${projectId}/shared-dirs/${encodedDir}/files`;
+    this.uploadsPath = `/api/v1/projects/${projectId}/shared-dirs/${encodedDir}/uploads`;
   }
 
   async listFiles(opts?: { limit?: number }): Promise<FileListResult> {
@@ -268,7 +271,20 @@ export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
     }
   }
 
-  async uploadFiles(files: FileList): Promise<void> {
+  async uploadFiles(
+    files: FileList,
+    options?: { onProgress?: (sent: number, total: number) => void; signal?: AbortSignal }
+  ): Promise<void> {
+    if (isFeatureEnabled('hub.large_uploads')) {
+      await uploadWorkspaceFiles(
+        this.basePath,
+        this.uploadsPath,
+        Array.from(files).map((file) => ({ path: file.name, file })),
+        options
+      );
+      return;
+    }
+
     const limits = await getUploadLimits();
     const sizeErr = validateWorkspaceUploadFiles(
       files,

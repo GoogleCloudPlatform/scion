@@ -123,8 +123,8 @@ describe('WorkspaceFileBrowserDataSource upload routing', () => {
     expect(uploadUrls).toEqual([]);
   });
 
-  it('clamps shared-dir pre-send check to 100 MiB when hub limit is 1 GiB', async () => {
-    setFeatureFlag('hub.large_uploads', true);
+  it('clamps shared-dir pre-send check to 100 MiB when hub limit is 1 GiB and experiment is off', async () => {
+    setFeatureFlag('hub.large_uploads', false);
     const uploadUrls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -151,6 +151,76 @@ describe('WorkspaceFileBrowserDataSource upload routing', () => {
       'File "huge.bin" exceeds the maximum size of 100 MiB'
     );
     expect(uploadUrls).toEqual([]);
+  });
+
+  it('uses chunked upload session for shared-dir when hub.large_uploads is on and file exceeds chunkBytes', async () => {
+    setFeatureFlag('hub.large_uploads', true);
+    const calls: Array<{ method: string; url: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        calls.push({ method, url });
+        if (url.endsWith('/shared-dirs/scratchpad/uploads') && method === 'POST') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: 'upl_sd1',
+                transport: 'hub_chunked',
+                chunkBytes: 8 * 1024 * 1024,
+                maxBytes: 1 << 30,
+                received: 0,
+                expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+              }),
+              { status: 201, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        if (method === 'PUT') {
+          const parsed = new URL(url, 'http://hub.test');
+          const offset = Number(parsed.searchParams.get('offset') ?? '0');
+          const bodyObj = init?.body as { size?: unknown } | null | undefined;
+          const size = typeof bodyObj?.size === 'number' ? bodyObj.size : 0;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                received: offset + size,
+                expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ path: 'big.bin', size: 9 * 1024 * 1024 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    const ds = new SharedDirDataSourceCtor('proj-1', 'scratchpad');
+    const fakeLarge = new File([new Uint8Array(10)], 'big.bin');
+    Object.defineProperty(fakeLarge, 'size', { value: 9 * 1024 * 1024 });
+    fakeLarge.slice = (start?: number, end?: number) => {
+      const len = (end ?? 9 * 1024 * 1024) - (start ?? 0);
+      return { size: len } as Blob;
+    };
+
+    const progress: Array<[number, number]> = [];
+    await ds.uploadFiles(makeFileList([fakeLarge]), {
+      onProgress: (sent, total) => progress.push([sent, total]),
+    });
+
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'POST /api/v1/projects/proj-1/shared-dirs/scratchpad/uploads',
+      'PUT /api/v1/projects/proj-1/shared-dirs/scratchpad/uploads/upl_sd1?offset=0',
+      'PUT /api/v1/projects/proj-1/shared-dirs/scratchpad/uploads/upl_sd1?offset=8388608',
+      'POST /api/v1/projects/proj-1/shared-dirs/scratchpad/uploads/upl_sd1/complete',
+    ]);
+    expect(progress.at(-1)).toEqual([9 * 1024 * 1024, 9 * 1024 * 1024]);
   });
 
   it('uses chunked upload session when hub.large_uploads is on and file exceeds chunkBytes', async () => {
