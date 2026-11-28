@@ -284,15 +284,59 @@ func (p *PendingStep) Dialect() string {
 	return p.dialect
 }
 
+// chainRunState is the explicit state machine for a ChainRun (C1, ptone/scion#9801).
+// Every transition is a single critical section under ChainRun.mu:
+//
+//	State            | Event                                   | Next State       | Notes
+//	-----------------+-----------------------------------------+------------------+----------------------------------------------------------
+//	Ready            | Next (end / empty)                      | Done             | done=true
+//	Ready            | Next (Inline.Ctx canceled)              | Done             | record canceled, done=true
+//	Ready            | Next (admission / enricher error)       | Ready / Done     | apply policy, record failed, advance nextPos
+//	Ready            | Next (IO element)                       | Pending          | park PendingStep token, return pending
+//	Ready            | Next (Inline element)                   | Evaluating       | unlock, evaluate inline, relock -> Ready / Done
+//	Ready            | Resume / claim / complete               | Ready (err/noop) | Resume/claim error; complete is no-op
+//	Ready            | failInvalidCompletion                   | Done             | record invalid_completion (countThrough=false)
+//	-----------------+-----------------------------------------+------------------+----------------------------------------------------------
+//	Evaluating       | Next / Resume / claim / complete        | Evaluating       | Next/Resume/claim error; complete is no-op (RV2-2)
+//	Evaluating       | inline finish (relock)                  | Ready / Done     | iff state==Evaluating; if Done, discard & return done
+//	Evaluating       | failInvalidCompletion                   | Done             | record invalid_completion (countThrough=false)
+//	-----------------+-----------------------------------------+------------------+----------------------------------------------------------
+//	Pending          | Next                                    | Pending (err)    | error, no transition
+//	Pending          | Resume (ctx live)                       | Pending (err)    | error "not evaluated yet", no transition
+//	Pending          | Resume (Inline or IO ctx canceled)      | Done             | consume token, record canceled, advance nextPos
+//	Pending          | claim (EvaluatePending / EvaluateGroup) | Dispatched       | iff p==pending && !consumed; mint evalCtx+inflight under mu
+//	Pending          | complete                                | Pending (no-op)  | only Dispatched can complete
+//	Pending          | failInvalidCompletion                   | Done             | consume pending, record invalid_completion on pending idx
+//	-----------------+-----------------------------------------+------------------+----------------------------------------------------------
+//	Dispatched       | Next / Resume                           | Dispatched (err) | error "step in flight", no transition
+//	Dispatched       | claim                                   | Dispatched (err) | error "already used" (consumed=true)
+//	Dispatched       | complete (completePending)              | PendingCompleted | iff p==pending; store outcome, clear inflight
+//	Dispatched       | failInvalidCompletion                   | Done             | record invalid_completion on inflight idx, advance nextPos, then cancel inflight
+//	-----------------+-----------------------------------------+------------------+----------------------------------------------------------
+//	PendingCompleted | Next / claim / complete                 | PendingCompleted | Next/claim error; complete is no-op
+//	PendingCompleted | Resume                                  | Ready / Done     | apply policy, record outcome, advance nextPos
+//	PendingCompleted | failInvalidCompletion                   | Done             | record real outcome + advance nextPos, then record invalid_completion (countThrough=false)
+//	-----------------+-----------------------------------------+------------------+----------------------------------------------------------
+//	Done             | Next                                    | Done             | done=true, no transition (absorbing)
+//	Done             | Resume / claim / complete / failInvalid | Done             | Resume/claim error; complete/failInvalid no-op (absorbing)
 type chainRunState int
 
 const (
 	chainStateReady chainRunState = iota
 	chainStateEvaluating
 	chainStatePending
+	chainStateDispatched
 	chainStatePendingCompleted
 	chainStateDone
 )
+
+// inflightStep tracks an active Dispatched evaluation under ChainRun.mu so a
+// concurrent terminal transition can cancel (or withdraw group interest from)
+// its evaluation context before releasing ChainRun.mu (C1, ptone/scion#9801).
+type inflightStep struct {
+	step   *PendingStep
+	cancel func(cause error)
+}
 
 // ChainRun is a resumable, single-run ordered rule-chain execution owned by Engine.
 //
@@ -320,6 +364,7 @@ type ChainRun struct {
 	through        int
 	tokenSeq       uint64
 	pending        *PendingStep
+	inflight       *inflightStep
 	pendingOutcome StepOutcome
 	pendingDetail  any
 	pendingCopier  func(any) any
@@ -591,6 +636,10 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 		r.mu.Unlock()
 		return nil, nil, false, errors.New("ruleengine: cannot call Next while an evaluation is already in progress")
 	}
+	if r.state == chainStateDispatched {
+		r.mu.Unlock()
+		return nil, nil, false, errors.New("ruleengine: cannot call Next while a pending step is in flight")
+	}
 	if r.state == chainStatePending || r.state == chainStatePendingCompleted {
 		r.mu.Unlock()
 		return nil, nil, false, errors.New("ruleengine: cannot call Next while a pending step is unresolved")
@@ -775,7 +824,7 @@ func (e *Engine) evaluateInlineElement(
 	if spec.elem.Source != nil {
 		dec, elapsed, evalErr = e.compileAndEvaluateSource(dom, spec, caps, input)
 	} else {
-		dec, elapsed, evalErr = e.evaluateCore(dom.Ctx, spec.elem.Compiled, input, dom.Budget)
+		dec, elapsed, evalErr = e.evaluateCoreSafe(dom.Ctx, spec.elem.Compiled, input, dom.Budget)
 	}
 
 	out := classifyDecisionToOutcome(spec.elem.Index, spec.dialect, spec.elem.Kind, DomainInline, "", caps, dec, elapsed, evalErr)
@@ -947,8 +996,24 @@ type sourceCompileError struct {
 func (e *sourceCompileError) Error() string { return "rule compile error: " + e.cause.Error() }
 func (e *sourceCompileError) Unwrap() error { return e.cause }
 
+// evaluateCoreSafe wraps evaluateCore with panic recovery (O-1) so a panicking
+// dialect never leaves a ChainRun stuck in Dispatched or Evaluating; the panic
+// is converted into a closed FailedError{Reason: ReasonEvalFailed}.
+func (e *Engine) evaluateCoreSafe(ctx context.Context, c Compiled, input Input, budget Budget) (dec Decision, elapsed time.Duration, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			dec = Decision{}
+			err = &FailedError{
+				Reason: ReasonEvalFailed,
+				Cause:  fmt.Errorf("dialect panic: %v", rec),
+			}
+		}
+	}()
+	return e.evaluateCore(ctx, c, input, budget)
+}
+
 // EvaluatePending evaluates a single PendingStep alone through the engine's
-// ordinary evaluation path and completes its single-use token (v1 §3.1, §3.2).
+// ordinary evaluation path and completes its single-use token (v1 §3.1, §3.2, C1).
 func (e *Engine) EvaluatePending(p *PendingStep) error {
 	if e == nil {
 		return errors.New("ruleengine: nil Engine")
@@ -960,16 +1025,17 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("pending step belongs to another engine")}
 	}
 
-	if err := p.claimForCompletion(); err != nil {
+	// C1: claim IS the dispatch. Under r.mu, transition Pending -> Dispatched
+	// and mint evalCtx + cancel BEFORE unlocking so any concurrent terminal
+	// transition cancels evalCtx under r.mu.
+	evalCtx, stopCtx, ioDomain, inlineCtx, err := p.claimAndDispatchSingle()
+	if err != nil {
 		p.run.failInvalidCompletion(p, err)
 		return err
 	}
+	defer stopCtx()
 
 	run := p.run
-	run.mu.Lock()
-	ioDomain := run.domains.IO
-	inlineCtx := run.domains.Inline.Ctx
-	run.mu.Unlock()
 
 	// Re-check per-consumer dialect admission at evaluation (§3.7 item 5).
 	dial, admErr := e.resolveDialect(p.compiled.Consumer(), p.compiled.Dialect())
@@ -1018,11 +1084,7 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 		return nil
 	}
 
-	// Wire D2 cascade from Inline.Ctx into IO.Ctx without leaking goroutines.
-	evalCtx, stopCascade := cascadeCancelContext(ioDomain.Ctx, inlineCtx)
-	defer stopCascade()
-
-	dec, elapsed, evalErr := e.evaluateCore(evalCtx, p.compiled, p.input, ioDomain.Budget)
+	dec, elapsed, evalErr := e.evaluateCoreSafe(evalCtx, p.compiled, p.input, ioDomain.Budget)
 	out := classifyDecisionToOutcome(p.index, p.dialect, p.kind, DomainIO, "", caps, dec, elapsed, evalErr)
 	var detail any
 	if p.kind == KindJudgment && out.Class == StepClassPass {
@@ -1032,11 +1094,42 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 	return nil
 }
 
+// groupInterestCancel coordinates C1 interest withdrawal across a group of
+// participating runs: each run's terminal transition withdraws its interest,
+// and the shared group evalCtx is canceled only when the LAST interest is
+// withdrawn.
+type groupInterestCancel struct {
+	remaining atomic.Int32
+	cancel    context.CancelCauseFunc
+	stop      func()
+}
+
+func (g *groupInterestCancel) registerMember() func(cause error) {
+	g.remaining.Add(1)
+	var once sync.Once
+	return func(cause error) {
+		once.Do(func() {
+			if g.remaining.Add(-1) == 0 {
+				g.cancel(cause)
+			}
+		})
+	}
+}
+
+func (g *groupInterestCancel) release() {
+	if g.cancel != nil {
+		g.cancel(nil)
+	}
+	if g.stop != nil {
+		g.stop()
+	}
+}
+
 // EvaluateGroup validates leader and members as a whole before any I/O, executes
 // ONE ordinary evaluation on leader's compiled rule and request, charges the
 // shared IO tracker once, and distributes the identical StepOutcome (with
 // independent deep-copied judgment Detail) to leader and every member
-// (v1 §3.3, §3.10 Addendum A, A1 §3 rule 8).
+// (v1 §3.3, §3.10 Addendum A, A1 §3 rule 8, C1).
 func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (string, error) {
 	if e == nil {
 		return "", errors.New("ruleengine: nil Engine")
@@ -1053,6 +1146,7 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	// tokens BEFORE mutating any state.
 	seenSteps := make(map[*PendingStep]struct{}, len(all))
 	seenRuns := make(map[*ChainRun]struct{}, len(all))
+	inlineCtxs := make([]context.Context, 0, len(all))
 	for _, p := range all {
 		if p == nil || p.run == nil || p.run.engine != e {
 			e.failWholeGroupIncompatible(all, errors.New("nil or foreign pending step in group"))
@@ -1075,13 +1169,34 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 			e.failWholeGroupIncompatible(all, err)
 			return "", err
 		}
+		// domains is immutable after NewChainRun; read under single lock per run.
+		p.run.mu.Lock()
+		inlineCtxs = append(inlineCtxs, p.run.domains.Inline.Ctx)
+		p.run.mu.Unlock()
 	}
 
-	// Claim all tokens atomically (O-2: if any fails concurrently, fail-closed
-	// on ALL supplied steps so none stay live).
+	leader.run.mu.Lock()
+	leaderIO := leader.run.domains.IO
+	leader.run.mu.Unlock()
+
+	// C1 & R-1: mint the shared group evalCtx and interest-withdrawal
+	// coordinator BEFORE claiming any member so every member's
+	// Pending -> Dispatched transition registers its withdraw callback under
+	// its own r.mu. The dispatcher holds its own interest across the entire
+	// claim loop so an early member withdrawal before later members are
+	// claimed cannot drop remaining to 0 and cross-cancel live members.
+	cascadedCtx, stopCascade := cascadeAllCanceledContext(leaderIO.Ctx, inlineCtxs)
+	evalCtx, cancelCause := context.WithCancelCause(cascadedCtx)
+	interest := &groupInterestCancel{cancel: cancelCause, stop: stopCascade}
+	defer interest.release()
+	releaseDispatcher := interest.registerMember()
+	defer releaseDispatcher(context.Canceled)
+
+	// Claim and dispatch all tokens atomically per run (O-2: if any fails
+	// concurrently, fail-closed on ALL supplied steps so none stay live).
 	claimed := make([]*PendingStep, 0, len(all))
 	for _, p := range all {
-		if err := p.claimForCompletion(); err != nil {
+		if err := p.claimAndDispatchGroup(interest); err != nil {
 			for _, c := range claimed {
 				c.run.completePending(c, StepOutcome{
 					Index:   c.index,
@@ -1102,10 +1217,6 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 
 	// Step 1b: Validate group compatibility (A1 §3 rule 8 + v1 §3.3 safety floor)
 	// and per-consumer dialect re-admission for every member BEFORE any I/O.
-	leader.run.mu.Lock()
-	leaderIO := leader.run.domains.IO
-	leader.run.mu.Unlock()
-
 	if leader.groupKey == "" {
 		return e.failClaimedGroup(claimed, errors.New("empty GroupKey cannot be grouped"))
 	}
@@ -1114,13 +1225,10 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		return e.failClaimedGroup(claimed, fmt.Errorf("leader dialect admission failed: %w", err))
 	}
 
-	inlineCtxs := make([]context.Context, 0, len(claimed))
 	for _, m := range claimed {
 		m.run.mu.Lock()
 		mIO := m.run.domains.IO
-		mInlineCtx := m.run.domains.Inline.Ctx
 		m.run.mu.Unlock()
-		inlineCtxs = append(inlineCtxs, mInlineCtx)
 
 		if m.groupKey != leader.groupKey {
 			return e.failClaimedGroup(claimed, errors.New("mismatched GroupKey"))
@@ -1148,6 +1256,12 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 
 	groupID := fmt.Sprintf("grp-%d", e.groupSeq.Add(1))
 	caps := leaderDial.Declares()
+
+	// R-1 (C1 claim-phase guard): all members are claimed and validated;
+	// release the dispatcher's interest AT DISPATCH, immediately before the
+	// pre-I/O checks and evaluateCoreSafe. If every member already terminated
+	// before dispatch, remaining drops to 0 and evalCtx cancels immediately.
+	releaseDispatcher(context.Canceled)
 
 	// Step 2a: Cancel-at-barrier check (0 calls).
 	if ctxErr := leaderIO.Ctx.Err(); ctxErr != nil {
@@ -1209,20 +1323,18 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	}
 
 	// Step 3 & 4: ONE ordinary evaluation on leader's compiled rule and request
-	// under leaderIO.Ctx only, cascading to cancel the evaluation ONLY when ALL
-	// members' Inline ctxs are done (R-2). Charges the shared IO tracker once.
-	evalCtx, stopCascade := cascadeAllCanceledContext(leaderIO.Ctx, inlineCtxs)
-	defer stopCascade()
-
-	dec, elapsed, evalErr := e.evaluateCore(evalCtx, leader.compiled, leader.input, leaderIO.Budget)
+	// under evalCtx (leaderIO.Ctx + all-Inline-canceled cascade + all-runs-
+	// terminal interest withdrawal). Charges the shared IO tracker once.
+	dec, elapsed, evalErr := e.evaluateCoreSafe(evalCtx, leader.compiled, leader.input, leaderIO.Budget)
 	leaderOut := classifyDecisionToOutcome(leader.index, leader.dialect, leader.kind, DomainIO, groupID, caps, dec, elapsed, evalErr)
 	leaderOut.GroupElapsed = elapsed
 
 	// Step 5: Distribute outcome. R-2: any member whose own Inline ctx is done
 	// records canceled (Elapsed: 0, GroupElapsed: 0, not charged) without
-	// affecting live members. O-a: attribute the charged Elapsed to the first
-	// live member (leader when live, or first live member when leader is
-	// canceled) so tracker spent == Σ StepOutcome.Elapsed across the group.
+	// affecting live members. O-a & C1: attribute the charged Elapsed to the
+	// first live member whose completePending actually transitions
+	// Dispatched -> PendingCompleted (skipping members terminated in-flight),
+	// so tracker spent == Σ StepOutcome.Elapsed across live members.
 	chargedAttributed := false
 	for i, m := range claimed {
 		if memberCtxErr := inlineCtxs[i].Err(); memberCtxErr != nil {
@@ -1245,7 +1357,6 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		out.Index = m.index
 		if !chargedAttributed {
 			out.Elapsed = elapsed
-			chargedAttributed = true
 		} else {
 			out.Elapsed = 0
 		}
@@ -1253,7 +1364,9 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		if m.kind == KindJudgment && out.Class == StepClassPass {
 			detail = copyJudgmentDetail(dec.Detail, caps.CopyDetail)
 		}
-		m.run.completePending(m, out, detail, caps.CopyDetail)
+		if m.run.completePending(m, out, detail, caps.CopyDetail) && !chargedAttributed {
+			chargedAttributed = true
+		}
 	}
 	return groupID, nil
 }
@@ -1306,6 +1419,9 @@ func (r *ChainRun) Resume() (Control, error) {
 
 	if r.state == chainStateEvaluating {
 		return Control{}, errors.New("ruleengine: cannot call Resume while an evaluation is in progress")
+	}
+	if r.state == chainStateDispatched {
+		return Control{}, errors.New("ruleengine: cannot call Resume while a pending step is in flight")
 	}
 	if r.state == chainStatePending {
 		// Terminal completion after expiry/cancel (§3.2 point 9, A1 D2): if a
@@ -1445,6 +1561,8 @@ func (p *PendingStep) isLive() bool {
 	return !p.consumed && p.run.state == chainStatePending && p.run.pending == p
 }
 
+// claimForCompletion transitions Pending -> Dispatched without an evaluation
+// context (used by failWholeGroupIncompatible to reject a group immediately).
 func (p *PendingStep) claimForCompletion() error {
 	if p == nil || p.run == nil {
 		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("nil pending step")}
@@ -1458,19 +1576,80 @@ func (p *PendingStep) claimForCompletion() error {
 		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("pending step not active for run")}
 	}
 	p.consumed = true
+	p.run.state = chainStateDispatched
 	return nil
 }
 
-func (r *ChainRun) completePending(p *PendingStep, out StepOutcome, detail any, copier func(any) any) {
+// claimAndDispatchSingle atomically transitions Pending -> Dispatched under
+// ChainRun.mu and mints the evaluation context + cancel handle BEFORE releasing
+// the lock (C1, ptone/scion#9801).
+func (p *PendingStep) claimAndDispatchSingle() (context.Context, func(), Domain, context.Context, error) {
+	if p == nil || p.run == nil {
+		return nil, nil, Domain{}, nil, &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("nil pending step")}
+	}
+	r := p.run
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.pending != p || r.state != chainStatePending {
-		return
+	if p.consumed {
+		return nil, nil, Domain{}, nil, &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("completion token already used")}
 	}
+	if r.state != chainStatePending || r.pending != p {
+		return nil, nil, Domain{}, nil, &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("pending step not active for run")}
+	}
+	p.consumed = true
+	ioDomain := r.domains.IO
+	inlineCtx := r.domains.Inline.Ctx
+	cascadedCtx, stopCascade := cascadeCancelContext(ioDomain.Ctx, inlineCtx)
+	evalCtx, cancelCause := context.WithCancelCause(cascadedCtx)
+	r.inflight = &inflightStep{
+		step:   p,
+		cancel: cancelCause,
+	}
+	r.state = chainStateDispatched
+	stop := func() {
+		cancelCause(nil)
+		stopCascade()
+	}
+	return evalCtx, stop, ioDomain, inlineCtx, nil
+}
+
+// claimAndDispatchGroup atomically transitions Pending -> Dispatched under
+// ChainRun.mu and registers this run's interest-withdrawal callback on the
+// shared groupInterestCancel BEFORE releasing the lock (C1, ptone/scion#9801).
+func (p *PendingStep) claimAndDispatchGroup(interest *groupInterestCancel) error {
+	if p == nil || p.run == nil {
+		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("nil pending step")}
+	}
+	r := p.run
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p.consumed {
+		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("completion token already used")}
+	}
+	if r.state != chainStatePending || r.pending != p {
+		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("pending step not active for run")}
+	}
+	p.consumed = true
+	r.inflight = &inflightStep{
+		step:   p,
+		cancel: interest.registerMember(),
+	}
+	r.state = chainStateDispatched
+	return nil
+}
+
+func (r *ChainRun) completePending(p *PendingStep, out StepOutcome, detail any, copier func(any) any) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending != p || r.state != chainStateDispatched {
+		return false
+	}
+	r.inflight = nil
 	r.pendingOutcome = out
 	r.pendingDetail = detail
 	r.pendingCopier = copier
 	r.state = chainStatePendingCompleted
+	return true
 }
 
 func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
@@ -1480,6 +1659,7 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 		return
 	}
 	wasPending := r.state == chainStatePending
+	wasDispatched := r.state == chainStateDispatched
 	wasPendingCompleted := r.state == chainStatePendingCompleted
 	// O-1 & O3-1: if a legitimate completion outcome was already recorded (before
 	// Resume), record it first and advance nextPos so the completed index is
@@ -1494,15 +1674,16 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 		r.pendingDetail = nil
 		r.pendingCopier = nil
 	}
-	// N-a: record the invalid completion against the currently pending step's
-	// index when one is active (so a stale token from step 1 replayed during
-	// step 2 fails step 2 rather than duplicating step 1). When the pending
+	// N-a & C1: when Pending or Dispatched, record invalid_completion against
+	// the active/in-flight step's index and advance nextPos. When the pending
 	// step was already completed (O3-1) or the run is Evaluating/Ready, record
 	// against the replayed token without double-counting Through.
 	target := p
-	if wasPending && r.pending != nil {
+	inFlight := false
+	if (wasPending || wasDispatched) && r.pending != nil {
 		target = r.pending
 		r.pending.consumed = true
+		inFlight = true
 	}
 	out := StepOutcome{
 		Index:   target.index,
@@ -1513,12 +1694,20 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 		Domain:  DomainIO,
 		Err:     err,
 	}
-	r.recordStepOutcomeLocked(out, Control{Stop: true}, nil, nil, wasPending)
-	if wasPending && r.nextPos < len(r.elements) {
+	r.recordStepOutcomeLocked(out, Control{Stop: true}, nil, nil, inFlight)
+	if inFlight && r.nextPos < len(r.elements) {
 		r.nextPos++
 	}
+	inf := r.inflight
+	r.inflight = nil
 	r.pending = nil
 	r.state = chainStateDone
+	// C1: record first, cancel second — while still holding r.mu so any
+	// observer of Result().Stopped == true is guaranteed to see evalCtx
+	// already canceled (closing the SEC3-L1 claim-then-stop window).
+	if inf != nil && inf.cancel != nil {
+		inf.cancel(err)
+	}
 }
 
 func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any, copier func(any) any) {
