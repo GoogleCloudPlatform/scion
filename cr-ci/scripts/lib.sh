@@ -71,8 +71,8 @@ crci_is_known_key() {
   [[ -n ${!_var+x} ]]
 }
 
-_crci_lower() { printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z'; }
-_crci_upper() { printf '%s' "$1" | LC_ALL=C tr 'a-z' 'A-Z'; }
+_crci_lower() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
+_crci_upper() { printf '%s' "$1" | LC_ALL=C tr '[:lower:]' '[:upper:]'; }
 
 crci_die() {
   printf '%s: error: %s\n' "$CRCI_PROG" "$*" >&2
