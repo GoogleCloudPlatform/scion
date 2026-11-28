@@ -232,6 +232,33 @@ func TestBuildDaemonStartArgsForwardsExplicitHost(t *testing.T) {
 	assert.Contains(t, buildDaemonStartArgs(c), "--host=1.2.3.4")
 }
 
+// TestBuildDaemonStartArgsForwardsEnableMCP guards that --enable-mcp survives
+// the daemon re-exec in both explicit true and explicit false forms, and is
+// omitted when unset.
+func TestBuildDaemonStartArgsForwardsEnableMCP(t *testing.T) {
+	resetServerFlags()
+	enableMCP = false
+	defer func() {
+		resetServerFlags()
+		enableMCP = false
+	}()
+
+	newCmd := func(args ...string) *cobra.Command {
+		enableMCP = false
+		c := &cobra.Command{Use: "start", RunE: func(*cobra.Command, []string) error { return nil }}
+		c.Flags().BoolVar(&enableMCP, "enable-mcp", false, "")
+		c.SetArgs(args)
+		require.NoError(t, c.Execute())
+		return c
+	}
+
+	assert.Contains(t, buildDaemonStartArgs(newCmd("--enable-mcp")), "--enable-mcp=true")
+	assert.Contains(t, buildDaemonStartArgs(newCmd("--enable-mcp=false")), "--enable-mcp=false")
+	for _, a := range buildDaemonStartArgs(newCmd()) {
+		assert.False(t, strings.HasPrefix(a, "--enable-mcp"), "unset --enable-mcp must not be forwarded: %s", a)
+	}
+}
+
 // serveHealth starts an httptest.Server that answers every request with the
 // given /healthz body.
 func serveHealth(t *testing.T, body string) *httptest.Server {

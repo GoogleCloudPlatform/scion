@@ -159,14 +159,18 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 
 // resolveProjectID resolves a project slug to its UUID via the Hub API using
 // the caller's own credential. If project is already a valid UUID it is
-// returned directly. If slug lookup fails or finds no match (for example when
-// a project-scoped UAT lacks project:list), a clear error is returned.
+// returned directly. If the Hub returns an error, the Hub's error reason is
+// returned verbatim; if lookup succeeds with 0 or multiple matches, a clear
+// hint is returned.
 func resolveProjectID(ctx context.Context, cl hubclient.Client, project string) (string, error) {
 	if _, err := uuid.Parse(project); err == nil {
 		return project, nil
 	}
 	list, err := cl.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: project})
-	if err == nil && list != nil && len(list.Projects) == 1 && list.Projects[0].ID != "" {
+	if err != nil {
+		return "", err
+	}
+	if list != nil && len(list.Projects) == 1 && list.Projects[0].ID != "" {
 		return list.Projects[0].ID, nil
 	}
 	return "", fmt.Errorf("cannot resolve project slug %q: pass the project ID (UUID) instead (slug lookup requires the project:list scope)", project)

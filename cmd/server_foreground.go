@@ -329,7 +329,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 5. Check if at least one server is enabled
 	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb && !cfg.MCP.Enabled {
-		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
+		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, --enable-web, or --enable-mcp")
 	}
 	if err := validateMCPStartup(cfg, enableHub); err != nil {
 		return err
@@ -2133,6 +2133,9 @@ func startEmbeddedMCPServer(
 	wg *sync.WaitGroup,
 	errCh chan<- error,
 ) error {
+	if cfg == nil || !cfg.MCP.Enabled {
+		return nil
+	}
 	mcpHost := cfg.MCP.Host
 	if mcpHost == "" {
 		mcpHost = cfg.Hub.Host

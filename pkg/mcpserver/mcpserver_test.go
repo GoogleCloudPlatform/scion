@@ -591,6 +591,109 @@ func TestAllowlistTransport_StripsDisallowedHeaders(t *testing.T) {
 	}
 }
 
+func TestSendMessage_SlugLookupPreservesHubError(t *testing.T) {
+	var projectsStatus atomic.Int32
+	projectsStatus.Store(http.StatusForbidden)
+
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u1", "email": "u1@example.com"})
+		case "/api/v1/projects":
+			if projectsStatus.Load() == http.StatusForbidden {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    "forbidden",
+						"message": "token revoked by admin",
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"projects": []any{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	cl := mcp.NewClient(&mcp.Implementation{Name: "slug-err-test", Version: "0.1"}, nil)
+	hc := &http.Client{
+		Transport: &staticHeaderTransport{
+			base:    &http.Transport{DisableKeepAlives: true},
+			headers: map[string]string{"Authorization": "Bearer scion_pat_test"},
+		},
+	}
+	ctx := context.Background()
+	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   ts.URL + "/mcp",
+		HTTPClient: hc,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// 1. Hub 403 error is preserved verbatim, not replaced with the project:list hint.
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"project": "my-project-slug",
+			"agent":   "echo-t",
+			"text":    "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error on Hub 403, got success")
+	}
+	gotText := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(gotText, "403") || !strings.Contains(gotText, "token revoked by admin") {
+		t.Fatalf("expected Hub 403 reason verbatim, got %q", gotText)
+	}
+	if strings.Contains(gotText, "project:list") {
+		t.Fatalf("Hub error must not be masked by project:list hint, got %q", gotText)
+	}
+
+	// 2. Hub 200 with 0 matching projects keeps the project:list hint.
+	projectsStatus.Store(http.StatusOK)
+	res2, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"project": "my-project-slug",
+			"agent":   "echo-t",
+			"text":    "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res2.IsError {
+		t.Fatalf("expected tool error on 0-match slug lookup, got success")
+	}
+	gotText2 := res2.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(gotText2, "project:list") {
+		t.Fatalf("expected project:list hint on 0-match slug lookup, got %q", gotText2)
+	}
+}
+
 func TestInProcessTransport_StreamingAndCancellation(t *testing.T) {
 	t.Run("streaming", func(t *testing.T) {
 		chunk2Gate := make(chan struct{})
