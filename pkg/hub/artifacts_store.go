@@ -388,9 +388,11 @@ func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store
 	case err != nil:
 		slog.WarnContext(ctx, "artifacts: owner liveness pass failed", "error", err, "owners_checked", res.Owners)
 	}
-	if res.Orphaned > 0 || res.Unorphaned > 0 {
+	if res.Orphaned > 0 || res.Unorphaned > 0 || res.Transferred > 0 || res.SuccessionErrors > 0 {
 		slog.InfoContext(ctx, "artifacts: owner liveness marks changed",
-			"orphaned", res.Orphaned, "unorphaned", res.Unorphaned, "owners_checked", res.Owners)
+			"orphaned", res.Orphaned, "unorphaned", res.Unorphaned,
+			"transferred", res.Transferred, "succession_errors", res.SuccessionErrors,
+			"owners_checked", res.Owners)
 	}
 }
 

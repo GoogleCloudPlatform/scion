@@ -175,3 +175,51 @@ func (s *Server) succeedAgentArtifacts(ctx context.Context, child *store.Agent, 
 			"trigger", trigger, "transferred", res.Transferred, "key_cleared", res.KeyCleared, "skipped", res.Skipped)
 	}
 }
+
+var _ artifacts.OwnerSuccessorResolver = (*artifactHost)(nil)
+
+// ResolveOwnerSuccessor implements artifacts.OwnerSuccessorResolver
+// (ptone/scion#9846). It serves as the reconciler backstop for soft-deleted
+// agents whose post-delete tail step did not run or did not finish.
+func (h *artifactHost) ResolveOwnerSuccessor(ctx context.Context, agentID string) (artifacts.Succession, bool, error) {
+	if h == nil || h.server == nil || !h.server.artifactsEnabled() || !h.server.experimentEnabled(experiments.Artifacts) {
+		return artifacts.Succession{}, false, nil
+	}
+	if h.server.store == nil {
+		return artifacts.Succession{}, false, errors.New("artifacts: resolve owner successor: store not available")
+	}
+	if _, err := uuid.Parse(agentID); err != nil {
+		return artifacts.Succession{}, false, nil
+	}
+	row, err := h.server.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return artifacts.Succession{}, false, nil
+		}
+		return artifacts.Succession{}, false, err
+	}
+	if row == nil || row.DeletedAt.IsZero() {
+		// Live row (restore race): do not transfer.
+		return artifacts.Succession{}, false, nil
+	}
+	succ, found, err := h.server.resolveArtifactSuccessor(ctx, row)
+	if err != nil {
+		return artifacts.Succession{}, false, err
+	}
+	if !found {
+		return artifacts.Succession{}, false, nil
+	}
+	fromRef := artifacts.PrincipalRef(artifacts.PrincipalKindAgent, row.ID)
+	toRef := artifacts.PrincipalRef(artifacts.PrincipalKindAgent, succ.AgentID)
+	return artifacts.Succession{
+		From:               artifacts.Owner{Kind: artifacts.PrincipalKindAgent, Ref: row.ID},
+		ProjectID:          row.ProjectID,
+		ToAgentID:          succ.AgentID,
+		Sponsor:            succ.Sponsor,
+		SponsorReviewGrant: succ.SponsorReviewGrant,
+		Trigger:            artifacts.SuccessionTriggerReconciler,
+		OnTransferred: func(a *artifacts.Artifact, _ artifacts.TransferResult) {
+			h.RecordTransfer(ctx, a.ID, fromRef, toRef, artifacts.AuthorityAncestorSuccession)
+		},
+	}, true, nil
+}

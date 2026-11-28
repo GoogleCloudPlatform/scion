@@ -142,6 +142,12 @@ type ReconcileResult struct {
 	// Orphaned and Unorphaned count the artifacts marked and cleared.
 	Orphaned   int
 	Unorphaned int
+	// Transferred counts artifacts passed to a live eligible ancestor agent
+	// by the reconciler backstop (ptone/scion#9846).
+	Transferred int
+	// SuccessionErrors counts gone agent owners whose successor lookup or
+	// transfer failed transiently and were left unmarked for retry.
+	SuccessionErrors int
 }
 
 // CheckerError is ReconcileOwners' error when the host's PrincipalChecker
@@ -179,7 +185,7 @@ func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, no
 		log = discardLogger
 	}
 	res, err := reconcileOwners(ctx, st, checker, now, log)
-	if st != nil && checker != nil && (res.Orphaned+res.Unorphaned > 0 || err != nil) {
+	if st != nil && checker != nil && (res.Orphaned+res.Unorphaned+res.Transferred > 0 || res.SuccessionErrors > 0 || err != nil) {
 		logOwnerPass(ctx, log, res, err)
 	}
 	return res, err
@@ -216,6 +222,22 @@ func reconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, no
 			gone := answered && !alive
 			switch {
 			case gone && o.Unmarked > 0:
+				if sr, ok := checker.(OwnerSuccessorResolver); ok && o.Kind == PrincipalKindAgent {
+					succ, found, serr := sr.ResolveOwnerSuccessor(ctx, o.Ref)
+					if serr != nil {
+						res.SuccessionErrors++
+						break
+					}
+					if found {
+						succ.Trigger = SuccessionTriggerReconciler
+						r, terr := TransferToSuccessor(ctx, st, succ, now, log)
+						res.Transferred += r.Transferred
+						if terr != nil {
+							res.SuccessionErrors++
+							break
+						}
+					}
+				}
 				n, err := markOwner(ctx, st, o, true, now, log)
 				res.Orphaned += n
 				if err != nil {
@@ -282,7 +304,7 @@ func logOwnerPass(ctx context.Context, log *slog.Logger, res ReconcileResult, er
 		slog.String(logKeyPrincipalKind, reconcilerActor.Kind), slog.String(logKeyPrincipalID, reconcilerActor.Ref),
 		slog.String(logKeyAuthority, reconcilerActor.Authority),
 		slog.Int(logKeyOwnersChecked, res.Owners), slog.Int(logKeyOrphanedCount, res.Orphaned),
-		slog.Int(logKeyUnorphanedCount, res.Unorphaned),
+		slog.Int(logKeyUnorphanedCount, res.Unorphaned), slog.Int(logKeyTransferredCount, res.Transferred),
 	}
 	if reason != "" {
 		attrs = append(attrs, slog.String(logKeyReason, reason))

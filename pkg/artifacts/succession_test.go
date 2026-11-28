@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -513,6 +514,423 @@ func TestTransferToSuccessor_MidPageErrorIdempotent(t *testing.T) {
 					t.Fatalf("artifact %s owner = %s, want %s", id, got.OwnerRef, parent)
 				}
 			}
+		})
+	}
+}
+
+// fakeSuccessorChecker extends fakeChecker with OwnerSuccessorResolver for R1/R2/C1.
+type fakeSuccessorChecker struct {
+	*fakeChecker
+	mu        sync.Mutex
+	succ      map[string]Succession
+	errFor    map[string]error
+	consulted []string
+}
+
+func (c *fakeSuccessorChecker) ResolveOwnerSuccessor(_ context.Context, agentID string) (Succession, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.consulted = append(c.consulted, agentID)
+	if err := c.errFor[agentID]; err != nil {
+		return Succession{}, false, err
+	}
+	s, ok := c.succ[agentID]
+	return s, ok, nil
+}
+
+// TestReconcileOwners_SuccessionBackstop (R1): found -> transferred & none marked;
+// not found -> marked orphaned; resolver error -> unmarked & SuccessionErrors++,
+// retried next pass; user owners never consult resolver.
+func TestReconcileOwners_SuccessionBackstop(t *testing.T) {
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver)
+			ctx := context.Background()
+			if err := st.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			childFound := uuid.NewString()
+			parent := uuid.NewString()
+			childNone := uuid.NewString()
+			childErr := uuid.NewString()
+			userGone := uuid.NewString()
+
+			aFound := seedAgentArtifact(t, st, childFound, "proj-1", "", "user-root")
+			aNone := seedAgentArtifact(t, st, childNone, "proj-1", "", "user-root")
+			aErr := seedAgentArtifact(t, st, childErr, "proj-1", "", "user-root")
+			aUser := seedOwned(t, st, PrincipalKindUser, userGone)
+
+			fc := newFakeChecker()
+			fc.gone[PrincipalRef(PrincipalKindAgent, childFound)] = true
+			fc.gone[PrincipalRef(PrincipalKindAgent, childNone)] = true
+			fc.gone[PrincipalRef(PrincipalKindAgent, childErr)] = true
+			fc.gone[PrincipalRef(PrincipalKindUser, userGone)] = true
+			fc.live[PrincipalRef(PrincipalKindAgent, parent)] = true
+
+			errTransient := errors.New("hub db unavailable")
+			checker := &fakeSuccessorChecker{
+				fakeChecker: fc,
+				succ: map[string]Succession{
+					childFound: {
+						From:      Owner{Kind: PrincipalKindAgent, Ref: childFound},
+						ProjectID: "proj-1",
+						ToAgentID: parent,
+						Sponsor:   "user-root",
+					},
+					childErr: {
+						From:      Owner{Kind: PrincipalKindAgent, Ref: childErr},
+						ProjectID: "proj-1",
+						ToAgentID: parent,
+						Sponsor:   "user-root",
+					},
+				},
+				errFor: map[string]error{
+					childErr: errTransient,
+				},
+			}
+
+			capLog := &logCapture{}
+			logger := slog.New(slog.NewJSONHandler(capLog, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			res1, err := ReconcileOwners(ctx, st, checker, now, logger)
+			if err != nil {
+				t.Fatalf("pass 1 err: %v", err)
+			}
+			if res1.Transferred != 1 || res1.Orphaned != 2 || res1.SuccessionErrors != 1 {
+				t.Fatalf("pass 1 res = %+v, want Transferred=1 Orphaned=2 SuccessionErrors=1", res1)
+			}
+
+			// User owner never consulted resolver.
+			if slices.Contains(checker.consulted, userGone) {
+				t.Fatalf("resolver was consulted for user owner %s", userGone)
+			}
+
+			// aFound moved to parent with trigger=reconciler and not orphaned.
+			gotFound, _ := st.GetArtifact(ctx, aFound.ID)
+			if gotFound.OwnerRef != parent || gotFound.OrphanedAt != nil {
+				t.Fatalf("aFound = owner:%s orphaned:%v", gotFound.OwnerRef, gotFound.OrphanedAt)
+			}
+			evs, _ := st.ListEvents(ctx, aFound.ID)
+			var sawReconcilerEvent bool
+			for _, ev := range evs {
+				if ev.Action == EventOwnerTransferred && ev.ActorRef == SuccessionTriggerReconciler && ev.Authority == AuthorityAncestorSuccession {
+					sawReconcilerEvent = true
+				}
+			}
+			if !sawReconcilerEvent {
+				t.Fatalf("expected reconciler owner_transferred event, got %+v", evs)
+			}
+
+			// aNone and aUser marked orphaned; aErr left unmarked for retry.
+			if gotNone, _ := st.GetArtifact(ctx, aNone.ID); gotNone.OrphanedAt == nil {
+				t.Fatalf("aNone should be orphaned")
+			}
+			if gotUser, _ := st.GetArtifact(ctx, aUser.ID); gotUser.OrphanedAt == nil {
+				t.Fatalf("aUser should be orphaned")
+			}
+			if gotErr, _ := st.GetArtifact(ctx, aErr.ID); gotErr.OrphanedAt != nil || gotErr.OwnerRef != childErr {
+				t.Fatalf("aErr should remain unmarked on childErr: owner=%s orphaned=%v", gotErr.OwnerRef, gotErr.OrphanedAt)
+			}
+
+			// Verify owner_pass summary carries transferred_count.
+			entries, _ := capLog.take(t)
+			var passEntry map[string]any
+			for _, e := range entries {
+				if e[logKeyAction] == logActionOwnerPass {
+					passEntry = e
+				}
+			}
+			if passEntry == nil {
+				t.Fatalf("missing owner_pass log entry")
+			}
+			checkEntry(t, "owner_pass", passEntry, "INFO", map[string]any{
+				logKeyTransferredCount: 1.0,
+				logKeyOrphanedCount:    2.0,
+			})
+
+			// Second pass with transient error cleared transfers aErr.
+			delete(checker.errFor, childErr)
+			res2, err := ReconcileOwners(ctx, st, checker, now.Add(time.Minute), nil)
+			if err != nil {
+				t.Fatalf("pass 2 err: %v", err)
+			}
+			if res2.Transferred != 1 || res2.Orphaned != 0 || res2.SuccessionErrors != 0 {
+				t.Fatalf("pass 2 res = %+v, want Transferred=1", res2)
+			}
+			if gotErr, _ := st.GetArtifact(ctx, aErr.ID); gotErr.OwnerRef != parent || gotErr.OrphanedAt != nil {
+				t.Fatalf("aErr after retry = owner:%s orphaned:%v", gotErr.OwnerRef, gotErr.OrphanedAt)
+			}
+		})
+	}
+}
+
+// TestReconcileOwners_SuccessionRunsOnce (R2): after a "not found" pass marks
+// artifacts orphaned, a later pass where the resolver now reports a successor
+// makes no transfer because Unmarked == 0.
+func TestReconcileOwners_SuccessionRunsOnce(t *testing.T) {
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver)
+			ctx := context.Background()
+			if err := st.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			child := uuid.NewString()
+			parent := uuid.NewString()
+			a := seedAgentArtifact(t, st, child, "proj-1", "", "user-root")
+
+			fc := newFakeChecker()
+			fc.gone[PrincipalRef(PrincipalKindAgent, child)] = true
+			checker := &fakeSuccessorChecker{fakeChecker: fc, succ: map[string]Succession{}}
+
+			// Pass 1: no successor -> marked orphaned.
+			res1, err := ReconcileOwners(ctx, st, checker, now, nil)
+			if err != nil || res1.Orphaned != 1 || res1.Transferred != 0 {
+				t.Fatalf("pass 1 = %+v, %v", res1, err)
+			}
+
+			// Pass 2: resolver now returns parent, but Unmarked == 0 -> no transfer.
+			checker.succ[child] = Succession{
+				From:      Owner{Kind: PrincipalKindAgent, Ref: child},
+				ProjectID: "proj-1",
+				ToAgentID: parent,
+				Sponsor:   "user-root",
+			}
+			res2, err := ReconcileOwners(ctx, st, checker, now.Add(time.Minute), nil)
+			if err != nil || res2.Transferred != 0 || res2.Orphaned != 0 {
+				t.Fatalf("pass 2 = %+v, %v", res2, err)
+			}
+			got, _ := st.GetArtifact(ctx, a.ID)
+			if got.OwnerRef != child || got.OrphanedAt == nil {
+				t.Fatalf("artifact should stay orphaned on child: owner=%s orphaned=%v", got.OwnerRef, got.OrphanedAt)
+			}
+		})
+	}
+}
+
+// TestTransferToSuccessor_Concurrency (C1, C2, C3, C4): exercises concurrent
+// races under -race:
+//   - C1: tail step vs reconciler backstop
+//   - C2: two concurrent TransferToSuccessor calls (multi-replica)
+//   - C3: succession vs steward manual TransferOwner to a different target
+//   - C4: succession vs SetOwnerOrphaned
+func TestTransferToSuccessor_Concurrency(t *testing.T) {
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Microsecond)
+
+			t.Run("C1_tail_vs_reconciler", func(t *testing.T) {
+				db, _ := b.open(t)
+				st := NewStore(db, b.driver)
+				if err := st.Init(ctx); err != nil {
+					t.Fatal(err)
+				}
+				child, parent := uuid.NewString(), uuid.NewString()
+				var ids []string
+				for range 6 {
+					ids = append(ids, seedAgentArtifact(t, st, child, "proj-1", "", "user-root").ID)
+				}
+				fc := newFakeChecker()
+				fc.gone[PrincipalRef(PrincipalKindAgent, child)] = true
+				fc.live[PrincipalRef(PrincipalKindAgent, parent)] = true
+				checker := &fakeSuccessorChecker{
+					fakeChecker: fc,
+					succ: map[string]Succession{
+						child: {
+							From:      Owner{Kind: PrincipalKindAgent, Ref: child},
+							ProjectID: "proj-1",
+							ToAgentID: parent,
+							Sponsor:   "user-root",
+						},
+					},
+				}
+
+				var wg sync.WaitGroup
+				var tailRes SuccessionResult
+				var recRes ReconcileResult
+				var tailErr, recErr error
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					tailRes, tailErr = TransferToSuccessor(ctx, st, Succession{
+						From:      Owner{Kind: PrincipalKindAgent, Ref: child},
+						ProjectID: "proj-1",
+						ToAgentID: parent,
+						Sponsor:   "user-root",
+						Trigger:   SuccessionTriggerAgentDelete,
+					}, now, nil)
+				}()
+				go func() {
+					defer wg.Done()
+					recRes, recErr = ReconcileOwners(ctx, st, checker, now, nil)
+				}()
+				wg.Wait()
+				if tailErr != nil || recErr != nil {
+					t.Fatalf("errors: tail=%v rec=%v", tailErr, recErr)
+				}
+				if tailRes.Transferred+recRes.Transferred != len(ids) {
+					t.Fatalf("total transferred = %d + %d, want %d", tailRes.Transferred, recRes.Transferred, len(ids))
+				}
+				for _, id := range ids {
+					got, _ := st.GetArtifact(ctx, id)
+					if got.OwnerRef != parent || got.OrphanedAt != nil {
+						t.Fatalf("artifact %s: owner=%s orphaned=%v", id, got.OwnerRef, got.OrphanedAt)
+					}
+					evs, _ := st.ListEvents(ctx, id)
+					count := 0
+					for _, ev := range evs {
+						if ev.Action == EventOwnerTransferred {
+							count++
+						}
+					}
+					if count != 1 {
+						t.Fatalf("artifact %s: %d owner_transferred events, want 1", id, count)
+					}
+				}
+			})
+
+			t.Run("C2_two_replicas", func(t *testing.T) {
+				db, _ := b.open(t)
+				st := NewStore(db, b.driver)
+				if err := st.Init(ctx); err != nil {
+					t.Fatal(err)
+				}
+				child, parent := uuid.NewString(), uuid.NewString()
+				var ids []string
+				for range 6 {
+					ids = append(ids, seedAgentArtifact(t, st, child, "proj-1", "", "user-root").ID)
+				}
+				succ := Succession{
+					From:      Owner{Kind: PrincipalKindAgent, Ref: child},
+					ProjectID: "proj-1",
+					ToAgentID: parent,
+					Sponsor:   "user-root",
+					Trigger:   SuccessionTriggerAgentDelete,
+				}
+				var wg sync.WaitGroup
+				var r1, r2 SuccessionResult
+				var e1, e2 error
+				wg.Add(2)
+				go func() { defer wg.Done(); r1, e1 = TransferToSuccessor(ctx, st, succ, now, nil) }()
+				go func() { defer wg.Done(); r2, e2 = TransferToSuccessor(ctx, st, succ, now, nil) }()
+				wg.Wait()
+				if e1 != nil || e2 != nil {
+					t.Fatalf("errors: e1=%v e2=%v", e1, e2)
+				}
+				if r1.Transferred+r2.Transferred != len(ids) {
+					t.Fatalf("total transferred = %d + %d, want %d", r1.Transferred, r2.Transferred, len(ids))
+				}
+				for _, id := range ids {
+					evs, _ := st.ListEvents(ctx, id)
+					count := 0
+					for _, ev := range evs {
+						if ev.Action == EventOwnerTransferred {
+							count++
+						}
+					}
+					if count != 1 {
+						t.Fatalf("artifact %s: %d owner_transferred events, want 1", id, count)
+					}
+				}
+			})
+
+			t.Run("C3_succession_vs_manual_transfer", func(t *testing.T) {
+				db, _ := b.open(t)
+				st := NewStore(db, b.driver)
+				if err := st.Init(ctx); err != nil {
+					t.Fatal(err)
+				}
+				child, parent, other := uuid.NewString(), uuid.NewString(), uuid.NewString()
+				a := seedAgentArtifact(t, st, child, "proj-1", "", "user-root")
+
+				var wg sync.WaitGroup
+				var succRes SuccessionResult
+				var succErr, manualErr error
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					succRes, succErr = TransferToSuccessor(ctx, st, Succession{
+						From:      Owner{Kind: PrincipalKindAgent, Ref: child},
+						ProjectID: "proj-1",
+						ToAgentID: parent,
+						Sponsor:   "user-root",
+						Trigger:   SuccessionTriggerAgentDelete,
+					}, now, nil)
+				}()
+				go func() {
+					defer wg.Done()
+					_, _, manualErr = st.TransferOwner(ctx, a.ID, TransferOptions{
+						ExpectOwner: Owner{Kind: PrincipalKindAgent, Ref: child},
+						To:          Owner{Kind: PrincipalKindAgent, Ref: other},
+						Sponsor:     "user-root",
+					}, &Actor{
+						Kind:      PrincipalKindUser,
+						Ref:       "user-root",
+						Authority: AuthorityStewardDelegator,
+						Expect:    Expect{ScopeRef: "proj-1", OwnerKind: PrincipalKindAgent, OwnerRef: child},
+					}, now)
+				}()
+				wg.Wait()
+				if succErr != nil {
+					t.Fatalf("succErr: %v", succErr)
+				}
+				got, _ := st.GetArtifact(ctx, a.ID)
+				if manualErr == nil {
+					if succRes.Transferred != 0 || got.OwnerRef != other {
+						t.Fatalf("manual won, but succRes=%+v owner=%s", succRes, got.OwnerRef)
+					}
+				} else {
+					if !errors.Is(manualErr, ErrOwnerChanged) {
+						t.Fatalf("manualErr = %v, want ErrOwnerChanged", manualErr)
+					}
+					if succRes.Transferred != 1 || got.OwnerRef != parent {
+						t.Fatalf("succession won, but succRes=%+v owner=%s", succRes, got.OwnerRef)
+					}
+				}
+			})
+
+			t.Run("C4_succession_vs_set_owner_orphaned", func(t *testing.T) {
+				db, _ := b.open(t)
+				st := NewStore(db, b.driver)
+				if err := st.Init(ctx); err != nil {
+					t.Fatal(err)
+				}
+				child, parent := uuid.NewString(), uuid.NewString()
+				a := seedAgentArtifact(t, st, child, "proj-1", "", "user-root")
+
+				var wg sync.WaitGroup
+				var succErr, orphErr error
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					_, succErr = TransferToSuccessor(ctx, st, Succession{
+						From:      Owner{Kind: PrincipalKindAgent, Ref: child},
+						ProjectID: "proj-1",
+						ToAgentID: parent,
+						Sponsor:   "user-root",
+						Trigger:   SuccessionTriggerAgentDelete,
+					}, now, nil)
+				}()
+				go func() {
+					defer wg.Done()
+					_, orphErr = st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: child}, true, now, 10)
+				}()
+				wg.Wait()
+				if succErr != nil || orphErr != nil {
+					t.Fatalf("errors: succ=%v orph=%v", succErr, orphErr)
+				}
+				got, _ := st.GetArtifact(ctx, a.ID)
+				if got.OwnerRef != parent || got.OrphanedAt != nil {
+					t.Fatalf("final state: owner=%s orphaned=%v, want owner=%s orphaned=nil", got.OwnerRef, got.OrphanedAt, parent)
+				}
+			})
 		})
 	}
 }

@@ -207,13 +207,18 @@ func (h *artifactHost) RecordTransfer(ctx context.Context, artifactID, fromOwner
 	}
 	beforeSummary, _ := json.Marshal(map[string]any{"owner": fromOwner})
 	afterSummary, _ := json.Marshal(map[string]any{"owner": toOwner, "authority": authority})
-	h.server.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	rec := &store.MutationAuditRecord{
 		MutationType:  mutationTypeArtifactOwnershipTransfer,
 		TargetType:    "artifact",
 		TargetID:      artifactID,
 		BeforeSummary: string(beforeSummary),
 		AfterSummary:  string(afterSummary),
-	})
+	}
+	if authority == artifacts.AuthorityAncestorSuccession {
+		rec.ActorPrincipalKind = artifacts.ActorKindSystem
+		rec.ActorPrincipalID = authority
+	}
+	h.server.emitMutationAudit(ctx, rec)
 }
 
 // notifyArtifactTransfer delivers best-effort system notices after a committed
