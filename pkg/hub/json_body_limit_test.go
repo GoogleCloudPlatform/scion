@@ -792,14 +792,33 @@ func TestJSONBodyLimits_AuthLogout(t *testing.T) {
 		return rec
 	}
 
-	t.Run("unauthenticated oversized gets 401 and reads 0 bytes", func(t *testing.T) {
+	t.Run("unauthenticated oversized through full handler returns 413 and stops at 4 KiB", func(t *testing.T) {
 		body := newBodyLimitCountingReader(exactSizeJSON(t, prefix, suffix, logoutLimit+1024))
 		req := httptest.NewRequest(http.MethodPost, path, body)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
-		assert.Zero(t, body.bytesRead.Load())
+		assertPayloadTooLarge(t, rec)
+		assert.LessOrEqual(t, body.bytesRead.Load(), int64(logoutLimit+1),
+			"MaxBytesReader must bound unauthenticated requests to RoutePublic /api/v1/auth/logout")
+	})
+
+	t.Run("unauthenticated empty or normal-size body succeeds idempotently", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body io.Reader
+		}{
+			{name: "empty", body: nil},
+			{name: "normal refreshToken", body: strings.NewReader(`{"refreshToken":"tok-123"}`)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, path, tc.body)
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			})
+		}
 	})
 
 	t.Run("empty body succeeds", func(t *testing.T) {
