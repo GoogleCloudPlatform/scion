@@ -24,6 +24,7 @@ ContainerScriptHarness has already:
   * Mounted any auth file (e.g. ~/.gemini/oauth_creds.json) at the declared
     container_path, when auth-file mode is in use.
   * Mounted ADC credentials when vertex-ai mode is in use.
+  * Written inputs/mcp-servers.json when universal MCP servers are configured.
 
 This script's job:
 
@@ -36,6 +37,8 @@ This script's job:
   3. Write outputs/resolved-auth.json describing the chosen method.
   4. Write outputs/env.json with env vars to project into the harness process
      (e.g. GEMINI_API_KEY, GOOGLE_CLOUD_PROJECT, or Vertex AI vars).
+  5. Reconcile telemetry, model selection, universal MCP servers (merged into
+     ~/.gemini/settings.json under mcpServers), and instructions.
 """
 
 from __future__ import annotations
@@ -260,6 +263,106 @@ def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.atomic_write_json(settings_path, settings)
 
 
+# ---------------------------------------------------------------------------
+# MCP translation (Gemini CLI uses url for SSE and httpUrl for streamable-http)
+# ---------------------------------------------------------------------------
+#
+# Gemini CLI's ~/.gemini/settings.json mcpServers schema differs from
+# scion_harness.apply_mcp_servers_simple's 1:1 mapping in two ways:
+#   1. Entries do not carry a transport "type" field; transport is inferred
+#      from the presence of "command" (stdio), "url" (SSE), or "httpUrl"
+#      (streamable HTTP).
+#   2. streamable-http servers MUST use "httpUrl" rather than "url"; setting
+#      "url" causes Gemini CLI to treat the endpoint as SSE instead.
+# Using apply_mcp_translated gives us exact per-transport translation while
+# reusing the shared inputs/mcp-servers.json loader and project-scope demotion.
+
+
+def _translate_mcp_server(
+    name: str,
+    spec: dict[str, Any],
+    warn_fn: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
+    """Translate a universal MCPServerConfig into Gemini CLI's native shape.
+
+    Returns None (and logs a warning) when the entry is missing required fields
+    or uses an unsupported transport.
+    """
+    warn = warn_fn or (lambda msg: print(f"gemini-cli provision: warning: {msg}", file=sys.stderr))
+    raw_transport = spec.get("transport")
+    transport = raw_transport.strip() if isinstance(raw_transport, str) else ""
+
+    if transport == "stdio":
+        cmd = spec.get("command")
+        if not isinstance(cmd, str) or not cmd.strip():
+            warn(f"mcp server {name!r}: stdio transport missing command")
+            return None
+        out: dict[str, Any] = {"command": cmd.strip()}
+        args = spec.get("args")
+        if isinstance(args, list) and args:
+            out["args"] = [str(a) for a in args]
+        env = spec.get("env")
+        if isinstance(env, dict) and env:
+            out["env"] = {str(k): str(v) for k, v in env.items()}
+        return out
+
+    if transport == "sse":
+        url = spec.get("url")
+        if not isinstance(url, str) or not url.strip():
+            warn(f"mcp server {name!r}: sse transport missing url")
+            return None
+        out = {"url": url.strip()}
+        headers = spec.get("headers")
+        if isinstance(headers, dict) and headers:
+            out["headers"] = {str(k): str(v) for k, v in headers.items()}
+        return out
+
+    if transport == "streamable-http":
+        url = spec.get("url")
+        if not isinstance(url, str) or not url.strip():
+            warn(f"mcp server {name!r}: streamable-http transport missing url")
+            return None
+        out = {"httpUrl": url.strip()}
+        headers = spec.get("headers")
+        if isinstance(headers, dict) and headers:
+            out["headers"] = {str(k): str(v) for k, v in headers.items()}
+        return out
+
+    warn(f"mcp server {name!r}: unsupported transport {raw_transport!r}")
+    return None
+
+
+def _write_mcp_servers(servers: dict[str, dict[str, Any]]) -> None:
+    """Merge translated MCP server entries into ~/.gemini/settings.json.
+
+    Fails closed (raising OSError so apply_mcp_translated warns and skips)
+    when an existing settings.json cannot be read or is not a JSON object,
+    preserving existing user settings and hooks untouched.
+    """
+    settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
+    settings: dict[str, Any] = {}
+    if os.path.isfile(settings_path):
+        try:
+            loaded = scion_harness.load_json(settings_path)
+        except (OSError, ValueError) as exc:
+            raise OSError(
+                f"existing {settings_path} is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(loaded, dict):
+            raise OSError(f"existing {settings_path} is not a JSON object")
+        settings = loaded
+
+    mcp_servers = settings.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+        settings["mcpServers"] = mcp_servers
+
+    for name, entry in servers.items():
+        mcp_servers[name] = entry
+
+    scion_harness.atomic_write_json(settings_path, settings)
+
+
 def provision(ctx: scion_harness.ProvisionContext) -> None:
     resolved = ctx.select_auth(AUTH)
 
@@ -325,6 +428,14 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     # Apply the resolved model to ~/.gemini/settings.json: SCION_MODEL,
     # else the harness-config default tier (see _resolve_model).
     _apply_model(ctx)
+
+    # Translate and merge universal inputs/mcp-servers.json into
+    # ~/.gemini/settings.json under mcpServers.
+    scion_harness.apply_mcp_translated(
+        ctx,
+        lambda name, spec: _translate_mcp_server(name, spec, ctx.warn),
+        _write_mcp_servers,
+    )
 
     harness_cfg = ctx.harness_config
     instructions_file = str(harness_cfg.get("instructions_file") or ".gemini/GEMINI.md")

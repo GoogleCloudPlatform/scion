@@ -75,6 +75,11 @@ capabilities:
     auth_file: { support: "yes" }
     oauth_token: { support: "no" }
     vertex_ai: { support: "yes" }
+  mcp:
+    stdio: { support: "yes" }
+    sse: { support: "yes" }
+    streamable_http: { support: "yes" }
+    project_scope: { support: "no", reason: "Project-scoped MCP (.gemini/settings.json in workspace) is demoted to global ~/.gemini/settings.json to avoid dirtying the workspace" }
   resume: { support: "yes" }
 no_auth:
   behavior: drop-to-shell

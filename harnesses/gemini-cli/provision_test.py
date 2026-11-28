@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-selection tests for the gemini-cli provisioner (ptone/scion#2674)."""
+"""Unit tests for the gemini-cli provisioner."""
 
 from __future__ import annotations
 
@@ -276,6 +276,513 @@ class VertexEnvOverlayTest(unittest.TestCase):
             self._location({"GOOGLE_CLOUD_REGION": "us-central1", "CLOUD_ML_REGION": "europe-west4"}),
             "us-central1",
         )
+
+
+class GeminiMCPProvisionTest(unittest.TestCase):
+    """MCP server translation and ~/.gemini/settings.json merge tests."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = self._tmp.name
+        self.bundle = os.path.join(self.home, ".scion", "harness")
+        os.makedirs(os.path.join(self.bundle, "inputs"))
+        self.settings_path = os.path.join(self.home, ".gemini", "settings.json")
+        os.makedirs(os.path.dirname(self.settings_path))
+        shutil.copy(IMAGE_SETTINGS, self.settings_path)
+        patcher = unittest.mock.patch.dict(os.environ, {"HOME": self.home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("SCION_MODEL", None)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _ctx(
+        self,
+        harness_config: dict[str, Any] | None = None,
+    ) -> tuple[Any, list[str]]:
+        ctx = scion_harness.ProvisionContext(
+            "gemini-cli",
+            {
+                "harness_bundle_dir": self.bundle,
+                "harness_config": harness_config if harness_config is not None else _harness_config(),
+                # Never fall back to the real /workspace (ptone/scion#2993).
+                "agent_workspace": os.path.join(self._tmp.name, "workspace"),
+            },
+        )
+        warnings: list[str] = []
+        ctx.info = lambda *a, **k: None
+        ctx.warn = warnings.append
+        return ctx, warnings
+
+    def _stage_mcp(self, mcp_servers: dict[str, Any]) -> None:
+        with open(
+            os.path.join(self.bundle, "inputs", "mcp-servers.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump({"mcp_servers": mcp_servers}, f)
+
+    def _settings(self) -> dict[str, Any]:
+        with open(self.settings_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def _apply_mcp(self, mcp_servers: dict[str, Any] | None) -> tuple[int, list[str]]:
+        if mcp_servers is not None:
+            self._stage_mcp(mcp_servers)
+        ctx, warnings = self._ctx()
+        count = scion_harness.apply_mcp_translated(
+            ctx,
+            lambda name, spec: provision._translate_mcp_server(name, spec, ctx.warn),
+            provision._write_mcp_servers,
+        )
+        return count, warnings
+
+    # --- transport translation -----------------------------------------
+
+    def test_stdio_translation_with_args_and_env(self) -> None:
+        warnings: list[str] = []
+        entry = provision._translate_mcp_server(
+            "fs",
+            {
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+                "env": {"DEBUG": "1", "PORT": 8080},
+                "scope": "global",
+            },
+            warnings.append,
+        )
+        self.assertEqual(
+            entry,
+            {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+                "env": {"DEBUG": "1", "PORT": "8080"},
+            },
+        )
+        self.assertNotIn("type", entry)
+        self.assertNotIn("scope", entry)
+        self.assertEqual(warnings, [])
+
+    def test_stdio_translation_omits_empty_args_and_env(self) -> None:
+        warnings: list[str] = []
+        entry = provision._translate_mcp_server(
+            "minimal",
+            {
+                "transport": "stdio",
+                "command": "/usr/local/bin/my-mcp",
+                "args": [],
+                "env": {},
+            },
+            warnings.append,
+        )
+        self.assertEqual(entry, {"command": "/usr/local/bin/my-mcp"})
+        self.assertNotIn("args", entry)
+        self.assertNotIn("env", entry)
+        self.assertEqual(warnings, [])
+
+    def test_sse_translation_with_and_without_headers(self) -> None:
+        warnings: list[str] = []
+        with_headers = provision._translate_mcp_server(
+            "events",
+            {
+                "transport": "sse",
+                "url": "https://mcp.example.com/sse",
+                "headers": {"Authorization": "Bearer tok"},
+            },
+            warnings.append,
+        )
+        self.assertEqual(
+            with_headers,
+            {
+                "url": "https://mcp.example.com/sse",
+                "headers": {"Authorization": "Bearer tok"},
+            },
+        )
+        self.assertNotIn("httpUrl", with_headers)
+        self.assertNotIn("type", with_headers)
+
+        without_headers = provision._translate_mcp_server(
+            "events-plain",
+            {
+                "transport": "sse",
+                "url": "https://mcp.example.com/sse",
+                "headers": {},
+            },
+            warnings.append,
+        )
+        self.assertEqual(without_headers, {"url": "https://mcp.example.com/sse"})
+        self.assertNotIn("headers", without_headers)
+        self.assertEqual(warnings, [])
+
+    def test_streamable_http_uses_http_url_not_url(self) -> None:
+        warnings: list[str] = []
+        with_headers = provision._translate_mcp_server(
+            "api",
+            {
+                "transport": "streamable-http",
+                "url": "https://mcp.example.com/mcp",
+                "headers": {"X-API-Key": "secret"},
+            },
+            warnings.append,
+        )
+        self.assertEqual(
+            with_headers,
+            {
+                "httpUrl": "https://mcp.example.com/mcp",
+                "headers": {"X-API-Key": "secret"},
+            },
+        )
+        self.assertNotIn("url", with_headers)
+        self.assertNotIn("type", with_headers)
+
+        without_headers = provision._translate_mcp_server(
+            "api-plain",
+            {
+                "transport": "streamable-http",
+                "url": "https://mcp.example.com/mcp",
+                "headers": {},
+            },
+            warnings.append,
+        )
+        self.assertEqual(without_headers, {"httpUrl": "https://mcp.example.com/mcp"})
+        self.assertNotIn("url", without_headers)
+        self.assertNotIn("headers", without_headers)
+        self.assertEqual(warnings, [])
+
+    def test_translation_strips_whitespace_from_command_and_url_only(self) -> None:
+        warnings: list[str] = []
+        stdio_entry = provision._translate_mcp_server(
+            "padded-stdio",
+            {
+                "transport": "stdio",
+                "command": "  npx  ",
+                "args": [" keep-leading ", "keep-trailing "],
+                "env": {"KEY": " padded-val "},
+            },
+            warnings.append,
+        )
+        self.assertEqual(
+            stdio_entry,
+            {
+                "command": "npx",
+                "args": [" keep-leading ", "keep-trailing "],
+                "env": {"KEY": " padded-val "},
+            },
+        )
+
+        sse_entry = provision._translate_mcp_server(
+            "padded-sse",
+            {
+                "transport": "sse",
+                "url": "  https://mcp.example.com/sse \n",
+                "headers": {"X-Header": " keep "},
+            },
+            warnings.append,
+        )
+        self.assertEqual(
+            sse_entry,
+            {
+                "url": "https://mcp.example.com/sse",
+                "headers": {"X-Header": " keep "},
+            },
+        )
+
+        http_entry = provision._translate_mcp_server(
+            "padded-http",
+            {
+                "transport": "streamable-http",
+                "url": "\thttps://mcp.example.com/mcp  ",
+                "headers": {"Authorization": " Bearer tok "},
+            },
+            warnings.append,
+        )
+        self.assertEqual(
+            http_entry,
+            {
+                "httpUrl": "https://mcp.example.com/mcp",
+                "headers": {"Authorization": " Bearer tok "},
+            },
+        )
+        self.assertEqual(warnings, [])
+
+    # --- scope demotion & settings merge -------------------------------
+
+    def test_project_scope_is_demoted_to_global_settings(self) -> None:
+        count, warnings = self._apply_mcp(
+            {
+                "proj-srv": {
+                    "transport": "stdio",
+                    "command": "python3",
+                    "args": ["-m", "my_mcp"],
+                    "scope": "project",
+                }
+            }
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(warnings, [])
+        settings = self._settings()
+        self.assertEqual(
+            settings["mcpServers"]["proj-srv"],
+            {"command": "python3", "args": ["-m", "my_mcp"]},
+        )
+        self.assertFalse(
+            os.path.exists(os.path.join(self._tmp.name, "workspace", ".gemini", "settings.json"))
+        )
+
+    def test_merge_preserves_existing_settings_and_user_mcp_servers(self) -> None:
+        existing = self._settings()
+        existing["security"]["auth"]["selectedType"] = "gemini-api-key"
+        existing["model"]["name"] = "gemini-3.6-flash"
+        existing["mcpServers"] = {
+            "user-local": {"command": "/opt/user-mcp", "args": ["--flag"]},
+            "shared": {"command": "old-cmd"},
+        }
+        scion_harness.atomic_write_json(self.settings_path, existing)
+
+        count, warnings = self._apply_mcp(
+            {
+                "shared": {"transport": "stdio", "command": "new-cmd"},
+                "remote-sse": {"transport": "sse", "url": "https://sse.example.com/events"},
+                "remote-http": {
+                    "transport": "streamable-http",
+                    "url": "https://http.example.com/mcp",
+                    "headers": {"X-Token": "abc"},
+                },
+            }
+        )
+        self.assertEqual(count, 3)
+        self.assertEqual(warnings, [])
+
+        merged = self._settings()
+        # Top-level settings preserved
+        self.assertEqual(merged["security"]["auth"]["selectedType"], "gemini-api-key")
+        self.assertEqual(merged["telemetry"], existing["telemetry"])
+        self.assertEqual(merged["model"]["name"], "gemini-3.6-flash")
+        self.assertIs(merged["model"]["skipNextSpeakerCheck"], True)
+        self.assertEqual(merged["hooks"], existing["hooks"])
+        self.assertEqual(merged["tools"], existing["tools"])
+        self.assertEqual(merged["experimental"], existing["experimental"])
+
+        # Existing user entry preserved, same-named entry overridden, new entries added
+        self.assertEqual(
+            merged["mcpServers"],
+            {
+                "user-local": {"command": "/opt/user-mcp", "args": ["--flag"]},
+                "shared": {"command": "new-cmd"},
+                "remote-sse": {"url": "https://sse.example.com/events"},
+                "remote-http": {
+                    "httpUrl": "https://http.example.com/mcp",
+                    "headers": {"X-Token": "abc"},
+                },
+            },
+        )
+
+    def test_write_creates_missing_settings_file_and_recovers_non_dict_mcp_servers(self) -> None:
+        # Missing settings file and parent directory
+        shutil.rmtree(os.path.dirname(self.settings_path))
+        provision._write_mcp_servers({"s1": {"command": "echo"}})
+        self.assertEqual(self._settings(), {"mcpServers": {"s1": {"command": "echo"}}})
+
+        # Non-dict mcpServers field inside a valid settings object
+        scion_harness.atomic_write_json(
+            self.settings_path,
+            {"yolo": True, "mcpServers": "corrupt"},
+        )
+        provision._write_mcp_servers({"s3": {"httpUrl": "https://example.com/mcp"}})
+        self.assertEqual(
+            self._settings(),
+            {"yolo": True, "mcpServers": {"s3": {"httpUrl": "https://example.com/mcp"}}},
+        )
+
+    def test_fail_closed_on_malformed_non_utf8_and_non_dict_settings_json(self) -> None:
+        cases = (
+            ("malformed_json", b'// jsonc comment\n{"hooks": {"SessionStart": []}}\n'),
+            ("non_utf8_bytes", b"\xff\xfe\x00invalid-utf8"),
+            ("json_array", b'["not", "an", "object"]\n'),
+            ("json_null", b"null\n"),
+        )
+        for label, raw_bytes in cases:
+            with self.subTest(case=label):
+                with open(self.settings_path, "wb") as f:
+                    f.write(raw_bytes)
+                count, warnings = self._apply_mcp(
+                    {"s1": {"transport": "stdio", "command": "echo"}}
+                )
+                self.assertEqual(count, 0)
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("failed to write MCP config", warnings[0])
+                with open(self.settings_path, "rb") as f:
+                    self.assertEqual(f.read(), raw_bytes)
+
+    # --- validation warnings & skip behavior ---------------------------
+
+    def test_invalid_entries_warn_and_skip_while_valid_entries_write(self) -> None:
+        count, warnings = self._apply_mcp(
+            {
+                "bad-stdio-missing": {"transport": "stdio"},
+                "bad-stdio-empty": {"transport": "stdio", "command": ""},
+                "bad-stdio-type": {"transport": "stdio", "command": ["npx"]},
+                "bad-sse-missing": {"transport": "sse"},
+                "bad-sse-type": {"transport": "sse", "url": 123},
+                "bad-http-missing": {"transport": "streamable-http", "url": ""},
+                "bad-http-type": {"transport": "streamable-http", "url": None},
+                "bad-transport": {"transport": "grpc", "url": "grpc://example.com"},
+                "missing-transport": {"command": "npx"},
+                "good-stdio": {"transport": "stdio", "command": "npx", "args": ["-y", "srv"]},
+                "good-http": {"transport": "streamable-http", "url": "https://example.com/mcp"},
+            }
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(len(warnings), 9)
+        joined = "\n".join(warnings)
+        for bad_name in (
+            "bad-stdio-missing",
+            "bad-stdio-empty",
+            "bad-stdio-type",
+            "bad-sse-missing",
+            "bad-sse-type",
+            "bad-http-missing",
+            "bad-http-type",
+            "bad-transport",
+            "missing-transport",
+        ):
+            self.assertIn(bad_name, joined)
+
+        mcp_servers = self._settings()["mcpServers"]
+        self.assertEqual(
+            mcp_servers,
+            {
+                "good-stdio": {"command": "npx", "args": ["-y", "srv"]},
+                "good-http": {"httpUrl": "https://example.com/mcp"},
+            },
+        )
+
+    # --- absent or empty inputs/mcp-servers.json -----------------------
+
+    def test_absent_mcp_servers_file_leaves_settings_untouched(self) -> None:
+        with open(self.settings_path, encoding="utf-8") as f:
+            before = f.read()
+        count, warnings = self._apply_mcp(None)
+        self.assertEqual(count, 0)
+        self.assertEqual(warnings, [])
+        with open(self.settings_path, encoding="utf-8") as f:
+            after = f.read()
+        self.assertEqual(after, before)
+
+    def test_empty_mcp_servers_map_leaves_settings_untouched(self) -> None:
+        with open(self.settings_path, encoding="utf-8") as f:
+            before = f.read()
+        count, warnings = self._apply_mcp({})
+        self.assertEqual(count, 0)
+        self.assertEqual(warnings, [])
+        with open(self.settings_path, encoding="utf-8") as f:
+            after = f.read()
+        self.assertEqual(after, before)
+
+    # --- end-to-end provision(ctx) -------------------------------------
+
+    def test_provision_end_to_end_writes_mcp_alongside_auth_telemetry_and_model(self) -> None:
+        with open(
+            os.path.join(self.bundle, "inputs", "auth-candidates.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump({"env_vars": ["GEMINI_API_KEY"]}, f)
+        self._stage_mcp(
+            {
+                "local-tool": {
+                    "transport": "stdio",
+                    "command": "node",
+                    "args": ["server.js"],
+                    "env": {"NODE_ENV": "production"},
+                },
+                "sse-tool": {
+                    "transport": "sse",
+                    "url": "https://mcp.example.com/sse",
+                },
+                "http-tool": {
+                    "transport": "streamable-http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": {"Authorization": "Bearer xyz"},
+                    "scope": "project",
+                },
+            }
+        )
+
+        ctx, warnings = self._ctx()
+        with unittest.mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            provision.provision(ctx)
+
+        self.assertEqual(warnings, [])
+        settings = self._settings()
+        self.assertEqual(settings["security"]["auth"]["selectedType"], "gemini-api-key")
+        self.assertIn("telemetry", settings)
+        self.assertEqual(settings["telemetry"]["target"], "local")
+        self.assertEqual(settings["model"]["name"], "gemini-3.6-flash")
+        self.assertIs(settings["model"]["skipNextSpeakerCheck"], True)
+        self.assertEqual(
+            settings["mcpServers"],
+            {
+                "local-tool": {
+                    "command": "node",
+                    "args": ["server.js"],
+                    "env": {"NODE_ENV": "production"},
+                },
+                "sse-tool": {
+                    "url": "https://mcp.example.com/sse",
+                },
+                "http-tool": {
+                    "httpUrl": "https://mcp.example.com/mcp",
+                    "headers": {"Authorization": "Bearer xyz"},
+                },
+            },
+        )
+        self.assertNotIn("url", settings["mcpServers"]["http-tool"])
+
+    def test_provision_end_to_end_warns_via_ctx_and_preserves_existing_mcp(self) -> None:
+        existing = self._settings()
+        existing["mcpServers"] = {"preexisting": {"command": "/opt/pre"}}
+        scion_harness.atomic_write_json(self.settings_path, existing)
+
+        with open(
+            os.path.join(self.bundle, "inputs", "auth-candidates.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump({"env_vars": ["GEMINI_API_KEY"]}, f)
+        self._stage_mcp(
+            {
+                "broken": {"transport": "streamable-http"},
+                "valid": {"transport": "stdio", "command": "npx"},
+            }
+        )
+
+        ctx, warnings = self._ctx()
+        with unittest.mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            provision.provision(ctx)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("broken", warnings[0])
+        self.assertEqual(
+            self._settings()["mcpServers"],
+            {
+                "preexisting": {"command": "/opt/pre"},
+                "valid": {"command": "npx"},
+            },
+        )
+
+    # --- config.yaml capabilities.mcp consistency ----------------------
+
+    def test_config_yaml_declares_mcp_capabilities(self) -> None:
+        with open(CONFIG_YAML, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("\n  mcp:\n", text)
+        self.assertIn('\n    stdio: { support: "yes" }\n', text)
+        self.assertIn('\n    sse: { support: "yes" }\n', text)
+        self.assertIn('\n    streamable_http: { support: "yes" }\n', text)
+        self.assertIn('\n    project_scope: { support: "no", reason:', text)
 
 
 if __name__ == "__main__":
