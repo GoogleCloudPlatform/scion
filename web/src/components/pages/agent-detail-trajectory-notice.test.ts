@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   TOKENOMICS_TRAJECTORY_CAPTURE_FLAG,
+  TOKENOMICS_USAGE_LEDGER_FLAG,
   setFeatureFlag,
   resetServerFlagStateForTests,
 } from '../../utils/feature-flags.js';
@@ -30,7 +31,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-describe('Trajectory capture notice banners (P5.1c)', () => {
+describe('Trajectory capture notice banner (Usage tab only)', () => {
   const origEventSource = globalThis.EventSource;
 
   beforeEach(() => {
@@ -56,11 +57,12 @@ describe('Trajectory capture notice banners (P5.1c)', () => {
       vi.unstubAllGlobals();
     }
     setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, false);
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
     resetServerFlagStateForTests();
     document.body.innerHTML = '';
   });
 
-  describe('agent-detail page banner', () => {
+  describe('agent-detail Usage tab banner', () => {
     beforeEach(async () => {
       await import('./agent-detail.js');
     });
@@ -102,15 +104,27 @@ describe('Trajectory capture notice banners (P5.1c)', () => {
       return el;
     }
 
-    it('hides banner when experiment is off even if payload has trajectory_capture', async () => {
+    it('hides banner when trajectory capture experiment is off even if Usage tab is visible and payload has trajectory_capture', async () => {
+      setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
       setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, false);
       const el = await mountAgentDetail({ policy: 'full', enforced_by_hub: false });
+      expect(el.shadowRoot!.querySelector('[data-testid="agent-usage-panel"]')).not.toBeNull();
       expect(el.shadowRoot!.querySelector('[data-testid="trajectory-capture-banner"]')).toBeNull();
     });
 
-    it('hides banner when experiment is on but trajectory_capture is absent', async () => {
+    it('hides banner entirely when Usage tab is hidden even if trajectory capture is on', async () => {
+      setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
+      setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
+      const el = await mountAgentDetail({ policy: 'full', enforced_by_hub: true });
+      expect(el.shadowRoot!.querySelector('[data-testid="agent-usage-panel"]')).toBeNull();
+      expect(el.shadowRoot!.querySelector('[data-testid="trajectory-capture-banner"]')).toBeNull();
+    });
+
+    it('hides banner when both experiments are on but trajectory_capture is absent', async () => {
+      setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
       setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
       const el = await mountAgentDetail(undefined);
+      expect(el.shadowRoot!.querySelector('[data-testid="agent-usage-panel"]')).not.toBeNull();
       expect(el.shadowRoot!.querySelector('[data-testid="trajectory-capture-banner"]')).toBeNull();
     });
 
@@ -120,13 +134,27 @@ describe('Trajectory capture notice banners (P5.1c)', () => {
       { policy: 'metadata_only', enforced_by_hub: false },
       { policy: 'off', enforced_by_hub: false },
     ] satisfies TrajectoryCapturePolicyStatus[]) {
-      it(`renders canonical notice for policy=${status.policy} enforced=${status.enforced_by_hub}`, async () => {
+      it(`renders canonical notice inside the Usage tab only for policy=${status.policy} enforced=${status.enforced_by_hub}`, async () => {
+        setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
         setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
         const el = await mountAgentDetail(status);
-        const banner = el.shadowRoot!.querySelector(
+
+        // Banner is rendered exclusively inside the Usage tab panel (never above tabs).
+        const allBanners = el.shadowRoot!.querySelectorAll(
+          '[data-testid="trajectory-capture-banner"]'
+        );
+        expect(allBanners).toHaveLength(1);
+
+        const usagePanel = el.shadowRoot!.querySelector(
+          '[data-testid="agent-usage-panel"]'
+        ) as HTMLElement | null;
+        expect(usagePanel).not.toBeNull();
+
+        const banner = usagePanel!.querySelector(
           '[data-testid="trajectory-capture-banner"]'
         ) as HTMLElement | null;
         expect(banner).not.toBeNull();
+        expect(banner!.closest('sl-tab-panel')?.getAttribute('name')).toBe('usage');
         expect(banner!.getAttribute('data-policy')).toBe(status.policy);
         expect(banner!.getAttribute('data-enforced')).toBe(String(status.enforced_by_hub));
         expect(banner!.textContent).toContain(formatTrajectoryCaptureNotice(status));
@@ -134,7 +162,7 @@ describe('Trajectory capture notice banners (P5.1c)', () => {
     }
   });
 
-  describe('terminal-pane banner', () => {
+  describe('terminal-pane has no capture banner or input gating', () => {
     beforeEach(async () => {
       await import('../terminal/terminal-pane.js');
     });
@@ -161,93 +189,18 @@ describe('Trajectory capture notice banners (P5.1c)', () => {
       return el;
     }
 
-    it('hides terminal banner when experiment is off', async () => {
-      setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, false);
+    it('never renders a capture banner in the terminal pane even when experiments are on', async () => {
+      setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+      setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
       const el = await mountTerminalPane({ policy: 'full', enforced_by_hub: true });
       expect(
         el.shadowRoot!.querySelector('[data-testid="terminal-trajectory-capture-banner"]')
       ).toBeNull();
+      expect(el.shadowRoot!.querySelector('[data-testid="trajectory-capture-banner"]')).toBeNull();
     });
 
-    for (const status of [
-      { policy: 'full', enforced_by_hub: false },
-      { policy: 'full', enforced_by_hub: true },
-      { policy: 'metadata_only', enforced_by_hub: false },
-      { policy: 'off', enforced_by_hub: false },
-    ] satisfies TrajectoryCapturePolicyStatus[]) {
-      it(`renders terminal banner for policy=${status.policy} enforced=${status.enforced_by_hub}`, async () => {
-        setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
-        const el = await mountTerminalPane(status);
-        const banner = el.shadowRoot!.querySelector(
-          '[data-testid="terminal-trajectory-capture-banner"]'
-        ) as HTMLElement | null;
-        expect(banner).not.toBeNull();
-        expect(banner!.getAttribute('data-policy')).toBe(status.policy);
-        expect(banner!.getAttribute('data-enforced')).toBe(String(status.enforced_by_hub));
-        expect(banner!.textContent).toContain(formatTrajectoryCaptureNotice(status));
-      });
-    }
-
-    it('gates terminal input until agent metadata and capture policy arrive', async () => {
+    it('does not gate terminal input before agent metadata arrives when trajectory capture is on', async () => {
       setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, true);
-      const sendDataSpy = vi.fn();
-      const el = document.createElement('scion-terminal-pane') as HTMLElement & {
-        loading: boolean;
-        agent: Record<string, unknown> | null;
-        session: { sendData: (d: string) => void } | null;
-        sendData: (d: string) => void;
-        applyMetadata: (value: {
-          agent: Record<string, unknown> | null;
-          availability: 'loading' | 'ready' | 'deleted' | 'unavailable';
-          error: string | null;
-        }) => void;
-        updateComplete: Promise<boolean>;
-      };
-      el.loading = false;
-      el.agent = null;
-      Object.defineProperty(el, 'session', {
-        value: { sendData: sendDataSpy, setFrontmost: vi.fn(), state: { error: null } },
-        configurable: true,
-      });
-      document.body.appendChild(el);
-      await el.updateComplete;
-
-      // Before metadata resolves, banner is absent and input is held back.
-      expect(
-        el.shadowRoot!.querySelector('[data-testid="terminal-trajectory-capture-banner"]')
-      ).toBeNull();
-      el.sendData('ls\n');
-      expect(sendDataSpy).not.toHaveBeenCalled();
-
-      // Once agent metadata arrives, banner renders and input is forwarded.
-      const status: TrajectoryCapturePolicyStatus = { policy: 'full', enforced_by_hub: true };
-      el.applyMetadata({
-        agent: {
-          id: 'agent-1',
-          name: 'test-agent',
-          projectId: 'proj-1',
-          template: 'claude',
-          phase: 'running',
-          trajectory_capture: status,
-        },
-        availability: 'ready',
-        error: null,
-      });
-      await el.updateComplete;
-
-      const banner = el.shadowRoot!.querySelector(
-        '[data-testid="terminal-trajectory-capture-banner"]'
-      ) as HTMLElement | null;
-      expect(banner).not.toBeNull();
-      expect(banner!.textContent).toContain(formatTrajectoryCaptureNotice(status));
-
-      el.sendData('ls\n');
-      expect(sendDataSpy).toHaveBeenCalledTimes(1);
-      expect(sendDataSpy).toHaveBeenCalledWith('ls\n');
-    });
-
-    it('does not gate terminal input when trajectory capture experiment is off', async () => {
-      setFeatureFlag(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG, false);
       const sendDataSpy = vi.fn();
       const el = document.createElement('scion-terminal-pane') as HTMLElement & {
         loading: boolean;

@@ -2196,11 +2196,16 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   /**
-   * Compact Track 2 trajectory capture notice banner, gated on the
-   * tokenomics.trajectory_capture presentation flag and Hub-provided policy.
+   * Compact Track 2 trajectory capture notice banner rendered inside the Usage
+   * tab, gated on the usage ledger tab being visible, the
+   * tokenomics.trajectory_capture presentation flag, and Hub-provided policy.
    */
   private renderTrajectoryCaptureBanner(): TemplateResult | typeof nothing {
-    if (!this.trajectoryCaptureEnabled || !this.agent?.trajectory_capture) {
+    if (
+      !this.usageLedgerEnabled ||
+      !this.trajectoryCaptureEnabled ||
+      !this.agent?.trajectory_capture
+    ) {
       return nothing;
     }
     const status = this.agent.trajectory_capture;
@@ -2240,7 +2245,6 @@ export class ScionPageAgentDetail extends LitElement {
 
     return html`
       ${this.renderHeader()} ${this.renderDeletionBanner()} ${this.renderStateBanner()}
-      ${this.renderTrajectoryCaptureBanner()}
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
         <sl-tab slot="nav" panel="status">Status</sl-tab>
@@ -2266,6 +2270,7 @@ export class ScionPageAgentDetail extends LitElement {
         <sl-tab-panel name="status">${this.renderStatusTab()}</sl-tab-panel>
         ${this.usageLedgerEnabled
           ? html`<sl-tab-panel name="usage" data-testid="agent-usage-panel">
+              ${this.renderTrajectoryCaptureBanner()}
               <scion-agent-usage-panel agentId=${this.agent.id}></scion-agent-usage-panel>
             </sl-tab-panel>`
           : nothing}
