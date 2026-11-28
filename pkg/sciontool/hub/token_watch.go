@@ -350,22 +350,26 @@ func (c *Client) TransportTokenFileChanged() bool {
 	return !c.transportFPSet || fp != c.transportFP
 }
 
-// readTokenFileQuiet reads the agent credential file like ReadTokenFile,
+// readTokenFileQuiet reads the agent credential handoff file like ReadTokenFile,
 // through the same guarded reader, but without warning about a refused
 // file: the watcher reads every few seconds, and a refused file is reported
-// by the reset path when it reads the file.
+// by the reset path when it reads the file. In default TokenStoreHome mode
+// HandoffTokenFilePath() equals TokenFilePath(); in isolated mode it watches
+// the handoff drop-box rather than the runtime store.
 func readTokenFileQuiet() string {
-	v, err := readTokenFileGuarded(TokenFilePath())
+	v, err := readTokenFileGuarded(HandoffTokenFilePath())
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(v)
 }
 
-// readTransportTokenForWatch reads the transport token file through the
-// guarded reader, returning "" when it is missing, refused or empty.
+// readTransportTokenForWatch reads the transport token handoff file through the
+// guarded reader, returning "" when it is missing, refused or empty. In default
+// TokenStoreHome mode HandoffTransportTokenFilePath() equals
+// TransportTokenFilePath(); in isolated mode it watches the handoff drop-box.
 func readTransportTokenForWatch() string {
-	v, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
+	v, err := ReadTransportTokenFileGuarded(HandoffTransportTokenFilePath())
 	if err != nil {
 		return ""
 	}
@@ -414,10 +418,12 @@ type TokenFileWatcher struct {
 	lastTransport Fingerprint
 	lastTransSet  bool
 	// retryFP and retryAt: report retryFP again once retryAt has passed,
-	// if the agent credential file still holds it (RetryAfter).
-	retryFP  Fingerprint
-	retryAt  time.Time
-	retrySet bool
+	// if the agent credential file still holds it (RetryAfter), or even when
+	// the handoff file was already unlinked in isolated mode (retryAllowMissing).
+	retryFP           Fingerprint
+	retryAt           time.Time
+	retrySet          bool
+	retryAllowMissing bool
 }
 
 // NewTokenFileWatcher returns a watcher seeded with the files' current
@@ -489,6 +495,14 @@ func (w *TokenFileWatcher) RecheckAgent() {
 	w.lastAgentSet = false
 }
 
+// RecheckTransport makes the watcher report the transport token file's
+// current value at its next check, even if it reported that value before.
+func (w *TokenFileWatcher) RecheckTransport() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastTransSet = false
+}
+
 // RetryAfter asks the watcher to report the agent credential with
 // fingerprint fp again once d has passed on its clock, if the file still
 // holds it then. It is for a credential whose check could not complete. A
@@ -496,18 +510,36 @@ func (w *TokenFileWatcher) RecheckAgent() {
 func (w *TokenFileWatcher) RetryAfter(fp Fingerprint, d time.Duration) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.retryFP, w.retryAt, w.retrySet = fp, w.cfg.Clock.Now().Add(d), true
+	w.retryFP, w.retryAt, w.retrySet, w.retryAllowMissing = fp, w.cfg.Clock.Now().Add(d), true, false
 }
 
-// retryDue reports whether a RetryAfter request for the agent credential
-// a is due, and clears a request that is due or no longer applies.
+// RetryPendingAfter is RetryAfter for isolated token-store mode, where the
+// receiver has already unlinked the handoff file and holds the candidate in
+// PID 1 memory. It fires once d has passed even when the handoff file is
+// absent. A new, different value written to the handoff file drops the
+// pending retry and is reported as usual.
+func (w *TokenFileWatcher) RetryPendingAfter(fp Fingerprint, d time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.retryFP, w.retryAt, w.retrySet, w.retryAllowMissing = fp, w.cfg.Clock.Now().Add(d), true, true
+}
+
+// retryDue reports whether a RetryAfter / RetryPendingAfter request for the
+// agent credential a is due, and clears a request that is due or no longer
+// applies.
 func (w *TokenFileWatcher) retryDue(a Fingerprint, aok bool) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.retrySet {
 		return false
 	}
-	if !aok || a != w.retryFP {
+	if w.retryAllowMissing {
+		if aok && a != w.retryFP {
+			w.retrySet = false
+			w.retryAllowMissing = false
+			return false
+		}
+	} else if !aok || a != w.retryFP {
 		w.retrySet = false
 		return false
 	}
@@ -515,6 +547,7 @@ func (w *TokenFileWatcher) retryDue(a Fingerprint, aok bool) bool {
 		return false
 	}
 	w.retrySet = false
+	w.retryAllowMissing = false
 	return true
 }
 

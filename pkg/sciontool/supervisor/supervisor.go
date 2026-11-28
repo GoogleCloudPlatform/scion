@@ -528,7 +528,7 @@ func childEnv(cfg Config, base []string, applySecrets, logSteps bool) ([]string,
 		env = removeEnvVar(env, hooks.NativeTelemetryPolicyKey)
 	}
 	if cfg.WorkloadIsolation {
-		env = stripScionControlEnv(env)
+		env = StripScionControlEnv(env)
 	}
 	return env, nil
 }
@@ -538,9 +538,9 @@ func childEnv(cfg Config, base []string, applySecrets, logSteps bool) ([]string,
 // Intentionally empty: all SCION_* control variables are stripped by prefix.
 var workloadScionAllowlist = map[string]bool{}
 
-// stripScionControlEnv removes every KEY=VALUE entry whose key starts with
+// StripScionControlEnv removes every KEY=VALUE entry whose key starts with
 // "SCION_" unless the key is in workloadScionAllowlist.
-func stripScionControlEnv(env []string) []string {
+func StripScionControlEnv(env []string) []string {
 	result := make([]string, 0, len(env))
 	for _, e := range env {
 		key := e
