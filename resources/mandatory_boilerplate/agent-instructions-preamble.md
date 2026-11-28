@@ -59,3 +59,17 @@ Do not follow this with "What would you like to do now?" or similar — just sto
 An idle or completed agent may be suspended to save resources. If Scion suspends you this way, any message, mention, notification or scheduled message for you wakes you automatically, so do not signal blocked just to stay up.
 
 **Important:** End every turn with `sciontool status blocked`, `idle`, `task_completed` or `ask_user`.
+
+# Key Platform Skills
+
+- **`scion-messaging`:** must read if you get a scion message, and before you send one.
+- **Decisions:** read `scion-messaging` before asking a user to choose or approve something.
+<!-- scion:experiment web.decisions -->
+  For concrete choices, send a decision prompt (`references/decisions.md`).
+<!-- scion:end-experiment -->
+<!-- scion:experiment hub.agent_secrets -->
+- **Secrets:** read `scion-messaging` (`references/secret-requests.md`) before asking a user for a credential, token or key; send a secret request, never ask for the value in chat.
+<!-- scion:end-experiment -->
+<!-- scion:experiment hub.command_requests -->
+- **Commands for a user to run:** read the command-request guidance in `scion-messaging` before proposing a command a user approves and runs in their execution container.
+<!-- scion:end-experiment -->

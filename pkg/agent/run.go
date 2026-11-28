@@ -1311,16 +1311,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// unchanged since its last render is left alone.
 		if len(opts.RerenderKeys) > 0 {
 			rerenderWarns, err := rerenderProvisionedFiles(ctx, rerenderInputs{
-				Keys:       opts.RerenderKeys,
-				AgentName:  opts.Name,
-				AgentDir:   agentDir,
-				AgentHome:  agentHome,
-				ProjectDir: projectDir,
-				Harness:    h,
-				Chain:      envChain,
-				Config:     finalScionCfg,
-				Inline:     opts.InlineConfig,
-				WriteHome:  func(f func() error) error { return writeAgentHome(ctx, f) },
+				Keys:         opts.RerenderKeys,
+				AgentName:    opts.Name,
+				AgentDir:     agentDir,
+				AgentHome:    agentHome,
+				ProjectDir:   projectDir,
+				Harness:      h,
+				Chain:        envChain,
+				Config:       finalScionCfg,
+				Inline:       opts.InlineConfig,
+				WriteHome:    func(f func() error) error { return writeAgentHome(ctx, f) },
+				ExperimentOn: experimentOn(ctx, settings),
 			})
 			if err != nil {
 				return nil, fmt.Errorf("re-render provision-time files: %w", err)
