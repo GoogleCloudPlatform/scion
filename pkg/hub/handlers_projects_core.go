@@ -3037,7 +3037,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Project GitHub App and git identity settings
 	switch subPath {
-	case "github-installation", "github-status", "github-permissions", "git-identity":
+	case "github", "github-installation", "github-status", "github-permissions", "git-identity":
 		s.handleProjectGitHubRoutes(w, r, projectID, subPath)
 		return
 	}

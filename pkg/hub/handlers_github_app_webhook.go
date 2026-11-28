@@ -1101,7 +1101,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 	} else if hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
 		// Explicit stored project permissions are requested unchanged (still
 		// capped by the association's proof).
-		perms, _, _ = githubTokenPermissionsForGrant(project.GitHubPermissions, grant, nil)
+		perms, _, _ = effectiveGitHubTokenPermissions(project, grant, nil)
 	} else {
 		// No usable stored permissions: intersect DefaultTokenPermissions with
 		// the permissions actually granted to the GitHub App so read-only and
@@ -1121,7 +1121,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 			}
 		}
 		var ok bool
-		perms, _, ok = githubTokenPermissionsForGrant(project.GitHubPermissions, grant, id.Permissions)
+		perms, _, ok = effectiveGitHubTokenPermissions(project, grant, id.Permissions)
 		if !ok {
 			const msg = "GitHub App does not have any of the default permissions required for this project. Update the GitHub App's permissions or configure project token permissions."
 			slog.WarnContext(ctx, "GitHub App token refused: default permissions intersection with app grant is empty",

@@ -179,6 +179,12 @@ var windowsAllowed = map[string]bool{
 	// and the leave), no local writes. The parent 'project' stays gated, as
 	// for project.use.
 	"project.leave": true,
+	// Project GitHub App integration (ptone/scion#9327): pure Hub API calls,
+	// no local writes. The parent 'project' stays gated, as for project.use.
+	"project.github":        true,
+	"project.github.status": true,
+	"project.github.bind":   true,
+	"project.github.unbind": true,
 
 	"config":            true,
 	"config.list":       true,

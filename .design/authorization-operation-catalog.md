@@ -156,7 +156,7 @@
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
 - [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
 - [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
-- [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.read](#projectgithubread) — Read a project's GitHub integration overview, status, permissions and git identity
 - [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
@@ -6390,12 +6390,13 @@
 
 **Domain:** project
 
-**Description:** Read a project's GitHub status, GitHub permissions and git identity
+**Description:** Read a project's GitHub integration overview, status, permissions and git identity
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/github` |
 | http_route | GET | `/api/v1/projects/{id}/github-status` |
 | http_route | GET | `/api/v1/projects/{id}/github-permissions` |
 | http_route | GET | `/api/v1/projects/{id}/git-identity` |

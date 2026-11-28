@@ -89,6 +89,11 @@ const (
 	// (lookup error, GitHub error, timeout or rate limit); no token is
 	// minted until it succeeds.
 	githubAppErrAssociationCheckFailed = "association_check_failed"
+	// githubAppErrAssociationUnverified: the project GitHub read model could
+	// not verify the association right now (for example, missing creator
+	// token, lookup failure, or GitHub check unavailable). Distinct from a
+	// definitive authorization refusal.
+	githubAppErrAssociationUnverified = "association_unverified"
 )
 
 var (
@@ -340,7 +345,65 @@ func githubAccessCacheKey(projectID string, installationID int64, apiBase, owner
 const (
 	githubAccessCacheGrantTTL  = 10 * time.Minute
 	githubAccessCacheDenialTTL = time.Minute
+	// Read-model-only bounds for creator-access checks triggered by
+	// GET /api/v1/projects/{id}/github. Minting never uses these.
+	githubReadModelInconclusiveTTL     = 45 * time.Second
+	githubReadModelCreatorCheckTimeout = 10 * time.Second
 )
+
+// githubReadModelInconclusiveCache is a short read-model-only negative cache
+// for inconclusive creator-access checks. The zero value is ready to use.
+type githubReadModelInconclusiveCache struct {
+	mu      sync.Mutex
+	entries map[string]githubReadModelInconclusiveEntry
+}
+
+type githubReadModelInconclusiveEntry struct {
+	projectID string
+	expires   time.Time
+}
+
+func (c *githubReadModelInconclusiveCache) recent(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return false
+	}
+	if !timeNow().Before(e.expires) {
+		delete(c.entries, key)
+		return false
+	}
+	return true
+}
+
+func (c *githubReadModelInconclusiveCache) put(key, projectID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]githubReadModelInconclusiveEntry)
+	}
+	now := timeNow()
+	for k, e := range c.entries {
+		if !now.Before(e.expires) {
+			delete(c.entries, k)
+		}
+	}
+	c.entries[key] = githubReadModelInconclusiveEntry{
+		projectID: projectID,
+		expires:   now.Add(githubReadModelInconclusiveTTL),
+	}
+}
+
+func (c *githubReadModelInconclusiveCache) invalidateProject(projectID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.entries {
+		if e.projectID == projectID {
+			delete(c.entries, k)
+		}
+	}
+}
 
 // githubRepoAccessCache caches access-check outcomes. The zero value is
 // ready to use.
@@ -420,6 +483,24 @@ func hasUsableStoredGitHubPermissions(stored *store.GitHubTokenPermissions) bool
 		}
 	}
 	return false
+}
+
+// effectiveGitHubTokenPermissions computes the effective GitHub App
+// installation token permissions for project under grant and the App's
+// granted permissions. Both token minting (mintGitHubAppTokenInternal) and
+// the project GitHub read model (GET /api/v1/projects/{id}/github) call this
+// single helper so reported effective permissions never drift from minted
+// tokens.
+func effectiveGitHubTokenPermissions(
+	project *store.Project,
+	grant githubAssociationGrant,
+	appPerms map[string]string,
+) (perms githubapp.TokenPermissions, usedDefaults bool, ok bool) {
+	var stored *store.GitHubTokenPermissions
+	if project != nil {
+		stored = project.GitHubPermissions
+	}
+	return githubTokenPermissionsForGrant(stored, grant, appPerms)
 }
 
 // githubTokenPermissionsForGrant returns the permission set to request for
@@ -661,6 +742,7 @@ func (c *githubAssociationReportCache) invalidate(projectID string) {
 // the admin report's entry. Every association change goes through here.
 func (s *Server) invalidateGitHubAssociation(projectID string) {
 	s.githubAccessCache.invalidateProject(projectID)
+	s.githubReadModelInconclusive.invalidateProject(projectID)
 	s.githubTokenCache.invalidateProject(projectID)
 	s.githubAssociationReportCache.invalidate(projectID)
 	s.githubAssociationRefusalLog.clear(projectID)
@@ -890,95 +972,268 @@ func (c *githubAssociationReportCache) lookupFreshProject(projectID string, inst
 	return e, true
 }
 
-// hasAuthorizedGitHubAssociationCached evaluates whether project has an
-// authorized GitHub App installation association for Stage 3 trigger authoring
-// (create, dispatch-affecting PATCH, and resume; design §4.2) WITHOUT making
-// any outbound GitHub HTTP call:
+// githubAssociationCachedEval is the outcome of evaluating a project's GitHub
+// App association through the shared cached evaluator.
+type githubAssociationCachedEval struct {
+	InstallationID        *int64
+	AccountLogin          string
+	Authorized            bool
+	Verified              bool
+	CreatorAccessUncached bool
+	Basis                 string
+	WriteAllowed          bool
+	ErrorCode             string
+	Reason                string
+}
+
+// evaluateGitHubAssociationCached is the single cached association evaluator
+// shared by trigger authoring (hasAuthorizedGitHubAssociationCached, with
+// allowCreatorCheck=false) and the project GitHub read model
+// (GET /api/v1/projects/{id}/github, with allowCreatorCheck=true).
 //
-//  1. When githubAssociationReportCache holds a fresh, non-dirty entry for
-//     project.ID on its current installation, entry.Authorized answers directly.
-//  2. Otherwise, local checks run in-process: installation ID present,
-//     project.GitHubAppStatus not showing association_unauthorized, git remote
-//     on the configured GitHub host, active installation whose account matches
-//     the remote owner, and either a valid admin binding or a creator
-//     user-scope GITHUB_TOKEN.
-//  3. When a creator GITHUB_TOKEN is stored and githubAccessCache has an entry,
-//     a cached grant authorizes and a cached denial refuses. When both caches
-//     are cold (for example right after autoAssociateGitHubInstallation, which
-//     calls invalidateGitHubAssociation, or after a hub restart before any
-//     mint/report), authoring accepts without calling GitHub: this check is a
-//     UX guard ("otherwise rules silently never fire", §4.2), and the trigger
-//     drainer runs full authorizeGitHubAppAssociation before any fire.
-func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, project *store.Project) (bool, error) {
+//  1. Unassociated projects return Authorized=false, Verified=true.
+//  2. When githubAssociationReportCache holds a fresh, non-dirty entry for
+//     project.ID on its current installation, authorized entries and
+//     check_failed entries answer directly; non-authorized entries also answer
+//     directly when allowCreatorCheck=false, while allowCreatorCheck=true falls
+//     through to the bounded local evaluation so unverified no-token states and
+//     specific denial reasons do not depend on report-cache warmth.
+//  3. Otherwise local checks run (host, active installation matching owner,
+//     and admin binding).
+//  4. When no admin binding applies, creator proof is evaluated:
+//     - with allowCreatorCheck=true: uses githubCreatorRepoAccess (bounded by
+//     githubAccessCache: at most one GitHub call per project per TTL). A
+//     missing creator token, lookup error, or inconclusive GitHub check
+//     yields Verified=false, ErrorCode=association_unverified with fixed
+//     safe text rather than a definitive unauthorized error.
+//     - with allowCreatorCheck=false: never makes an outbound GitHub call;
+//     checks the in-memory githubAccessCache and returns Verified=false when
+//     cold so trigger authoring can preserve its cold-cache UX guard.
+func (s *Server) evaluateGitHubAssociationCached(
+	ctx context.Context,
+	project *store.Project,
+	allowCreatorCheck bool,
+) (githubAssociationCachedEval, error) {
 	if project == nil || project.GitHubInstallationID == nil || *project.GitHubInstallationID <= 0 {
-		return false, nil
+		return githubAssociationCachedEval{Verified: true}, nil
 	}
 	instID := *project.GitHubInstallationID
-
-	if entry, ok := s.githubAssociationReportCache.lookupFreshProject(project.ID, instID, timeNow()); ok {
-		return entry.Authorized, nil
+	eval := githubAssociationCachedEval{
+		InstallationID: &instID,
 	}
 
-	if project.GitHubAppStatus != nil &&
+	inst, instErr := s.store.GetGitHubInstallation(ctx, instID)
+	if instErr == nil && inst != nil {
+		eval.AccountLogin = inst.AccountLogin
+	}
+
+	if entry, ok := s.githubAssociationReportCache.lookupFreshProject(project.ID, instID, timeNow()); ok {
+		if entry.Authorized {
+			eval.Authorized = true
+			eval.Verified = true
+			eval.Basis = entry.Basis
+			eval.WriteAllowed = entry.WriteAllowed
+			return eval, nil
+		}
+		if entry.ErrorCode == githubAppErrAssociationCheckFailed {
+			eval.Verified = false
+			eval.ErrorCode = githubAppErrAssociationUnverified
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+			return eval, nil
+		}
+		if !allowCreatorCheck {
+			eval.Verified = true
+			eval.ErrorCode = entry.ErrorCode
+			if eval.ErrorCode == "" {
+				eval.ErrorCode = githubAppErrAssociationUnauthorized
+			}
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationUnauthorized)
+			return eval, nil
+		}
+	}
+
+	if !allowCreatorCheck &&
+		project.GitHubAppStatus != nil &&
 		project.GitHubAppStatus.State == store.GitHubAppStateError &&
 		project.GitHubAppStatus.ErrorCode == githubAppErrAssociationUnauthorized {
-		return false, nil
+		eval.Verified = true
+		eval.ErrorCode = githubAppErrAssociationUnauthorized
+		eval.Reason = githubAppStatusMessage(githubAppErrAssociationUnauthorized)
+		return eval, nil
 	}
 
 	host := s.githubAppWebHost()
 	owner, repo, ok := githubapp.RemoteOwnerRepo(project.GitRemote, host)
 	if !ok {
-		return false, nil
+		eval.Verified = true
+		eval.ErrorCode = githubAppErrAssociationUnauthorized
+		eval.Reason = fmt.Sprintf("the project's git remote is not an owner/repo on the configured GitHub host %q", host)
+		return eval, nil
 	}
 
-	inst, err := s.store.GetGitHubInstallation(ctx, instID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return false, nil
+	if instErr != nil {
+		if errors.Is(instErr, store.ErrNotFound) {
+			eval.Verified = true
+			eval.ErrorCode = githubAppErrAssociationUnauthorized
+			eval.Reason = fmt.Sprintf("installation %d not found", instID)
+			return eval, nil
 		}
-		return false, err
+		eval.Verified = false
+		eval.ErrorCode = githubAppErrAssociationUnverified
+		eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+		return eval, instErr
 	}
 	if inst == nil || inst.Status != store.GitHubInstallationStatusActive {
-		return false, nil
+		status := "missing"
+		if inst != nil {
+			status = inst.Status
+		}
+		eval.Verified = true
+		eval.ErrorCode = githubAppErrAssociationUnauthorized
+		eval.Reason = fmt.Sprintf("installation %d is %s", instID, status)
+		return eval, nil
 	}
 	if inst.AccountLogin == "" || !strings.EqualFold(inst.AccountLogin, owner) {
-		return false, nil
+		eval.Verified = true
+		eval.ErrorCode = githubAppErrAssociationUnauthorized
+		eval.Reason = fmt.Sprintf("installation %d belongs to account %q, not the remote owner %q", instID, inst.AccountLogin, owner)
+		return eval, nil
 	}
 
 	bound, err := s.githubAdminBindingValid(ctx, project, instID)
 	if err != nil {
+		eval.Verified = false
+		eval.ErrorCode = githubAppErrAssociationUnverified
+		eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
 		if ctx.Err() != nil {
-			return false, ctx.Err()
+			return eval, ctx.Err()
 		}
-		return false, err
+		return eval, err
 	}
 	if bound {
-		return true, nil
+		eval.Authorized = true
+		eval.Verified = true
+		eval.Basis = githubAssociationBasisAdminBinding
+		eval.WriteAllowed = true
+		return eval, nil
 	}
 
 	creatorToken, hasToken, err := s.lookupCreatorGitHubToken(ctx, project)
 	if err != nil {
+		eval.Verified = false
+		eval.ErrorCode = githubAppErrAssociationUnverified
+		eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
 		if ctx.Err() != nil {
-			return false, ctx.Err()
+			return eval, ctx.Err()
 		}
-		return false, err
+		return eval, err
 	}
 	if !hasToken {
-		return false, nil
+		eval.Verified = false
+		eval.ErrorCode = githubAppErrAssociationUnverified
+		eval.Reason = "No admin binding and the project creator has no stored GitHub token to verify repository access."
+		return eval, nil
+	}
+
+	if allowCreatorCheck {
+		key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
+		if s.githubReadModelInconclusive.recent(key) {
+			eval.Verified = false
+			eval.ErrorCode = githubAppErrAssociationUnverified
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+			return eval, nil
+		}
+		v, accessErr, _ := s.githubReadModelSF.Do(key, func() (any, error) {
+			if s.githubReadModelInconclusive.recent(key) {
+				return githubapp.RepoAccess{}, errGitHubAssociationCheckFailed
+			}
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubReadModelCreatorCheckTimeout)
+			defer cancel()
+			access, err := s.githubCreatorRepoAccess(cctx, project, instID, owner, repo)
+			if errors.Is(err, errGitHubAssociationCheckFailed) {
+				s.githubReadModelInconclusive.put(key, project.ID)
+			}
+			return access, err
+		})
+		if accessErr != nil {
+			if errors.Is(accessErr, errGitHubAssociationCheckFailed) {
+				eval.Verified = false
+				eval.ErrorCode = githubAppErrAssociationUnverified
+				eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+				return eval, nil
+			}
+			eval.Verified = true
+			eval.ErrorCode = githubAppErrAssociationUnauthorized
+			eval.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
+			return eval, nil
+		}
+		access, _ := v.(githubapp.RepoAccess)
+		switch {
+		case access.Push:
+			eval.Authorized = true
+			eval.Verified = true
+			eval.Basis = githubAssociationBasisCreatorPush
+			eval.WriteAllowed = true
+		case access.Pull:
+			eval.Authorized = true
+			eval.Verified = true
+			eval.Basis = githubAssociationBasisCreatorPull
+			eval.WriteAllowed = false
+		default:
+			eval.Verified = true
+			eval.ErrorCode = githubAppErrAssociationUnauthorized
+			eval.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
+		}
+		return eval, nil
 	}
 
 	key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
 	if access, denied, cached := s.githubAccessCache.get(key); cached {
 		if denied || (!access.Push && !access.Pull) {
-			return false, nil
+			eval.Verified = true
+			eval.ErrorCode = githubAppErrAssociationUnauthorized
+			eval.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
+			return eval, nil
 		}
-		return true, nil
+		eval.Authorized = true
+		eval.Verified = true
+		if access.Push {
+			eval.Basis = githubAssociationBasisCreatorPush
+			eval.WriteAllowed = true
+		} else {
+			eval.Basis = githubAssociationBasisCreatorPull
+			eval.WriteAllowed = false
+		}
+		return eval, nil
 	}
 
-	// Narrow cold-cache creator-proof case: all local checks passed and the
-	// creator holds a stored GITHUB_TOKEN, so accept without calling GitHub;
-	// AuthorizeEventSource re-checks full authorizeGitHubAppAssociation at fire time.
-	return true, nil
+	// Narrow cold-cache creator-proof case for non-calling paths: local checks
+	// passed and creator holds a GITHUB_TOKEN, but access is not cached.
+	eval.Verified = false
+	eval.CreatorAccessUncached = true
+	eval.ErrorCode = githubAppErrAssociationUnverified
+	return eval, nil
+}
+
+// hasAuthorizedGitHubAssociationCached evaluates whether project has an
+// authorized GitHub App installation association for Stage 3 trigger authoring
+// (create, dispatch-affecting PATCH, and resume; design §4.2) WITHOUT making
+// any outbound GitHub HTTP call.
+func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, project *store.Project) (bool, error) {
+	eval, err := s.evaluateGitHubAssociationCached(ctx, project, false)
+	if err != nil {
+		return false, err
+	}
+	if eval.Authorized {
+		return true, nil
+	}
+	// Preserve trigger authoring's cold-cache UX guard: when local checks pass
+	// and the creator holds a GITHUB_TOKEN but access is not yet cached, accept
+	// without calling GitHub; AuthorizeEventSource re-checks live at fire time.
+	if eval.CreatorAccessUncached {
+		return true, nil
+	}
+	return false, nil
 }
 
 // clearProjectGitHubAssociationErrorStatus resets project.GitHubAppStatus back

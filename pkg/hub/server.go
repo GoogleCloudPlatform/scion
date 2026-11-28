@@ -3121,6 +3121,13 @@ type Server struct {
 	// githubAccessCache caches GitHub-side repository access checks made
 	// with a project creator's own token (github_app_association_authz.go).
 	githubAccessCache githubRepoAccessCache
+	// githubReadModelInconclusive is a short read-model-only negative cache
+	// for inconclusive creator-access checks so project readers cannot force
+	// repeated creator-token GitHub calls (github_app_association_authz.go).
+	githubReadModelInconclusive githubReadModelInconclusiveCache
+	// githubReadModelSF collapses concurrent cold-cache creator-access checks
+	// for the same access-cache key on GET /api/v1/projects/{id}/github.
+	githubReadModelSF singleflight.Group
 	// githubAssociationReportCache bounds the admin association report
 	// (github_app_association_authz.go).
 	githubAssociationReportCache githubAssociationReportCache
