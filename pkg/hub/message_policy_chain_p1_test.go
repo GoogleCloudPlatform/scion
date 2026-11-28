@@ -327,8 +327,8 @@ func TestMessagePolicyChainsP1_E1E2Gate_SkipRejectDisabledAndUnsupported(t *test
 	// 1. E2 conversation send: guard false -> skip_policy, send admitted (200),
 	// decision row carries content-free chain provenance.
 	rr = f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "conv:" + f.conv.ID,
-		Msg:       "contains SECRET_WORD in group chat",
+		ConversationRef: "conv:" + f.conv.ID,
+		Msg:             "contains SECRET_WORD in group chat",
 	})
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
