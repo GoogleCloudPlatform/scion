@@ -781,7 +781,7 @@ func (s *UsageLedgerStore) QueryGroupMemberUsageBreakdown(
 
 	// Build OR clause across all overlapping episodes with non-empty member
 	// snapshots, using a single JSON array parameter per episode (O2) and
-	// clamping finalized episodes by received_at <= ep.UpdatedAt so late
+	// clamping finalized episodes by received_at <= ep.CutoffAt so late
 	// uncharged uploads after finalization do not inflate the breakdown (O3).
 	memberClause := "billing_user_id IN (SELECT value FROM json_each(?))"
 	if dialectName == dialect.Postgres {

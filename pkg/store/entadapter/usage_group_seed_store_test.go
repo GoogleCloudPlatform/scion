@@ -446,8 +446,10 @@ func TestUsageGroupSeedStore_LargeMemberSetExceedsSQLiteParamLimit(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	// Build a 1,200-member snapshot (> SQLite's 999 parameter limit) and store it on an open episode.
-	const memberCount = 1200
+	// Build a 35,000-member snapshot (> modernc SQLite's 32,766 SQLITE_MAX_VARIABLE_NUMBER
+	// parameter limit) and store it on an open episode so an unbounded IN (?, ...)
+	// query would fail with "too many SQL variables".
+	const memberCount = 35000
 	members := make([]string, memberCount)
 	members[0] = realUser
 	for i := 1; i < memberCount; i++ {
@@ -470,7 +472,7 @@ func TestUsageGroupSeedStore_LargeMemberSetExceedsSQLiteParamLimit(t *testing.T)
 	res, err := cs.ExecuteUsageGroupEpisodeSeedPass(ctx, store.UsageGroupEpisodeSeedPassInput{
 		EpisodeID: ep.ID.String(), GroupID: gLarge.ID, Now: tAct.Add(2 * time.Minute), IsFinalPass: true,
 	})
-	require.NoError(t, err, "O2: seed pass must handle >999 frozen members without SQL parameter overflow")
+	require.NoError(t, err, "O2: seed pass must handle >32766 frozen members without SQL parameter overflow")
 	assert.True(t, res.DidMutate)
 
 	nov01 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
@@ -482,7 +484,7 @@ func TestUsageGroupSeedStore_LargeMemberSetExceedsSQLiteParamLimit(t *testing.T)
 	eps, err := cs.ListUsageGroupSeedEpisodesOverlapping(ctx, gLarge.ID, nov01, dec01)
 	require.NoError(t, err)
 	bd, err := cs.QueryGroupMemberUsageBreakdown(ctx, gLarge.ID, "", eps, nov01, dec01)
-	require.NoError(t, err, "O2: breakdown query must handle >999 frozen members without SQL parameter overflow")
+	require.NoError(t, err, "O2: breakdown query must handle >32766 frozen members without SQL parameter overflow")
 	require.Len(t, bd, 1)
 	assert.Equal(t, realUser, bd[0].UserID)
 	assert.Equal(t, int64(450), bd[0].TokensSummable)
