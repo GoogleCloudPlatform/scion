@@ -139,8 +139,29 @@ func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Age
 	if err != nil {
 		return err
 	}
-	if status != nil && status.Exhausted {
-		_, coverageStatus, _ := s.resolveAgentHarnessCoverage(ctx, agent)
+	if status == nil {
+		return nil
+	}
+
+	// Check project usage.unmeasured_policy=deny only when not already
+	// exhausted and an active non-zero token cap applies (reusing
+	// status.HasActiveCap from the evaluation pass above).
+	// A stale meter alone never blocks admission.
+	needUnmeasuredCheck := !status.Exhausted && status.HasActiveCap
+	if needUnmeasuredCheck {
+		if project == nil && s.store != nil {
+			if p, perr := s.store.GetProject(ctx, agent.ProjectID); perr == nil {
+				project = p
+			}
+		}
+		needUnmeasuredCheck = project != nil && project.Annotations[projectSettingUsageUnmeasuredPolicy] == UsageUnmeasuredPolicyDeny
+	}
+	if !status.Exhausted && !needUnmeasuredCheck {
+		return nil
+	}
+
+	harnessConfig, coverageStatus, capKind := s.resolveAgentHarnessCoverage(ctx, agent)
+	if status.Exhausted {
 		return &TokenBudgetAdmissionError{
 			HTTPStatus: http.StatusTooManyRequests,
 			Code:       api.LaunchCodeBudgetExhausted,
@@ -157,31 +178,16 @@ func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Age
 			},
 		}
 	}
-
-	// Check project usage.unmeasured_policy=deny: refuses unmeasured, unknown,
-	// and calls_only harnesses when an active non-zero token cap applies
-	// (reusing status.HasActiveCap from the evaluation pass above).
-	// A stale meter alone never blocks admission.
-	if status != nil && status.HasActiveCap {
-		if project == nil && s.store != nil {
-			if p, perr := s.store.GetProject(ctx, agent.ProjectID); perr == nil {
-				project = p
-			}
-		}
-		if project != nil && project.Annotations[projectSettingUsageUnmeasuredPolicy] == UsageUnmeasuredPolicyDeny {
-			harnessConfig, coverageStatus, capKind := s.resolveAgentHarnessCoverage(ctx, agent)
-			if capKind == usageCapUnmeasured || capKind == usageCapUnknown || capKind == usageCapCallsOnly {
-				return &TokenBudgetAdmissionError{
-					HTTPStatus: http.StatusForbidden,
-					Code:       api.LaunchCodeBudgetUnmeasured,
-					Message:    "the harness is not measured for token usage under this project's policy",
-					Details: map[string]interface{}{
-						"policy":         UsageUnmeasuredPolicyDeny,
-						"harnessConfig":  harnessConfig,
-						"coverageStatus": coverageStatus,
-					},
-				}
-			}
+	if capKind == usageCapUnmeasured || capKind == usageCapUnknown || capKind == usageCapCallsOnly {
+		return &TokenBudgetAdmissionError{
+			HTTPStatus: http.StatusForbidden,
+			Code:       api.LaunchCodeBudgetUnmeasured,
+			Message:    "the harness is not measured for token usage under this project's policy",
+			Details: map[string]interface{}{
+				"policy":         UsageUnmeasuredPolicyDeny,
+				"harnessConfig":  harnessConfig,
+				"coverageStatus": coverageStatus,
+			},
 		}
 	}
 

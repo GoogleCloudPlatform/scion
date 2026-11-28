@@ -167,6 +167,17 @@ type headlessResolvedRole struct {
 	parentMessageMode string
 }
 
+func headlessDispatchKindLabel(kind string) string {
+	switch kind {
+	case hubfire.DefinitionKindTrigger:
+		return "trigger dispatch"
+	case hubfire.DefinitionKindSchedule, hubfire.DefinitionKindScheduledEvent:
+		return "scheduled dispatch"
+	default:
+		return "headless dispatch"
+	}
+}
+
 func validateHeadlessEventEnv(env map[string]string) error {
 	for k, v := range env {
 		switch k {
@@ -674,7 +685,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1)
 	// before committing the agent row or dispatching to the broker.
 	if err := s.checkTokenBudgetAdmission(ctx, agent, project); err != nil {
-		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		return nil, fmt.Errorf("%s of agent %q: %w", headlessDispatchKindLabel(hc.Authority.Recorded.DefinitionKind), slug, err)
 	}
 
 	// Inject allow-listed event data environment variables after deriveAgentConfig

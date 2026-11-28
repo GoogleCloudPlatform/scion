@@ -1019,6 +1019,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	beforeStart := agentStartEchoFields(agent)
+	// Defense-in-depth TOCTOU re-check before launching the new container: the
+	// HTTP handler gate already refuses before stopping when the budget is
+	// exhausted at request time; if the budget exhausts mid-reincarnation,
+	// failing here enforces pause_new by leaving the agent stopped rather than
+	// starting a new container over cap.
 	if err := s.checkTokenBudgetAdmission(startCtx, agent, nil); err != nil {
 		var budgetErr *TokenBudgetAdmissionError
 		if errors.As(err, &budgetErr) {

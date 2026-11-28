@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -354,6 +355,18 @@ func TestResolvedSettings_InvalidStoredThinkingLevelIsUnset(t *testing.T) {
 // surprise cannot slip an extra key past both.
 func TestResolvedSettings_EndpointReturnsNoEffectiveValue(t *testing.T) {
 	srv, s := testServer(t)
+	// Enable experiment-gated project settings so the wire-payload denylist
+	// inspects every key in projectSettingKeys (including scion.io/usage-unmeasured-policy).
+	var exps []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.TokenomicsUsageLedger || e.Name == experiments.TokenomicsTokenBudgets {
+			e.Default = true
+		}
+		exps = append(exps, e)
+	}
+	reg, err := experiments.NewRegistry(exps, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
 	project := createTestProjectForSettings(t, s)
 
 	rec := doRequest(t, srv, http.MethodGet,

@@ -34,9 +34,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // stopRecordingDispatcher wraps mockDispatcher and records DispatchAgentStop
@@ -367,9 +370,12 @@ func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) 
 		Authority: FireAuthority{
 			PrincipalKind: store.DelegationPrincipalUser,
 			PrincipalID:   adminIdent.ID(),
+			Recorded: hubfire.RecordedAuthority{
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+			},
 		},
 		Identity:    adminIdent,
-		CreatorName: "scheduler",
+		CreatorName: "trigger",
 		EdgeCeiling: store.EffectCeiling{
 			Kind: store.EffectCeilingPrincipal,
 		},
@@ -377,8 +383,7 @@ func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) 
 			SourcePrincipalKind:         store.DelegationPrincipalUser,
 			SourcePrincipalID:           adminIdent.ID(),
 			SourceCredentialKind:        store.SourceCredentialScheduler,
-			SourceEventID:               "ev-sched-1",
-			SourceScheduleID:            "sched-1",
+			SourceEventID:               "ev-trig-1",
 			SourceAuthorizationRevision: 1,
 		},
 		resolvedRole: &resolvedRole,
@@ -388,8 +393,89 @@ func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) 
 	var bErr *TokenBudgetAdmissionError
 	require.ErrorAs(t, headlessErr, &bErr)
 	assert.Equal(t, api.LaunchCodeBudgetExhausted, bErr.Code)
+	assert.Contains(t, headlessErr.Error(), "trigger dispatch of agent", "O4: wrap text must reflect dispatch kind")
 	_, lookupErr := s.GetAgentBySlug(ctx, proj.ID, "scheduled-blocked")
 	assert.True(t, errors.Is(lookupErr, store.ErrNotFound), "blocked headless create must not persist agent row")
+
+	// 6b. handleExistingAgent (POST /projects/{id}/agents with existing stopped agent name) -> 429 budget_exhausted.
+	stoppedAg := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "existing-stopped-ag",
+		Name:            "existing-stopped-ag",
+		ProjectID:       proj.ID,
+		RuntimeBrokerID: brokerID,
+		Phase:           string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, stoppedAg))
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents", CreateAgentRequest{
+		Name:   stoppedAg.Name,
+		Resume: true,
+	})
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "existing stopped agent resume via POST /agents must be blocked: %s", rec.Body.String())
+	code, _, details = decodeAPIErrorEnvelope(t, rec.Body.Bytes())
+	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
+	assert.Equal(t, store.LimitLLMTokensPerProjectDay, details["limit"])
+	assert.Equal(t, store.UsageScopeKindProject, details["scopeKind"])
+	assert.Equal(t, proj.ID, details["scopeId"])
+	assert.Empty(t, disp.startedAgents)
+
+	// 6c. handleExistingAgent Branch 3 (env-gather recreate of a provisioning agent):
+	// must refuse with 429 budget_exhausted BEFORE tearing down the provisioning row or its secrets.
+	secBackend := secret.NewLocalBackend(s, "hub-admit-test", "test-signing-key-32-bytes-long!!")
+	srv.SetSecretBackend(secBackend)
+	provGatherAg := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "prov-gather-ag",
+		Name:            "prov-gather-ag",
+		ProjectID:       proj.ID,
+		RuntimeBrokerID: brokerID,
+		Phase:           string(state.PhaseProvisioning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, provGatherAg))
+	_, _, err = secBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "AGENT_KEEP_ME",
+		Value:      "secret-value",
+		Scope:      secret.ScopeAgent,
+		ScopeID:    provGatherAg.ID,
+		SecretType: secret.TypeEnvironment,
+	})
+	require.NoError(t, err)
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents", CreateAgentRequest{
+		Name:      provGatherAg.Name,
+		GatherEnv: true,
+	})
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "env-gather recreate must be blocked: %s", rec.Body.String())
+	code, _, details = decodeAPIErrorEnvelope(t, rec.Body.Bytes())
+	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
+	assert.Equal(t, store.LimitLLMTokensPerProjectDay, details["limit"])
+	gotProv, err := s.GetAgent(ctx, provGatherAg.ID)
+	require.NoError(t, err, "provisioning agent row must survive refused env-gather recreate")
+	assert.Equal(t, string(state.PhaseProvisioning), gotProv.Phase)
+	keptSec, err := secBackend.Get(ctx, "AGENT_KEEP_ME", secret.ScopeAgent, provGatherAg.ID)
+	require.NoError(t, err, "agent-scoped secret must survive refused env-gather recreate")
+	assert.Equal(t, "secret-value", keptSec.Value)
+
+	// 6d. submitAgentEnv (POST /projects/{id}/agents/{agentId}/env) -> 429 budget_exhausted, no finalize dispatched.
+	dispatchedBefore := len(disp.dispatchedAgents)
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents/"+provGatherAg.ID+"/env", SubmitEnvRequest{
+		Env: map[string]string{"MY_VAR": "1"},
+	})
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "submitAgentEnv must be blocked: %s", rec.Body.String())
+	code, _, details = decodeAPIErrorEnvelope(t, rec.Body.Bytes())
+	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
+	assert.Equal(t, store.LimitLLMTokensPerProjectDay, details["limit"])
+	assert.Len(t, disp.dispatchedAgents, dispatchedBefore)
+
+	// 6e. handleWorkspaceSyncToFinalize (POST /agents/{id}/workspace/sync-to/finalize) -> 429 budget_exhausted, no create dispatched.
+	srv.SetStorage(newMockStorage("test-bucket"))
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/"+provGatherAg.ID+"/workspace/sync-to/finalize", SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0"},
+	})
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "workspace sync-to finalize must be blocked: %s", rec.Body.String())
+	code, _, details = decodeAPIErrorEnvelope(t, rec.Body.Bytes())
+	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
+	assert.Equal(t, store.LimitLLMTokensPerProjectDay, details["limit"])
+	assert.Len(t, disp.dispatchedAgents, dispatchedBefore)
 
 	// 7. Reincarnate -> 429 budget_exhausted, running agent stays running.
 	if proj.Labels == nil {
@@ -549,6 +635,58 @@ func TestTokenBudgetIngestNotice(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.False(t, strings.Contains(rec.Body.String(), "budget_notice"))
+
+	// 7. O3: User-scope heartbeat fallback (0 events, cold attrCache -> ResolveBillingUserID):
+	//    returns user-scope warn notice.
+	billingUser := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "notice-user@example.com",
+		DisplayName: "Notice User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, billingUser))
+	createTokenLimitBinding(t, s, store.LimitLLMTokensPerUserDay,
+		store.EntitlementSubjectUser, billingUser.ID, store.QuotaScopeSystem, "", 1000, store.TokenActionPauseNew)
+	// Seed user-scope counter to 600/1000 (60% -> warn) and evaluate it.
+	ingestTestTokens(t, s, proj.ID, tbStrPtr(billingUser.ID), now, 600, false)
+	srv.TokenBudgetEvaluator().EvaluateIngestedEvents(ctx, []*store.UsageEvent{
+		{ProjectID: proj.ID, BillingUserID: tbStrPtr(billingUser.ID), EventTS: now},
+	})
+
+	// Send an empty heartbeat from a fresh agent owned by billingUser (no prior
+	// ingest events, so attrCache has no entry and the handler must resolve
+	// billingUser via ResolveBillingUserID).
+	userAg := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "user-notice-hb-ag",
+		Name:      "user-notice-hb-ag",
+		ProjectID: proj.ID,
+		OwnerID:   billingUser.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, userAg))
+	userRunID := "run-user-notice-1"
+	_, err = s.SetAgentRunID(ctx, userAg.ID, userRunID, nil)
+	require.NoError(t, err)
+	userTok := srv.generateRecordedAgentToken(t, userAg.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	rec = doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(userAg.ID), userTok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{},
+		RunID:         userRunID,
+		ProducerEpoch: "ep-user-1",
+		ProducerSeq:   1,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	resp = telemetrycontract.UsageIngestResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.BudgetNotice, "heartbeat fallback must surface user-scope warn notice")
+	assert.Equal(t, store.UsageBudgetStateWarn, resp.BudgetNotice.State)
+	assert.Equal(t, store.UsageScopeKindUser, resp.BudgetNotice.ScopeKind)
+	assert.Equal(t, store.LimitLLMTokensPerUserDay, resp.BudgetNotice.Limit)
+	assert.Equal(t, int64(600), resp.BudgetNotice.Consumed)
+	assert.Equal(t, int64(1000), resp.BudgetNotice.Max)
+	assert.Equal(t, store.TokenActionPauseNew, resp.BudgetNotice.TokenAction)
 }
 
 func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
@@ -875,4 +1013,190 @@ func TestTokenBudgetAdmission_ReincarnateHarnessSwitch(t *testing.T) {
 		"harnessConfig": "hc-measured",
 	})
 	require.Equal(t, http.StatusAccepted, rec.Code, "switching unmeasured -> measured must be admitted: %s", rec.Body.String())
+}
+
+// TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity pins R1: the exact set
+// of (limit, scopeKind, scopeID, projectScopeID) evaluated by
+// EvaluateIngestedEventsWithNotice must equal the set checked by
+// IsScopeExhaustedForAction for both principal-less and billing-user events.
+func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	srv, s, _, _, _ := setupBudgetAdmissionServer(t, now)
+	eval := srv.TokenBudgetEvaluator()
+
+	type scopeTuple struct {
+		limitName      string
+		scopeKind      string
+		scopeID        string
+		projectScopeID string
+	}
+
+	limitIDToName := make(map[string]string, 6)
+	for _, name := range []string{
+		store.LimitLLMTokensPerProjectDay,
+		store.LimitLLMTokensPerProjectMonth,
+		store.LimitLLMTokensPerUserDay,
+		store.LimitLLMTokensPerUserMonth,
+		store.LimitLLMTokensPerUserProjectDay,
+		store.LimitLLMTokensPerUserProjectMonth,
+	} {
+		def, err := s.GetLimitDefinitionByName(ctx, name)
+		require.NoError(t, err)
+		limitIDToName[def.ID] = name
+	}
+
+	seedAllSixCaps := func(projID, userID string) {
+		createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
+			store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, projID, 10000, store.TokenActionPauseNew)
+		createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectMonth,
+			store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, projID, 100000, store.TokenActionPauseNew)
+		if userID != "" {
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerUserDay,
+				store.EntitlementSubjectUser, userID, store.QuotaScopeSystem, "", 10000, store.TokenActionPauseNew)
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerUserMonth,
+				store.EntitlementSubjectUser, userID, store.QuotaScopeSystem, "", 100000, store.TokenActionPauseNew)
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerUserProjectDay,
+				store.EntitlementSubjectUser, userID, store.QuotaScopeProject, projID, 10000, store.TokenActionPauseNew)
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerUserProjectMonth,
+				store.EntitlementSubjectUser, userID, store.QuotaScopeProject, projID, 100000, store.TokenActionPauseNew)
+		}
+	}
+
+	collectPersistedScopes := func(projID, userID string) map[scopeTuple]bool {
+		out := make(map[scopeTuple]bool)
+		norm := func(v string) string {
+			switch v {
+			case projID:
+				return "PROJ"
+			case userID:
+				if userID != "" {
+					return "USER"
+				}
+			}
+			return v
+		}
+		collect := func(kind, scopeID, projScopeID string) {
+			rows, err := s.ListUsageBudgetStatesForScope(ctx, kind, scopeID, projScopeID, now)
+			require.NoError(t, err)
+			for _, r := range rows {
+				out[scopeTuple{
+					limitName:      limitIDToName[r.LimitDefinitionID],
+					scopeKind:      r.ScopeKind,
+					scopeID:        norm(r.ScopeID),
+					projectScopeID: norm(r.ProjectScopeID),
+				}] = true
+			}
+		}
+		collect(store.UsageScopeKindProject, projID, "")
+		if userID != "" {
+			collect(store.UsageScopeKindUser, userID, "")
+			collect(store.UsageScopeKindUserProject, userID, projID)
+		}
+		return out
+	}
+
+	for _, tc := range []struct {
+		name      string
+		withUser  bool
+		wantCount int
+	}{
+		{name: "principal-less", withUser: false, wantCount: 2},
+		{name: "with-billing-user", withUser: true, wantCount: 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projIngest := &store.Project{ID: uuid.NewString(), Name: "parity-ingest-" + tc.name, Slug: "parity-ingest-" + tc.name}
+			projAdmit := &store.Project{ID: uuid.NewString(), Name: "parity-admit-" + tc.name, Slug: "parity-admit-" + tc.name}
+			require.NoError(t, s.CreateProject(ctx, projIngest))
+			require.NoError(t, s.CreateProject(ctx, projAdmit))
+
+			var userIngest, userAdmit string
+			var userIngestPtr *string
+			if tc.withUser {
+				userIngest = uuid.NewString()
+				userAdmit = uuid.NewString()
+				userIngestPtr = &userIngest
+			}
+
+			seedAllSixCaps(projIngest.ID, userIngest)
+			seedAllSixCaps(projAdmit.ID, userAdmit)
+
+			// Under-cap consumption so IsScopeExhaustedForAction evaluates every spec without short-circuiting.
+			ingestTestTokens(t, s, projIngest.ID, userIngestPtr, now, 100, false)
+			if tc.withUser {
+				ingestTestTokens(t, s, projAdmit.ID, &userAdmit, now, 100, false)
+			} else {
+				ingestTestTokens(t, s, projAdmit.ID, nil, now, 100, false)
+			}
+
+			_ = eval.EvaluateIngestedEventsWithNotice(ctx, []*store.UsageEvent{
+				{ProjectID: projIngest.ID, BillingUserID: userIngestPtr, EventTS: now},
+			})
+			status, err := eval.IsScopeExhaustedForAction(ctx, projAdmit.ID, userAdmit, now, store.TokenActionPauseNew)
+			require.NoError(t, err)
+			require.False(t, status.Exhausted)
+
+			ingestScopes := collectPersistedScopes(projIngest.ID, userIngest)
+			admitScopes := collectPersistedScopes(projAdmit.ID, userAdmit)
+			assert.Len(t, ingestScopes, tc.wantCount)
+			assert.Equal(t, ingestScopes, admitScopes, "ingest evaluator and admission check must evaluate identical scope sets")
+		})
+	}
+}
+
+// exhaustOnStopDispatcher wraps reincarnateTestDispatcher and exhausts a
+// project's token budget during DispatchAgentStop to exercise the worker-side
+// TOCTOU re-check in runReincarnationWorker (R2).
+type exhaustOnStopDispatcher struct {
+	*reincarnateTestDispatcher
+	onStop func()
+}
+
+func (d *exhaustOnStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	if d.onStop != nil {
+		d.onStop()
+	}
+	return d.reincarnateTestDispatcher.DispatchAgentStop(ctx, agent)
+}
+
+func TestTokenBudgetAdmission_ReincarnateWorkerRecheck(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	baseDisp := newReincarnateTestDispatcher()
+	srv, s, proj, brk := setupReincarnateTestServer(t, baseDisp)
+	setTokenBudgetExperimentsForTest(t, srv, true, true, true)
+	srv.reconcileTokenBudgets(ctx)
+	srv.TokenBudgetEvaluator().nowFn = func() time.Time { return now }
+
+	// Cap 500 with 0 tokens consumed initially -> HTTP handler gate passes.
+	createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
+		store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, proj.ID, 500, store.TokenActionPauseNew)
+
+	// Exhaust the budget during the worker's Stop step so the worker's
+	// pre-start re-check in runReincarnationWorker blocks DispatchAgentStart.
+	disp := &exhaustOnStopDispatcher{
+		reincarnateTestDispatcher: baseDisp,
+		onStop: func() {
+			ingestTestTokens(t, s, proj.ID, nil, now, 700, false)
+		},
+	}
+	srv.SetDispatcher(disp)
+
+	agent := newReincarnateTestAgent(t, s, proj, brk, nil)
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{Image: "patched-image:v9"})
+	require.Equal(t, http.StatusAccepted, rec.Code, "handler must admit while under cap: %s", rec.Body.String())
+
+	settled := waitForReincarnationSettled(t, s, agent.ID)
+	assert.Equal(t, store.AgentReincarnationStateFailed, settled.State)
+	assert.Contains(t, settled.Error, "start blocked by token budget:")
+
+	stops, reprovisions, starts := dispatcherCalls(baseDisp)
+	assert.Equal(t, 1, stops)
+	// 1 reprovision for gen N+1 + 1 rollback re-render to gen N by failAfterProvision.
+	assert.Equal(t, 2, reprovisions)
+	assert.Zero(t, starts, "worker budget re-check must prevent DispatchAgentStart")
+
+	got, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, string(state.PhaseRunning), got.Phase, "agent must remain stopped after worker budget refusal")
 }
