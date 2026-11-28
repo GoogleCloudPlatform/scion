@@ -1190,13 +1190,13 @@ func (s *Server) resolveAssertedDirectUserRecipient(ctx context.Context, w http.
 // checkDirectThreadIDMatchesDMKey applies the ptone/scion#2211 direct-conversation
 // thread_id check: when the caller supplied a dm:-prefixed thread_id
 // alongside an asserted direct conversation, that thread_id must equal the
-// conversation's own DM key (ExternalRef) — a mismatched dm: thread_id names
-// a different conversation than the one the caller just asserted. A no-op
-// when thread_id is empty (still backfilled elsewhere) or not dm:-prefixed
-// (some other addressing scheme). Shared by both the conversation_ref and
-// the raw conversation_id paths, so the two behave identically.
+// conversation's own DM key (ExternalRef) — a mismatched or whitespace-padded
+// dm: thread_id is rejected. A no-op when thread_id is empty (still backfilled
+// elsewhere) or not dm:-prefixed after trimming whitespace. Shared by both the
+// conversation_ref and the raw conversation_id paths, so the two behave
+// identically.
 func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, threadID string) error {
-	if !strings.HasPrefix(threadID, "dm:") {
+	if !strings.HasPrefix(strings.TrimSpace(threadID), "dm:") {
 		return nil
 	}
 	if threadID != externalRef {

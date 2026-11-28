@@ -336,3 +336,120 @@ func TestGroupConversation_ValidThreadID_StillAccepted(t *testing.T) {
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	})
 }
+
+func TestDirectConversation_WhitespacePaddedDMThreadID_Rejected(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+	setupWebChannelBroker(t, srv, s, project)
+
+	otherUser := &store.User{
+		ID:          tid("direct-ws-dm-other-user"),
+		Email:       "direct-ws-dm-other@example.com",
+		DisplayName: "Other Direct WS User",
+	}
+	require.NoError(t, s.CreateUser(ctx, otherUser))
+
+	dmKey := mustDMKey(t, "agent", agent.ID, "user", user.ID)
+	otherDMKey := mustDMKey(t, "agent", agent.ID, "user", otherUser.ID)
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name string
+		req  OutboundMessageRequest
+	}{
+		{
+			name: "conv_ref_leading_space_mismatched_dm_key",
+			req: OutboundMessageRequest{
+				Msg:             "direct conv ref leading space mismatched",
+				ConversationRef: "conv:" + dmConv.ID,
+				ThreadID:        " " + otherDMKey,
+				Channel:         "web",
+			},
+		},
+		{
+			name: "conv_ref_surrounding_whitespace_mismatched_dm_key",
+			req: OutboundMessageRequest{
+				Msg:             "direct conv ref surrounding whitespace mismatched",
+				ConversationRef: "conv:" + dmConv.ID,
+				ThreadID:        " \t" + otherDMKey + "\n",
+				Channel:         "web",
+			},
+		},
+		{
+			name: "conv_ref_leading_space_matching_dm_key",
+			req: OutboundMessageRequest{
+				Msg:             "direct conv ref leading space matching",
+				ConversationRef: "conv:" + dmConv.ID,
+				ThreadID:        " " + dmKey,
+				Channel:         "web",
+			},
+		},
+		{
+			name: "raw_conv_id_leading_space_mismatched_dm_key",
+			req: OutboundMessageRequest{
+				Recipient:      "user:" + user.Email,
+				RecipientID:    user.ID,
+				Msg:            "direct raw conv id leading space mismatched",
+				ConversationID: dmConv.ID,
+				ThreadID:       " " + otherDMKey,
+				Channel:        "web",
+			},
+		},
+		{
+			name: "raw_conv_id_leading_space_matching_dm_key",
+			req: OutboundMessageRequest{
+				Recipient:      "user:" + user.Email,
+				RecipientID:    user.ID,
+				Msg:            "direct raw conv id leading space matching",
+				ConversationID: dmConv.ID,
+				ThreadID:       " " + dmKey,
+				Channel:        "web",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postOutboundRequest(t, srv, project.ID, agent.ID, tc.req)
+			require.Equal(t, http.StatusBadRequest, rr.Code,
+				"%s: whitespace-padded dm: thread_id on direct conversation must be rejected 400: %s",
+				tc.name, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), "does not match the direct conversation's key")
+
+			msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, msgs.Items, "rejected send must not persist a message")
+		})
+	}
+}
+
+func TestDerivedGroupThread_WhitespacePaddedDMThreadID_Rejected(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+	setupWebChannelBroker(t, srv, s, project)
+
+	dmKey := mustDMKey(t, "agent", agent.ID, "user", user.ID)
+
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		Recipient:   "user:" + user.Email,
+		RecipientID: user.ID,
+		Msg:         "derived group thread with whitespace-padded dm thread_id",
+		ThreadID:    " " + dmKey,
+		Channel:     "web",
+	})
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"derived group thread with whitespace-padded dm: thread_id must be rejected 400: %s",
+		rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "non-DM conversation")
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "rejected send must not persist a message")
+}
