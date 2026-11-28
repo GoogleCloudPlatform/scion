@@ -177,6 +177,7 @@ describe('scion-page-agents agent badges', () => {
     const el = await mount([agent('a1', { project: 'One', runtimeBrokerId: 'b1' })]);
 
     const card = el.shadowRoot!.querySelector('.agent-card')!;
+    expect(card).not.toBeNull();
     const name = card.querySelector('h3')!;
     const status = card.querySelector('.agent-header > scion-status-badge')!;
     const meta = card.querySelector('.agent-meta')!;

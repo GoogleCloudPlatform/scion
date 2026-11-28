@@ -382,7 +382,7 @@ export class ScionPageAgents extends LitElement {
          flex:1 matters as much as min-width:0. With only min-width:0 the
          column sizes to its content and, because the badges never shrink,
          absorbs the entire overflow — collapsing to a few characters and
-         wrapping the meta lines into a narrow ribbon. Growing into the space
+         wrapping the name into a narrow ribbon. Growing into the space
          the badges leave keeps names on as few lines as possible. */
       .agent-header > div {
         /* Full-width basis, so the badges always wrap to their own row rather
