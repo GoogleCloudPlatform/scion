@@ -3351,6 +3351,11 @@ type Server struct {
 	// answer is written. Only tests set it, on their own Server.
 	legacyPortTunnelReturnedTestHook func()
 
+	// mintCandidatesTestHook, when non-nil under a test binary, adjusts
+	// the candidate scopes returned by mintCandidateScopes inside
+	// AuthorizeAgentToken. Only tests set it, on their own Server.
+	mintCandidatesTestHook func(agent *store.Agent, candidates []AgentTokenScope) []AgentTokenScope
+
 	// hubRestartReservedAt is the UnixNano time Restart Hub reserved the
 	// hub-binary exclusive group (0: none); see reserveHubRestart.
 	hubRestartReservedAt atomic.Int64

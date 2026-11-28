@@ -1193,7 +1193,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	if len(fuseMounts) > 0 {
 		mountCmds := strings.Join(fuseMounts, " && ")
-		wrapped := fmt.Sprintf(`%s && exec sh -c "$SCION_START_CMD"`, mountCmds)
+		wrapped := fmt.Sprintf("%s && %s", mountCmds, state.FUSEStartCmdExecSuffix)
 		args = append(args, "sh", "-c", wrapped)
 	} else {
 		args = append(args, "sh", "-c", tmuxCmd)

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -122,6 +123,9 @@ func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (A
 	}
 
 	candidates := s.authzService.mintCandidateScopes(agent)
+	if hook := s.mintCandidatesTestHook; hook != nil && testing.Testing() {
+		candidates = hook(agent, candidates)
+	}
 	// A natively assigned Cloud Run agent gets its GCP tokens from its
 	// instance, so its token carries no GCP token scope. A lookup fault
 	// grants nothing.
@@ -135,6 +139,11 @@ func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (A
 			return AgentTokenGrant{}, err
 		}
 		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
+	}
+	// Fail-closed post-condition (ptone/scion#9743): a shell execution
+	// container token must never carry any scope outside shellRuntimeScopes.
+	if isShellAgent(agent) && !scopesSubsetOf(scopes, shellRuntimeScopes) {
+		return AgentTokenGrant{}, fmt.Errorf("%w: shell agent scope cap violated", errMintLookup)
 	}
 	// No grant for an agent that is held or not in good standing
 	// (ptone/scion#3433). A lookup fault grants nothing either.

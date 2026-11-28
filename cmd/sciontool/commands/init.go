@@ -534,6 +534,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// StatusHandler is created so it writes to the correct path.
 	agentHome := resolveAgentHome(targetUID, rootless)
 
+	// Evaluate the shell execution-container isolation predicate once from
+	// PID 1's broker-set environment and pass it explicitly to every step below.
+	shellIsolation := isShellExecContainer(os.Getenv)
+	if shellIsolation {
+		log.Info("Shell execution container detected: enabling workload isolation")
+	}
+
 	// Refuse, before any credential below is written or staged, a start
 	// whose required metadata protection cannot be set up in this
 	// container (see metadataProtectionPreflight). The config is read once
@@ -1200,10 +1207,23 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
-	// Write critical environment variables to a shell-sourceable file so that
-	// processes launched by harnesses (which may re-exec with a filtered env)
-	// can recover the full SCION environment. The file is sourced by .bashrc/.zshrc.
-	writeEnvFile(agentHome, targetUID, targetGID)
+	if shellIsolation {
+		// In shell execution containers, remove any stale ~/.scion/scion-env
+		// (so .zshrc never re-injects stripped SCION_* control vars) and seed
+		// ~/.scion/context.yaml if absent so `scion hub auth login` / `scion login`
+		// discovers the Hub with zero flags. Both run before sup.Run.
+		if err := removeEnvFileNoFollow(agentHome); err != nil {
+			log.Error("Failed to remove stale scion-env file (interactive zsh sessions may re-source SCION_* control variables from ~/.scion/scion-env): %v", err)
+		}
+		if err := seedShellCLIContext(agentHome, targetUID, targetGID, os.Getenv); err != nil {
+			log.Error("Failed to seed CLI context: %v", err)
+		}
+	} else {
+		// Write critical environment variables to a shell-sourceable file so that
+		// processes launched by harnesses (which may re-exec with a filtered env)
+		// can recover the full SCION environment. The file is sourced by .bashrc/.zshrc.
+		writeEnvFile(agentHome, targetUID, targetGID)
+	}
 
 	// For execution containers (SCION_HARNESS=shell), write a one-screen MOTD
 	// and login-shell profile snippet so first attach displays usage, S9
@@ -1325,6 +1345,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	config.AuthEnv = resolvedAuthEnv
+	config.WorkloadIsolation = shellIsolation
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown
@@ -1390,8 +1411,18 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// differently keeps a step-line summation from silently double-counting
 	// it.
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
+	supChildArgs := childArgs
+	if shellIsolation {
+		supChildArgs = resolveShellStartCmdArgs(childArgs, os.Getenv)
+		if hasUnresolvedScionEnvRef(supChildArgs) {
+			log.Error("Unresolved $SCION_ or ${SCION_ reference remains in child argv under shell workload isolation; SCION_* variables are stripped so tmux or the workload may not start")
+		}
+	}
+	if beforeSupervisorRunForTest != nil {
+		beforeSupervisorRunForTest(config)
+	}
 	go func() {
-		code, err := sup.Run(ctx, childArgs)
+		code, err := sup.Run(ctx, supChildArgs)
 		exitChan <- struct {
 			code int
 			err  error
@@ -1586,12 +1617,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 					execOpts,
 					os.Getenv).run(ctx)
 
-				// Auto-expose: detect and register listening ports
-				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
-					reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
-					reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
-					go reconciler.Run(ctx)
-					log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+				// Auto-expose: detect and register listening ports (skipped in shell
+				// execution containers: the Hub refuses port exposure and capped
+				// shell tokens lack RegisterPort scope).
+				if !shellIsolation {
+					if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
+						reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
+						reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
+						go reconciler.Run(ctx)
+						log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+					}
 				}
 			}
 
@@ -1654,8 +1689,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			}
 
 			// Serve the delegation socket, through which processes in the
-			// agent make hub requests with a delegation grant.
-			delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
+			// agent make hub requests with a delegation grant. Skipped in shell
+			// execution containers so the workload has no hub-identity surface.
+			if !shellIsolation {
+				delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
+			}
 		} else {
 			log.Debug("Hub client not configured - skipping status report")
 		}
@@ -1726,7 +1764,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 							ChownGID:  targetGID,
 							OnRefreshed: func(newToken string, newExpiry time.Time) {
 								log.Info("GitHub token refreshed, new expiry: %s", newExpiry.Format(time.RFC3339))
-								writeEnvFile(agentHome, targetUID, targetGID)
+								if !shellIsolation {
+									writeEnvFile(agentHome, targetUID, targetGID)
+								}
 							},
 							OnError: func(err error) {
 								log.Error("GitHub token refresh failed: %v", err)

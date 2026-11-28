@@ -127,6 +127,14 @@ const HarnessReadyEnv = "SCION_HARNESS_READY"
 // regardless of SCION_HARNESS or start env (ptone/scion#8812 §3.4 S5).
 const HarnessDeliveryDisabledEnv = "SCION_HARNESS_DELIVERY_DISABLED"
 
+// FUSEStartCmdExecSuffix is the exact trailing shell command emitted by
+// pkg/runtime/common.go (buildCommonRunArgs) when FUSE mounts wrap the tmux
+// start command, and matched by sciontool init's resolveShellStartCmdArgs to
+// resolve SCION_START_CMD from PID 1's environment before workload isolation
+// strips SCION_* variables. Defined once here so runtime and sciontool stay
+// in lockstep.
+const FUSEStartCmdExecSuffix = `exec sh -c "$SCION_START_CMD"`
+
 // HarnessDeliveryDisabled reports whether the broker-written
 // HarnessDeliveryDisabledEnv signal disables message delivery for this
 // container.
@@ -164,6 +172,21 @@ func ReadySpecIsIdle(getenv func(string) string) bool {
 	}
 	spec, err := ParseReadySpecEnv(raw)
 	return err == nil && spec.Strategy == ReadyStrategyIdle
+}
+
+// IsShellExecContainerEnv reports whether the container environment describes
+// a shell execution container. It keys on the broker-written
+// SCION_HARNESS_READY signal (ReadySpecIsIdle) whenever present so start-env
+// SCION_HARNESS cannot spoof or weaken shell-ness, falling back to
+// IsShellHarnessEnv only when SCION_HARNESS_READY is absent (older brokers).
+func IsShellExecContainerEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	if strings.TrimSpace(getenv(HarnessReadyEnv)) != "" {
+		return ReadySpecIsIdle(getenv)
+	}
+	return IsShellHarnessEnv(getenv)
 }
 
 // LivenessHarnessRootDepthEnv names the environment variable a harness

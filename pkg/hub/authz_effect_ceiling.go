@@ -914,7 +914,9 @@ func filterScopes(candidates []AgentTokenScope, chain store.EffectCeiling, sc Sc
 // mintCandidateScopes returns the scopes a mint starts from: the role scopes
 // plus the config-derived scopes from agentRoleAndScopes, de-duplicated.
 // When mintDevAuthOverride is set, a role below full (including none) is
-// raised to full before its scopes are taken.
+// raised to full before its scopes are taken. As the final step, shell
+// execution containers are capped to scopes ∩ shellRuntimeScopes
+// (ptone/scion#9743).
 func (a *AuthzService) mintCandidateScopes(agent *store.Agent) []AgentTokenScope {
 	role, additional := agentRoleAndScopes(agent)
 	if a != nil && a.mintDevAuthOverride && CompareRoles(role, AgentRoleFull) < 0 {
@@ -931,7 +933,7 @@ func (a *AuthzService) mintCandidateScopes(agent *store.Agent) []AgentTokenScope
 			seen[s] = true
 		}
 	}
-	return scopes
+	return capShellRuntimeScopes(agent, scopes)
 }
 
 // ceilingFilteredAgentScopes returns the agent-token scopes a mint or refresh

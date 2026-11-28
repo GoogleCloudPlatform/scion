@@ -889,19 +889,10 @@ func (r *tailRing) finalizeTail() (string, []byte) {
 }
 
 // isShellContainerForExec reports whether this container is a shell execution
-// container for exec-route registration (carry-forward I2). It keys on the
-// broker-written SCION_HARNESS_READY signal (state.ReadySpecIsIdle) whenever
-// present so start-env SCION_HARNESS cannot spoof shell-ness on an LLM agent,
-// falling back to state.IsShellHarnessEnv only when SCION_HARNESS_READY is
-// absent (older brokers).
+// container for exec-route registration (carry-forward I2), delegating to the
+// canonical state.IsShellExecContainerEnv predicate shared with sciontool init.
 func isShellContainerForExec(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	if strings.TrimSpace(getenv(state.HarnessReadyEnv)) != "" {
-		return state.ReadySpecIsIdle(getenv)
-	}
-	return state.IsShellHarnessEnv(getenv)
+	return state.IsShellExecContainerEnv(getenv)
 }
 
 // ExecEnabled reports whether sciontool should register the exec routes:
