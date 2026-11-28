@@ -117,6 +117,9 @@ var prefixSubRouteTable = []prefixSubRouteRow{
 
 	// /api/v1/chat/attachments/
 	{prefix: "/api/v1/chat/attachments/", pattern: "/api/v1/chat/attachments/{id}", methods: []string{http.MethodGet}},
+	{prefix: "/api/v1/chat/attachments/", pattern: "/api/v1/chat/attachments/uploads", methods: []string{http.MethodPost}},
+	{prefix: "/api/v1/chat/attachments/", pattern: "/api/v1/chat/attachments/uploads/{sid}", methods: []string{http.MethodGet, http.MethodPut, http.MethodDelete}},
+	{prefix: "/api/v1/chat/attachments/", pattern: "/api/v1/chat/attachments/uploads/{sid}/complete", methods: []string{http.MethodPost}},
 
 	// /api/v1/chat/conversations/
 	{prefix: "/api/v1/chat/conversations/", pattern: "/api/v1/chat/conversations/{id}/messages", methods: []string{http.MethodGet, http.MethodPost}},
