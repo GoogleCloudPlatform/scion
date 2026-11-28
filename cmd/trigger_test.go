@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -905,7 +906,19 @@ func TestTriggerWebhookCreateHelp_SenderContractAndLimits(t *testing.T) {
 	assert.Contains(t, helpText, "anyone with read access to this project's triggers can read bodies sent here")
 	assert.Contains(t, helpText, "at most 64 KiB by default")
 	assert.Contains(t, helpText, "up to 1 MiB via --max-body")
-	assert.Contains(t, helpText, `openssl dgst -sha256 -hmac "$SECRET"`)
+	assert.Contains(t, helpText, `openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}'`)
+	assert.Equal(t, 3, strings.Count(helpText, `openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}'`),
+		"all three signature-mode examples (scion_v1, github_v1, stripe_v1) must use the portable LibreSSL/OpenSSL awk '{print $NF}' form")
+	assert.NotContains(t, helpText, `-r | awk '{print $1}'`,
+		"help examples must not use openssl -r | awk '{print $1}', which fails on macOS LibreSSL")
+	assert.Contains(t, helpText, `-H "X-Scion-Event: ${EVENT}"`,
+		"scion_v1 curl example must send X-Scion-Event so setting EVENT to a non-empty value matches the signed canonical string")
+	assert.Contains(t, helpText, `-H "X-Scion-Subject: ${SUBJECT}"`,
+		"scion_v1 curl example must send X-Scion-Subject matching what is signed")
+	assert.Contains(t, helpText, `EVENT=""`)
+	assert.Contains(t, helpText, `SUBJECT=""`)
+	assert.Contains(t, helpText, `# X-Scion-Event: <name> sets event.type=webhook.<name> (default webhook.received rules then stop matching; use --type webhook.<name>)`)
+	assert.Contains(t, helpText, `# X-Scion-Subject is stored as event.subject=webhook:<endpoint-id>/<subject>`)
 	assert.Contains(t, helpText, `printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl`)
 	assert.NotContains(t, helpText, `SIGNED="$(`, "help example must pipe directly into openssl so command substitution never strips trailing newlines from BODY")
 
@@ -975,6 +988,121 @@ func TestTriggerWebhookCreateHelp_CurlExampleFiresDefaultTrigger(t *testing.T) {
 
 	flatHelp := strings.Join(strings.Fields(helpText), " ")
 	assert.Contains(t, flatHelp, "X-Scion-Event: <name> sets event.type to webhook.<name>; match it with scion trigger create --type webhook.<name>")
+}
+
+func TestTriggerWebhookCreateHelp_ShellSnippetsAcceptedByVerifiers(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("openssl not available")
+	}
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("awk not available")
+	}
+
+	helpText := triggerWebhookCreateCmd.Long
+	sigLines := regexp.MustCompile(`(?m)^\s*(SIG="\$\([^\n]*openssl[^\n]*\)")`).FindAllStringSubmatch(helpText, -1)
+	require.Len(t, sigLines, 3, "expected 3 SIG= openssl lines in triggerWebhookCreateCmd.Long (scion_v1, github_v1, stripe_v1)")
+
+	now := time.Date(2026, 11, 28, 5, 0, 0, 0, time.UTC)
+	ts := strconv.FormatInt(now.Unix(), 10)
+	secret := "dGVzdC1zZWNyZXQtYmFzZTY0dXJsLWFzY2lpLWtleQ"
+	delivery := "9E9EC071-E9D4-47F0-9629-A3D2AD96424C" // uppercase UUID (macOS uuidgen)
+	subject := "service/api"
+
+	runSigLine := func(sigLine string, env []string) string {
+		t.Helper()
+		cmd := exec.Command("bash", "-c", sigLine+"\nprintf '%s' \"$SIG\"")
+		cmd.Env = append(os.Environ(), env...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "shell pipeline failed: %s", string(out))
+		return string(out)
+	}
+
+	// 1. scion_v1: empty and non-empty EVENT and SUBJECT, plus explicit empty headers == absent
+	for _, tc := range []struct {
+		name               string
+		event              string
+		subject            string
+		body               string
+		setEmptyHeadersRaw bool
+	}{
+		{name: "empty_event_and_subject_omitted", event: "", subject: "", body: `{"status":"ok","commit":"abc1234"}`},
+		{name: "empty_event_and_subject_explicit_empty", event: "", subject: "", body: `{"status":"ok","commit":"abc1234"}`, setEmptyHeadersRaw: true},
+		{name: "custom_event_empty_subject", event: "testevent", subject: "", body: `{"status":"ok","commit":"abc1234"}`},
+		{name: "empty_event_custom_subject", event: "", subject: subject, body: `{"status":"ok","commit":"abc1234"}`},
+		{name: "custom_event_and_subject_trailing_newline_body", event: "deploy.finished", subject: subject, body: "{\"status\":\"ok\"}\n"},
+	} {
+		t.Run("scion_v1/"+tc.name, func(t *testing.T) {
+			sig := runSigLine(sigLines[0][1], []string{
+				"SECRET=" + secret,
+				"TS=" + ts,
+				"DELIVERY=" + delivery,
+				"EVENT=" + tc.event,
+				"SUBJECT=" + tc.subject,
+				"BODY=" + tc.body,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/550e8400-e29b-41d4-a716-446655440000", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(trigger.HeaderSignature, fmt.Sprintf("t=%s,v1=%s", ts, sig))
+			req.Header.Set(trigger.HeaderDelivery, delivery)
+			if tc.event != "" || tc.setEmptyHeadersRaw {
+				// curl omits -H "X-Scion-Event: ${EVENT}" when EVENT is empty; also test explicit empty header equivalence.
+				req.Header.Set(trigger.HeaderEvent, tc.event)
+			}
+			if tc.subject != "" || tc.setEmptyHeadersRaw {
+				req.Header.Set(trigger.HeaderSubject, tc.subject)
+			}
+
+			v := &trigger.ScionV1Verifier{Now: now, ReplayWindow: trigger.ReplayWindow}
+			require.NoError(t, v.Precheck(req))
+			vh, err := v.Verify(req, []byte(tc.body), []string{secret})
+			require.NoError(t, err)
+			assert.Equal(t, tc.event, vh.Event)
+			assert.Equal(t, delivery, vh.Delivery)
+			assert.Equal(t, tc.subject, vh.Subject)
+		})
+	}
+
+	// 2. github_v1
+	t.Run("github_v1", func(t *testing.T) {
+		body := `{"action":"opened","repository":{"full_name":"org/repo"}}`
+		sig := runSigLine(sigLines[1][1], []string{
+			"SECRET=" + secret,
+			"BODY=" + body,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/550e8400-e29b-41d4-a716-446655440000", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderGitHubSignature256, "sha256="+sig)
+		req.Header.Set(trigger.HeaderGitHubEvent, "issues")
+		req.Header.Set(trigger.HeaderGitHubDelivery, delivery)
+
+		v := &trigger.GitHubV1Verifier{}
+		require.NoError(t, v.Precheck(req))
+		vh, err := v.Verify(req, []byte(body), []string{secret})
+		require.NoError(t, err)
+		assert.Equal(t, "issues", vh.Event)
+		assert.Equal(t, delivery, vh.Delivery)
+	})
+
+	// 3. stripe_v1
+	t.Run("stripe_v1", func(t *testing.T) {
+		body := `{"id":"evt_123","type":"invoice.payment_succeeded","data":{"object":{"id":"in_456"}}}`
+		sig := runSigLine(sigLines[2][1], []string{
+			"SECRET=" + secret,
+			"TS=" + ts,
+			"BODY=" + body,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/550e8400-e29b-41d4-a716-446655440000", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderStripeSignature, fmt.Sprintf("t=%s,v1=%s", ts, sig))
+
+		v := &trigger.StripeV1Verifier{Now: now, ReplayWindow: trigger.ReplayWindow}
+		require.NoError(t, v.Precheck(req))
+		_, err := v.Verify(req, []byte(body), []string{secret})
+		require.NoError(t, err)
+	})
 }
 
 func TestTriggerHistoryCLI_NameAndUUIDResolutionFlagsAndFormats(t *testing.T) {
