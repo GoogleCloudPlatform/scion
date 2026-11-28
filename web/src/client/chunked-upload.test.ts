@@ -687,6 +687,60 @@ describe('chunked-upload', () => {
     expect(putSizes).toEqual([20, 10, 10]);
   });
 
+  it('slow-link adaptation never drops non-final chunks below the 1 MiB floor', async () => {
+    let clock = 0;
+    _setUploadTestConfig({
+      retryDelayMs: 0,
+      maxBackoffMs: 0,
+      minChunkBytes: MIN_CHUNK_BYTES,
+      slowLinkTargetMs: 30_000,
+      now: () => clock,
+    });
+    // Server chunkBytes = 2 MiB; file = 3 MiB + 123 B.
+    // First chunk of 2 MiB takes 3,000 s (100x slower than 30 s target) →
+    // raw proportional target would be ~20 KiB, which must clamp at 1 MiB.
+    const twoMiB = 2 * MIN_CHUNK_BYTES;
+    const tail = 123;
+    const hub = createFakeHub({
+      chunkBytes: twoMiB,
+      now: () => clock,
+      onChunk: () => {
+        clock += 3_000_000;
+      },
+    });
+    const file = makeFile(twoMiB + MIN_CHUNK_BYTES + tail);
+    const res = await uploadFileChunked('/api/v1/projects/p1/workspace/uploads', file);
+    expect(res.ok).toBe(true);
+
+    const putSizes = hub.calls.filter((c) => c.method === 'PUT').map((c) => c.size);
+    expect(putSizes).toEqual([twoMiB, MIN_CHUNK_BYTES, tail]);
+  });
+
+  it('treats 400 chunk_too_small as a terminal client error without retrying', async () => {
+    const hub = createFakeHub({
+      chunkBytes: 10,
+      failChunkCalls: {
+        1: {
+          kind: 'status',
+          status: 400,
+          code: 'chunk_too_small',
+          message: 'Non-final chunk size is below minimum',
+          details: { minChunkBytes: MIN_CHUNK_BYTES },
+        },
+      },
+    });
+    let err: unknown;
+    try {
+      await uploadFileChunked('/api/v1/projects/p1/workspace/uploads', makeFile(20));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(UploadHttpError);
+    expect((err as UploadHttpError).status).toBe(400);
+    expect((err as UploadHttpError).code).toBe('chunk_too_small');
+    expect(hub.calls.filter((c) => c.method === 'PUT').length).toBe(1);
+  });
+
   it('uploadWorkspaceFiles uses single multipart request when ≤ chunkBytes, chunked when larger, and falls back on proxy 413', async () => {
     // Small file ≤ chunkBytes (2048) → single POST to /files
     const hub1 = createFakeHub({ chunkBytes: 2048 });

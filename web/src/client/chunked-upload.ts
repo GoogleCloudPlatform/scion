@@ -235,6 +235,14 @@ async function toUploadError(res: Response): Promise<UploadHttpError> {
       info.details
     );
   }
+  if (info.code === 'chunk_too_small') {
+    return new UploadHttpError(
+      info.message || 'Upload chunk is below the server minimum chunk size.',
+      res.status,
+      info.code,
+      info.details
+    );
+  }
   return new UploadHttpError(
     info.message || `Upload failed: HTTP ${res.status}`,
     res.status,
