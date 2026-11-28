@@ -36,12 +36,12 @@ import (
 // emit bare UUIDs.
 func TestResolveConversationRef_AcceptsBareUUID(t *testing.T) {
 	const convID = "69e36cbf-69ac-4782-8ec1-e0604abeb687"
-	got, err := resolveConversationRef(context.Background(), nil, convID)
+	got, err := resolveConversationRef(context.Background(), nil, "", convID)
 	require.NoError(t, err)
 	assert.Equal(t, convID, got)
 
 	// Uppercase UUIDs normalize cleanly too.
-	gotUpper, err := resolveConversationRef(context.Background(), nil, strings.ToUpper(convID))
+	gotUpper, err := resolveConversationRef(context.Background(), nil, "", strings.ToUpper(convID))
 	require.NoError(t, err)
 	assert.Equal(t, convID, gotUpper)
 }
@@ -51,16 +51,16 @@ func TestResolveConversationRef_AcceptsBareUUID(t *testing.T) {
 // unrecognized or truncated references suggest `conv:<uuid>` and state that
 // conversation IDs must be full 36-character UUIDs.
 func TestResolveConversationRef_InvalidAndShortRefsHintConvPrefix(t *testing.T) {
-	_, shortErr := resolveConversationRef(context.Background(), nil, "69e36cbf")
+	_, shortErr := resolveConversationRef(context.Background(), nil, "", "69e36cbf")
 	require.Error(t, shortErr)
 	assert.Contains(t, shortErr.Error(), "conv:<uuid>")
 	assert.Contains(t, shortErr.Error(), "36-character UUID")
 
-	_, shortPrefixedErr := resolveConversationRef(context.Background(), nil, "conv:69e36cbf")
+	_, shortPrefixedErr := resolveConversationRef(context.Background(), nil, "", "conv:69e36cbf")
 	require.Error(t, shortPrefixedErr)
 	assert.Contains(t, shortPrefixedErr.Error(), "36-character UUID")
 
-	_, otherErr := resolveConversationRef(context.Background(), nil, "not_a_valid_ref")
+	_, otherErr := resolveConversationRef(context.Background(), nil, "", "not_a_valid_ref")
 	require.Error(t, otherErr)
 	assert.Contains(t, otherErr.Error(), "conv:<uuid>")
 }
