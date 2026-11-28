@@ -158,6 +158,7 @@ const USED_ICONS = [
   'bell-fill',
   'key',
   'keyboard',
+  'layout-three-columns',
   'lightbulb',
   'lightning-charge',
   'link',

@@ -577,6 +577,28 @@ func TestTerminalKeyBar_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestAgentsColumnPicker_RegisteredDefaultOff pins web.agents_column_picker
+// (ptone/scion#9577): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestAgentsColumnPicker_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentsColumnPicker)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentsColumnPicker)
+	}
+	if entry.Name != "web.agents_column_picker" {
+		t.Errorf("Name = %q, want web.agents_column_picker", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#9577" || entry.Owner != "web" || entry.ReviewBy != "2027-02-27" {
+		t.Errorf("agents column picker experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
 // (ptone/scion#4595): it gates the hub's attachment upload path and the web
 // surfaces of later phases, so it has both layers, and it ships off.

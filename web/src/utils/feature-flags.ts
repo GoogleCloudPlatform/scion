@@ -563,7 +563,7 @@ export function telemetryEnforcementEnabled(): boolean {
 /**
  * Never-suspend agents (lifecycle.never_suspend, ptone/scion#9178):
  * gates the Never suspend create checkbox, badge, edit toggle, force-suspend
- * confirmation dialog, and hub-wide agent list filter/column. Presentation
+ * confirmation dialog, and hub-wide agent list Traits pill. Presentation
  * only: the hub enforces the experiment on create, PATCH, suspend, and
  * auto-suspend sweeps. Default OFF.
  */
@@ -572,4 +572,16 @@ export const NEVER_SUSPEND_FLAG = 'lifecycle.never_suspend';
 /** Whether Never-suspend UI surfaces are enabled in this session. */
 export function neverSuspendEnabled(): boolean {
   return isFeatureEnabled(NEVER_SUSPEND_FLAG);
+}
+
+/**
+ * Agents list column picker (web.agents_column_picker, ptone/scion#9577):
+ * shows the Columns visibility picker on the hub-wide and project agents list
+ * tables, persisted per browser in localStorage. Presentation only. Default OFF.
+ */
+export const AGENTS_COLUMN_PICKER_FLAG = 'web.agents_column_picker';
+
+/** Whether the agents list column picker is enabled in this session. */
+export function agentsColumnPickerEnabled(): boolean {
+  return isFeatureEnabled(AGENTS_COLUMN_PICKER_FLAG);
 }

@@ -43,6 +43,16 @@ import {
 } from '../../shared/types.js';
 
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
+import {
+  AGENT_COLUMNS,
+  defaultVisibleAgentColumns,
+  loadVisibleAgentColumns,
+  saveVisibleAgentColumns,
+  toggleAgentColumn,
+  type AgentColumnDef,
+  type AgentColumnId,
+} from '../../shared/agent-columns.js';
+import { renderColumnPicker } from '../shared/column-picker.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { getMessageModeDisplay } from '../../shared/message-mode.js';
 import {
@@ -87,6 +97,7 @@ import { agentBadges } from '../shared/agent-badges.js';
 import {
   AGENT_BADGES_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
+  agentsColumnPickerEnabled,
   isFeatureEnabled,
   neverSuspendEnabled,
 } from '../../utils/feature-flags.js';
@@ -283,6 +294,12 @@ export class ScionPageAgents extends LitElement {
 
   @state()
   private sortDir: SortDir = 'desc';
+
+  /** Visible columns for the hub-wide agents table, lazily loaded under `scion-columns-agents` when enabled. */
+  @state()
+  private visibleColumns: Set<AgentColumnId> = defaultVisibleAgentColumns();
+
+  private visibleColumnsLoaded = false;
 
   @state()
   private quickMessageAgentId = '';
@@ -1571,6 +1588,35 @@ export class ScionPageAgents extends LitElement {
     return this.sortField === field ? (this.sortDir === 'asc' ? '▲' : '▼') : '▲';
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (agentsColumnPickerEnabled() && !this.visibleColumnsLoaded) {
+      this.visibleColumnsLoaded = true;
+      this.visibleColumns = loadVisibleAgentColumns();
+    }
+  }
+
+  private onToggleColumn(id: AgentColumnId): void {
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = toggleAgentColumn(this.visibleColumns, id);
+    saveVisibleAgentColumns(this.visibleColumns);
+  }
+
+  private resetVisibleColumns(): void {
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = defaultVisibleAgentColumns();
+    saveVisibleAgentColumns(this.visibleColumns);
+  }
+
+  private renderColumnPicker(): TemplateResult {
+    return renderColumnPicker({
+      columns: AGENT_COLUMNS,
+      visible: this.visibleColumns,
+      onToggle: (id) => this.onToggleColumn(id),
+      onReset: () => this.resetVisibleColumns(),
+    });
+  }
+
   override render() {
     return html`
       <div class="header">
@@ -1698,13 +1744,6 @@ export class ScionPageAgents extends LitElement {
     const onPhaseClick = (phase: AgentPhase | ''): void => {
       this.setChipInQuery('phase', phase);
     };
-    const neverSuspendOn = neverSuspendEnabled();
-    const activePolicy = neverSuspendOn
-      ? getActiveSingleKeyValue(this.filterQueryText, 'suspendPolicy', AGENTS_FILTER_SCHEMA)
-      : '';
-    const onPolicyClick = (policy: '' | 'never' | 'auto'): void => {
-      this.setChipInQuery('suspendPolicy', policy);
-    };
 
     return html`
       <div class="filter-bar">
@@ -1744,33 +1783,6 @@ export class ScionPageAgents extends LitElement {
             Error
           </button>
         </div>
-        ${neverSuspendOn
-          ? html`
-              <span class="label">Policy:</span>
-              <div class="scope-toggle" data-testid="suspend-policy-filter">
-                <button
-                  class=${activePolicy === '' ? 'active' : ''}
-                  @click=${() => onPolicyClick('')}
-                >
-                  All
-                </button>
-                <button
-                  class=${activePolicy === 'never' ? 'active' : ''}
-                  data-testid="filter-suspend-policy-never"
-                  @click=${() => onPolicyClick('never')}
-                >
-                  Never suspend
-                </button>
-                <button
-                  class=${activePolicy === 'auto' ? 'active' : ''}
-                  data-testid="filter-suspend-policy-auto"
-                  @click=${() => onPolicyClick('auto')}
-                >
-                  Auto
-                </button>
-              </div>
-            `
-          : nothing}
         <scion-filter-box
           view="agents"
           .value=${this.filterQueryText}
@@ -1809,6 +1821,9 @@ export class ScionPageAgents extends LitElement {
                 </sl-menu>
               </sl-dropdown>
             `
+          : nothing}
+        ${this.viewMode === 'list' && agentsColumnPickerEnabled()
+          ? this.renderColumnPicker()
           : nothing}
       </div>
     `;
@@ -2385,46 +2400,70 @@ export class ScionPageAgents extends LitElement {
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const neverSuspendOn = neverSuspendEnabled();
+    const columnPickerOn = agentsColumnPickerEnabled();
+    const activeColumns = columnPickerOn
+      ? AGENT_COLUMNS.filter((col) => this.visibleColumns.has(col.id))
+      : AGENT_COLUMNS;
     return html`
       <div class="resource-table-container">
         <table>
           <thead>
             <tr>
-              <th
-                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('name')}
-              >
-                Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
-              </th>
-              <th>Project</th>
-              <th class="hide-mobile">Template</th>
-              <th
-                class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('status')}
-              >
-                Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
-              </th>
-              <th class="hide-mobile" data-testid="traits-col-header">Traits</th>
-              <th
-                class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('updated')}
-              >
-                Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
-              </th>
-              <th class="hide-mobile">Task</th>
-              <th style="text-align: right">Actions</th>
+              ${activeColumns.map((col) => this.renderTableHeaderCell(col))}
             </tr>
           </thead>
           <tbody>
             ${repeat(
               items,
               (agent) => agent.id,
-              (agent) => this.renderAgentRow(agent, badgesOn, neverSuspendOn)
+              (agent) => this.renderAgentRow(agent, badgesOn, neverSuspendOn, activeColumns)
             )}
           </tbody>
         </table>
       </div>
     `;
+  }
+
+  private renderTableHeaderCell(col: AgentColumnDef): TemplateResult {
+    switch (col.id) {
+      case 'name':
+        return html`
+          <th
+            class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('name')}
+          >
+            Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
+          </th>
+        `;
+      case 'project':
+        return html`<th>Project</th>`;
+      case 'template':
+        return html`<th class="hide-mobile">Template</th>`;
+      case 'status':
+        return html`
+          <th
+            class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('status')}
+          >
+            Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
+          </th>
+        `;
+      case 'traits':
+        return html`<th class="hide-mobile" data-testid="traits-col-header">Traits</th>`;
+      case 'updated':
+        return html`
+          <th
+            class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('updated')}
+          >
+            Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
+          </th>
+        `;
+      case 'task':
+        return html`<th class="hide-mobile">Task</th>`;
+      case 'actions':
+        return html`<th style="text-align: right">Actions</th>`;
+    }
   }
 
   /**
@@ -2490,50 +2529,95 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
-  private renderAgentRow(agent: Agent, badgesOn: boolean, neverSuspendOn: boolean) {
+  private renderAgentRow(
+    agent: Agent,
+    badgesOn: boolean,
+    neverSuspendOn: boolean,
+    activeColumns: readonly AgentColumnDef[]
+  ): TemplateResult {
+    const statusVisible = activeColumns.some((col) => col.id === 'status');
     return html`
       <tr>
-        <td>
-          <span class="name-cell">
-            ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
-            <a href="/agents/${agent.id}">${agent.name}</a>
-          </span>
-        </td>
-        <td>
-          ${agent.project
-            ? html`<a href="/projects/${agent.projectId}" class="project-link">${agent.project}</a>`
-            : '\u2014'}
-        </td>
-        <td class="hide-mobile">${agent.template}</td>
-        <td>
-          ${agentStatusBadge(agent, { size: 'small' })}
-          <scion-deletion-badge
-            .deletion=${this.deletingView(agent)}
-            size="small"
-          ></scion-deletion-badge>
-          ${this.renderDeletionBanner(agent, true)}
-        </td>
-        <td class="hide-mobile" data-testid="traits-cell">
-          ${this.renderTraitsCell(agent, neverSuspendOn)}
-        </td>
-        <td class="hide-mobile">
-          ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
-          agent.updated
-            ? this.formatRelativeTime(
-                (agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')
-                  ? agent.lastActivityEvent
-                  : agent.updated)!
-              )
-            : '\u2014'}
-        </td>
-        <td class="hide-mobile">
-          <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
-        </td>
-        <td class="actions-cell">
-          <span class="table-actions"> ${this.renderActionButtons(agent)} </span>
-        </td>
+        ${activeColumns.map((col) =>
+          this.renderAgentRowCell(col, agent, badgesOn, neverSuspendOn, statusVisible)
+        )}
       </tr>
     `;
+  }
+
+  private renderAgentRowCell(
+    col: AgentColumnDef,
+    agent: Agent,
+    badgesOn: boolean,
+    neverSuspendOn: boolean,
+    statusVisible: boolean
+  ): TemplateResult {
+    switch (col.id) {
+      case 'name':
+        return html`
+          <td>
+            <span class="name-cell">
+              ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
+              <a href="/agents/${agent.id}">${agent.name}</a>
+            </span>
+            ${statusVisible ? nothing : this.renderDeletionBanner(agent, true)}
+          </td>
+        `;
+      case 'project':
+        return html`
+          <td>
+            ${agent.project
+              ? html`<a href="/projects/${agent.projectId}" class="project-link"
+                  >${agent.project}</a
+                >`
+              : '\u2014'}
+          </td>
+        `;
+      case 'template':
+        return html`<td class="hide-mobile">${agent.template}</td>`;
+      case 'status':
+        return html`
+          <td>
+            ${agentStatusBadge(agent, { size: 'small' })}
+            <scion-deletion-badge
+              .deletion=${this.deletingView(agent)}
+              size="small"
+            ></scion-deletion-badge>
+            ${this.renderDeletionBanner(agent, true)}
+          </td>
+        `;
+      case 'traits':
+        return html`
+          <td class="hide-mobile" data-testid="traits-cell">
+            ${this.renderTraitsCell(agent, neverSuspendOn)}
+          </td>
+        `;
+      case 'updated':
+        return html`
+          <td class="hide-mobile">
+            ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
+            agent.updated
+              ? this.formatRelativeTime(
+                  (agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')
+                    ? agent.lastActivityEvent
+                    : agent.updated)!
+                )
+              : '\u2014'}
+          </td>
+        `;
+      case 'task':
+        return html`
+          <td class="hide-mobile">
+            <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
+          </td>
+        `;
+      case 'actions':
+        return html`
+          <td class="actions-cell">
+            <span class="table-actions"> ${this.renderActionButtons(agent)} </span>
+          </td>
+        `;
+    }
   }
 }
 

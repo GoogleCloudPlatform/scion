@@ -214,6 +214,7 @@ export function buildFixture() {
           'tokenomics.usage_ledger': false,
           'web.agent_badges': false,
           'web.agent_edit': true,
+          'web.agents_column_picker': false,
           'web.artifact_manage_access': true,
           'web.artifact_review_editor': true,
           'web.decisions': false,

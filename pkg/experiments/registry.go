@@ -388,6 +388,11 @@ const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 // presentation-only: the hub is unaffected whether or not it is on.
 const TerminalKeyBar = "web.terminal_key_bar"
 
+// AgentsColumnPicker gates the column visibility picker on the hub-wide and
+// project agents list tables (ptone/scion#9577). It is web-only and
+// presentation-only: the hub is unaffected whether or not it is on.
+const AgentsColumnPicker = "web.agents_column_picker"
+
 // SecretRotation gates opt-in Hub server keyring configuration
 // (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
 // file refuses to start while it is off. For the keyring it is checked once
@@ -1195,6 +1200,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9338",
 		Owner:       "web",
 		ReviewBy:    "2027-02-26",
+	},
+	{
+		Name:        AgentsColumnPicker,
+		Title:       "Agents list column picker",
+		Description: "Adds a column visibility picker to the hub-wide and project agents list tables so users can show or hide non-pinned columns, persisted per browser in localStorage. Web only; the hub is unaffected.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9577",
+		Owner:       "web",
+		ReviewBy:    "2027-02-27",
 	},
 	{
 		Name:        ArtifactReviewEditor,

@@ -71,6 +71,7 @@
         "experiments.tokenomics.usage_ledger:boolean",
         "experiments.web.agent_badges:boolean",
         "experiments.web.agent_edit:boolean",
+        "experiments.web.agents_column_picker:boolean",
         "experiments.web.artifact_manage_access:boolean",
         "experiments.web.artifact_review_editor:boolean",
         "experiments.web.decisions:boolean",
