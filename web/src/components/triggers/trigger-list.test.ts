@@ -876,4 +876,156 @@ describe('scion-trigger-list', () => {
     expect(patchBodies[0]['action']).toBeUndefined();
     expect(patchBodies[0]['actions']).toBeUndefined();
   });
+
+  it('preserves non-admitted match rules byte-identical across edits, reorders, non-match edits, and supports explicit removal (J16c)', async () => {
+    const systemOneRule = {
+      dialect: 'system_one',
+      expr: 'policy("prod-only") &&  severity >= 3\n',
+    };
+    const stored: TriggerDefinition = {
+      id: 'tr-s1',
+      projectId: 'proj-1',
+      name: 'mixed-dialect-rule',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: {
+        types: ['webhook.received'],
+        rules: [
+          { dialect: 'cel', expr: 'event.attributes.env == "prod"' },
+          { ...systemOneRule },
+          { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+        ],
+      },
+      actions: [{ type: 'message', agentId: 'ag-1', message: 'ping' }],
+      subject: { mode: 'new' },
+      maxFiresPerMinute: 10,
+      status: 'active',
+      authorizationRevision: 6,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T10:00:00Z',
+      updatedAt: '2026-11-28T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(stored));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [stored], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Edit A's expression -> PATCH carries S byte-identical in position 2 (index 1).
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const where1 = el.shadowRoot?.querySelector('scion-trigger-where-editor') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await where1.updateComplete;
+    const exprA = where1.shadowRoot?.querySelector('[data-where-expr="0"]') as HTMLTextAreaElement;
+    exprA.value = 'event.attributes.env == "staging"';
+    exprA.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const match1 = patchBodies[0]?.['match'] as {
+      rules: Array<{ dialect: string; expr: string }>;
+    };
+    expect(match1.rules).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.env == "staging"' },
+      systemOneRule,
+      { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+    ]);
+    expect(match1.rules[1]?.dialect).toBe('system_one');
+
+    // 2. Reorder A/B (move A down twice, then move B up to index 0) -> S remains intact.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const where2 = el.shadowRoot?.querySelector('scion-trigger-where-editor') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await where2.updateComplete;
+    // Move A (0) down -> [S, A, B]
+    (where2.shadowRoot?.querySelector('[data-where-down="0"]') as HTMLElement).click();
+    await where2.updateComplete;
+    // Move B (2) up -> [S, B, A]
+    (where2.shadowRoot?.querySelector('[data-where-up="2"]') as HTMLElement).click();
+    await where2.updateComplete;
+    // Move B (1) up -> [B, S, A]
+    (where2.shadowRoot?.querySelector('[data-where-up="1"]') as HTMLElement).click();
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const match2 = patchBodies[1]?.['match'] as {
+      rules: Array<{ dialect: string; expr: string }>;
+    };
+    expect(match2.rules).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+      systemOneRule,
+      { dialect: 'cel', expr: 'event.attributes.env == "prod"' },
+    ]);
+    expect(match2.rules[1]?.dialect).toBe('system_one');
+
+    // 3. Change another field (name + maxFiresPerMinute) -> match is omitted from PATCH.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'mixed-dialect-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const fpmInput = el.shadowRoot?.querySelector('[data-trigger-max-fpm]') as HTMLInputElement;
+    fpmInput.value = '25';
+    fpmInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[2]).toEqual({
+      name: 'mixed-dialect-rule-renamed',
+      maxFiresPerMinute: 25,
+      expectedRevision: 6,
+    });
+    expect(patchBodies[2]['match']).toBeUndefined();
+
+    // 4. Explicitly remove S -> PATCH omits S and keeps [A, B].
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const where4 = el.shadowRoot?.querySelector('scion-trigger-where-editor') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await where4.updateComplete;
+    (where4.shadowRoot?.querySelector('[data-where-remove="1"]') as HTMLElement).click();
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const match4 = patchBodies[3]?.['match'] as {
+      rules: Array<{ dialect: string; expr: string }>;
+    };
+    expect(match4.rules).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.env == "prod"' },
+      { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+    ]);
+
+    // Sanity check: S's dialect was never coerced to 'cel' in any PATCH payload.
+    for (const body of patchBodies) {
+      const m = body['match'] as { rules?: Array<{ dialect: string; expr: string }> } | undefined;
+      for (const r of m?.rules ?? []) {
+        if (r.expr === systemOneRule.expr) {
+          expect(r.dialect).toBe('system_one');
+        }
+      }
+    }
+  });
 });
