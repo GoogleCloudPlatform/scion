@@ -208,7 +208,7 @@ func (s *Server) hostedBootstrapChanges(ctx context.Context, ops *OperationalSet
 	}
 	var leaves []classified
 	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
-		if l.path[0] == "expected_revisions" || l.path[0] == opsettings.AgentLimitsSectionName {
+		if l.path[0] == "expected_revisions" || l.path[0] == opsettings.AgentLimitsSectionName || l.path[0] == "artifacts" {
 			continue
 		}
 		// Error-code precedence follows the registry classification, not
@@ -341,7 +341,7 @@ func pathHasPrefixPath(p, prefix []string) bool {
 // on a workstation hub: Layer-0, unclassified or file-only. Layer-1 leaves
 // go to the DB; the unwritten Layer-1 keys are rejected elsewhere.
 func isWorkstationFileLeaf(path []string) bool {
-	if len(path) == 0 || path[0] == "expected_revisions" || path[0] == opsettings.AgentLimitsSectionName {
+	if len(path) == 0 || path[0] == "expected_revisions" || path[0] == opsettings.AgentLimitsSectionName || path[0] == "artifacts" {
 		return false
 	}
 	for _, p := range dbUnwrittenLayer1Paths {
