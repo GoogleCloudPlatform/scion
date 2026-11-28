@@ -218,9 +218,10 @@ jobs:
   # the floor must name the first nightly that contains the commit; otherwise
   # that nightly refuses to tag (later floor) or a nightly without the migration
   # stays a downgrade target (earlier floor). Push-only: it cannot block the
-  # merge, but it turns red hours before the 03:00 UTC cut. Upstream
-  # squash-merges, so HEAD^1 is the previous main. Stays on ubuntu-latest: a
-  # sub-minute shell check.
+  # merge, but it turns red minutes after it, usually hours before the 03:00
+  # UTC cut. The base is the push's previous main (github.event.before), so a
+  # multi-commit push is checked as a whole; HEAD^1 when that is unavailable.
+  # Stays on ubuntu-latest: a sub-minute shell check.
   downgrade-floor-cut-check:
     name: DowngradeFloor cut check
     runs-on: ubuntu-latest
@@ -230,11 +231,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 2
+          fetch-depth: 50
+          filter: blob:none
           persist-credentials: false
 
       - name: Check DowngradeFloor against the nightly cut
-        run: ./scripts/release/check-downgrade-floor-cut.sh --landed
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base=HEAD^1
+          if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && [[ "$BEFORE" != 0000000000000000000000000000000000000000 ]] \
+              && git merge-base --is-ancestor "$BEFORE" HEAD 2>/dev/null; then
+            base="$BEFORE"
+          fi
+          ./scripts/release/check-downgrade-floor-cut.sh --landed --base "$base"
 
   build-and-test:
     name: Build & Test

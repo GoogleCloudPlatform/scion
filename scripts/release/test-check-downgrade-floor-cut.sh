@@ -38,11 +38,13 @@ repo="$tmp/repo"
 new_repo() {
   rm -rf "$repo"
   mkdir -p "$repo/pkg/version" "$repo/.github/workflows"
-  git -C "$repo" init -q
+  git -C "$repo" init -q -b main
   write_floor "$1"
   write_cron "${2:-0 3 * * *}"
   git -C "$repo" add -A
   git -C "$repo" commit -q -m base
+  # Pull-request commits go on a branch; main stays at the base.
+  git -C "$repo" checkout -q -b pr
 }
 
 write_floor() {
@@ -163,8 +165,27 @@ new_repo nightly-20261101
 printf 'package version\n\nconst DowngradeFloor = "nightly-20261128"\nconst DowngradeFloor = "nightly-20261129"\n' > "$repo/pkg/version/downgrade_floor.go"
 git -C "$repo" commit -q -am dup
 expect_rc 1 "duplicate declarations" "exactly one" --at 2026-11-27T12:00:00Z
-rm -rf "$repo"; mkdir -p "$repo"; git -C "$repo" init -q; git -C "$repo" commit -q --allow-empty -m only
-expect_rc 1 "no parent commit" "fetch at least two commits" --at 2026-11-27T12:00:00Z
+rm -rf "$repo"; mkdir -p "$repo"; git -C "$repo" init -q -b main; git -C "$repo" commit -q --allow-empty -m only
+expect_rc 1 "no parent commit" "fetch at least two commits" --landed --at 2026-11-27T12:00:00Z
+
+# --- Local pre-merge run: floor bump below a review fixup (rm-floor-rev r1) -----
+new_repo nightly-20261101
+commit_floor nightly-20261205
+git -C "$repo" commit -q --allow-empty -m "address review"
+expect_rc 1 "fixup on top: merge-base with main still sees the bump" "set it to nightly-20261129" --at 2026-11-28T12:00:00Z
+expect_rc 0 "fixup on top: --landed compares HEAD^1 only" "unchanged" --landed --at 2026-11-28T12:00:00Z
+expect_rc 1 "missing main ref" "pass --main REF" --main nosuch --at 2026-11-28T12:00:00Z
+git -C "$repo" branch -q upstream-main main
+expect_rc 1 "--main names another ref" "set it to nightly-20261129" --main upstream-main --at 2026-11-28T12:00:00Z
+
+# --- Exact boundaries ----------------------------------------------------------
+new_repo nightly-20261101
+commit_floor nightly-20261128
+expect_rc 0 "exactly at the cut, grace 0: same day" "passed" --at 2026-11-28T03:00:00Z --grace-minutes 0
+expect_rc 0 "exactly at cut+grace: same day still accepted" "passed" --at 2026-11-28T04:00:00Z
+new_repo nightly-20261101
+commit_floor nightly-20261129
+expect_rc 1 "exactly at the cut, grace 0: next day too late" "later than" --at 2026-11-28T03:00:00Z --grace-minutes 0
 
 # --- Usage errors ----------------------------------------------------------------------
 new_repo nightly-20261101

@@ -28,7 +28,10 @@
 # Usage: ./scripts/release/check-downgrade-floor-cut.sh [options]
 #
 # Options:
-#   --base REV           Revision to compare the floor against (default HEAD^1).
+#   --base REV           Revision to compare the floor against. Default: HEAD^1
+#                        with --landed, else the merge-base of --head and
+#                        --main (so a floor bump below review fixups counts).
+#   --main REF           Main branch for the default --base (default main).
 #   --head REV           Revision under test (default HEAD).
 #   --at TIME            Landing time, UTC RFC3339 (e.g. 2026-11-27T23:02:00Z).
 #                        Default: the committer date of --head with --landed,
@@ -41,6 +44,9 @@
 #   --grace-minutes N    Default 60.
 #   -h, --help           Show this help message.
 #
+# Before merging a pull request that changes the floor, run it locally:
+#   ./scripts/release/check-downgrade-floor-cut.sh --at <expected merge time>
+#
 # Exit status:
 #   0  The floor is unchanged, empty, or names an accepted nightly.
 #   1  The floor names the wrong nightly, or a file could not be parsed.
@@ -48,7 +54,8 @@
 
 set -euo pipefail
 
-BASE_REV="HEAD^1"
+BASE_REV=""
+MAIN_REF="main"
 HEAD_REV="HEAD"
 AT=""
 LANDED=false
@@ -57,7 +64,7 @@ FLOOR_FILE="pkg/version/downgrade_floor.go"
 GRACE_MINUTES=60
 
 usage() {
-  sed -n '16,47p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '16,53p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 emit_error() {
@@ -74,6 +81,7 @@ need_value() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) need_value "$1" $#; BASE_REV="$2"; shift 2 ;;
+    --main) need_value "$1" $#; MAIN_REF="$2"; shift 2 ;;
     --head) need_value "$1" $#; HEAD_REV="$2"; shift 2 ;;
     --at) need_value "$1" $#; AT="$2"; shift 2 ;;
     --landed) LANDED=true; shift ;;
@@ -157,6 +165,7 @@ AT_MINUTE_OF_DAY=$(( AT_H * 60 + AT_MIN ))
 
 # --- Floor values -------------------------------------------------------------
 
+# Keep FLOOR_DECL_RE and NIGHTLY_RE in sync with check-downgrade-floor.sh.
 FLOOR_DECL_RE='^[[:space:]]*const[[:space:]]+DowngradeFloor([[:space:]]+string)?[[:space:]]*=[[:space:]]*"([^"]*)"([[:space:]]*//.*)?[[:space:]]*$'
 
 # read_floor REV — prints the floor at REV; "<absent>" when the file is missing.
@@ -182,6 +191,20 @@ read_floor() {
 if ! git rev-parse -q --verify "${HEAD_REV}^{commit}" >/dev/null; then
   emit_error "Unknown --head revision '${HEAD_REV}'."
   exit 1
+fi
+if [ -z "$BASE_REV" ]; then
+  if [ "$LANDED" = true ]; then
+    BASE_REV="${HEAD_REV}^1"
+  else
+    if ! git rev-parse -q --verify "${MAIN_REF}^{commit}" >/dev/null; then
+      emit_error "Main branch '${MAIN_REF}' not found; pass --main REF (e.g. upstream/main) or --base REV."
+      exit 1
+    fi
+    if ! BASE_REV="$(git merge-base "$MAIN_REF" "$HEAD_REV")"; then
+      emit_error "No merge-base between '${MAIN_REF}' and '${HEAD_REV}'; deepen the clone or pass --base REV."
+      exit 1
+    fi
+  fi
 fi
 if ! git rev-parse -q --verify "${BASE_REV}^{commit}" >/dev/null; then
   emit_error "Unknown --base revision '${BASE_REV}' (fetch at least two commits of history)."
