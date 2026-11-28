@@ -184,6 +184,7 @@ var prefixSubRouteTable = []prefixSubRouteRow{
 	{prefix: "/api/v1/groups/", pattern: "/api/v1/groups/{id}", methods: []string{http.MethodGet, http.MethodPatch, http.MethodDelete}},
 	{prefix: "/api/v1/groups/", pattern: "/api/v1/groups/{id}/members", methods: []string{http.MethodGet, http.MethodPost}},
 	{prefix: "/api/v1/groups/", pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}", methods: []string{http.MethodGet, http.MethodDelete}},
+	{prefix: "/api/v1/groups/", pattern: "/api/v1/groups/{id}/usage/budgets", methods: []string{http.MethodGet}},
 
 	// /api/v1/harness-configs/
 	{prefix: "/api/v1/harness-configs/", pattern: "/api/v1/harness-configs/{id}", methods: []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete}},
