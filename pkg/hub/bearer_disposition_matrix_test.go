@@ -1325,9 +1325,8 @@ func (m *bearerMatrixFixture) mintAgentTokenWithScopes(t *testing.T, agentID, pr
 // agentProjectReadScopeExemptions lists catalogued GET entry points that admit
 // PrincipalAgent + CredentialAgentJWT but by policy are NOT gated by
 // ScopeProjectRead (agent self-service routes, caller-owned inbox/DM routes,
-// hub-level discovery routes, parentless-only routes, or routes gated by a
-// different scope/authority such as project:secret:read, project:artifact:read,
-// or agent.attach).
+// hub-level discovery routes, or routes gated by a different scope/authority
+// such as project:secret:read, project:artifact:read, or agent.attach).
 //
 // Routes that refuse every agent token (including routes whose handlers call
 // checkAgentReadScope before a kernel or user-only refusal) belong in
@@ -1376,7 +1375,6 @@ var agentProjectReadScopeExemptions = map[liveInventoryKey]string{
 	{"env.hub.read", http.MethodGet, "/api/v1/env/{key}"}:                                                 "hub-level env key lookup, not a project read",
 	{"secret.hub.read", http.MethodGet, "/api/v1/secrets"}:                                                "hub-level secret listing, not a project read",
 	{"secret.hub.read", http.MethodGet, "/api/v1/secrets/{key}"}:                                          "hub-level secret key lookup, not a project read",
-	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts/{id}"}:                            "serves parentless (hub/user) accounts only; project-scoped accounts return 404 before auth",
 	{"agent.delegation.list", http.MethodGet, "/api/v1/agents/{id}/delegations"}:                          "agent self-service listing only its own delegations",
 	{"agent.delegation.read", http.MethodGet, "/api/v1/agents/{id}/delegations/{grantId}"}:                "agent self-service reading only its own delegation grant",
 }
@@ -1430,6 +1428,10 @@ var agentProjectReadRefusedForAllAgents = map[liveInventoryKey]agentProjectReadR
 	{"agent.delegation.list", http.MethodGet, "/api/v1/users/me/delegations"}: {
 		RequireScopeRefusal: false,
 		Reason:              "handleUserMeDelegations is session-only (admitAgentDelegationCaller refuses all agent tokens)",
+	},
+	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts/{id}"}: {
+		RequireScopeRefusal: false,
+		Reason:              "flat by-ID route requires a user identity; agent callers get 404",
 	},
 }
 
