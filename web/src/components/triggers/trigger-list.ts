@@ -32,6 +32,7 @@ import {
   fireStatusBadgeVariant,
   formatRedactedExecSummary,
   getTriggerActions,
+  hasNonCelTriggerRules,
   parseTriggerRuleRowErrors,
   type ListTriggerEventsResponse,
   type ListTriggersResponse,
@@ -339,7 +340,7 @@ export class ScionTriggerList extends LitElement {
         });
     }
     const ext = getFormAuthoring(kind);
-    this.formAuthoringPane = ext ? 'form' : 'cel';
+    this.formAuthoringPane = ext && !this.hasNonCelRules ? 'form' : 'cel';
     this.formAuthoringValid = true;
     this.formAuthoringErrors = [];
     if (ext) {
@@ -430,7 +431,10 @@ export class ScionTriggerList extends LitElement {
     this.formAuthoringErrors = [];
 
     const formExt = getFormAuthoring(this.formSourceKind);
-    this.formAuthoringPane = formExt && tr.match.form ? 'form' : 'cel';
+    // J16c (mixed-rule-arrays §11.3): form pane is available only when every
+    // stored element is 'cel'. With any non-cel element, open the list editor
+    // and keep match.form intact unless a row is edited.
+    this.formAuthoringPane = formExt && tr.match.form && !this.hasNonCelRules ? 'form' : 'cel';
     if (formExt) {
       void ensureExtensionLoaded(formExt)
         .then(() => this.requestUpdate())
@@ -442,6 +446,11 @@ export class ScionTriggerList extends LitElement {
   }
 
   private handleFormAuthoringOutput(out: FormAuthoringOutput): void {
+    // J16c defense-in-depth: never let form authoring overwrite rules when
+    // non-cel elements are present.
+    if (this.hasNonCelRules) {
+      return;
+    }
     this.formAuthoringValid = out.valid !== false;
     this.formAuthoringErrors = Array.isArray(out.errors) ? [...out.errors] : [];
     // O-C: never apply types, rules, form, subject, or suggested actions from
@@ -491,6 +500,18 @@ export class ScionTriggerList extends LitElement {
 
   private get hasReadOnlyActions(): boolean {
     return this.formActions.some((a) => this.isReadOnlyActionType(a.type));
+  }
+
+  private get hasNonCelRules(): boolean {
+    return hasNonCelTriggerRules(this.formRules);
+  }
+
+  private get activeAuthoringPane(): 'form' | 'cel' {
+    return getFormAuthoring(this.formSourceKind) &&
+      this.formAuthoringPane === 'form' &&
+      !this.hasNonCelRules
+      ? 'form'
+      : 'cel';
   }
 
   private buildDiffPatchBody(
@@ -631,8 +652,7 @@ export class ScionTriggerList extends LitElement {
       this.formError = 'Source endpoint is required.';
       return;
     }
-    const formExt = getFormAuthoring(this.formSourceKind);
-    if (formExt && this.formAuthoringPane === 'form' && !this.formAuthoringValid) {
+    if (this.activeAuthoringPane === 'form' && !this.formAuthoringValid) {
       this.formError = this.formAuthoringErrors.join('; ') || 'Fix the form errors before saving.';
       return;
     }
@@ -1211,19 +1231,36 @@ export class ScionTriggerList extends LitElement {
                 <sl-radio-group
                   label="Authoring mode"
                   size="small"
-                  .value=${this.formAuthoringPane}
+                  .value=${this.activeAuthoringPane}
                   data-authoring-mode
                   @sl-change=${(e: Event) => {
-                    this.formAuthoringPane =
-                      (e.target as HTMLInputElement).value === 'form' ? 'form' : 'cel';
+                    const group = e.target as HTMLInputElement;
+                    const next = group.value === 'form' ? 'form' : 'cel';
+                    if (next === 'form' && this.hasNonCelRules) {
+                      this.formAuthoringPane = 'cel';
+                      group.value = 'cel';
+                      return;
+                    }
+                    this.formAuthoringPane = next;
                   }}
                 >
-                  <sl-radio-button value="form">${formExt.label || 'Form'}</sl-radio-button>
+                  <sl-radio-button value="form" ?disabled=${this.hasNonCelRules}
+                    >${formExt.label || 'Form'}</sl-radio-button
+                  >
                   <sl-radio-button value="cel">Advanced (CEL)</sl-radio-button>
                 </sl-radio-group>
+                ${this.hasNonCelRules
+                  ? html`
+                      <sl-alert variant="neutral" open data-form-pane-disabled-notice>
+                        Form mode is disabled because this rule contains elements the form cannot
+                        represent. Edit CEL rules below, or use the CLI or API to edit other
+                        dialects.
+                      </sl-alert>
+                    `
+                  : nothing}
               `
             : nothing}
-          ${formExt && this.formAuthoringPane === 'form'
+          ${formExt && this.activeAuthoringPane === 'form'
             ? html`
                 <div data-form-authoring-pane>
                   ${formExt.render({
@@ -1376,8 +1413,7 @@ export class ScionTriggerList extends LitElement {
               this.formNotify = e.detail.notify;
             }}
           ></scion-trigger-notify-editor>
-          ${formExt &&
-          this.formAuthoringPane === 'form' &&
+          ${this.activeAuthoringPane === 'form' &&
           !this.formAuthoringValid &&
           this.formAuthoringErrors.length > 0
             ? html`
@@ -1402,7 +1438,7 @@ export class ScionTriggerList extends LitElement {
           variant="primary"
           ?loading=${this.saving}
           ?disabled=${this.saving ||
-          (Boolean(formExt) && this.formAuthoringPane === 'form' && !this.formAuthoringValid)}
+          (this.activeAuthoringPane === 'form' && !this.formAuthoringValid)}
           data-submit-trigger
           @click=${() => this.submitTriggerForm()}
         >

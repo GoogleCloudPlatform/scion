@@ -321,6 +321,25 @@ export const ADMITTED_TRIGGER_DIALECTS: readonly TriggerDialectOption[] = [
   { value: 'cel', label: 'CEL' },
 ];
 
+/**
+ * Returns true if `dialect` is in the admitted dialect list for the web editor.
+ */
+export function isAdmittedTriggerDialect(
+  dialect: string,
+  admitted: readonly TriggerDialectOption[] = ADMITTED_TRIGGER_DIALECTS
+): boolean {
+  return admitted.some((d) => d.value === dialect);
+}
+
+/**
+ * Returns true if any match rule has a non-empty dialect other than `'cel'`.
+ * Form-authoring panes only represent CEL rules (mixed-rule-arrays §11.3).
+ */
+export function hasNonCelTriggerRules(rules: readonly TriggerMatchRuleSpec[] | undefined): boolean {
+  if (!rules || rules.length === 0) return false;
+  return rules.some((r) => Boolean(r.dialect) && r.dialect !== 'cel');
+}
+
 export interface TriggerRuleRowError {
   category?: string;
   message: string;
