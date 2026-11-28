@@ -2861,11 +2861,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	autoWakeUser := s.autoWakeModeOf(agent) != autoWakeNone
 	userWake := req.Wake || autoWakeUser
 	if autoWakeUser && !senderIsAgent && !delegatedSender && !deferDelivery {
+		if ctx.Err() != nil {
+			WriteAgentDMError(w, requestEndedRefusal().dmError())
+			return
+		}
 		// The hub's own wakes are routine and the sender cannot know about
 		// them: a start already in progress is waited for and delivered
 		// to, instead of keeping the message deferred (wakeOrAwaitStart).
 		// The wait fits in the same write budget as a resume.
 		s.extendWriteDeadlineForDMWake(ctx, w)
+		// Detach from client cancellation so a sender that disconnects during
+		// a slow resume does not drop the message after the agent wakes
+		// (ptone/scion#9757).
+		var cancelWakeSend context.CancelFunc
+		ctx, cancelWakeSend = detachDMWakeSend(ctx)
+		defer cancelWakeSend()
 		dmErr, awaitErr := s.wakeOrAwaitStart(ctx, agent)
 		if dmErr != nil {
 			WriteAgentDMError(w, dmErr)
@@ -2876,9 +2886,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 	} else if userWake && !senderIsAgent && !delegatedSender && !deferDelivery {
+		if ctx.Err() != nil {
+			WriteAgentDMError(w, requestEndedRefusal().dmError())
+			return
+		}
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
+		// Detach from client cancellation so a sender that disconnects during
+		// a slow resume does not drop the message after the agent wakes
+		// (ptone/scion#9757).
+		var cancelWakeSend context.CancelFunc
+		ctx, cancelWakeSend = detachDMWakeSend(ctx)
+		defer cancelWakeSend()
 		wakeResult, wakeErr := s.wakeAgentForDMAuthorized(ctx, agent, s.explicitWakeAuthorize(ctx, GetIdentityFromContext(ctx)))
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
@@ -3703,12 +3723,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			if !delegatedSender {
 				retryOpts = append(retryOpts, withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
 					s.extendWriteDeadlineForDMWake(ctx, w)
-					wctx, wcancel := context.WithTimeout(ctx, scheduledWakeBudget)
+					wctx, wcancel := dispatchContext(ctx, scheduledWakeBudget)
 					defer wcancel()
 					if err := s.syncWakeForDM(wctx, target, req.Wake, GetIdentityFromContext(ctx)); err != nil {
 						return nil, nil, err
 					}
-					newCtx, newCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
+					newCtx, newCancel := dispatchContext(dispatchCtx, 30*time.Second)
 					if err := s.refreshHoldLaunchAfterWake(newCtx, target, persistedMsgID, nil); err != nil {
 						newCancel()
 						return nil, nil, err
