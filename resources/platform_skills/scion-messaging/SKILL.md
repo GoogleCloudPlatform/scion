@@ -305,7 +305,9 @@ CR/LF characters are trimmed; other body bytes are preserved.
 For example, in the shell expression `` "Run `printf substituted`" ``, the shell
 runs `printf` and produces `Run substituted`. The same text inside a quoted heredoc
 is literal. Do not embed user-facing Markdown commands in double-quoted shell
-arguments and expect the backticks to survive.
+arguments and expect the backticks to survive. The same applies to any file you
+write with a heredoc, such as a write-once retrospective: quote the delimiter, and
+read the file back before treating it as final.
 
 ## Read older messages and catch up
 
