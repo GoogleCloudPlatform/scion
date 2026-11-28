@@ -1128,6 +1128,14 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 			map[string]interface{}{"field": "steps"})
 		return
 	}
+	if !existing.HasChain() && req.Steps != nil {
+		// P1 boundary: legacy read-time projection is display-only; legacy->chain
+		// conversion via PATCH arrives in P3.
+		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeNotYetSupported,
+			"converting a legacy policy to a rule chain via PATCH is not yet supported in this phase",
+			map[string]interface{}{"field": "steps"})
+		return
+	}
 
 	candidate := existing.Clone()
 	if req.Name != nil {

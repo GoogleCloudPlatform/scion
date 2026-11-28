@@ -140,14 +140,11 @@ func IsP1ChainSupported(steps []ChainStepInput) bool {
 	return true
 }
 
-// chainEnricher supplies strictly JSON-shaped `chain` additions to CEL steps
-// (SEC-S2-L1: maps, slices, strings, numbers, bools only; no structs or []byte).
-type chainEnricher struct {
-	steps []ChainStepInput
-}
-
 // BuildChainEnricherMap builds the strictly JSON-shaped `chain` map for step
-// from prior passing judgments in j (SEC-S2-L1). Exported for adapter testing.
+// from prior passing judgments in j (SEC-S2-L1: maps, slices, strings, numbers,
+// bools only; no structs or []byte). P1 uses ruleengine.NoopEnricher{} because
+// there are no judgment steps in P1; this helper is retained and tested for
+// SEC-S2-L1 conformance ahead of P4+P5.
 func BuildChainEnricherMap(steps []ChainStepInput, j ruleengine.JudgmentView) map[string]any {
 	chainMap := make(map[string]any)
 	if j == nil {
@@ -180,12 +177,6 @@ func BuildChainEnricherMap(steps []ChainStepInput, j ruleengine.JudgmentView) ma
 		}
 	}
 	return chainMap
-}
-
-func (ce chainEnricher) Additions(_ int, j ruleengine.JudgmentView) (map[string]any, error) {
-	return map[string]any{
-		"chain": BuildChainEnricherMap(ce.steps, j),
-	}, nil
 }
 
 // EvaluateChain evaluates a P1 CEL-only ordered rule chain through
@@ -303,7 +294,7 @@ func (e *Evaluator) EvaluateChain(
 			MaxTraceBytes: 16 * 1024,
 		},
 		stepPolicy,
-		chainEnricher{steps: steps},
+		ruleengine.NoopEnricher{},
 		nil,
 	)
 	if err != nil {

@@ -358,6 +358,14 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 		}
 	}
 
+	if spec.HasSteps && (strings.TrimSpace(spec.ViolationRule) != "" || strings.TrimSpace(spec.SystemOneRule) != "") {
+		return "", &ValidationError{
+			Code:    ErrCodeValidation,
+			Field:   "steps",
+			Message: "steps cannot be combined with violation_rule or system_one_rule",
+		}
+	}
+
 	hasSystemOne := strings.TrimSpace(spec.SystemOneRule) != ""
 	if hasSystemOne && len(spec.SystemOneRule) > MaxSystemOneRuleBytes {
 		return "", &ValidationError{
