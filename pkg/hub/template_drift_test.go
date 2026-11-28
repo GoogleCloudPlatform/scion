@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1009,39 +1010,179 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		reqs := fg.snapshotReqs()
 		assert.Empty(t, reqs[len(reqs)-1].auth, "post-PAT-removal request must be anonymous")
 	})
+
+	t.Run("branch-key scope isolation even when anonymous commit tree is pre-cached", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		clock := func() time.Time { return now }
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+		fg.override = func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return true
+			}
+			return false
+		}
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		// Pre-cache the anonymous commit tree for sourceCommit so commit-key
+		// scoping cannot mask a missing scope on branchKey.
+		f.srv.templateDrift.putCommitTree(templateDriftKey{
+			owner: "o",
+			repo:  "r",
+			ref:   commitOld,
+			path:  ".scion/templates/my-tmpl",
+			scope: githubfetch.AnonScope,
+		}, treeOld)
+
+		f.srv.SetSecretBackend(&importCredSecretBackend{
+			scope:     secret.ScopeProject,
+			projectID: f.project.ID,
+			values:    map[string]string{"GITHUB_TOKEN": "ghp_branch_scope_pat"},
+		})
+		seedDriftTemplate(t, f, "branch-iso-tmpl", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
+
+		// 1. PAT check populates PAT-scoped branch entry and warns
+		rec1 := f.create(t, map[string]any{"name": "ag-biso-1", "task": "t", "template": "branch-iso-tmpl"})
+		require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Len(t, resp1.Warnings, 1)
+		callsWithPAT := fg.callCount()
+
+		// 2. Remove PAT: anonymous check must miss PAT's branch entry and re-resolve anonymously
+		f.srv.SetSecretBackend(nil)
+		rec2 := f.create(t, map[string]any{"name": "ag-biso-2", "task": "t", "template": "branch-iso-tmpl"})
+		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Empty(t, resp2.Warnings, "anonymous scope must not reuse PAT branch cache entry")
+		assert.Greater(t, fg.callCount(), callsWithPAT, "anonymous check must re-resolve ref anonymously")
+		reqs := fg.snapshotReqs()
+		assert.Empty(t, reqs[len(reqs)-1].auth)
+	})
+
+	t.Run("App-installed project mints once on cold drift cache and zero times on warm cache", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		var clockMu sync.Mutex
+		clock := func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		}
+
+		var mintCount atomic.Int64
+		appMux := http.NewServeMux()
+		appMux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":          1,
+				"slug":        "drift-test-app",
+				"permissions": map[string]string{"contents": "read", "metadata": "read"},
+			})
+		})
+		appMux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+				http.NotFound(w, r)
+				return
+			}
+			n := mintCount.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token":      fmt.Sprintf("ghs_drift_app_token_%d", n),
+				"expires_at": now.Add(time.Hour).UTC().Format(time.RFC3339),
+			})
+		})
+		appSrv := httptest.NewServer(appMux)
+		t.Cleanup(appSrv.Close)
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		// Route api.github.com App token minting calls to appSrv while keeping
+		// APIBaseURL empty so githubAppWebHost() remains "github.com".
+		appURL, err := url.Parse(appSrv.URL)
+		require.NoError(t, err)
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == "api.github.com" {
+				clone := req.Clone(req.Context())
+				clone.URL.Scheme = appURL.Scheme
+				clone.URL.Host = appURL.Host
+				return origTransport.RoundTrip(clone)
+			}
+			return origTransport.RoundTrip(req)
+		})
+		t.Cleanup(func() { http.DefaultTransport = origTransport })
+
+		f.srv.mu.Lock()
+		f.srv.config.GitHubAppConfig.AppID = 1
+		f.srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+		f.srv.mu.Unlock()
+
+		const installID int64 = 7201
+		admin := createAssocAdmin(t, f.s, "drift-app-admin")
+		createAssocInstallation(t, f.s, installID, "o", "o/r")
+		setAdminBinding(t, f.s, f.project, installID, normalizedRemoteForTest("https://github.com/o/r.git"), admin.ID)
+		f.project.GitHubInstallationID = ptrInt64(installID)
+		require.NoError(t, f.s.UpdateProject(context.Background(), f.project))
+
+		seedDriftTemplate(t, f, "app-tmpl", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
+
+		// 1. Cold drift cache: exactly 1 App token mint and drift warning returned
+		rec1 := f.create(t, map[string]any{"name": "ag-app-1", "task": "t", "template": "app-tmpl"})
+		require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Len(t, resp1.Warnings, 1)
+		assert.Equal(t, int64(1), mintCount.Load(), "cold drift check must mint App token once")
+		reqs := fg.snapshotReqs()
+		require.NotEmpty(t, reqs)
+		assert.Equal(t, "Bearer ghs_drift_app_token_1", reqs[0].auth)
+		callsAfterFirst := fg.callCount()
+
+		// 2. Warm drift cache within 60s TTL: 0 additional App token mints and 0 GitHub API calls
+		clockMu.Lock()
+		now = now.Add(20 * time.Second)
+		clockMu.Unlock()
+		rec2 := f.create(t, map[string]any{"name": "ag-app-2", "task": "t", "template": "app-tmpl"})
+		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Len(t, resp2.Warnings, 1)
+		assert.Equal(t, int64(1), mintCount.Load(), "warm drift cache hit must not mint another App token")
+		assert.Equal(t, callsAfterFirst, fg.callCount(), "warm drift cache hit must not make GitHub API calls")
+	})
 }
 
 func TestTemplateDrift_HostedUsesNetworkVetted(t *testing.T) {
-	hostedSrv := &Server{workstation: false, resourceLog: slog.Default()}
+	var hostedLogs bytes.Buffer
+	hostedSrv := &Server{
+		workstation: false,
+		resourceLog: slog.New(slog.NewTextHandler(&hostedLogs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
 	assert.Equal(t, remotefetch.NetworkVetted, hostedSrv.templateReimportNetworkMode())
 
-	wsSrv := &Server{workstation: true, resourceLog: slog.Default()}
-	assert.Equal(t, remotefetch.NetworkSystem, wsSrv.templateReimportNetworkMode())
-
-	// End-to-end check: a hosted drift doer built via newTemplateGitHubDoer
-	// rejects a loopback httptest TLS server because NetworkVetted denies
-	// loopback/private IPs.
-	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(tlsSrv.Close)
-
-	u, err := url.Parse(tlsSrv.URL)
-	require.NoError(t, err)
-	ep := githubfetch.Endpoint{
-		APIBase:  tlsSrv.URL,
-		RawBase:  tlsSrv.URL,
-		WebHost:  u.Hostname(),
-		Codeload: u.Hostname(),
+	// Build the drift client through getTemplateDriftClient with an endpoint
+	// pointing at a loopback IP on implicit port 443. Only NetworkVetted runs
+	// the IP denylist and rejects this with remotefetch.ReasonDeniedAddress;
+	// NetworkSystem skips IP vetting and attempts a TCP connect instead.
+	loopbackEP := &githubfetch.Endpoint{
+		APIBase:  "https://127.0.0.1",
+		RawBase:  "https://127.0.0.1",
+		WebHost:  "127.0.0.1",
+		Codeload: "127.0.0.1",
 	}
-	doer := hostedSrv.newTemplateGitHubDoer(ep, hostedSrv.templateDriftLimits())
-	client := githubfetch.New(githubfetch.Options{
-		Endpoint:   ep,
-		Doer:       doer,
-		Cooldown:   githubfetch.NewCooldown(nil),
-		MaxRetries: 0,
-	})
-	_, _, resolveErr := client.ResolveRef(context.Background(), githubfetch.Source{
+	hostedSrv.templateDrift.endpoint = loopbackEP
+	hostedClient := hostedSrv.getTemplateDriftClient()
+
+	_, _, resolveErr := hostedClient.ResolveRef(context.Background(), githubfetch.Source{
 		Owner: "o",
 		Repo:  "r",
 		Ref:   "main",
@@ -1049,7 +1190,27 @@ func TestTemplateDrift_HostedUsesNetworkVetted(t *testing.T) {
 	require.Error(t, resolveErr)
 	var ghe *githubfetch.Error
 	require.ErrorAs(t, resolveErr, &ghe)
-	assert.Equal(t, githubfetch.KindUnreachable, ghe.Kind, "hosted drift must enforce NetworkVetted and deny loopback targets")
+	assert.Equal(t, githubfetch.KindUnreachable, ghe.Kind)
+	assert.Contains(t, hostedLogs.String(), "reason="+string(remotefetch.ReasonDeniedAddress),
+		"hosted drift client built via getTemplateDriftClient must enforce NetworkVetted IP denylist")
+
+	// Contrast: workstation mode uses NetworkSystem (no IP denylist refusal).
+	var wsLogs bytes.Buffer
+	wsSrv := &Server{
+		workstation: true,
+		resourceLog: slog.New(slog.NewTextHandler(&wsLogs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	assert.Equal(t, remotefetch.NetworkSystem, wsSrv.templateReimportNetworkMode())
+	wsSrv.templateDrift.endpoint = loopbackEP
+	wsSrv.templateDrift.budget = 250 * time.Millisecond
+	wsClient := wsSrv.getTemplateDriftClient()
+	_, _, _ = wsClient.ResolveRef(context.Background(), githubfetch.Source{
+		Owner: "o",
+		Repo:  "r",
+		Ref:   "main",
+	}, githubfetch.Credential{})
+	assert.NotContains(t, wsLogs.String(), "reason="+string(remotefetch.ReasonDeniedAddress),
+		"workstation drift client must use NetworkSystem rather than NetworkVetted")
 }
 
 func TestTemplateDriftWarning_AdminPolicyClassifiedDeny(t *testing.T) {

@@ -77,9 +77,10 @@ type templateDriftChecker struct {
 	branchItems map[templateDriftKey]templateDriftBranchEntry
 
 	// Optional test seams; nil/zero select production defaults.
-	client *githubfetch.Client
-	now    func() time.Time
-	budget time.Duration
+	client   *githubfetch.Client
+	endpoint *githubfetch.Endpoint
+	now      func() time.Time
+	budget   time.Duration
 }
 
 func (c *templateDriftChecker) clock() time.Time {
@@ -210,12 +211,16 @@ func (s *Server) templateDriftLimits() githubfetch.Limits {
 func (s *Server) getTemplateDriftClient() *githubfetch.Client {
 	s.templateDrift.mu.Lock()
 	c := s.templateDrift.client
+	epOverride := s.templateDrift.endpoint
 	nowFn := s.templateDrift.now
 	s.templateDrift.mu.Unlock()
 	if c != nil {
 		return c
 	}
 	ep := githubfetch.DefaultEndpoint()
+	if epOverride != nil {
+		ep = *epOverride
+	}
 	doer := s.newTemplateGitHubDoer(ep, s.templateDriftLimits())
 	return githubfetch.New(githubfetch.Options{
 		Endpoint:   ep,
@@ -299,14 +304,16 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 	ownerLower := strings.ToLower(src.Owner)
 	repoLower := strings.ToLower(src.Repo)
 
-	cred := s.githubCredential(ctx, ghCredRequest{
+	credReq := ghCredRequest{
 		Scope:   store.TemplateScopeProject,
 		ScopeID: project.ID,
 		Owner:   src.Owner,
 		Repo:    src.Repo,
 		Quiet:   true,
-	})
-	scope := cred.EffectiveScope()
+	}
+	// Compute the principal scope cheaply (no GitHub App token mint) so warm
+	// drift cache hits and active cooldowns never trigger token minting.
+	scope := s.githubCredentialScope(ctx, credReq)
 	now := s.templateDrift.clock()
 
 	branchKey := templateDriftKey{
@@ -365,6 +372,24 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 				"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
 				"owner", src.Owner, "repo", src.Repo)
 			return ""
+		}
+
+		// Resolve the full credential (including App token mint if applicable)
+		// only when an outbound GitHub API call is actually required.
+		cred := s.githubCredential(ctx, credReq)
+		if actualScope := cred.EffectiveScope(); actualScope != scope {
+			// App token minting fell through to a fallback credential (or anon);
+			// re-scope keys and cooldown check to the actual credential used.
+			scope = actualScope
+			branchKey.scope = scope
+			hasBranch = false
+			branchTree = ""
+			if _, cooling := s.githubCooldown().Active(scope); cooling {
+				s.agentLifecycleLog.Debug("template drift check skipped (rate-limit cooldown)",
+					"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
+					"owner", src.Owner, "repo", src.Repo)
+				return ""
+			}
 		}
 
 		client := s.getTemplateDriftClient()

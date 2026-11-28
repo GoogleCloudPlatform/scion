@@ -57,6 +57,12 @@ func TestGitHubCredential_ScopeHMACAndPrecedence(t *testing.T) {
 		assert.NotContains(t, cred.Scope, tokA)
 		assert.NotEqual(t, "secret:"+githubfetch.TokenFingerprint(tokA)[:32], cred.Scope,
 			"with a purpose key present, scope must be keyed HMAC rather than unkeyed SHA-256")
+		assert.Equal(t, cred.EffectiveScope(), srv.githubCredentialScope(ctx, ghCredRequest{
+			Scope:   store.TemplateScopeProject,
+			ScopeID: project.ID,
+			Owner:   "acme",
+			Repo:    "repo",
+		}), "cheap scope must match full resolver for GH_OWNER__REPO")
 
 		// Same token produces identical scope; different token produces different scope.
 		cred2 := srv.githubCredential(ctx, ghCredRequest{
@@ -75,6 +81,41 @@ func TestGitHubCredential_ScopeHMACAndPrecedence(t *testing.T) {
 		})
 		assert.Equal(t, tokB, credOtherRepo.Token)
 		assert.NotEqual(t, cred.Scope, credOtherRepo.Scope)
+		assert.Equal(t, credOtherRepo.EffectiveScope(), srv.githubCredentialScope(ctx, ghCredRequest{
+			Scope:   store.TemplateScopeProject,
+			ScopeID: project.ID,
+			Owner:   "acme",
+			Repo:    "other",
+		}), "cheap scope must match full resolver for GH_OWNER")
+	})
+
+	t.Run("cheap scope matches full resolver for GITHUB_TOKEN, app installation, and anon", func(t *testing.T) {
+		// GITHUB_TOKEN
+		project.GitHubInstallationID = nil
+		require.NoError(t, s.UpdateProject(ctx, project))
+		useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+			"GITHUB_TOKEN": tokB,
+		})
+		req := ghCredRequest{
+			Scope:   store.TemplateScopeProject,
+			ScopeID: project.ID,
+			Owner:   "acme",
+			Repo:    "repo",
+		}
+		assert.Equal(t, srv.githubCredential(ctx, req).EffectiveScope(), srv.githubCredentialScope(ctx, req))
+
+		// App installation (cheap scope returns app:<id> without minting)
+		installID := int64(54321)
+		project.GitHubInstallationID = &installID
+		require.NoError(t, s.UpdateProject(ctx, project))
+		useReimportCredBackend(srv, secret.ScopeProject, project.ID, nil)
+		assert.Equal(t, "app:54321", srv.githubCredentialScope(ctx, req))
+
+		// Anon
+		project.GitHubInstallationID = nil
+		require.NoError(t, s.UpdateProject(ctx, project))
+		assert.Equal(t, githubfetch.AnonScope, srv.githubCredentialScope(ctx, req))
+		assert.Equal(t, srv.githubCredential(ctx, req).EffectiveScope(), srv.githubCredentialScope(ctx, req))
 	})
 
 	t.Run("app mint failure falls through to GITHUB_TOKEN with Hint", func(t *testing.T) {
