@@ -745,6 +745,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-discord.js'),
   },
   {
+    pattern: /^\/profile\/slack$/,
+    tag: 'scion-page-profile-slack',
+    load: () => import('../components/pages/profile-slack.js'),
+  },
+  {
     pattern: /^\/profile\/skills$/,
     tag: 'scion-page-profile-skills',
     load: () => import('../components/pages/profile-skills.js'),
@@ -929,6 +934,7 @@ const PROFILE_ROUTES = new Set([
   'scion-page-profile-telegram',
   'scion-page-profile-teams',
   'scion-page-profile-discord',
+  'scion-page-profile-slack',
   'scion-page-profile-skills',
   'scion-page-profile-templates',
 ]);

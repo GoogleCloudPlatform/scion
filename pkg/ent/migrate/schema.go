@@ -1096,7 +1096,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "code_hash", Type: field.TypeString, Unique: true},
 		{Name: "user_identifier", Type: field.TypeString},
-		{Name: "provider", Type: field.TypeEnum, Enums: []string{"telegram", "discord", "teams"}},
+		{Name: "provider", Type: field.TypeEnum, Enums: []string{"telegram", "discord", "teams", "slack"}},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "confirmed"}, Default: "pending"},
 		{Name: "user_id", Type: field.TypeString, Nullable: true},
 		{Name: "user_email", Type: field.TypeString, Nullable: true},

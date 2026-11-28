@@ -63,6 +63,7 @@
     "pages/harness-config-detail-source.test.ts",
     "profile/profile-nav.test.ts",
     "pages/profile-decisions.test.ts",
+    "pages/profile-slack.test.ts",
     "shared/schedule-exec.test.ts",
     "shared/chat/chat-theme-tokens.test.ts",
     "../styles/theme.test.ts"

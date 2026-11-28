@@ -446,10 +446,12 @@ func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 		telegramLinkService: NewTelegramLinkService(),
 		discordLinkService:  NewDiscordLinkService(),
 		teamsLinkService:    NewTeamsLinkService(),
+		slackLinkService:    NewSlackLinkService(),
 	}
 	t.Cleanup(srv.telegramLinkService.Close)
 	t.Cleanup(srv.discordLinkService.Close)
 	t.Cleanup(srv.teamsLinkService.Close)
+	t.Cleanup(srv.slackLinkService.Close)
 
 	member := NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "web")
 	fed := NewFederatedUserIdentity("https://issuer.pw.test", "link-fed", "fed@example.com", "Fed", "member", nil)
@@ -461,6 +463,7 @@ func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 		{"telegram", srv.telegramLinkService.chatLinkService, srv.handleTelegramLinkVerify},
 		{"discord", srv.discordLinkService.chatLinkService, srv.handleDiscordLinkVerify},
 		{"teams", srv.teamsLinkService.chatLinkService, srv.handleTeamsLinkVerify},
+		{"slack", srv.slackLinkService.chatLinkService, srv.handleSlackLinkVerify},
 	}
 	verify := func(handler http.HandlerFunc, identity Identity, code string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"code":"`+code+`"}`))

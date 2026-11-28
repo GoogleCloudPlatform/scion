@@ -451,6 +451,18 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/teams/link/status", RouteID: "teams.link.status",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/slack/link": {
+		Pattern: "/api/v1/slack/link", RouteID: "slack.link",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/slack/link/verify": {
+		Pattern: "/api/v1/slack/link/verify", RouteID: "slack.link.verify",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/slack/link/status": {
+		Pattern: "/api/v1/slack/link/status", RouteID: "slack.link.status",
+		Classification: RouteAuthenticated,
+	},
 
 	// -------------------------------------------------------------------------
 	// Policy: Agents

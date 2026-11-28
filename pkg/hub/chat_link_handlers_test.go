@@ -31,10 +31,12 @@ func TestChatLinkRegistrationAcceptsShortCodes(t *testing.T) {
 		telegramLinkService: NewTelegramLinkService(),
 		discordLinkService:  NewDiscordLinkService(),
 		teamsLinkService:    NewTeamsLinkService(),
+		slackLinkService:    NewSlackLinkService(),
 	}
 	t.Cleanup(srv.telegramLinkService.Close)
 	t.Cleanup(srv.discordLinkService.Close)
 	t.Cleanup(srv.teamsLinkService.Close)
+	t.Cleanup(srv.slackLinkService.Close)
 
 	tests := []struct {
 		name    string
@@ -44,6 +46,7 @@ func TestChatLinkRegistrationAcceptsShortCodes(t *testing.T) {
 		{name: "telegram", body: `{"code":"A","telegramUserId":"telegram-user"}`, handler: srv.handleTelegramLink},
 		{name: "discord", body: `{"code":"A","discordUserId":"discord-user"}`, handler: srv.handleDiscordLink},
 		{name: "teams", body: `{"code":"A","teamsUserId":"teams-user"}`, handler: srv.handleTeamsLink},
+		{name: "slack", body: `{"code":"A","slackUserId":"slack-user"}`, handler: srv.handleSlackLink},
 	}
 
 	for _, tt := range tests {
@@ -63,10 +66,12 @@ func TestChatLinkRegistrationPreservesProviderValidation(t *testing.T) {
 		telegramLinkService: NewTelegramLinkService(),
 		discordLinkService:  NewDiscordLinkService(),
 		teamsLinkService:    NewTeamsLinkService(),
+		slackLinkService:    NewSlackLinkService(),
 	}
 	t.Cleanup(srv.telegramLinkService.Close)
 	t.Cleanup(srv.discordLinkService.Close)
 	t.Cleanup(srv.teamsLinkService.Close)
+	t.Cleanup(srv.slackLinkService.Close)
 
 	tests := []struct {
 		name      string
@@ -77,6 +82,7 @@ func TestChatLinkRegistrationPreservesProviderValidation(t *testing.T) {
 		{name: "telegram", body: `{"code":"ABC123"}`, handler: srv.handleTelegramLink, wantError: "code and telegramUserId are required"},
 		{name: "discord", body: `{"code":"ABC123"}`, handler: srv.handleDiscordLink, wantError: "code and discordUserId are required"},
 		{name: "teams", body: `{"code":"ABC123"}`, handler: srv.handleTeamsLink, wantError: "code and teamsUserId are required"},
+		{name: "slack", body: `{"code":"ABC123"}`, handler: srv.handleSlackLink, wantError: "code and slackUserId are required"},
 	}
 
 	for _, tt := range tests {
@@ -188,10 +194,12 @@ func TestChatLinkVerification(t *testing.T) {
 		telegramLinkService: NewTelegramLinkService(),
 		discordLinkService:  NewDiscordLinkService(),
 		teamsLinkService:    NewTeamsLinkService(),
+		slackLinkService:    NewSlackLinkService(),
 	}
 	t.Cleanup(srv.telegramLinkService.Close)
 	t.Cleanup(srv.discordLinkService.Close)
 	t.Cleanup(srv.teamsLinkService.Close)
+	t.Cleanup(srv.slackLinkService.Close)
 
 	tests := []struct {
 		name           string
@@ -203,6 +211,7 @@ func TestChatLinkVerification(t *testing.T) {
 		{name: "telegram", providerUserID: "telegram-user", responseKey: "telegramUserId", register: srv.telegramLinkService.RegisterCode, handler: srv.handleTelegramLinkVerify},
 		{name: "discord", providerUserID: "discord-user", responseKey: "discordUserId", register: srv.discordLinkService.RegisterCode, handler: srv.handleDiscordLinkVerify},
 		{name: "teams", providerUserID: "teams-user", responseKey: "teamsUserId", register: srv.teamsLinkService.RegisterCode, handler: srv.handleTeamsLinkVerify},
+		{name: "slack", providerUserID: "slack-user", responseKey: "slackUserId", register: srv.slackLinkService.RegisterCode, handler: srv.handleSlackLinkVerify},
 	}
 
 	for _, tt := range tests {
@@ -365,10 +374,12 @@ func TestChatLinkStatusReturnsConfirmationOnce(t *testing.T) {
 		telegramLinkService: NewTelegramLinkService(),
 		discordLinkService:  NewDiscordLinkService(),
 		teamsLinkService:    NewTeamsLinkService(),
+		slackLinkService:    NewSlackLinkService(),
 	}
 	t.Cleanup(srv.telegramLinkService.Close)
 	t.Cleanup(srv.discordLinkService.Close)
 	t.Cleanup(srv.teamsLinkService.Close)
+	t.Cleanup(srv.slackLinkService.Close)
 
 	tests := []struct {
 		name           string
@@ -382,6 +393,7 @@ func TestChatLinkStatusReturnsConfirmationOnce(t *testing.T) {
 		{name: "telegram", providerUserID: "telegram-user", queryParam: "telegram_user_id", register: srv.telegramLinkService.RegisterCode, verify: srv.telegramLinkService.VerifyCode, getStatus: srv.telegramLinkService.GetStatusByTelegramUser, handler: srv.handleTelegramLinkStatus},
 		{name: "discord", providerUserID: "discord-user", queryParam: "discord_user_id", register: srv.discordLinkService.RegisterCode, verify: srv.discordLinkService.VerifyCode, getStatus: srv.discordLinkService.GetStatusByDiscordUser, handler: srv.handleDiscordLinkStatus},
 		{name: "teams", providerUserID: "teams-user", queryParam: "teams_user_id", register: srv.teamsLinkService.RegisterCode, verify: srv.teamsLinkService.VerifyCode, getStatus: srv.teamsLinkService.GetStatusByTeamsUser, handler: srv.handleTeamsLinkStatus},
+		{name: "slack", providerUserID: "slack-user", queryParam: "slack_user_id", register: srv.slackLinkService.RegisterCode, verify: srv.slackLinkService.VerifyCode, getStatus: srv.slackLinkService.GetStatusBySlackUser, handler: srv.handleSlackLinkStatus},
 	}
 
 	for _, tt := range tests {

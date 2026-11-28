@@ -393,6 +393,15 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			assert.JSONEq(t, `{"status":"pending"}`, w.Body.String())
 		})
+		t.Run("slack link and link status", func(t *testing.T) {
+			w := env.do(t, http.MethodPost, "/api/v1/slack/link", noUser,
+				map[string]string{"code": "CHATMATRIX3", "slackUserId": "s-123"})
+			require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+			w = env.do(t, http.MethodGet, "/api/v1/slack/link/status?slack_user_id=s-123", noUser, nil)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.JSONEq(t, `{"status":"pending"}`, w.Body.String())
+		})
 	})
 
 	t.Run("request with an unknown linked user is denied", func(t *testing.T) {

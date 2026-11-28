@@ -1648,6 +1648,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/telegram/link/verify", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/discord/link/verify", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/teams/link/verify", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/slack/link/verify", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},

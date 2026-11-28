@@ -99,3 +99,19 @@ func TestTeamsLinkService_FallsBackToInMemory_WithStore(t *testing.T) {
 	status, _, _ := svc.GetStatusByTeamsUser("teams-user-1")
 	assert.Equal(t, "not_found", status)
 }
+
+func TestSlackLinkService_FallsBackToInMemory_WithStore(t *testing.T) {
+	svc := NewSlackLinkService()
+	defer svc.Close()
+
+	svc.RegisterCode("SLCK01", "slack-user-1")
+
+	uid, reason := svc.VerifyCode("SLCK01", "user-1", "user@test.com")
+	assert.Empty(t, reason)
+	assert.Equal(t, "slack-user-1", uid)
+
+	svc.ConsumePending("slack-user-1")
+
+	status, _, _ := svc.GetStatusBySlackUser("slack-user-1")
+	assert.Equal(t, "not_found", status)
+}

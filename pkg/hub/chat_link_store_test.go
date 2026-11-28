@@ -242,12 +242,19 @@ func TestChatLinkStore_ProviderIsolation(t *testing.T) {
 	err = store.RegisterCode(ctx, "DCCODE", "dc-user-1", chatlinkcode.ProviderDiscord, 15*time.Minute)
 	require.NoError(t, err)
 
+	err = store.RegisterCode(ctx, "SLCODE", "sl-user-1", chatlinkcode.ProviderSlack, 15*time.Minute)
+	require.NoError(t, err)
+
 	// Verify the telegram code against discord provider should fail.
 	_, reason := store.VerifyCode(ctx, "TGCODE", chatlinkcode.ProviderDiscord, "scion-user-1", "user@example.com")
 	assert.Equal(t, "code_not_found", reason)
 
 	// Verify the discord code against telegram provider should fail.
 	_, reason = store.VerifyCode(ctx, "DCCODE", chatlinkcode.ProviderTelegram, "scion-user-1", "user@example.com")
+	assert.Equal(t, "code_not_found", reason)
+
+	// Verify the slack code against teams provider should fail.
+	_, reason = store.VerifyCode(ctx, "SLCODE", chatlinkcode.ProviderTeams, "scion-user-1", "user@example.com")
 	assert.Equal(t, "code_not_found", reason)
 
 	// Correct provider matches work.
@@ -258,6 +265,10 @@ func TestChatLinkStore_ProviderIsolation(t *testing.T) {
 	uid, reason = store.VerifyCode(ctx, "DCCODE", chatlinkcode.ProviderDiscord, "scion-user-1", "user@example.com")
 	assert.Empty(t, reason)
 	assert.Equal(t, "dc-user-1", uid)
+
+	uid, reason = store.VerifyCode(ctx, "SLCODE", chatlinkcode.ProviderSlack, "scion-user-1", "user@example.com")
+	assert.Empty(t, reason)
+	assert.Equal(t, "sl-user-1", uid)
 }
 
 func TestLinkServicesUseProviderSpecificStoreScope(t *testing.T) {
@@ -277,6 +288,7 @@ func TestLinkServicesUseProviderSpecificStoreScope(t *testing.T) {
 		{name: "telegram", service: NewTelegramLinkService(), provider: chatlinkcode.ProviderTelegram, code: "SCOPE1", providerUserID: "telegram-user"},
 		{name: "discord", service: NewDiscordLinkService(), provider: chatlinkcode.ProviderDiscord, code: "SCOPE2", providerUserID: "discord-user"},
 		{name: "teams", service: NewTeamsLinkService(), provider: chatlinkcode.ProviderTeams, code: "SCOPE3", providerUserID: "teams-user"},
+		{name: "slack", service: NewSlackLinkService(), provider: chatlinkcode.ProviderSlack, code: "SCOPE4", providerUserID: "slack-user"},
 	}
 
 	for _, tt := range tests {

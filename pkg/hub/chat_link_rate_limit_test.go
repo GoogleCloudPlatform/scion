@@ -35,6 +35,7 @@ func TestLinkServicesAllowVerifyRateLimit(t *testing.T) {
 		{name: "telegram", new: func() linkVerifyService { return NewTelegramLinkService() }},
 		{name: "discord", new: func() linkVerifyService { return NewDiscordLinkService() }},
 		{name: "teams", new: func() linkVerifyService { return NewTeamsLinkService() }},
+		{name: "slack", new: func() linkVerifyService { return NewSlackLinkService() }},
 	}
 
 	for _, tt := range tests {

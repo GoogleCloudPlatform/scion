@@ -386,6 +386,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/teams/link":           "authenticated", // Teams account linking
 	"/api/v1/teams/link/verify":    "authenticated", // Teams link verification
 	"/api/v1/teams/link/status":    "authenticated", // Teams link status
+	"/api/v1/slack/link":           "authenticated", // Slack account linking
+	"/api/v1/slack/link/verify":    "authenticated", // Slack link verification
+	"/api/v1/slack/link/status":    "authenticated", // Slack link status
 
 	// ── Resource import ────────────────────────────────────────────────
 	"/api/v1/resources/import":   "authenticated", // Resource import (templates + harness-configs)

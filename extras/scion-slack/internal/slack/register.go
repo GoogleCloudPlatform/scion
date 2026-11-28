@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -117,7 +118,7 @@ func (h *RegistrationHandler) StartRegistration(ctx context.Context, slackUserID
 	go h.pollForConfirmation(pollCtx, reg)
 
 	hubLink := fmt.Sprintf("%s/profile/slack?code=%s&user_name=%s",
-		strings.TrimRight(h.hubURL, "/"), code, slackUsername)
+		strings.TrimRight(h.hubURL, "/"), url.QueryEscape(code), url.QueryEscape(slackUsername))
 	return hubLink, nil
 }
 
@@ -225,8 +226,8 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, sla
 		return fmt.Errorf("marshal slack link request: %w", err)
 	}
 
-	url := h.hubURL + "/api/v1/slack/link"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	endpoint := strings.TrimRight(h.hubURL, "/") + "/api/v1/slack/link"
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create slack link request: %w", err)
 	}
@@ -249,9 +250,9 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, sla
 }
 
 func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, slackUserID string) (*identityLinkStatusResponse, error) {
-	url := fmt.Sprintf("%s/api/v1/slack/link/status?slack_user_id=%s",
-		h.hubURL, slackUserID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	endpoint := fmt.Sprintf("%s/api/v1/slack/link/status?slack_user_id=%s",
+		strings.TrimRight(h.hubURL, "/"), url.QueryEscape(slackUserID))
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create identity link status request: %w", err)
 	}
