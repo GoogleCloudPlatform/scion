@@ -2398,6 +2398,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.reconcileLifecycleEvents(context.Background())
 	s.reconcileTriggerDrainer(context.Background())
 	s.reconcileUsageLedgerAsync(context.Background())
+	s.reconcileTokenBudgets(context.Background())
 
 	return map[string]interface{}{
 		"applied":          applied,

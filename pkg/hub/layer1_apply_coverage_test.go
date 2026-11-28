@@ -199,6 +199,7 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.retention.hourly_rollups_days":  `{"retention":{"hourly_rollups_days":7}}`,
 	"telemetry.retention.daily_rollups_days":   `{"retention":{"daily_rollups_days":180}}`,
 	"telemetry.retention.scope_counters_days":  `{"retention":{"scope_counters_days":75}}`,
+	"telemetry.retention.budget_state_days":    `{"retention":{"budget_state_days":45}}`,
 	"telemetry.retention.meter_health_days":    `{"retention":{"meter_health_days":15}}`,
 	"telemetry.retention.sweep_interval":       `{"retention":{"sweep_interval":"12h"}}`,
 	"telemetry.retention.batch_size":           `{"retention":{"batch_size":2500}}`,

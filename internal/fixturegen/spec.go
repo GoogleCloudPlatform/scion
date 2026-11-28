@@ -1696,6 +1696,24 @@ func Spec() []TableFixture {
 				"tokens_summable": int64(185), "calls": int64(1), "unmeasured_calls": int64(0),
 			},
 		}},
+		{Table: "usage_budget_state", Rows: []row{
+			{
+				"id":                  "c5000000-0000-0000-0000-000000000001",
+				"limit_definition_id": limitDefID,
+				"scope_kind":          "project",
+				"scope_id":            projectID,
+				"project_scope_id":    "",
+				"window_start_utc":    time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+				"window_end_utc":      time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC),
+				"state":               "ok",
+				"consumed_at_eval":    int64(185),
+				"cap_at_eval":         int64(100000),
+				"thresholds_notified": int64(0),
+				"state_version":       int64(1),
+				"created_at":          baseTime,
+				"updated_at":          baseTime,
+			},
+		}},
 		{Table: "meter_health", Rows: []row{
 			{
 				"id":       "c4000000-0000-0000-0000-000000000001",

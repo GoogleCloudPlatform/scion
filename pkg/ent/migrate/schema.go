@@ -1866,6 +1866,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "value", Type: field.TypeInt64},
+		{Name: "token_action", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "updated_at", Type: field.TypeTime},
@@ -1879,7 +1880,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "entitlement_bindings_limit_definitions_entitlement_bindings",
-				Columns:    []*schema.Column{EntitlementBindingsColumns[9]},
+				Columns:    []*schema.Column{EntitlementBindingsColumns[10]},
 				RefColumns: []*schema.Column{LimitDefinitionsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -1888,7 +1889,7 @@ var (
 			{
 				Name:    "entitlementbinding_limit_definition_id_subject_type_subject_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{EntitlementBindingsColumns[9], EntitlementBindingsColumns[1], EntitlementBindingsColumns[2], EntitlementBindingsColumns[3], EntitlementBindingsColumns[4]},
+				Columns: []*schema.Column{EntitlementBindingsColumns[10], EntitlementBindingsColumns[1], EntitlementBindingsColumns[2], EntitlementBindingsColumns[3], EntitlementBindingsColumns[4]},
 			},
 		},
 	}
@@ -4667,6 +4668,48 @@ var (
 			},
 		},
 	}
+	// UsageBudgetStateColumns holds the columns for the "usage_budget_state" table.
+	UsageBudgetStateColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "limit_definition_id", Type: field.TypeUUID},
+		{Name: "scope_kind", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "project_scope_id", Type: field.TypeString, Default: ""},
+		{Name: "window_start_utc", Type: field.TypeTime},
+		{Name: "window_end_utc", Type: field.TypeTime},
+		{Name: "state", Type: field.TypeString, Default: "ok"},
+		{Name: "consumed_at_eval", Type: field.TypeInt64, Default: 0},
+		{Name: "cap_at_eval", Type: field.TypeInt64, Default: 0},
+		{Name: "thresholds_notified", Type: field.TypeInt64, Default: 0},
+		{Name: "ack_anomalous_through", Type: field.TypeTime, Nullable: true},
+		{Name: "override_until", Type: field.TypeTime, Nullable: true},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// UsageBudgetStateTable holds the schema information for the "usage_budget_state" table.
+	UsageBudgetStateTable = &schema.Table{
+		Name:       "usage_budget_state",
+		Columns:    UsageBudgetStateColumns,
+		PrimaryKey: []*schema.Column{UsageBudgetStateColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_budget_state_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageBudgetStateColumns[1], UsageBudgetStateColumns[2], UsageBudgetStateColumns[3], UsageBudgetStateColumns[4], UsageBudgetStateColumns[5]},
+			},
+			{
+				Name:    "usagebudgetstate_window_end_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageBudgetStateColumns[6]},
+			},
+			{
+				Name:    "usage_budget_state_scope_window",
+				Unique:  false,
+				Columns: []*schema.Column{UsageBudgetStateColumns[2], UsageBudgetStateColumns[3], UsageBudgetStateColumns[4], UsageBudgetStateColumns[5]},
+			},
+		},
+	}
 	// UsageEventsColumns holds the columns for the "usage_events" table.
 	UsageEventsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -5358,6 +5401,7 @@ var (
 		TriggerEventsTable,
 		TriggerFiresTable,
 		TriggerSubjectClaimsTable,
+		UsageBudgetStateTable,
 		UsageEventsTable,
 		UsageReservationsTable,
 		UsageRollupsDailyTable,
@@ -5673,6 +5717,9 @@ func init() {
 	}
 	TriggerSubjectClaimsTable.Annotation = &entsql.Annotation{
 		Table: "trigger_subject_claims",
+	}
+	UsageBudgetStateTable.Annotation = &entsql.Annotation{
+		Table: "usage_budget_state",
 	}
 	UsageEventsTable.ForeignKeys[0].RefTable = RunAttributionTable
 	UsageEventsTable.Annotation = &entsql.Annotation{

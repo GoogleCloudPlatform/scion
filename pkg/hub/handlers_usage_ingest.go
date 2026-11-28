@@ -518,6 +518,16 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		s.UsageOTelMetrics().RecordCommittedEvents(ctx, res.InsertedEvents, attrCache)
 	}
 
+	// Post-commit raw-token budget evaluation (Tokenomics P3.1, D4): runs
+	// strictly after IngestUsageBatch commits, only for newly inserted rows,
+	// when tokenomics.token_budgets is enabled. Evaluation errors are logged
+	// and never fail or alter the ingest response.
+	if len(res.InsertedEvents) > 0 && s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.EvaluateIngestedEvents(ctx, res.InsertedEvents)
+		}
+	}
+
 	if len(res.Rejected) > 0 {
 		for _, r := range res.Rejected {
 			rejected = append(rejected, telemetrycontract.UsageIngestRejection{

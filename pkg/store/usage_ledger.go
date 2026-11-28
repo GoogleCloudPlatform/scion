@@ -703,6 +703,7 @@ type UsageLedgerStore interface {
 	CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error)
 
 	UsageRetentionStore
+	UsageBudgetStore
 }
 
 // UsageExportCursor is the analytics export watermark for usage_events (P8).
@@ -776,4 +777,9 @@ type UsageRetentionStore interface {
 	// live (non-deleted) agent, and with no remaining usage_events or
 	// meter_health rows referencing the run (D8a rule).
 	SweepRunAttributionBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageBudgetStateBatch deletes up to batchSize closed
+	// usage_budget_state rows with window_end_utc < cutoff (never touching
+	// active windows).
+	SweepUsageBudgetStateBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 }

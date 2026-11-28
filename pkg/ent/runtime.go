@@ -118,6 +118,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
@@ -1932,15 +1933,15 @@ func init() {
 	// entitlementbinding.DefaultScopeID holds the default value on creation for the scope_id field.
 	entitlementbinding.DefaultScopeID = entitlementbindingDescScopeID.Default.(string)
 	// entitlementbindingDescCreatedBy is the schema descriptor for created_by field.
-	entitlementbindingDescCreatedBy := entitlementbindingFields[7].Descriptor()
+	entitlementbindingDescCreatedBy := entitlementbindingFields[8].Descriptor()
 	// entitlementbinding.DefaultCreatedBy holds the default value on creation for the created_by field.
 	entitlementbinding.DefaultCreatedBy = entitlementbindingDescCreatedBy.Default.(string)
 	// entitlementbindingDescCreatedAt is the schema descriptor for created_at field.
-	entitlementbindingDescCreatedAt := entitlementbindingFields[8].Descriptor()
+	entitlementbindingDescCreatedAt := entitlementbindingFields[9].Descriptor()
 	// entitlementbinding.DefaultCreatedAt holds the default value on creation for the created_at field.
 	entitlementbinding.DefaultCreatedAt = entitlementbindingDescCreatedAt.Default.(func() time.Time)
 	// entitlementbindingDescUpdatedAt is the schema descriptor for updated_at field.
-	entitlementbindingDescUpdatedAt := entitlementbindingFields[9].Descriptor()
+	entitlementbindingDescUpdatedAt := entitlementbindingFields[10].Descriptor()
 	// entitlementbinding.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	entitlementbinding.DefaultUpdatedAt = entitlementbindingDescUpdatedAt.Default.(func() time.Time)
 	// entitlementbinding.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
@@ -4448,6 +4449,54 @@ func init() {
 	triggersubjectclaimDescID := triggersubjectclaimFields[0].Descriptor()
 	// triggersubjectclaim.DefaultID holds the default value on creation for the id field.
 	triggersubjectclaim.DefaultID = triggersubjectclaimDescID.Default.(func() uuid.UUID)
+	usagebudgetstateFields := schema.UsageBudgetState{}.Fields()
+	_ = usagebudgetstateFields
+	// usagebudgetstateDescScopeKind is the schema descriptor for scope_kind field.
+	usagebudgetstateDescScopeKind := usagebudgetstateFields[2].Descriptor()
+	// usagebudgetstate.ScopeKindValidator is a validator for the "scope_kind" field. It is called by the builders before save.
+	usagebudgetstate.ScopeKindValidator = usagebudgetstateDescScopeKind.Validators[0].(func(string) error)
+	// usagebudgetstateDescScopeID is the schema descriptor for scope_id field.
+	usagebudgetstateDescScopeID := usagebudgetstateFields[3].Descriptor()
+	// usagebudgetstate.ScopeIDValidator is a validator for the "scope_id" field. It is called by the builders before save.
+	usagebudgetstate.ScopeIDValidator = usagebudgetstateDescScopeID.Validators[0].(func(string) error)
+	// usagebudgetstateDescProjectScopeID is the schema descriptor for project_scope_id field.
+	usagebudgetstateDescProjectScopeID := usagebudgetstateFields[4].Descriptor()
+	// usagebudgetstate.DefaultProjectScopeID holds the default value on creation for the project_scope_id field.
+	usagebudgetstate.DefaultProjectScopeID = usagebudgetstateDescProjectScopeID.Default.(string)
+	// usagebudgetstateDescState is the schema descriptor for state field.
+	usagebudgetstateDescState := usagebudgetstateFields[7].Descriptor()
+	// usagebudgetstate.DefaultState holds the default value on creation for the state field.
+	usagebudgetstate.DefaultState = usagebudgetstateDescState.Default.(string)
+	// usagebudgetstateDescConsumedAtEval is the schema descriptor for consumed_at_eval field.
+	usagebudgetstateDescConsumedAtEval := usagebudgetstateFields[8].Descriptor()
+	// usagebudgetstate.DefaultConsumedAtEval holds the default value on creation for the consumed_at_eval field.
+	usagebudgetstate.DefaultConsumedAtEval = usagebudgetstateDescConsumedAtEval.Default.(int64)
+	// usagebudgetstateDescCapAtEval is the schema descriptor for cap_at_eval field.
+	usagebudgetstateDescCapAtEval := usagebudgetstateFields[9].Descriptor()
+	// usagebudgetstate.DefaultCapAtEval holds the default value on creation for the cap_at_eval field.
+	usagebudgetstate.DefaultCapAtEval = usagebudgetstateDescCapAtEval.Default.(int64)
+	// usagebudgetstateDescThresholdsNotified is the schema descriptor for thresholds_notified field.
+	usagebudgetstateDescThresholdsNotified := usagebudgetstateFields[10].Descriptor()
+	// usagebudgetstate.DefaultThresholdsNotified holds the default value on creation for the thresholds_notified field.
+	usagebudgetstate.DefaultThresholdsNotified = usagebudgetstateDescThresholdsNotified.Default.(int64)
+	// usagebudgetstateDescStateVersion is the schema descriptor for state_version field.
+	usagebudgetstateDescStateVersion := usagebudgetstateFields[13].Descriptor()
+	// usagebudgetstate.DefaultStateVersion holds the default value on creation for the state_version field.
+	usagebudgetstate.DefaultStateVersion = usagebudgetstateDescStateVersion.Default.(int64)
+	// usagebudgetstateDescCreatedAt is the schema descriptor for created_at field.
+	usagebudgetstateDescCreatedAt := usagebudgetstateFields[14].Descriptor()
+	// usagebudgetstate.DefaultCreatedAt holds the default value on creation for the created_at field.
+	usagebudgetstate.DefaultCreatedAt = usagebudgetstateDescCreatedAt.Default.(func() time.Time)
+	// usagebudgetstateDescUpdatedAt is the schema descriptor for updated_at field.
+	usagebudgetstateDescUpdatedAt := usagebudgetstateFields[15].Descriptor()
+	// usagebudgetstate.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	usagebudgetstate.DefaultUpdatedAt = usagebudgetstateDescUpdatedAt.Default.(func() time.Time)
+	// usagebudgetstate.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	usagebudgetstate.UpdateDefaultUpdatedAt = usagebudgetstateDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// usagebudgetstateDescID is the schema descriptor for id field.
+	usagebudgetstateDescID := usagebudgetstateFields[0].Descriptor()
+	// usagebudgetstate.DefaultID holds the default value on creation for the id field.
+	usagebudgetstate.DefaultID = usagebudgetstateDescID.Default.(func() uuid.UUID)
 	usageeventFields := schema.UsageEvent{}.Fields()
 	_ = usageeventFields
 	// usageeventDescHubID is the schema descriptor for hub_id field.

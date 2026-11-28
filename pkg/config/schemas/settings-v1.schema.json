@@ -3118,6 +3118,13 @@
           "description": "Retention window in days for usage_scope_counters_daily (min 65, or 0 for unlimited; always preserves current and previous calendar months).",
           "x-since": "1"
         },
+        "budget_state_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 90,
+          "description": "Retention window in days past window_end_utc for closed usage_budget_state rows (min 1, or 0 for unlimited; active windows are never deleted).",
+          "x-since": "1"
+        },
         "meter_health_days": {
           "type": "integer",
           "minimum": 0,

@@ -77,6 +77,20 @@ func (_c *EntitlementBindingCreate) SetValue(v int64) *EntitlementBindingCreate 
 	return _c
 }
 
+// SetTokenAction sets the "token_action" field.
+func (_c *EntitlementBindingCreate) SetTokenAction(v string) *EntitlementBindingCreate {
+	_c.mutation.SetTokenAction(v)
+	return _c
+}
+
+// SetNillableTokenAction sets the "token_action" field if the given value is not nil.
+func (_c *EntitlementBindingCreate) SetNillableTokenAction(v *string) *EntitlementBindingCreate {
+	if v != nil {
+		_c.SetTokenAction(*v)
+	}
+	return _c
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_c *EntitlementBindingCreate) SetCreatedBy(v string) *EntitlementBindingCreate {
 	_c.mutation.SetCreatedBy(v)
@@ -294,6 +308,10 @@ func (_c *EntitlementBindingCreate) createSpec() (*EntitlementBinding, *sqlgraph
 		_spec.SetField(entitlementbinding.FieldValue, field.TypeInt64, value)
 		_node.Value = value
 	}
+	if value, ok := _c.mutation.TokenAction(); ok {
+		_spec.SetField(entitlementbinding.FieldTokenAction, field.TypeString, value)
+		_node.TokenAction = &value
+	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(entitlementbinding.FieldCreatedBy, field.TypeString, value)
 		_node.CreatedBy = value
@@ -453,6 +471,24 @@ func (u *EntitlementBindingUpsert) AddValue(v int64) *EntitlementBindingUpsert {
 	return u
 }
 
+// SetTokenAction sets the "token_action" field.
+func (u *EntitlementBindingUpsert) SetTokenAction(v string) *EntitlementBindingUpsert {
+	u.Set(entitlementbinding.FieldTokenAction, v)
+	return u
+}
+
+// UpdateTokenAction sets the "token_action" field to the value that was provided on create.
+func (u *EntitlementBindingUpsert) UpdateTokenAction() *EntitlementBindingUpsert {
+	u.SetExcluded(entitlementbinding.FieldTokenAction)
+	return u
+}
+
+// ClearTokenAction clears the value of the "token_action" field.
+func (u *EntitlementBindingUpsert) ClearTokenAction() *EntitlementBindingUpsert {
+	u.SetNull(entitlementbinding.FieldTokenAction)
+	return u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (u *EntitlementBindingUpsert) SetUpdatedAt(v time.Time) *EntitlementBindingUpsert {
 	u.Set(entitlementbinding.FieldUpdatedAt, v)
@@ -607,6 +643,27 @@ func (u *EntitlementBindingUpsertOne) AddValue(v int64) *EntitlementBindingUpser
 func (u *EntitlementBindingUpsertOne) UpdateValue() *EntitlementBindingUpsertOne {
 	return u.Update(func(s *EntitlementBindingUpsert) {
 		s.UpdateValue()
+	})
+}
+
+// SetTokenAction sets the "token_action" field.
+func (u *EntitlementBindingUpsertOne) SetTokenAction(v string) *EntitlementBindingUpsertOne {
+	return u.Update(func(s *EntitlementBindingUpsert) {
+		s.SetTokenAction(v)
+	})
+}
+
+// UpdateTokenAction sets the "token_action" field to the value that was provided on create.
+func (u *EntitlementBindingUpsertOne) UpdateTokenAction() *EntitlementBindingUpsertOne {
+	return u.Update(func(s *EntitlementBindingUpsert) {
+		s.UpdateTokenAction()
+	})
+}
+
+// ClearTokenAction clears the value of the "token_action" field.
+func (u *EntitlementBindingUpsertOne) ClearTokenAction() *EntitlementBindingUpsertOne {
+	return u.Update(func(s *EntitlementBindingUpsert) {
+		s.ClearTokenAction()
 	})
 }
 
@@ -933,6 +990,27 @@ func (u *EntitlementBindingUpsertBulk) AddValue(v int64) *EntitlementBindingUpse
 func (u *EntitlementBindingUpsertBulk) UpdateValue() *EntitlementBindingUpsertBulk {
 	return u.Update(func(s *EntitlementBindingUpsert) {
 		s.UpdateValue()
+	})
+}
+
+// SetTokenAction sets the "token_action" field.
+func (u *EntitlementBindingUpsertBulk) SetTokenAction(v string) *EntitlementBindingUpsertBulk {
+	return u.Update(func(s *EntitlementBindingUpsert) {
+		s.SetTokenAction(v)
+	})
+}
+
+// UpdateTokenAction sets the "token_action" field to the value that was provided on create.
+func (u *EntitlementBindingUpsertBulk) UpdateTokenAction() *EntitlementBindingUpsertBulk {
+	return u.Update(func(s *EntitlementBindingUpsert) {
+		s.UpdateTokenAction()
+	})
+}
+
+// ClearTokenAction clears the value of the "token_action" field.
+func (u *EntitlementBindingUpsertBulk) ClearTokenAction() *EntitlementBindingUpsertBulk {
+	return u.Update(func(s *EntitlementBindingUpsert) {
+		s.ClearTokenAction()
 	})
 }
 

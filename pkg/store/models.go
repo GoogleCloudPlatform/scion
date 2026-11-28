@@ -5943,9 +5943,37 @@ type EntitlementBinding struct {
 	ScopeType         string    `json:"scopeType"` // "system" or "project"
 	ScopeID           string    `json:"scopeId"`   // "" for system, project ID for project
 	Value             int64     `json:"value"`
+	TokenAction       *string   `json:"tokenAction,omitempty"` // NULL = "pause_new"; valid only for llm_tokens limits
 	CreatedBy         string    `json:"createdBy"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+// Token budget breach action values for EntitlementBinding.TokenAction
+// (Tokenomics design §4.4). NULL is equivalent to TokenActionPauseNew.
+const (
+	TokenActionPauseNew        = "pause_new"
+	TokenActionSuspendAndPause = "suspend_and_pause"
+	TokenActionNotifyOnly      = "notify_only"
+)
+
+// ValidTokenAction reports whether action is a recognized token budget breach action.
+func ValidTokenAction(action string) bool {
+	switch action {
+	case TokenActionPauseNew, TokenActionSuspendAndPause, TokenActionNotifyOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// EffectiveTokenAction returns the effective breach action for a nullable
+// TokenAction pointer, defaulting NULL or empty to TokenActionPauseNew.
+func EffectiveTokenAction(action *string) string {
+	if action == nil || *action == "" {
+		return TokenActionPauseNew
+	}
+	return *action
 }
 
 // UsageReservation tracks a single unit of quota consumption.
@@ -6005,6 +6033,18 @@ const (
 	// them, regardless of which project or user created them. It is seeded
 	// with a non-zero default rather than 0/unlimited. See seedLimitDefinitions.
 	LimitMaxAgentsPerBroker = "max_agents_per_broker"
+
+	// Raw-token budget limit definitions (Tokenomics P3, §4.4).
+	// All use resource_type = "llm_tokens", unit = "tokens", DefaultValue = 0 (unlimited).
+	LimitResourceTypeLLMTokens = "llm_tokens"
+	LimitUnitTokens            = "tokens"
+
+	LimitLLMTokensPerProjectDay       = "llm_tokens_per_project_day"
+	LimitLLMTokensPerProjectMonth     = "llm_tokens_per_project_month"
+	LimitLLMTokensPerUserDay          = "llm_tokens_per_user_day"
+	LimitLLMTokensPerUserMonth        = "llm_tokens_per_user_month"
+	LimitLLMTokensPerUserProjectDay   = "llm_tokens_per_user_project_day"
+	LimitLLMTokensPerUserProjectMonth = "llm_tokens_per_user_project_month"
 )
 
 // =============================================================================

@@ -112,6 +112,7 @@ func ConvertV1TelemetryToAPI(v1 *V1TelemetryConfig) *api.TelemetryConfig {
 			HourlyRollupsDays: v1.Retention.HourlyRollupsDays,
 			DailyRollupsDays:  v1.Retention.DailyRollupsDays,
 			ScopeCountersDays: v1.Retention.ScopeCountersDays,
+			BudgetStateDays:   v1.Retention.BudgetStateDays,
 			MeterHealthDays:   v1.Retention.MeterHealthDays,
 			SweepInterval:     v1.Retention.SweepInterval,
 			BatchSize:         v1.Retention.BatchSize,
