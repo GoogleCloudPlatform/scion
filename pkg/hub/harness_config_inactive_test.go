@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,7 +46,7 @@ func seedHarnessConfigWithStatus(t *testing.T, s store.Store, slug, harnessType,
 	return hc
 }
 
-func TestResolveHarnessConfigBySlug_RefusesInactiveNoFallthrough(t *testing.T) {
+func TestResolveActiveHarnessConfigBySlug_RefusesInactiveNoFallthrough(t *testing.T) {
 	ctx := context.Background()
 
 	for _, status := range []string{store.HarnessConfigStatusArchived, store.HarnessConfigStatusPending} {
@@ -54,10 +55,10 @@ func TestResolveHarnessConfigBySlug_RefusesInactiveNoFallthrough(t *testing.T) {
 			srv.workstation = false
 			projectID := tid("hc-inactive-hosted-" + status)
 
-			seedHarnessConfigWithStatus(t, s, "shared-hc", "claude", store.HarnessConfigScopeGlobal, "", status)
+			inactiveGlobal := seedHarnessConfigWithStatus(t, s, "shared-hc", "claude", store.HarnessConfigScopeGlobal, "", status)
 			seedHarnessConfigWithStatus(t, s, "shared-hc", "claude", store.HarnessConfigScopeProject, projectID, store.HarnessConfigStatusActive)
 
-			got, err := srv.resolveHarnessConfigBySlug(ctx, projectID, "shared-hc")
+			got, err := srv.resolveActiveHarnessConfigBySlug(ctx, projectID, "shared-hc")
 			assert.Nil(t, got)
 			var notActive *harnessConfigNotActiveError
 			require.ErrorAs(t, err, &notActive)
@@ -66,6 +67,12 @@ func TestResolveHarnessConfigBySlug_RefusesInactiveNoFallthrough(t *testing.T) {
 			assert.Equal(t, store.HarnessConfigScopeGlobal, notActive.Scope)
 			assert.Contains(t, err.Error(), "shared-hc")
 			assert.Contains(t, err.Error(), status)
+
+			// Status-agnostic lookup still resolves the higher-scope row for existing-agent readers.
+			raw, err := srv.resolveHarnessConfigBySlug(ctx, projectID, "shared-hc")
+			require.NoError(t, err)
+			require.NotNil(t, raw)
+			assert.Equal(t, inactiveGlobal.ID, raw.ID)
 		})
 
 		t.Run("workstation_"+status+"_project_no_fallthrough_to_global", func(t *testing.T) {
@@ -73,16 +80,22 @@ func TestResolveHarnessConfigBySlug_RefusesInactiveNoFallthrough(t *testing.T) {
 			srv.workstation = true
 			projectID := tid("hc-inactive-ws-" + status)
 
-			seedHarnessConfigWithStatus(t, s, "shared-hc", "claude", store.HarnessConfigScopeProject, projectID, status)
+			inactiveProject := seedHarnessConfigWithStatus(t, s, "shared-hc", "claude", store.HarnessConfigScopeProject, projectID, status)
 			seedHarnessConfigWithStatus(t, s, "shared-hc", "claude", store.HarnessConfigScopeGlobal, "", store.HarnessConfigStatusActive)
 
-			got, err := srv.resolveHarnessConfigBySlug(ctx, projectID, "shared-hc")
+			got, err := srv.resolveActiveHarnessConfigBySlug(ctx, projectID, "shared-hc")
 			assert.Nil(t, got)
 			var notActive *harnessConfigNotActiveError
 			require.ErrorAs(t, err, &notActive)
 			assert.Equal(t, "shared-hc", notActive.Name)
 			assert.Equal(t, status, notActive.Status)
 			assert.Equal(t, store.HarnessConfigScopeProject, notActive.Scope)
+
+			// Status-agnostic lookup still resolves the higher-scope row for existing-agent readers.
+			raw, err := srv.resolveHarnessConfigBySlug(ctx, projectID, "shared-hc")
+			require.NoError(t, err)
+			require.NotNil(t, raw)
+			assert.Equal(t, inactiveProject.ID, raw.ID)
 		})
 	}
 
@@ -93,12 +106,12 @@ func TestResolveHarnessConfigBySlug_RefusesInactiveNoFallthrough(t *testing.T) {
 
 		active := seedHarnessConfigWithStatus(t, s, "active-hc", "claude", store.HarnessConfigScopeGlobal, "", store.HarnessConfigStatusActive)
 
-		got, err := srv.resolveHarnessConfigBySlug(ctx, projectID, "active-hc")
+		got, err := srv.resolveActiveHarnessConfigBySlug(ctx, projectID, "active-hc")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, active.ID, got.ID)
 
-		got, err = srv.resolveHarnessConfigBySlug(ctx, projectID, "deleted-or-absent-hc")
+		got, err = srv.resolveActiveHarnessConfigBySlug(ctx, projectID, "deleted-or-absent-hc")
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
@@ -172,6 +185,31 @@ func TestCreateAgent_RefusesInactiveHarnessConfig(t *testing.T) {
 
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
 			Name:          "agent-no-fallthrough",
+			HarnessConfig: "custom-hc",
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), rec.Body.String())
+		assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+		assert.Contains(t, errResp.Error.Message, "custom-hc")
+		assert.Contains(t, errResp.Error.Message, store.HarnessConfigStatusArchived)
+
+		listed, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, listed.Items)
+	})
+
+	t.Run("workstation_archived_project_does_not_fall_through_to_active_global", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.workstation = true
+
+		project := setupProjectWithBroker(t, s, "ws-no-fallthrough")
+		seedHarnessConfigWithStatus(t, s, "custom-hc", "claude", store.HarnessConfigScopeProject, project.ID, store.HarnessConfigStatusArchived)
+		seedHarnessConfigWithStatus(t, s, "custom-hc", "claude", store.HarnessConfigScopeGlobal, "", store.HarnessConfigStatusActive)
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+			Name:          "agent-ws-no-fallthrough",
 			HarnessConfig: "custom-hc",
 		})
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -312,48 +350,74 @@ func TestReincarnateAgent_RefusesInactiveHarnessConfig(t *testing.T) {
 	})
 }
 
-func TestResolveHarnessTypeFromConfigRef_IgnoresInactiveNoFallthrough(t *testing.T) {
+func TestExistingAgent_RetainsHarnessAndModelAliasesWhenConfigInactive(t *testing.T) {
 	ctx := context.Background()
+	defaultClaudeLarge := harness.DefaultModelAliases("claude")["large"]
+	require.NotEmpty(t, defaultClaudeLarge, "claude harness must expose a built-in 'large' model alias")
 
 	for _, status := range []string{store.HarnessConfigStatusArchived, store.HarnessConfigStatusPending} {
-		t.Run("hosted_"+status+"_global_no_fallthrough", func(t *testing.T) {
+		t.Run("hosted_"+status+"_retains_harness_capabilities_and_default_aliases", func(t *testing.T) {
 			srv, s := testServer(t)
 			srv.workstation = false
-			projectID := tid("hc-cap-hosted-" + status)
+			projectID := tid("hc-existing-" + status)
 
-			seedHarnessConfigWithStatus(t, s, "custom-cfg", "codex", store.HarnessConfigScopeGlobal, "", status)
-			seedHarnessConfigWithStatus(t, s, "custom-cfg", "claude", store.HarnessConfigScopeProject, projectID, store.HarnessConfigStatusActive)
+			// Seed an archived/pending global config with no custom model_aliases.
+			seedHarnessConfigWithStatus(t, s, "legacy-cfg", "claude", store.HarnessConfigScopeGlobal, "", status)
 
-			assert.Equal(t, "", srv.resolveHarnessTypeFromConfigRef(ctx, projectID, "custom-cfg"))
+			// Existing agent predating AppliedConfig.Harness stamping.
+			agent := &store.Agent{
+				ID:        tid("agent-existing-" + status),
+				ProjectID: projectID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					HarnessConfig: "legacy-cfg",
+				},
+			}
+
+			assert.Equal(t, "claude", srv.effectiveAgentHarnessType(ctx, agent))
+			assert.Equal(t, "claude", srv.resolveAgentHarnessType(ctx, agent))
+			assert.Equal(t, "claude", srv.resolveHarnessTypeFromConfigRef(ctx, projectID, "legacy-cfg"))
+
 			memo := newHarnessTypeMemo()
-			assert.Equal(t, "", srv.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, "custom-cfg", memo))
-			// Repeat call hits memo with the same result.
-			assert.Equal(t, "", srv.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, "custom-cfg", memo))
+			assert.Equal(t, "claude", srv.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, "legacy-cfg", memo))
+			assert.Equal(t, "claude", srv.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, "legacy-cfg", memo))
+
+			resolvedHarness, caps := srv.resolveAgentHarnessCapabilities(ctx, agent)
+			assert.Equal(t, "claude", resolvedHarness)
+			assert.Equal(t, agentHarnessCapabilities(agent, "claude"), caps)
+
+			// Built-in alias fallback still resolves via the claude harness defaults, not "generic".
+			assert.Equal(t, defaultClaudeLarge, srv.resolveModelAliasForAgent(ctx, agent, "large"))
 		})
 
-		t.Run("workstation_"+status+"_project_no_fallthrough", func(t *testing.T) {
+		t.Run("hosted_"+status+"_retains_config_model_aliases_via_slug_fallback", func(t *testing.T) {
 			srv, s := testServer(t)
-			srv.workstation = true
-			projectID := tid("hc-cap-ws-" + status)
+			srv.workstation = false
+			projectID := tid("hc-existing-alias-" + status)
 
-			seedHarnessConfigWithStatus(t, s, "custom-cfg", "claude", store.HarnessConfigScopeProject, projectID, status)
-			seedHarnessConfigWithStatus(t, s, "custom-cfg", "codex", store.HarnessConfigScopeGlobal, "", store.HarnessConfigStatusActive)
+			hc := &store.HarnessConfig{
+				ID:          api.NewUUID(),
+				Name:        "legacy-aliased-cfg",
+				Slug:        "legacy-aliased-cfg",
+				Harness:     "claude",
+				ContentHash: "legacy-aliased-cfg-" + status,
+				Scope:       store.HarnessConfigScopeGlobal,
+				ScopeID:     "",
+				Status:      status,
+				Config: &store.HarnessConfigData{
+					ModelAliases: map[string]string{"large": "custom-legacy-large"},
+				},
+			}
+			require.NoError(t, s.CreateHarnessConfig(ctx, hc))
 
-			assert.Equal(t, "", srv.resolveHarnessTypeFromConfigRef(ctx, projectID, "custom-cfg"))
-			memo := newHarnessTypeMemo()
-			assert.Equal(t, "", srv.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, "custom-cfg", memo))
+			// Agent with no HarnessConfigID so resolveModelAliasForAgent uses the slug fallback.
+			agent := &store.Agent{
+				ID:        tid("agent-existing-alias-" + status),
+				ProjectID: projectID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					HarnessConfig: "legacy-aliased-cfg",
+				},
+			}
+			assert.Equal(t, "custom-legacy-large", srv.resolveModelAliasForAgent(ctx, agent, "large"))
 		})
 	}
-
-	t.Run("absent_global_resolves_active_project_and_active_global_resolves", func(t *testing.T) {
-		srv, s := testServer(t)
-		srv.workstation = false
-		projectID := tid("hc-cap-active")
-
-		seedHarnessConfigWithStatus(t, s, "proj-only-cfg", "claude", store.HarnessConfigScopeProject, projectID, store.HarnessConfigStatusActive)
-		seedHarnessConfigWithStatus(t, s, "global-active-cfg", "codex", store.HarnessConfigScopeGlobal, "", store.HarnessConfigStatusActive)
-
-		assert.Equal(t, "claude", srv.resolveHarnessTypeFromConfigRef(ctx, projectID, "proj-only-cfg"))
-		assert.Equal(t, "codex", srv.resolveHarnessTypeFromConfigRef(ctx, projectID, "global-active-cfg"))
-	})
 }

@@ -356,7 +356,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// typo would otherwise reset the home for nothing (ptone/scion#7757).
 	var targetHC *store.HarnessConfig
 	if req.HarnessConfig != "" {
-		hc, err := s.resolveHarnessConfigBySlug(ctx, project.ID, req.HarnessConfig)
+		hc, err := s.resolveActiveHarnessConfigBySlug(ctx, project.ID, req.HarnessConfig)
 		if err != nil {
 			if writeHarnessConfigNotActive(w, err) {
 				return

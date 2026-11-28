@@ -810,7 +810,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		// through to broker-local resolution. Any other lookup error is logged
 		// by the resolver and the create goes on as for a name the hub does not
 		// know.
-		hc, err := s.resolveHarnessConfigBySlug(ctx, projectID, hcName)
+		hc, err := s.resolveActiveHarnessConfigBySlug(ctx, projectID, hcName)
 		if err != nil {
 			var notActive *harnessConfigNotActiveError
 			if errors.As(err, &notActive) {
@@ -3643,20 +3643,33 @@ func writeHarnessConfigNotActive(w http.ResponseWriter, err error) bool {
 // resolveHarnessConfigBySlug looks up the hub harness config named name in
 // the scopes harnessConfigLookupScopes gives: project then global on a
 // workstation hub, global then project on a hosted hub. It returns (nil, nil)
-// when no scope has one. If the first matching row in scope order is not
-// active (e.g. archived or pending), it returns (nil, *harnessConfigNotActiveError)
-// immediately without falling through to a lower scope. A store failure other
-// than not-found is logged; on a workstation hub the next scope is still tried
-// and the failure returned with a nil config if none matches, while on a hosted
-// hub a failed global lookup is returned at once, so the project scope is never
-// consulted without knowing whether a global config of that slug exists.
+// when no scope has one. A store failure other than not-found is logged; on
+// a workstation hub the next scope is still tried and the failure returned
+// with a nil config if none matches, while on a hosted hub a failed global
+// lookup is returned at once, so the project scope is never consulted
+// without knowing whether a global config of that slug exists.
+//
+// This lookup is status-agnostic so existing-agent readers (capabilities,
+// model-alias fallback, usage reads) continue to resolve configs that were
+// archived after the agent was created. Callers selecting a harness config
+// for a new generation (create or reincarnate) should use
+// resolveActiveHarnessConfigBySlug instead.
 func (s *Server) resolveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
 	if s == nil || s.store == nil {
 		return nil, nil
 	}
-	hc, err := s.resolveHarnessConfigBySlugWith(projectID, name, func(slug, scope, scopeID string) (*store.HarnessConfig, error) {
+	return s.resolveHarnessConfigBySlugWith(projectID, name, func(slug, scope, scopeID string) (*store.HarnessConfig, error) {
 		return s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
 	})
+}
+
+// resolveActiveHarnessConfigBySlug resolves name via resolveHarnessConfigBySlug
+// and enforces that the first matching row in scope order is active. Non-active
+// rows (e.g. archived or pending) return (nil, *harnessConfigNotActiveError)
+// immediately without falling through to a lower scope or broker-local
+// fallback.
+func (s *Server) resolveActiveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
+	hc, err := s.resolveHarnessConfigBySlug(ctx, projectID, name)
 	if err != nil || hc == nil {
 		return nil, err
 	}
