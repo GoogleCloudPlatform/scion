@@ -188,11 +188,11 @@ func applySecretRequestsToOutbound(out *hubclient.OutboundMessageRequest) {
 // sends it preserves the existing wrapHubError formatting.
 func formatSecretRequestSendError(recipient string, err error) error {
 	if msgSecretRequestsPayload == nil {
-		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
+		return outboundMessageSendError(recipient, err)
 	}
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
-		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
+		return outboundMessageSendError(recipient, err)
 	}
 	switch {
 	case apiErr.Code == "experiment_disabled":
@@ -209,7 +209,7 @@ func formatSecretRequestSendError(recipient string, err error) error {
 			return errors.New(safeText(msg))
 		}
 	}
-	return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
+	return outboundMessageSendError(recipient, err)
 }
 
 func formatSecretRequestKeyPendingError(apiErr *apiclient.APIError) string {

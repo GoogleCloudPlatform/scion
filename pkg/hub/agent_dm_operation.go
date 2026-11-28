@@ -589,9 +589,19 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (dmRes
 					return nil, denial
 				}
 			}
+			if ctx.Err() != nil {
+				return nil, requestEndedRefusal().dmError()
+			}
 			if input.BeforeWake != nil {
 				input.BeforeWake()
 			}
+			// Detach from client cancellation once the wake starts so a
+			// sender that disconnects or times out during a slow resume does
+			// not abort persistence and delivery after the agent wakes
+			// (ptone/scion#9757). Any tighter caller deadline is preserved.
+			var cancelWakeSend context.CancelFunc
+			ctx, cancelWakeSend = detachDMWakeSend(ctx)
+			defer cancelWakeSend()
 			if autoWake {
 				// The hub's own wakes (other new work for this agent) are
 				// routine and the sender cannot know about them: wait for

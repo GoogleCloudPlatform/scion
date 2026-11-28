@@ -334,8 +334,13 @@ func TestAttachUpload_SlowUploadKeepsSendTime(t *testing.T) {
 	msgAttach = nil
 	t.Setenv("SCION_AGENT_NAME", "sender")
 	orig := msgSendTimeout
+	origWake := msgWakeSendTimeout
 	msgSendTimeout = 2 * time.Second
-	t.Cleanup(func() { msgSendTimeout = orig })
+	msgWakeSendTimeout = 2 * time.Second
+	t.Cleanup(func() {
+		msgSendTimeout = orig
+		msgWakeSendTimeout = origWake
+	})
 	h, srv := newAttachHub(t, "artifact")
 	h.uploadDelay = 3 * time.Second
 	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)

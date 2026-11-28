@@ -65,6 +65,22 @@ func detachLaunchKeepDeadline(ctx context.Context) (context.Context, context.Can
 	return detached, func() {}
 }
 
+// detachDMWakeSend returns a context for a direct-message send once its wake
+// is about to run: it drops ctx's cancellation (so a client that disconnects
+// or times out while the agent is resuming does not abort the persist and
+// dispatch after the wake finishes, ptone/scion#9757), keeps any tighter
+// caller deadline (such as a scheduled send's budget), and bounds the whole
+// wake, persist, and dispatch by dmWakeWriteBudget. The caller must check
+// ctx.Err() before calling it and must call the returned cancel func.
+func detachDMWakeSend(ctx context.Context) (context.Context, context.CancelFunc) {
+	detached, cancel := context.WithTimeout(detachLaunchFromClient(ctx), dmWakeWriteBudget())
+	if deadline, ok := ctx.Deadline(); ok {
+		dctx, dcancel := context.WithDeadline(detached, deadline)
+		return dctx, func() { dcancel(); cancel() }
+	}
+	return detached, cancel
+}
+
 // detachStopFromClient returns a context for the rest of a lifecycle stop or
 // suspend, and its cancel func, which the caller must call. Like
 // detachLaunchFromClient, it keeps ctx's values (identity, trace, dispatch
