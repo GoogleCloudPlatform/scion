@@ -72,8 +72,12 @@ interface FakeHubOptions {
   rollout404ChunkCalls?: number;
   /** Answer every chunk with received = offset (no progress). */
   noProgress?: boolean;
+  /** Return 409 upload_busy on the first N DELETE calls before returning 204. */
+  busyDeleteCalls?: number;
   /** Hook called before each chunk response (e.g. to advance a fake clock). */
   onChunk?: (callNumber: number, chunkSize: number) => void;
+  /** Hook called before each complete response (e.g. to trigger cancel). */
+  onComplete?: (callNumber: number) => void;
   /** Clock provider. */
   now?: () => number;
 }
@@ -85,6 +89,7 @@ function createFakeHub(opts: FakeHubOptions) {
   let chunkCallNum = 0;
   let completeCallNum = 0;
   let statusCallNum = 0;
+  let deleteCallNum = 0;
   let state: 'uploading' | 'finalizing' | 'completed' | 'aborted' = 'uploading';
   const startBodies: Array<Record<string, unknown>> = [];
 
@@ -137,6 +142,10 @@ function createFakeHub(opts: FakeHubOptions) {
     // Complete: POST .../uploads/{sid}/complete
     if (url.pathname.endsWith('/complete') && method === 'POST') {
       completeCallNum++;
+      opts.onComplete?.(completeCallNum);
+      if (init?.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       if (completeCallNum <= (opts.failCompleteCalls ?? 0)) {
         return json({ error: { code: 'internal_error', message: 'gateway timeout' } }, 504);
       }
@@ -153,6 +162,13 @@ function createFakeHub(opts: FakeHubOptions) {
 
     // Abort: DELETE .../uploads/{sid}
     if (method === 'DELETE' && url.pathname.includes('/uploads/')) {
+      deleteCallNum++;
+      if (deleteCallNum <= (opts.busyDeleteCalls ?? 0)) {
+        return json(
+          { error: { code: 'upload_busy', message: 'Upload session has an active chunk write' } },
+          409
+        );
+      }
       state = 'aborted';
       return new Response(null, { status: 204 });
     }
@@ -252,7 +268,13 @@ function makeFile(size: number, name = 'test.bin', type = 'application/octet-str
 
 describe('chunked-upload', () => {
   beforeEach(() => {
-    _setUploadTestConfig({ retryDelayMs: 0, maxBackoffMs: 0, minChunkBytes: 4 });
+    _setUploadTestConfig({
+      retryDelayMs: 0,
+      maxBackoffMs: 0,
+      abortRetryDelayMs: 0,
+      abortMaxBackoffMs: 0,
+      minChunkBytes: 4,
+    });
   });
 
   afterEach(() => {
@@ -558,6 +580,84 @@ describe('chunked-upload', () => {
     ).rejects.toBeInstanceOf(UploadCancelledError);
 
     expect(hub.calls.some((c) => c.method === 'DELETE')).toBe(true);
+    expect(hub.getState()).toBe('aborted');
+  });
+
+  it('retries DELETE on 409 upload_busy until 204 when cancelled mid-chunk', async () => {
+    const controller = new AbortController();
+    const hub = createFakeHub({
+      chunkBytes: 10,
+      busyDeleteCalls: 2,
+      onChunk: (callNum) => {
+        if (callNum === 1) controller.abort();
+      },
+    });
+
+    await expect(
+      uploadFileChunked('/api/v1/projects/p1/workspace/uploads', makeFile(20), {
+        signal: controller.signal,
+      })
+    ).rejects.toBeInstanceOf(UploadCancelledError);
+
+    expect(hub.calls.filter((c) => c.method === 'DELETE').length).toBe(3);
+    expect(hub.getState()).toBe('aborted');
+  });
+
+  it('bounds DELETE retries on persistent 409 upload_busy to abortWindowMs', async () => {
+    let clock = 1_000_000;
+    _setUploadTestConfig({
+      retryDelayMs: 0,
+      maxBackoffMs: 0,
+      abortRetryDelayMs: 200,
+      abortMaxBackoffMs: 1000,
+      abortWindowMs: 1500,
+      minChunkBytes: 4,
+      now: () => clock,
+    });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((cb: () => void, ms?: number) => {
+      clock += ms ?? 0;
+      cb();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    const controller = new AbortController();
+    const hub = createFakeHub({
+      chunkBytes: 10,
+      busyDeleteCalls: 99,
+      now: () => clock,
+      onChunk: (callNum) => {
+        if (callNum === 1) controller.abort();
+      },
+    });
+
+    await expect(
+      uploadFileChunked('/api/v1/projects/p1/workspace/uploads', makeFile(20), {
+        signal: controller.signal,
+      })
+    ).rejects.toBeInstanceOf(UploadCancelledError);
+
+    // 200 + 400 + 800 = 1400ms (4 attempts total); next 1000ms would exceed 1500ms window.
+    expect(hub.calls.filter((c) => c.method === 'DELETE').length).toBe(4);
+    expect(clock).toBe(1_001_400);
+  });
+
+  it('sends DELETE (and retries upload_busy) when cancelled during complete', async () => {
+    const controller = new AbortController();
+    const hub = createFakeHub({
+      chunkBytes: 10,
+      busyDeleteCalls: 1,
+      onComplete: () => {
+        controller.abort();
+      },
+    });
+
+    await expect(
+      uploadFileChunked('/api/v1/projects/p1/workspace/uploads', makeFile(10), {
+        signal: controller.signal,
+      })
+    ).rejects.toBeInstanceOf(UploadCancelledError);
+
+    expect(hub.calls.filter((c) => c.method === 'DELETE').length).toBe(2);
     expect(hub.getState()).toBe('aborted');
   });
 

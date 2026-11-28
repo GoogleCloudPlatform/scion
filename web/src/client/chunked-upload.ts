@@ -44,6 +44,15 @@ const DEFAULT_ROLLOUT_404_WINDOW_MS = 60_000;
 /** Cap on exponential backoff between retries (10 s). */
 const DEFAULT_MAX_BACKOFF_MS = 10_000;
 
+/** Initial backoff before retrying DELETE on `upload_busy` (200 ms). */
+const DEFAULT_ABORT_RETRY_DELAY_MS = 200;
+
+/** Cap on backoff between DELETE retries (1 s). */
+const DEFAULT_ABORT_MAX_BACKOFF_MS = 1_000;
+
+/** Bounded total window for retrying DELETE on `upload_busy` (5 s). */
+const DEFAULT_ABORT_WINDOW_MS = 5_000;
+
 /** Fallback session expiry window when a response omits `expiresAt` (1 h). */
 const FALLBACK_EXPIRY_MS = 60 * 60 * 1000;
 
@@ -56,6 +65,9 @@ const utf8 = new TextEncoder();
 interface UploadClientConfig {
   retryDelayMs: number;
   maxBackoffMs: number;
+  abortRetryDelayMs: number;
+  abortMaxBackoffMs: number;
+  abortWindowMs: number;
   rollout404WindowMs: number;
   minChunkBytes: number;
   slowLinkTargetMs: number;
@@ -65,6 +77,9 @@ interface UploadClientConfig {
 const DEFAULT_CONFIG: Readonly<UploadClientConfig> = Object.freeze({
   retryDelayMs: 1000,
   maxBackoffMs: DEFAULT_MAX_BACKOFF_MS,
+  abortRetryDelayMs: DEFAULT_ABORT_RETRY_DELAY_MS,
+  abortMaxBackoffMs: DEFAULT_ABORT_MAX_BACKOFF_MS,
+  abortWindowMs: DEFAULT_ABORT_WINDOW_MS,
   rollout404WindowMs: DEFAULT_ROLLOUT_404_WINDOW_MS,
   minChunkBytes: MIN_CHUNK_BYTES,
   slowLinkTargetMs: SLOW_LINK_TARGET_MS,
@@ -198,10 +213,57 @@ async function toUploadError(res: Response): Promise<UploadHttpError> {
   return new UploadHttpError(info.message, res.status, info.code, info.details);
 }
 
-function abortSessionBestEffort(uploadsUrl: string, id: string): void {
-  void apiFetch(`${uploadsUrl}/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(
-    () => undefined
-  );
+function sleepUninterruptible(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Send `DELETE .../{sid}` to release the session and its quota.
+ *
+ * When a user cancels mid-chunk, the server may still hold the chunk lease
+ * briefly until it observes the aborted request body, answering `409 upload_busy`.
+ * Retry with a short exponential backoff within a bounded window (`abortWindowMs`)
+ * so the session transitions to `aborted` instead of pinning quota until `idle_ttl`.
+ */
+async function abortSessionBestEffort(uploadsUrl: string, id: string): Promise<void> {
+  const url = `${uploadsUrl}/${encodeURIComponent(id)}`;
+  const deadline = config.now() + config.abortWindowMs;
+
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await apiFetch(url, { method: 'DELETE' });
+    } catch {
+      const delay = Math.min(
+        config.abortRetryDelayMs * 2 ** Math.min(attempt, 6),
+        config.abortMaxBackoffMs
+      );
+      if (config.now() + delay > deadline) return;
+      await sleepUninterruptible(delay);
+      continue;
+    }
+
+    if (res.ok || res.status === 204 || res.status === 404) {
+      return;
+    }
+
+    if (res.status === 409) {
+      const info = await parseApiError(res, '');
+      if (info.code !== 'upload_busy') return;
+    } else if (res.status < 500) {
+      return;
+    }
+
+    const delay = Math.min(
+      config.abortRetryDelayMs * 2 ** Math.min(attempt, 6),
+      config.abortMaxBackoffMs
+    );
+    if (config.now() + delay > deadline) return;
+    await sleepUninterruptible(delay);
+  }
 }
 
 export interface ChunkedUploadOptions {
@@ -296,7 +358,7 @@ export async function uploadFileChunked(
   }
 
   if (signal?.aborted) {
-    abortSessionBestEffort(uploadsUrl, id);
+    await abortSessionBestEffort(uploadsUrl, id);
     throw new UploadCancelledError();
   }
 
@@ -466,12 +528,19 @@ export async function uploadFileChunked(
       err instanceof UploadHttpError &&
       (err.status === 404 || err.status === 401 || err.status === 403);
     if (!skipAbort) {
-      abortSessionBestEffort(uploadsUrl, id);
+      await abortSessionBestEffort(uploadsUrl, id);
     }
     throw err;
   }
 
-  return completeUpload(sessionUrl, expiresAtMs, signal);
+  try {
+    return await completeUpload(sessionUrl, expiresAtMs, signal);
+  } catch (err) {
+    if (err instanceof UploadCancelledError) {
+      await abortSessionBestEffort(uploadsUrl, id);
+    }
+    throw err;
+  }
 }
 
 /**
