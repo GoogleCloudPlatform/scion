@@ -369,6 +369,10 @@ func (c *Client) ListTree(ctx context.Context, s Source, commitSHA string, cred 
 // f.BlobSHA is non-empty. Authorization is sent only for non-anonymous
 // credentials under the Doer's hop-0 rules. A 429 or rate-limit response
 // records into the shared cooldown for cred's scope.
+//
+// Because bytes are streamed directly to w as they arrive, w may hold partial
+// or unverified content on any error; callers must discard it when FetchFile
+// returns a non-nil error.
 func (c *Client) FetchFile(ctx context.Context, s Source, commitSHA string, f File, cred Credential, w io.Writer) error {
 	_, err := c.fetchFile(ctx, s, commitSHA, f, cred, w, 0)
 	return err
@@ -596,17 +600,20 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 	if err := ctx.Err(); err != nil {
 		return FolderResult{}, &Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, err: err}
 	}
-	if l.MaxFiles > 0 && len(tree.Files) > l.MaxFiles {
-		return FolderResult{}, &Error{Kind: KindTooLarge, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "directory exceeds maximum file count"}
-	}
 
-	// Validate every tree entry and pre-create parent directories before
-	// launching parallel workers so directory creation never races.
+	// Validate every tree entry, skip .git segments (matching decodeTree and
+	// extractTarGz for caller-supplied Trees passed to FetchFolderResolved),
+	// and pre-create parent directories before launching parallel workers so
+	// directory creation never races.
 	var plannedTotal int64
 	createdDirs := make(map[string]struct{})
+	files := make([]File, 0, len(tree.Files))
 	for _, f := range tree.Files {
 		if !validRelativePath(f.Path) {
 			return FolderResult{}, &Error{Kind: KindUnsupportedContent, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "unsafe file path in git tree"}
+		}
+		if hasDotGitSegment(f.Path) {
+			continue
 		}
 		if len(f.Path) > l.MaxNameBytes {
 			return FolderResult{}, &Error{Kind: KindTooLarge, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "file path exceeds maximum name length"}
@@ -617,6 +624,10 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 		plannedTotal += f.Size
 		if l.MaxTotal > 0 && plannedTotal > l.MaxTotal {
 			return FolderResult{}, &Error{Kind: KindTooLarge, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "directory exceeds maximum total size"}
+		}
+		files = append(files, f)
+		if l.MaxFiles > 0 && len(files) > l.MaxFiles {
+			return FolderResult{}, &Error{Kind: KindTooLarge, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "directory exceeds maximum file count"}
 		}
 		if dir := path.Dir(f.Path); dir != "." && dir != "" {
 			if _, ok := createdDirs[dir]; !ok {
@@ -630,7 +641,7 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 		}
 	}
 
-	if len(tree.Files) == 0 {
+	if len(files) == 0 {
 		return FolderResult{
 			CommitSHA: commitSHA,
 			TreeSHA:   tree.TreeSHA,
@@ -642,15 +653,15 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 	if concurrency <= 0 {
 		concurrency = DefaultRawConcurrency
 	}
-	if concurrency > len(tree.Files) {
-		concurrency = len(tree.Files)
+	if concurrency > len(files) {
+		concurrency = len(files)
 	}
 
 	fetchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobs := make(chan File, len(tree.Files))
-	for _, f := range tree.Files {
+	jobs := make(chan File, len(files))
+	for _, f := range files {
 		jobs <- f
 	}
 	close(jobs)
@@ -740,7 +751,7 @@ func (c *Client) fetchFolderRaw(ctx context.Context, s Source, commitSHA string,
 	if err := ctx.Err(); err != nil {
 		return FolderResult{}, &Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, err: err}
 	}
-	if completed != len(tree.Files) {
+	if completed != len(files) {
 		return FolderResult{}, &Error{Kind: KindTimeout, Repo: s.RepoSlug(), CredKind: cred.Kind, Hint: "incomplete raw folder fetch"}
 	}
 

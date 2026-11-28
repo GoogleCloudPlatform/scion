@@ -196,9 +196,9 @@ func TestTemplateReimport_UserScopeSendsOnlyThatUsersCredential(t *testing.T) {
 	})
 }
 
-// TestTemplateReimport_NoCredentialFetchesPublicArchive: with no credential
-// configured the public archive URL is fetched with no Authorization header.
-func TestTemplateReimport_NoCredentialFetchesPublicArchive(t *testing.T) {
+// TestTemplateReimport_NoCredentialFetchesAnonymously: with no credential
+// configured the source is fetched anonymously with no Authorization header.
+func TestTemplateReimport_NoCredentialFetchesAnonymously(t *testing.T) {
 	srv, s, project, _ := setupWorkspaceProject(t, "reimport-cred-none")
 	admin := newReimportAdmin(t, s)
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-cred-none", "my-template", store.TemplateScopeProject, project.ID, reimportCredSource)

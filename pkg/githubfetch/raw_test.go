@@ -749,6 +749,68 @@ func TestFetchFolder_RawContextCancelAndTimeout(t *testing.T) {
 	})
 }
 
+func TestFetchFolderResolved_RawSkipsDotGitEntries(t *testing.T) {
+	const sha = "9999999999999999999999999999999999999999"
+	okBody := []byte("safe-content")
+	dotGitBody := []byte("[core]\n\trepositoryformatversion = 0\n")
+
+	var requested []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requested = append(requested, r.URL.Path)
+		mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/ok.txt") {
+			_, _ = w.Write(okBody)
+			return
+		}
+		_, _ = w.Write(dotGitBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	ep := Endpoint{APIBase: srv.URL, RawBase: srv.URL, WebHost: srv.URL, Codeload: srv.URL}
+	client := New(Options{Endpoint: ep, Doer: newHTTPDoer(srv.Client(), nil), Cooldown: NewCooldown(nil)})
+
+	handBuiltTree := &Tree{
+		TreeSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Files: []File{
+			{Path: ".git/config", Mode: 0o644, Size: int64(len(dotGitBody)), BlobSHA: gitBlobSHA(dotGitBody)},
+			{Path: "sub/.git/HEAD", Mode: 0o644, Size: int64(len(dotGitBody)), BlobSHA: gitBlobSHA(dotGitBody)},
+			{Path: "ok.txt", Mode: 0o644, Size: int64(len(okBody)), BlobSHA: gitBlobSHA(okBody)},
+		},
+	}
+
+	destDir := t.TempDir()
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	res, err := client.FetchFolderResolved(context.Background(), Source{Owner: "acme", Repo: "repo", Path: "pkg"}, sha, handBuiltTree, Credential{}, root, ImportHostedLimits())
+	if err != nil {
+		t.Fatalf("FetchFolderResolved: %v", err)
+	}
+	if res.Strategy != StrategyRaw || res.Files != 1 || res.Bytes != int64(len(okBody)) {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf(".git directory or file should not exist, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "sub", ".git")); !os.IsNotExist(err) {
+		t.Fatalf("sub/.git directory or file should not exist, stat err = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(destDir, "ok.txt"))
+	if err != nil || !bytes.Equal(got, okBody) {
+		t.Fatalf("ok.txt = (%q, %v), want %q", got, err, okBody)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requested) != 1 || !strings.HasSuffix(requested[0], "/ok.txt") {
+		t.Fatalf("requested = %v, want only ok.txt", requested)
+	}
+}
+
 func TestSkillLimitsAndTarballZeroLimitsFailClosed(t *testing.T) {
 	const sha = "8888888888888888888888888888888888888888"
 
