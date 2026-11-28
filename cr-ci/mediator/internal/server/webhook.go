@@ -148,12 +148,17 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) onQueued(w http.ResponseWriter, ctx context.Context, repo githubapp.Repo, p webhookPayload, attrs []any) {
-	// Fork guard from the API, not the payload.
-	run, err := s.o.GitHub.GetRun(ctx, repo, p.WorkflowJob.RunID)
-	if err != nil {
-		s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
-		plain(w, http.StatusServiceUnavailable, "github unavailable")
-		return
+	// Fork guard from the API (or cached immutable run metadata), not the payload.
+	run, ok := s.cachedRun(p.WorkflowJob.RunID)
+	if !ok {
+		var err error
+		run, err = s.o.GitHub.GetRun(ctx, repo, p.WorkflowJob.RunID)
+		if err != nil {
+			s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
+			plain(w, http.StatusServiceUnavailable, "github unavailable")
+			return
+		}
+		s.rememberRun(*run)
 	}
 	if reason := forkReason(run, repo); reason != "" {
 		s.log().Warn("refusing to launch a runner for a fork or privileged-trigger run",
