@@ -1375,7 +1375,12 @@ export class ScionPageArtifactDetail extends LitElement {
           margin-left: auto;
         }
         .g-review-actions sl-icon-button::part(base) {
-          padding: 0.125rem;
+          padding: 0.125rem 0.25rem;
+          min-width: 1.5rem;
+          min-height: var(--sl-input-height-small, 1.875rem);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
         }
         /* Visually hidden, still the buttons' accessible names. */
         .g-toolbar .lbl {
@@ -3062,15 +3067,16 @@ export class ScionPageArtifactDetail extends LitElement {
       if (rev > 0) {
         await deleteReviewDraft(this.artifactId, { rev });
         if (!this.reviewing || this.draftLoadGen !== abandonGen) return;
+        this.clearMyDraftState();
       }
-      this.clearMyDraftState();
       this.closeReviewMode();
     } catch (err) {
       if (!this.reviewing || this.draftLoadGen !== abandonGen) return;
       if (err instanceof DraftConflictError) {
         this.draftAbandonConflict = true;
         this.draftAbandonError =
-          'This draft was updated on another device or tab. Close this dialog and review the latest draft before abandoning.';
+          'This draft was updated on another device or tab. Close this dialog to choose whether to load the newer draft or keep yours before abandoning.';
+        draftCtrl?.noteConflict(err);
         void this.loadSavedDraft(this.loadGen);
       } else {
         this.draftAbandonError =
@@ -5451,7 +5457,7 @@ export class ScionPageArtifactDetail extends LitElement {
             </div>
           </sl-dialog>`
         : nothing}
-      ${conflict
+      ${conflict && !this.draftAbandonOpen
         ? html`<sl-dialog
             class="draft-conflict-dialog"
             label="This review was changed on another device or tab"
@@ -5624,7 +5630,9 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           >
             <p>
-              ${(this.draftSnapshot?.rev ?? 0) > 0 || this.savedDraft !== null
+              ${(this.draftController
+                ? (this.draftSnapshot?.rev ?? this.draftController.currentRev)
+                : (this.savedDraft?.rev ?? 0)) > 0
                 ? "Delete your saved review draft and discard any unsaved changes without submitting? This can't be undone."
                 : "Discard your review edits and exit Review mode without submitting? This can't be undone."}
             </p>

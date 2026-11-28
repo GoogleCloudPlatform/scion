@@ -405,6 +405,22 @@ export class ReviewDraftController {
   }
 
   /**
+   * Records a 409 conflict surfaced outside `runSave` (for example from
+   * Abandon review's conditional DELETE) so the controller enters its normal
+   * conflict state and pauses autosave until the user resolves it.
+   */
+  noteConflict(err: DraftConflictError): void {
+    if (this.disposed) return;
+    this.clearAutosaveTimer();
+    this.clearRetryTimer();
+    this.submitting = false;
+    this.pausedReason = 'conflict';
+    this.conflict = { rev: err.rev, savedAt: err.savedAt, base: err.base };
+    this.status = 'conflict';
+    this.emit();
+  }
+
+  /**
    * Resolves a 409 conflict by overwriting the hub draft with the local buffer
    * using the server's latest revision.
    */

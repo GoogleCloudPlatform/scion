@@ -103,6 +103,7 @@ interface DraftServerState {
   canPublish?: boolean;
   canReview?: boolean;
   fileText?: string;
+  nextGetResponse?: () => Response;
   nextPutResponse?: () => Response;
   holdPut?: (res: Response) => Promise<Response>;
   nextDeleteResponse?: () => Response;
@@ -124,6 +125,7 @@ function mockHub(state: DraftServerState): void {
 
     if (url.includes('/review-draft')) {
       if (method === 'GET') {
+        if (state.nextGetResponse) return reply(state.nextGetResponse());
         return reply(
           new Response(JSON.stringify({ draft: state.draft, currentSeq: state.currentSeq }), {
             status: 200,
@@ -179,6 +181,26 @@ function mockHub(state: DraftServerState): void {
       }
       if (method === 'DELETE') {
         if (state.nextDeleteResponse) return reply(state.nextDeleteResponse());
+        const revParam = new URL(url, 'http://localhost').searchParams.get('rev');
+        const curRev = state.draft?.rev ?? 0;
+        if (revParam !== null && curRev > 0 && Number(revParam) !== curRev) {
+          return reply(
+            new Response(
+              JSON.stringify({
+                error: {
+                  code: 'draft_conflict',
+                  message: 'draft rev mismatch',
+                  details: {
+                    rev: curRev,
+                    savedAt: state.draft?.savedAt ?? '2026-11-21T18:05:00Z',
+                    base: state.draft?.base ?? 1,
+                  },
+                },
+              }),
+              { status: 409, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
         state.draft = null;
         return reply(new Response(null, { status: 204 }));
       }
@@ -1555,23 +1577,15 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(confirmBtn.hasAttribute('disabled')).toBe(false);
     expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
 
-    // 2. 409 DraftConflictError: disables confirm, switches cancel to Close, preserves newer draft.
-    state.nextDeleteResponse = () => {
-      state.draft = {
-        ...state.draft!,
-        rev: 3,
-        savedAt: '2026-11-27T23:50:00Z',
-      };
-      return new Response(
-        JSON.stringify({
-          error: {
-            code: 'draft_conflict',
-            message: 'draft rev mismatch',
-            details: { rev: 3, savedAt: '2026-11-27T23:50:00Z', base: 1 },
-          },
-        }),
-        { status: 409, headers: { 'Content-Type': 'application/json' } }
-      );
+    // 2. 409 DraftConflictError enforced by mockHub when server advances to rev 3:
+    //    disables confirm, switches cancel to Close, preserves newer draft, and routes into conflict model.
+    const newerBody = 'We ship in {~~Q3~>Q1~~}{>>pulled forward<<}.\n';
+    state.nextDeleteResponse = undefined;
+    state.draft = {
+      ...state.draft!,
+      rev: 3,
+      body: newerBody,
+      savedAt: '2026-11-27T23:50:00Z',
     };
     confirmBtn.click();
     await settle(el);
@@ -1581,11 +1595,79 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     const cancelBtn = dialog.querySelector<HTMLElement>('sl-button.draft-abandon-cancel')!;
     expect(cancelBtn.textContent?.trim()).toBe('Close');
     expect(state.draft?.rev).toBe(3);
+    // Conflict dialog must not stack while the Abandon dialog is still open.
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-conflict-dialog')).toBeNull();
 
-    // Closing dialog returns to Review mode with autosave resumed cleanly.
+    // Closing the Abandon dialog surfaces the standard conflict dialog so the user can resolve in place.
     cancelBtn.click();
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')).toBeNull();
     expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
+    const conflictDialog = el.shadowRoot!.querySelector('sl-dialog.draft-conflict-dialog')!;
+    expect(conflictDialog).not.toBeNull();
+
+    // Load the newer draft (rev 3) and then Abandon again: DELETE must send ?rev=3 and succeed.
+    conflictDialog.querySelector<HTMLElement>('sl-button.draft-conflict-load')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-conflict-dialog')).toBeNull();
+
+    el.shadowRoot!.querySelector<HTMLElement>('.edit-footer sl-button.abandon-review-btn')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    )!.click();
+    await settle(el);
+
+    const delUrls = state.requests
+      .filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+      .map((r) => r.url);
+    expect(delUrls[delUrls.length - 1]).toContain('?rev=3');
+    expect(state.draft).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+  });
+
+  it('preserves hub draft state when abandoning a rev-0 session started after a failed GET (ptone/scion#9706)', async () => {
+    const state: DraftServerState = {
+      draft: {
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-27T23:45:00Z',
+        createdAt: '2026-11-27T23:30:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    // Initial load populated savedDraft; simulate a transient GET failure when entering Review mode.
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeDefined();
+    state.nextGetResponse = () => {
+      state.nextGetResponse = undefined;
+      return new Response('server error', { status: 500 });
+    };
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    el.shadowRoot!.querySelector<HTMLElement>('.edit-footer sl-button.abandon-review-btn')!.click();
+    await el.updateComplete;
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')!;
+    expect(dialog.textContent).toContain('Discard your review edits and exit Review mode');
+
+    dialog.querySelector<HTMLElement>('sl-button.draft-abandon-confirm')!.click();
+    await settle(el);
+
+    expect(
+      state.requests.filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+    ).toHaveLength(0);
+    expect(state.draft?.rev).toBe(2);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+    // Hub draft badge and Resume draft button remain because no DELETE was issued.
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeDefined();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).not.toBeNull();
   });
 });

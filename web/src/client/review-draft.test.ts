@@ -515,6 +515,69 @@ describe('ReviewDraftController', () => {
     h.controller.dispose();
   });
 
+  it('noteConflict routes an external 409 (e.g. Abandon DELETE) into the conflict model after quiesce', async () => {
+    const puts: PutReviewDraftRequest[] = [];
+    const h = makeHarness({
+      initialRev: 2,
+      initialSavedAt: '2026-11-21T17:55:00Z',
+      put: (_id, req) => {
+        puts.push(req);
+        return Promise.resolve({
+          rev: req.rev + 1,
+          savedAt: new Date(Date.now()).toISOString(),
+          currentSeq: 1,
+        });
+      },
+      get: () =>
+        Promise.resolve({
+          draft: {
+            rev: 3,
+            base: 1,
+            entry: 'plan.md',
+            body: 'Newer remote body',
+            note: 'Newer note',
+            carried: null,
+            savedAt: '2026-11-21T17:59:00Z',
+            createdAt: '2026-11-21T17:50:00Z',
+          },
+          currentSeq: 1,
+        }),
+    });
+
+    await h.controller.quiesce();
+    h.controller.noteConflict(new DraftConflictError('rev mismatch', 3, '2026-11-21T17:59:00Z', 1));
+
+    const snap = h.controller.getSnapshot();
+    expect(snap.status).toBe('conflict');
+    expect(snap.conflict).toEqual({
+      rev: 3,
+      savedAt: '2026-11-21T17:59:00Z',
+      base: 1,
+    });
+    expect(h.controller.canSaveNow).toBe(false);
+
+    // Calling resumeFromQuiesce() afterwards must not clear the conflict state.
+    h.controller.resumeFromQuiesce();
+    expect(h.controller.getSnapshot().status).toBe('conflict');
+
+    // Resolving via Load adopts the server's rev (3).
+    const loaded = await h.controller.resolveConflictLoad();
+    expect(loaded?.body).toBe('Newer remote body');
+    expect(h.controller.currentRev).toBe(3);
+    expect(h.controller.getSnapshot().status).toBe('saved');
+
+    // Resolving via Keep after another external 409 overwrites at the server's rev (4 -> 5).
+    await h.controller.quiesce();
+    h.controller.noteConflict(new DraftConflictError('rev mismatch', 4, '2026-11-21T18:01:00Z', 1));
+    expect(await h.controller.resolveConflictKeep()).toBe(true);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.rev).toBe(4);
+    expect(h.controller.currentRev).toBe(5);
+    expect(h.controller.getSnapshot().status).toBe('saved');
+
+    h.controller.dispose();
+  });
+
   it('pauses on 413 draft_too_large until text shrinks under 1 MiB, and on 429 too_many_drafts / 403', async () => {
     let errToThrow: Error | null = new DraftApiError('too large', 413, 'draft_too_large', {
       limit: MAX_DRAFT_BODY_BYTES,
