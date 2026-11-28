@@ -282,6 +282,20 @@ func TestTriggerUntrustedVarsDerive_DispatchAgentAndMultiAction(t *testing.T) {
 		})
 		require.Equal(t, http.StatusBadRequest, recFail.Code, recFail.Body.String())
 		assert.Equal(t, "untrusted_var_not_allowed", decodeAPIErrorCode(t, recFail))
+
+		// Explicit empty list [] in JSON must be treated as supplied (never omitted) and refused.
+		recEmpty := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, map[string]any{
+			"name":   "disp-empty-fail",
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			"action": map[string]any{
+				"type":          store.TriggerActionDispatchAgent,
+				"template":      "developer",
+				"task":          "Review ${event.payload.commit}",
+				"untrustedVars": []string{},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, recEmpty.Code, recEmpty.Body.String())
+		assert.Equal(t, "untrusted_var_not_allowed", decodeAPIErrorCode(t, recEmpty))
 	})
 
 	t.Run("multi-action actions[] derives per-action independently", func(t *testing.T) {

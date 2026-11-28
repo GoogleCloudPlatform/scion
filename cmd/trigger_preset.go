@@ -610,7 +610,6 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 	}
 
 	printCreatedPresetTrigger(created)
-	printDerivedUntrustedVars(collectTriggerUntrustedVars(effectiveTriggerActions(created)))
 	return nil
 }
 
@@ -675,7 +674,7 @@ func printCreatedPresetTrigger(created *hubclient.Trigger) {
 	if created.Subject.CoalesceWindow != "" {
 		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
-	printTriggerActionSummary(created.Action)
+	printTriggerActionsSummary(effectiveTriggerActions(created))
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(created.Status, created.StatusReason), false))
 }
 

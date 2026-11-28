@@ -201,10 +201,16 @@ describe('scion-trigger-action-editor', () => {
     await msgDisplay.updateComplete;
     await dispDisplay.updateComplete;
 
-    expect(msgDisplay.shadowRoot?.textContent).toContain('data, not instructions');
+    expect(msgDisplay.shadowRoot?.textContent).toContain(
+      'Event values inserted as data, not instructions:'
+    );
+    expect(msgDisplay.shadowRoot?.textContent).toContain('Recomputed on save.');
     expect(msgDisplay.shadowRoot?.textContent).toContain('event.payload.commit');
 
-    expect(dispDisplay.shadowRoot?.textContent).toContain('data, not instructions');
+    expect(dispDisplay.shadowRoot?.textContent).toContain(
+      'Event values inserted as data, not instructions:'
+    );
+    expect(dispDisplay.shadowRoot?.textContent).toContain('Recomputed on save.');
     expect(dispDisplay.shadowRoot?.textContent).toContain('event.attributes.title');
     expect(dispDisplay.shadowRoot?.textContent).toContain('event.payload.sha');
   });

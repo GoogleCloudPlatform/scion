@@ -292,7 +292,11 @@ func (s *Server) validateMessageAuthoringTarget(
 		}
 		if !untrustedSupplied {
 			if derived := msgTmpl.Untrusted(); len(derived) > 0 {
-				parsed.UntrustedVars = derived
+				deduped, uErr := validateUntrustedVars(derived)
+				if uErr != nil {
+					return "", dispatchToMessageAuthoringError(uErr)
+				}
+				parsed.UntrustedVars = deduped
 			}
 		}
 		if _, vErr := validateTemplateSlot(parsed.Message, triggertemplate.SlotMessage, parsed.UntrustedVars); vErr != nil {

@@ -332,26 +332,11 @@ func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool
 	return action, nil, nil
 }
 
-func collectTriggerUntrustedVars(actions []hubclient.TriggerActionSpec) []string {
-	var (
-		out  []string
-		seen map[string]bool
-	)
-	for _, act := range actions {
-		for _, p := range act.UntrustedVars {
-			if seen == nil {
-				seen = make(map[string]bool)
-			}
-			if !seen[p] {
-				seen[p] = true
-				out = append(out, p)
-			}
-		}
-	}
-	return out
+func printDerivedUntrustedVars(paths []string) {
+	printDerivedUntrustedVarsIndented("", paths)
 }
 
-func printDerivedUntrustedVars(paths []string) {
+func printDerivedUntrustedVarsIndented(prefix string, paths []string) {
 	if len(paths) == 0 || isTriggerJSONOutput() {
 		return
 	}
@@ -359,7 +344,7 @@ func printDerivedUntrustedVars(paths []string) {
 	for i, p := range paths {
 		safe[i] = triggerTerminalText(p, false)
 	}
-	fmt.Printf("Event values that will be inserted as data: %s\n", strings.Join(safe, ", "))
+	fmt.Printf("%sEvent values that will be inserted as data: %s\n", prefix, strings.Join(safe, ", "))
 }
 
 // formatTriggerAPIError maps structured Hub trigger authoring errors (rules,
@@ -886,9 +871,7 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Trigger updated: %s (revision %d)\n", triggerTerminalText(updated.ID, false), updated.AuthorizationRevision)
-	updatedActions := effectiveTriggerActions(updated)
-	printTriggerActionsSummary(updatedActions)
-	printDerivedUntrustedVars(collectTriggerUntrustedVars(updatedActions))
+	printTriggerActionsSummary(effectiveTriggerActions(updated))
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(updated.Status, updated.StatusReason), false))
 	return nil
 }
@@ -896,6 +879,7 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 func printTriggerActionsSummary(actions []hubclient.TriggerActionSpec) {
 	if len(actions) == 1 {
 		printTriggerActionSummary(actions[0])
+		printDerivedUntrustedVars(actions[0].UntrustedVars)
 		return
 	}
 	if len(actions) == 0 {
@@ -915,6 +899,7 @@ func printTriggerActionsSummary(actions []hubclient.TriggerActionSpec) {
 		default:
 			fmt.Printf("    %d/%d [%s]\n", i+1, len(actions), triggerTerminalText(act.Type, false))
 		}
+		printDerivedUntrustedVarsIndented("      ", act.UntrustedVars)
 	}
 }
 

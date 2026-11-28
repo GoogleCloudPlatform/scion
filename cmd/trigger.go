@@ -817,9 +817,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	if created.Subject.CoalesceWindow != "" {
 		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
-	createdActions := effectiveTriggerActions(created)
-	printTriggerActionsSummary(createdActions)
-	printDerivedUntrustedVars(collectTriggerUntrustedVars(createdActions))
+	printTriggerActionsSummary(effectiveTriggerActions(created))
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
 	return nil
 }

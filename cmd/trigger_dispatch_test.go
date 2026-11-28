@@ -666,6 +666,132 @@ func TestTriggerUpdate_DispatchAgentPartialUpdateAndDerivedAllow(t *testing.T) {
 	assert.Contains(t, out, "Trigger updated: "+trigID+" (revision 3)")
 }
 
+func TestTriggerUpdate_NonTemplateFlagsPreserveStoredUntrustedVars(t *testing.T) {
+	t.Run("dispatch_agent --agent-role only preserves stored untrustedVars", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		const trigID = "33333333-3333-3333-3333-333333333344"
+		var gotPatch hubclient.UpdateTriggerRequest
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "pr-fix",
+					AuthorizationRevision: 2,
+					Action: hubclient.TriggerActionSpec{
+						Type:          "dispatch_agent",
+						Template:      "default",
+						Task:          "Fix ${event.payload.title}",
+						UntrustedVars: []string{"event.payload.*"},
+					},
+					Status: "active",
+				})
+			case http.MethodPatch:
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPatch))
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "pr-fix",
+					AuthorizationRevision: 3,
+					Action:                *gotPatch.Action,
+					Status:                "active",
+				})
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		origFn := triggerHubContextFn
+		t.Cleanup(func() { triggerHubContextFn = origFn })
+		triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return &HubContext{Client: client, Endpoint: srv.URL}, "proj-1", ctx, cancel, nil
+		}
+
+		require.NoError(t, triggerUpdateCmd.Flags().Set("agent-role", "baseline"))
+		t.Cleanup(func() {
+			_ = triggerUpdateCmd.Flags().Set("agent-role", "")
+			triggerUpdateCmd.Flags().Lookup("agent-role").Changed = false
+		})
+
+		_ = captureStdout(t, func() {
+			require.NoError(t, runTriggerUpdate(triggerUpdateCmd, []string{trigID}))
+		})
+
+		require.NotNil(t, gotPatch.Action)
+		assert.Equal(t, "baseline", gotPatch.Action.AgentRole)
+		assert.Equal(t, []string{"event.payload.*"}, gotPatch.Action.UntrustedVars)
+	})
+
+	t.Run("message --interrupt only preserves stored untrustedVars", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		const trigID = "33333333-3333-3333-3333-333333333355"
+		var gotPatch hubclient.UpdateTriggerRequest
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "msg-alert",
+					AuthorizationRevision: 1,
+					Action: hubclient.TriggerActionSpec{
+						Type:          "message",
+						AgentID:       "ag-1",
+						Message:       "CI ${event.attributes.repo}",
+						UntrustedVars: []string{"event.attributes.*"},
+					},
+					Status: "active",
+				})
+			case http.MethodPatch:
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPatch))
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "msg-alert",
+					AuthorizationRevision: 2,
+					Action:                *gotPatch.Action,
+					Status:                "active",
+				})
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		origFn := triggerHubContextFn
+		t.Cleanup(func() { triggerHubContextFn = origFn })
+		triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return &HubContext{Client: client, Endpoint: srv.URL}, "proj-1", ctx, cancel, nil
+		}
+
+		require.NoError(t, triggerUpdateCmd.Flags().Set("interrupt", "true"))
+		t.Cleanup(func() {
+			_ = triggerUpdateCmd.Flags().Set("interrupt", "false")
+			triggerUpdateCmd.Flags().Lookup("interrupt").Changed = false
+		})
+
+		_ = captureStdout(t, func() {
+			require.NoError(t, runTriggerUpdate(triggerUpdateCmd, []string{trigID}))
+		})
+
+		require.NotNil(t, gotPatch.Action)
+		assert.True(t, gotPatch.Action.Interrupt)
+		assert.Equal(t, []string{"event.attributes.*"}, gotPatch.Action.UntrustedVars)
+	})
+}
+
 func TestTriggerUpdate_PinsRevisionWhenActionChangedAndMaps409(t *testing.T) {
 	resetTriggerDispatchTestFlags(t)
 

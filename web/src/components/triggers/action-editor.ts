@@ -101,6 +101,11 @@ export class ScionTriggerUntrustedVars extends LitElement {
       gap: 0.375rem;
     }
 
+    .untrusted-readonly-hint {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted);
+    }
+
     .untrusted-var-chip {
       font-family: var(--scion-font-mono);
       font-size: 0.75rem;
@@ -118,12 +123,11 @@ export class ScionTriggerUntrustedVars extends LitElement {
     }
     return html`
       <div class="untrusted-readonly" data-untrusted-vars-display=${this.actionIndex}>
-        <div class="untrusted-readonly-label">
-          Event values inserted as data, not instructions (derived by hub):
-        </div>
+        <div class="untrusted-readonly-label">Event values inserted as data, not instructions:</div>
         <div class="untrusted-readonly-list">
           ${this.vars.map((v) => html`<code class="untrusted-var-chip">${v}</code>`)}
         </div>
+        <div class="untrusted-readonly-hint">Recomputed on save.</div>
       </div>
     `;
   }

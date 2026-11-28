@@ -1227,11 +1227,20 @@ export class ScionTriggerList extends LitElement {
               `}
 
           <div class="section-divider">${this.multiActionEnabled ? 'Actions' : 'Action'}</div>
+          ${this.formActions.some((a) => this.isReadOnlyActionType(a.type))
+            ? html`
+                <sl-alert variant="neutral" open data-readonly-actions-notice>
+                  This rule includes read-only action types; these actions can only be edited with
+                  the CLI or API. Other rule fields can still be updated here.
+                </sl-alert>
+              `
+            : nothing}
           <scion-trigger-action-editor
             .actions=${this.formActions}
             .agents=${this.agents}
             .subjectMode=${this.formSubjectMode}
             .multiActionEnabled=${this.multiActionEnabled}
+            .readonly=${this.formActions.some((a) => this.isReadOnlyActionType(a.type))}
             @actions-changed=${(e: CustomEvent<{ actions: TriggerActionSpec[] }>) => {
               this.formActions = e.detail.actions;
             }}

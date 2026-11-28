@@ -438,6 +438,16 @@ func (a *dispatchAgentAction) validateForAuthoring(
 
 	if !untrustedSupplied {
 		derived := deriveUntrustedVarsUnion(slotTmpls...)
+		if len(derived) > triggertemplate.MaxPlaceholders {
+			return "", &dispatchAgentValidationError{
+				status: http.StatusBadRequest,
+				code:   "invalid_untrusted_var",
+				message: fmt.Sprintf(
+					"derived untrustedVars across action slots exceeds maximum of %d entries; supply an explicit untrustedVars list with trailing \".*\" prefixes (e.g. \"event.payload.*\")",
+					triggertemplate.MaxPlaceholders,
+				),
+			}
+		}
 		if len(derived) > 0 {
 			deduped, uErr := validateUntrustedVars(derived)
 			if uErr != nil {
