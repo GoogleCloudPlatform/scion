@@ -22,12 +22,13 @@ import (
 
 // GitHubRun is a workflow run in the fake.
 type GitHubRun struct {
-	ID       int64
-	Repo     string // owner/name
-	HeadRepo string // owner/name; "" means null head_repository
-	Event    string
-	Status   string
-	Jobs     []GitHubJob
+	ID        int64
+	Repo      string // owner/name
+	HeadRepo  string // owner/name; "" means null head_repository
+	Event     string
+	Status    string
+	CreatedAt time.Time
+	Jobs      []GitHubJob
 }
 
 // GitHubJob is a workflow job in the fake.
@@ -86,6 +87,7 @@ type GitHub struct {
 	FailListJobs  map[int64]int
 	BusyOnDelete  bool          // DELETE answers 422 as if the runner just picked up a job
 	TokenLifetime time.Duration // default 1 h
+	OnListRuns    func()        // optional hook invoked during listRuns (outside mu)
 
 	// Rate-limit simulation (guarded by rlMu).
 	rlMu                      sync.Mutex
@@ -499,10 +501,14 @@ func repoRef(full string) any {
 }
 
 func (g *GitHub) runJSON(run *GitHubRun) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id": run.ID, "event": run.Event, "status": run.Status,
 		"repository": repoRef(run.Repo), "head_repository": repoRef(run.HeadRepo),
 	}
+	if !run.CreatedAt.IsZero() {
+		m["created_at"] = run.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	return m
 }
 
 func (g *GitHub) getRun(w http.ResponseWriter, r *http.Request) {
@@ -538,6 +544,9 @@ func writeJSONConditional(w http.ResponseWriter, r *http.Request, v any) {
 }
 
 func (g *GitHub) listRuns(w http.ResponseWriter, r *http.Request) {
+	if fn := g.OnListRuns; fn != nil {
+		fn()
+	}
 	full := r.PathValue("owner") + "/" + r.PathValue("repo")
 	status := r.URL.Query().Get("status")
 	g.mu.Lock()

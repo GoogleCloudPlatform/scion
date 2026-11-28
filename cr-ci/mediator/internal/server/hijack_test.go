@@ -592,12 +592,12 @@ func TestReconcileGuardViewResetAfterKill(t *testing.T) {
 		h.queued(r*10, r)
 	}
 	// Guard order: 11 swap on cr-job-100, 12 fork job on cr-job-200 (hijack),
-	// 13 swap on cr-job-300.
-	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	// 13 swap on cr-job-300. All three are in_progress (P1), so discovery visits
+	// them in ID order (11, 12, 13).
+	h.gh.AddRun(fakes.GitHubRun{ID: 11, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "in_progress",
+		Jobs: []fakes.GitHubJob{{ID: 110, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}})
 	h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
 		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-200"}}})
-	// Run 13 is in_progress like the fork run, so the in_progress pass of
-	// discovery visits it after run 12 (run 11 comes in the queued pass).
 	h.gh.AddRun(fakes.GitHubRun{ID: 13, Repo: testRepo, HeadRepo: testRepo, Event: "push", Status: "in_progress",
 		Jobs: []fakes.GitHubJob{{ID: 130, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-300"}}})
 	before := h.cr.ListCalls

@@ -621,11 +621,12 @@ func stripQuery(p string) string {
 
 // Run is the subset of a workflow run the mediator uses.
 type Run struct {
-	ID             int64    `json:"id"`
-	Event          string   `json:"event"`
-	Status         string   `json:"status"`
-	Repository     *RepoRef `json:"repository"`
-	HeadRepository *RepoRef `json:"head_repository"`
+	ID             int64     `json:"id"`
+	Event          string    `json:"event"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	Repository     *RepoRef  `json:"repository"`
+	HeadRepository *RepoRef  `json:"head_repository"`
 }
 
 // RepoRef is a repository reference inside a run.
@@ -696,7 +697,7 @@ func (c *Client) ListRuns(ctx context.Context, r Repo, status string) ([]Run, er
 			WorkflowRuns []Run `json:"workflow_runs"`
 		}
 		q := url.Values{"status": {status}, "per_page": {strconv.Itoa(perPage)}, "page": {strconv.Itoa(page)}}
-		if err := c.api(ctx, r, http.MethodGet, repoPath(r)+"/actions/runs?"+q.Encode(), nil, &out); err != nil {
+		if err := c.getCached(ctx, r, repoPath(r)+"/actions/runs?"+q.Encode(), &out); err != nil {
 			return nil, err
 		}
 		all = append(all, out.WorkflowRuns...)

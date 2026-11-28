@@ -25,10 +25,12 @@ type ReconcileResult struct {
 	LeftQueued       int      `json:"left_queued"`
 	ForkRunsRejected int      `json:"fork_runs_rejected"`
 	Errors           []string `json:"errors,omitempty"`
-	// Skipped: steps for one repo, run or job that GitHub answered with a 5xx.
-	// They are retried by the next pass and do not fail this one (HTTP 200).
+	// Skipped: steps for one repo, run or job that GitHub answered with a 5xx
+	// or rate-limit, or stopped at the budget reserve. They are retried by the
+	// next pass and do not fail this one (HTTP 200).
 	Skipped            []string `json:"skipped,omitempty"`
 	CapacityFullAtStop bool     `json:"capacity_full,omitempty"`
+	BudgetStopped      bool     `json:"budget_stopped,omitempty"`
 }
 
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
@@ -53,9 +55,18 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		plain(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if !s.reconcileMu.TryLock() {
+		s.log().Info("reconcile already in progress; skipping overlapping pass", "event", logging.EventReconcileOverlap)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"overlap\":true}\n"))
+		return
+	}
+	defer s.reconcileMu.Unlock()
+
 	ctx, cancel := detached(r.Context(), s.o.ReconcileTimeout)
 	defer cancel()
-	res := s.Reconcile(ctx)
+	res := s.reconcileLocked(ctx)
 	status := http.StatusOK
 	if len(res.Errors) > 0 {
 		status = http.StatusInternalServerError
@@ -83,15 +94,21 @@ type runnerJob struct {
 //  3. expire claims, reap stale registrations and executions, and backfill
 //     queued servable jobs, oldest first, within capacity (a fresh view).
 func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	return s.reconcileLocked(ctx)
+}
+
+func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 	var res ReconcileResult
 	// Every GitHub call in a pass concerns one repo, run or job. A GitHub 5xx
-	// there (a 502 on one run's jobs list, say) skips that item only: the rest of
-	// the pass goes on, and the next pass retries it. Anything else is an error
-	// and makes /reconcile answer 500.
+	// or rate-limit response skips that item only: the rest of the pass goes
+	// on (or stops discovery on rate limit), and the next pass retries it.
+	// Anything else is an error and makes /reconcile answer 500.
 	addErr := func(stage string, err error) {
-		if githubServerError(err) {
+		if githubServerError(err) || githubapp.IsRateLimited(err) {
 			res.Skipped = append(res.Skipped, stage+": "+err.Error())
-			s.log().Warn("reconcile step skipped after a GitHub server error; retried next pass", "event", logging.EventReconcileSkip, "stage", stage, "error", err.Error())
+			s.log().Warn("reconcile step skipped after a transient GitHub error; retried next pass", "event", logging.EventReconcileSkip, "stage", stage, "error", err.Error())
 			return
 		}
 		res.Errors = append(res.Errors, stage+": "+err.Error())
@@ -198,7 +215,7 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 		"claims_expired", res.ClaimsExpired, "runners_reaped", res.RunnersReaped, "executions_reaped", res.ExecutionsReaped,
 		"hijacks_killed", res.HijacksKilled, "backfilled", res.Backfilled, "left_queued", res.LeftQueued,
 		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors), "skipped", len(res.Skipped),
-		"rate_limit_remaining", rateLimitRemaining)
+		"budget_stopped", res.BudgetStopped, "rate_limit_remaining", rateLimitRemaining)
 	return res
 }
 
@@ -208,10 +225,28 @@ func githubServerError(err error) bool {
 	return errors.As(err, &ae) && ae.Status >= 500 && ae.Status <= 599
 }
 
+type discoverWork struct {
+	repo githubapp.Repo
+	run  githubapp.Run
+	prio int // 0 = P0 (active cr-ci runner in prev pass), 1 = P1 (in_progress), 2 = P2 (queued)
+}
+
+func budgetReserve(rl githubapp.RateLimit) int {
+	r := rl.Limit / 10
+	if r < 500 {
+		r = 500
+	}
+	return r
+}
+
 // discover lists queued and in_progress runs of every served repo. It
-// returns queued servable jobs of runs that pass the fork guard (oldest
-// first, deduplicated) and the jobs currently running on cr-ci runners.
-// listed counts the repos for which at least one runs list succeeded.
+// orders runs P0 (previously held an in_progress cr-ci runner) -> P1
+// (in_progress) -> P2 (queued, oldest created_at first), stops non-P0 runs
+// when the rate-limit reserve is reached, and stops the whole loop on the
+// first rate-limit error. It returns queued servable jobs of runs that pass
+// the fork guard (oldest first, deduplicated) and the jobs currently running
+// on cr-ci runners. listed counts the repos for which at least one runs list
+// succeeded.
 func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func(string, error)) (cands []candidate, onRunners []runnerJob, notices map[string]bool, listed int) {
 	notices = map[string]bool{}
 	notice := func(key string) bool { // true the first time a notice is seen
@@ -222,60 +257,133 @@ func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func
 		s.noticed[key] = true
 		return first
 	}
-	seenJob := map[int64]bool{}
+
+	var work []discoverWork
+	seenRun := map[int64]int{} // run ID -> index in work
+	rateLimited := false
 	for _, repo := range s.o.TargetRepos {
+		if rateLimited {
+			break
+		}
 		repoListed := false
 		for _, status := range []string{"queued", "in_progress"} {
 			runs, err := s.o.GitHub.ListRuns(ctx, repo, status)
 			if err != nil {
 				addErr("list_runs "+repo.String(), err)
+				if githubapp.IsRateLimited(err) {
+					rateLimited = true
+					break
+				}
 				continue
 			}
 			if !repoListed {
 				repoListed = true
 				listed++
 			}
-			for i := range runs {
-				run := runs[i]
-				jobs, err := s.o.GitHub.ListJobs(ctx, repo, run.ID)
-				if err != nil {
-					addErr("list_jobs "+repo.String(), err)
+			for _, run := range runs {
+				prio := 2
+				switch {
+				case s.lastRunnerRuns[run.ID]:
+					prio = 0
+				case run.Status == "in_progress":
+					prio = 1
+				}
+				if idx, dup := seenRun[run.ID]; dup {
+					if prio < work[idx].prio {
+						work[idx].prio = prio
+						work[idx].run = run
+					}
 					continue
 				}
-				reason := forkReason(&run, repo)
-				for _, j := range jobs {
-					if seenJob[j.ID] {
-						continue
-					}
-					seenJob[j.ID] = true
-					if _, ours := parseRunnerName(j.RunnerName); ours && j.Status == "in_progress" {
-						onRunners = append(onRunners, runnerJob{repo: repo, run: run, job: j})
-						continue
-					}
-					if j.Status != "queued" || !hasLabel(j.Labels, s.o.RunnerLabel) {
-						continue
-					}
-					if !s.servable(j.Labels) {
-						if notice("labels:" + strconv.FormatInt(j.ID, 10)) {
-							s.log().Warn("job labels cannot be served by a cr-ci runner (it carries RUNNER_LABEL only)", "event", logging.EventWebhookIgnored,
-								"source", "reconcile", "repo", repo.String(), "job_id", j.ID, "reason", "labels_unservable", "labels", strings.Join(j.Labels, ","))
-						}
-						continue
-					}
-					if reason != "" {
-						res.ForkRunsRejected++
-						if notice("fork:" + strconv.FormatInt(run.ID, 10)) {
-							s.log().Warn("refusing to backfill a fork or privileged-trigger run", "event", logging.EventRejectFork,
-								"source", "reconcile", "repo", repo.String(), "run_id", run.ID, "job_id", j.ID, "reason", reason,
-								"run_event", run.Event, "head_repository", headRepo(&run))
-						}
-						continue
-					}
-					cands = append(cands, candidate{repo: repo, job: j})
-				}
+				seenRun[run.ID] = len(work)
+				work = append(work, discoverWork{repo: repo, run: run, prio: prio})
 			}
 		}
 	}
+
+	sort.SliceStable(work, func(i, j int) bool {
+		if work[i].prio != work[j].prio {
+			return work[i].prio < work[j].prio
+		}
+		ai, aj := work[i].run, work[j].run
+		if !ai.CreatedAt.Equal(aj.CreatedAt) {
+			return ai.CreatedAt.Before(aj.CreatedAt)
+		}
+		return ai.ID < aj.ID
+	})
+
+	nextRunnerRuns := map[int64]bool{}
+	seenJob := map[int64]bool{}
+	stoppedAt := len(work)
+	for idx, item := range work {
+		if rateLimited {
+			stoppedAt = idx
+			break
+		}
+		if item.prio > 0 {
+			if rl, ok := s.o.GitHub.RateLimit(item.repo); ok && rl.Remaining < budgetReserve(rl) {
+				res.BudgetStopped = true
+				msg := "list_jobs: budget reserve reached (remaining=" + strconv.Itoa(rl.Remaining) + ")"
+				res.Skipped = append(res.Skipped, msg)
+				s.log().Warn("reconcile discovery stopped at rate-limit budget reserve",
+					"event", logging.EventReconcileSkip, "stage", "list_jobs", "remaining", rl.Remaining, "reserve", budgetReserve(rl))
+				stoppedAt = idx
+				break
+			}
+		}
+		repo, run := item.repo, item.run
+		jobs, err := s.o.GitHub.ListJobs(ctx, repo, run.ID)
+		if err != nil {
+			addErr("list_jobs "+repo.String(), err)
+			if githubapp.IsRateLimited(err) {
+				rateLimited = true
+				stoppedAt = idx + 1
+				break
+			}
+			continue
+		}
+		reason := forkReason(&run, repo)
+		for _, j := range jobs {
+			if seenJob[j.ID] {
+				continue
+			}
+			seenJob[j.ID] = true
+			if _, ours := parseRunnerName(j.RunnerName); ours && j.Status == "in_progress" {
+				nextRunnerRuns[run.ID] = true
+				onRunners = append(onRunners, runnerJob{repo: repo, run: run, job: j})
+				continue
+			}
+			if j.Status != "queued" || !hasLabel(j.Labels, s.o.RunnerLabel) {
+				continue
+			}
+			if !s.servable(j.Labels) {
+				if notice("labels:" + strconv.FormatInt(j.ID, 10)) {
+					s.log().Warn("job labels cannot be served by a cr-ci runner (it carries RUNNER_LABEL only)", "event", logging.EventWebhookIgnored,
+						"source", "reconcile", "repo", repo.String(), "job_id", j.ID, "reason", "labels_unservable", "labels", strings.Join(j.Labels, ","))
+				}
+				continue
+			}
+			if reason != "" {
+				res.ForkRunsRejected++
+				if notice("fork:" + strconv.FormatInt(run.ID, 10)) {
+					s.log().Warn("refusing to backfill a fork or privileged-trigger run", "event", logging.EventRejectFork,
+						"source", "reconcile", "repo", repo.String(), "run_id", run.ID, "job_id", j.ID, "reason", reason,
+						"run_event", run.Event, "head_repository", headRepo(&run))
+				}
+				continue
+			}
+			cands = append(cands, candidate{repo: repo, job: j})
+		}
+	}
+	// Preserve P0 priority for runs that were not visited because discovery
+	// stopped early (rate limit or budget reserve).
+	for i := stoppedAt; i < len(work); i++ {
+		if s.lastRunnerRuns[work[i].run.ID] {
+			nextRunnerRuns[work[i].run.ID] = true
+		}
+	}
+	s.lastRunnerRuns = nextRunnerRuns
+
 	sort.Slice(cands, func(i, j int) bool {
 		a, b := cands[i].job, cands[j].job
 		if !a.CreatedAt.Equal(b.CreatedAt) {

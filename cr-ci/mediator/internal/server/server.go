@@ -143,6 +143,13 @@ type Server struct {
 	prevUntil     time.Time
 	secretAttempt time.Time
 
+	// reconcileMu makes reconcile passes single-flight. /reconcile uses TryLock
+	// so overlapping scheduler ticks skip cleanly; Server.Reconcile blocks.
+	// lastRunnerRuns is guarded by reconcileMu and records run IDs that held an
+	// in_progress job on a cr-ci runner in the previous pass (P0 priority).
+	reconcileMu    sync.Mutex
+	lastRunnerRuns map[int64]bool
+
 	// dispatchMu serialises dispatch, runner stops and the mutating part of
 	// reconcile so that capacity and idempotency checks cannot race (single
 	// instance).
@@ -180,13 +187,14 @@ func New(o Options) *Server {
 		o.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	return &Server{
-		o:           o,
-		runners:     map[string]*runnerRecord{},
-		cancelled:   map[string]time.Time{},
-		offlineSeen: map[string]time.Time{},
-		noticed:     map[string]bool{},
-		hijacked:    map[string]time.Time{},
-		forgotten:   map[string]time.Time{},
+		o:              o,
+		lastRunnerRuns: map[int64]bool{},
+		runners:        map[string]*runnerRecord{},
+		cancelled:      map[string]time.Time{},
+		offlineSeen:    map[string]time.Time{},
+		noticed:        map[string]bool{},
+		hijacked:       map[string]time.Time{},
+		forgotten:      map[string]time.Time{},
 	}
 }
 

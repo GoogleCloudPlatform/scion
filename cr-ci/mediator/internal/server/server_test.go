@@ -1157,3 +1157,151 @@ func TestReconcileRefusesDisallowedEvents(t *testing.T) {
 	}
 	h.wantLog(logging.EventRejectFork)
 }
+
+func TestReconcile_StopsOnRateLimit(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for i := int64(1); i <= 250; i++ {
+		h.gh.AddRun(fakes.GitHubRun{
+			ID: i, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+			CreatedAt: h.clock.Now().Add(time.Duration(i) * time.Second),
+			Jobs:      []fakes.GitHubJob{{ID: i * 10, Status: "queued", Labels: []string{"ubuntu-latest"}}},
+		})
+	}
+	// 2 ListRuns calls + 10 ListJobs calls = 12 counted calls before 403 rate limit.
+	h.gh.RateLimitMode = fakes.Primary403
+	h.gh.RateLimitAfter = 12
+
+	code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now()))
+	if code != http.StatusOK {
+		t.Fatalf("reconcile status = %d, want 200; res=%+v", code, res)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("Errors = %v, want empty", res.Errors)
+	}
+	foundRL := false
+	for _, s := range res.Skipped {
+		if strings.Contains(strings.ToLower(s), "rate limit") {
+			foundRL = true
+			break
+		}
+	}
+	if !foundRL {
+		t.Errorf("Skipped = %v, want mention of rate limit", res.Skipped)
+	}
+	jobsPrefix := "/repos/" + testRepo + "/actions/runs/"
+	totalCalls := h.gh.Calls(jobsPrefix)
+	// Subtract any non-jobs calls under /actions/runs/ (none here: ListRuns path is /actions/runs without trailing slash).
+	if totalCalls > 11 {
+		t.Errorf("ListJobs calls = %d, want <= 11", totalCalls)
+	}
+	if totalCalls == 0 {
+		t.Errorf("ListJobs calls = 0, want > 0")
+	}
+}
+
+func TestReconcile_BudgetReserve(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	// Run 100 holds an in_progress job on cr-job-1000 (will become P0 after pass 1).
+	h.addSameRepoRun(100, fakes.GitHubJob{ID: 1000, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-1000"})
+	// Pass 1 establishes P0 for run 100 while budget is plentiful.
+	h.reconcile()
+
+	// Add P2 queued runs and drop remaining below reserve (500 for limit 5000).
+	for i := int64(200); i < 205; i++ {
+		h.gh.AddRun(fakes.GitHubRun{
+			ID: i, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+			CreatedAt: h.clock.Now().Add(time.Duration(i) * time.Second),
+			Jobs:      []fakes.GitHubJob{{ID: i * 10, Status: "queued", Labels: []string{"ubuntu-latest"}}},
+		})
+	}
+	h.gh.RateLimitInitialRemaining = 400
+
+	p0Path := "/repos/" + testRepo + "/actions/runs/100/jobs"
+	p2Path := "/repos/" + testRepo + "/actions/runs/200/jobs"
+	p0Before := h.gh.Calls(p0Path)
+	p2Before := h.gh.Calls(p2Path)
+
+	res := h.reconcile()
+	if !res.BudgetStopped {
+		t.Errorf("BudgetStopped = false, want true; res=%+v", res)
+	}
+	if h.gh.Calls(p0Path) != p0Before+1 {
+		t.Errorf("P0 run 100 was not listed under reserve: calls=%d, want %d", h.gh.Calls(p0Path), p0Before+1)
+	}
+	if h.gh.Calls(p2Path) != p2Before {
+		t.Errorf("P2 run 200 was listed under reserve: calls=%d, want %d", h.gh.Calls(p2Path), p2Before)
+	}
+	if !strings.Contains(h.logs.String(), `"budget_stopped":true`) {
+		t.Errorf("reconcile finished log missing budget_stopped:true")
+	}
+}
+
+func TestReconcile_UnchangedRunsCost304(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for i := int64(1); i <= 10; i++ {
+		h.gh.AddRun(fakes.GitHubRun{
+			ID: i, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+			Jobs: []fakes.GitHubJob{{ID: i * 10, Status: "queued", Labels: []string{"ubuntu-latest"}}},
+		})
+	}
+	h.reconcile()
+	jobsPrefix := "/repos/" + testRepo + "/actions/runs/"
+	ok1, mod1 := h.gh.CallsByStatus(jobsPrefix)
+	if ok1 != 10 || mod1 != 0 {
+		t.Fatalf("pass 1 ListJobs (200, 304) = (%d, %d), want (10, 0)", ok1, mod1)
+	}
+
+	h.reconcile()
+	ok2, mod2 := h.gh.CallsByStatus(jobsPrefix)
+	if ok2 != 10 || mod2 != 10 {
+		t.Fatalf("pass 2 ListJobs (200, 304) = (%d, %d), want (10, 10) (0 new 200s)", ok2, mod2)
+	}
+}
+
+func TestReconcile_SingleFlight(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h.gh.OnListRuns = func() {
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+	}
+
+	tok := h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())
+	done := make(chan int, 1)
+	go func() {
+		code, _ := h.reconcileWith(tok)
+		done <- code
+	}()
+	<-started
+
+	code2, body2, _ := h.post("/reconcile", map[string]string{"Authorization": "Bearer " + tok}, nil)
+	if code2 != http.StatusOK || !strings.Contains(body2, `"overlap":true`) {
+		t.Errorf("overlapping /reconcile = %d %q, want 200 {\"overlap\":true}", code2, body2)
+	}
+	h.wantLog(logging.EventReconcileOverlap)
+
+	close(release)
+	if code1 := <-done; code1 != http.StatusOK {
+		t.Errorf("first /reconcile = %d, want 200", code1)
+	}
+}
+
+func TestReconcile_InProgressInQueuedRunIsGuarded(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	// GitHub quirk: run.status stays "queued" while a job inside it is in_progress on cr-job-100.
+	h.gh.AddRun(fakes.GitHubRun{
+		ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "queued",
+		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}},
+	})
+	res := h.reconcile()
+	if res.HijacksKilled != 1 || h.activeFor("cr-job-100") != 0 {
+		t.Fatalf("result %+v; cr-job-100 active = %d, want hijack killed in queued run", res, h.activeFor("cr-job-100"))
+	}
+	h.wantLog(logging.EventKillHijacked)
+}
