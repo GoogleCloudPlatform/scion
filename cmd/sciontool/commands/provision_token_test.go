@@ -54,7 +54,12 @@ func runProvisionCaptureRemote(t *testing.T, cloneURL, token, tokenRemote string
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("GIT_CONFIG_COUNT", "")
+	for _, key := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	if err := runProvision(context.Background()); err != nil {
 		t.Fatalf("runProvision: %v", err)
@@ -63,13 +68,18 @@ func runProvisionCaptureRemote(t *testing.T, cloneURL, token, tokenRemote string
 		t.Fatal("runProvision did not call ProvisionShared")
 	}
 	// The credential helper is given to the clone command only, never to
-	// this process (later steps must not inherit it).
-	if v := os.Getenv("GIT_CONFIG_COUNT"); v != "" {
-		t.Errorf("GIT_CONFIG_COUNT set in the provision process env: %q", v)
-	}
+	// this process (later steps must not inherit it). Only scoped
+	// safe.directory entries may appear in GIT_CONFIG_*.
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "GIT_CONFIG_VALUE_") && strings.Contains(e, "credential") {
-			t.Errorf("credential helper entry in the provision process env: %s", strings.SplitN(e, "=", 2)[0])
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(k, "GIT_CONFIG_KEY_") && v != "safe.directory" {
+			t.Errorf("unexpected git config key in the provision process env: %s=%q", k, v)
+		}
+		if strings.HasPrefix(k, "GIT_CONFIG_VALUE_") && strings.Contains(v, "credential") {
+			t.Errorf("credential helper entry in the provision process env: %s", k)
 		}
 	}
 	return got
