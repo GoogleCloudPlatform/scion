@@ -14,6 +14,19 @@
 
 package hub
 
+// Structural invariant for all usage_budget_state writers (evaluateSpec,
+// reevaluateSpec, OverrideBudgetState):
+//
+//   Every budget-state writer MUST resolve the effective (cap, token_action)
+//   FRESH (uncached, via a fresh tokenLimitEvalCache) AFTER reading the
+//   usage_budget_state row, on EVERY CAS attempt that writes.
+//
+//   A per-call tokenLimitEvalCache may ONLY be used to decide to skip (when
+//   the cached effective cap <= 0 -> no write), never as the cap persisted
+//   into usage_budget_state. This guarantees that neither the create path nor
+//   the existing-row update path nor a CAS retry can write a stale cap after a
+//   concurrent entitlement/limit change commits.
+
 import (
 	"context"
 	"errors"
@@ -108,8 +121,13 @@ type TokenBudgetEvaluator struct {
 	hookMu        sync.RWMutex
 	thresholdHook BudgetThresholdHook
 
-	evalErrors atomic.Int64
-	hookPanics atomic.Int64
+	evalErrors        atomic.Int64
+	hookPanics        atomic.Int64
+	reevalUnprocessed atomic.Int64
+	reevalPageSize    int
+	reevalTimeout     time.Duration
+	reevalWG          sync.WaitGroup
+	metrics           atomic.Pointer[OTelTokenBudgetMetrics]
 }
 
 // NewTokenBudgetEvaluator constructs a TokenBudgetEvaluator.
@@ -345,7 +363,7 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEventsWithNotice(ctx context.Cont
 	for _, spec := range specs {
 		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
 		if err != nil {
-			e.evalErrors.Add(1)
+			e.recordEvalError()
 			e.logger.Warn("token budget evaluation failed",
 				"limit", spec.limitName,
 				"scope_kind", spec.scopeKind,
@@ -765,23 +783,28 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		return nil, "", nil
 	}
 
-	var capVal int64
-	var action string
-	if spec.scopeKind == store.UsageScopeKindGroup {
-		capVal, action, err = evalCache.resolveGroupForDef(
-			ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
-		)
-	} else {
-		capVal, action, err = evalCache.resolveForDef(
-			ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-		)
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
-	}
-	// Cap <= 0 means unlimited for llm_tokens limits; no state row is created (D3).
-	if capVal <= 0 {
-		return nil, action, nil
+	// Per the structural fresh-cap writer rule, evalCache may ONLY be used to
+	// decide to skip (cached cap <= 0 -> no write). Every CAS attempt that
+	// actually writes resolves the cap fresh after reading the row (for both
+	// project/user/user_project and pooled group scopes).
+	if evalCache != nil {
+		var cachedCap int64
+		var cachedAction string
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			cachedCap, cachedAction, err = evalCache.resolveGroupForDef(
+				ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+			)
+		} else {
+			cachedCap, cachedAction, err = evalCache.resolveForDef(
+				ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+			)
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+		}
+		if cachedCap <= 0 {
+			return nil, cachedAction, nil
+		}
 	}
 
 	key := store.UsageBudgetStateKey{
@@ -793,6 +816,34 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 	}
 
 	for attempt := 0; attempt < maxBudgetEvalCASRetries; attempt++ {
+		existing, err := e.store.GetUsageBudgetState(ctx, key)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, "", fmt.Errorf("get usage budget state: %w", err)
+		}
+
+		// Always resolve the effective cap FRESH (uncached) AFTER reading the
+		// row on every CAS attempt that may create or update usage_budget_state
+		// (applies uniformly to project, user, user_project, and group scopes).
+		freshCache := newTokenLimitEvalCache(e.quota)
+		var capVal int64
+		var action string
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			capVal, action, err = freshCache.resolveGroupByID(
+				ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+			)
+		} else {
+			capVal, action, err = freshCache.resolveByID(
+				ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+			)
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+		}
+		// Cap <= 0 means unlimited for llm_tokens limits; no state row is created (D3).
+		if capVal <= 0 {
+			return nil, action, nil
+		}
+
 		var consumed int64
 		if spec.scopeKind == store.UsageScopeKindGroup {
 			consumed, err = e.store.SumUsageGroupRollupTokens(
@@ -807,11 +858,6 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 			return nil, "", fmt.Errorf("sum scope counter tokens: %w", err)
 		}
 		computedState := computeBudgetState(consumed, capVal)
-
-		existing, err := e.store.GetUsageBudgetState(ctx, key)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, "", fmt.Errorf("get usage budget state: %w", err)
-		}
 
 		if existing == nil {
 			created, createErr := e.store.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
@@ -855,7 +901,15 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		}
 
 		// Monotonic within window: evaluator never moves state downward (D4).
-		nextState := maxBudgetState(existing.State, computedState)
+		// While an admin override is active (override_until > evaluator clock),
+		// do not re-raise state above existing.State (ok); state resumes rising
+		// once override_until elapses.
+		var nextState string
+		if existing.OverrideUntil != nil && existing.OverrideUntil.After(e.now()) {
+			nextState = existing.State
+		} else {
+			nextState = maxBudgetState(existing.State, computedState)
+		}
 		nextConsumed := consumed
 		if existing.ConsumedAtEval > nextConsumed {
 			nextConsumed = existing.ConsumedAtEval

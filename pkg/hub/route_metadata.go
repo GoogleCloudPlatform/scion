@@ -1371,6 +1371,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/me/usage", RouteID: "me.usage",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/me/usage/budgets": {
+		Pattern: "/api/v1/me/usage/budgets", RouteID: "me.usage.budgets",
+		Classification: RouteAuthenticated,
+	},
 
 	// -------------------------------------------------------------------------
 	// Hub admin: GitHub App (method-aware permission enforcement)

@@ -288,6 +288,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/usage/":                                  "hub-admin:quota",
 	"/api/v1/usage/me":                                      "authenticated:quota-usage",
 	"/api/v1/me/usage":                                      "authenticated:token-usage",
+	"/api/v1/me/usage/budgets":                              "authenticated:token-budgets",
 	"/api/v1/usage":                                         "hub-admin:token-usage",
 	"/api/v1/pending-secrets":                               "authenticated:user-secret",
 	"/api/v1/pending-secrets/":                              "authenticated:user-secret",

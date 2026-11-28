@@ -3503,6 +3503,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetQuotaCapacityMetrics(capacityRec)
 	}
 
+	if budgetRec, err := hub.NewOTelTokenBudgetMetrics(mp); err != nil {
+		log.Printf("WARNING: hub token budget metrics disabled: %v", err)
+	} else {
+		hubSrv.SetTokenBudgetMetrics(budgetRec)
+	}
+
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {

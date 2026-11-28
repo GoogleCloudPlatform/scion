@@ -1014,6 +1014,31 @@ var hubOperations = []OperationSpec{
 		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestMeUsageRead_SelfTokenReadsOwn"},
 	},
 	{
+		ID:          "hub.usage.budgets.self.read",
+		Domain:      "hub",
+		Description: "Read the caller's own raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets). A project-boundary user access token restricts user_project rows to its boundary project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/me/usage/budgets", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestMeUsageBudgetsRead_SelfTokenReadsOwn"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Returns only the caller's own raw-token budgets; carries no other user's records",
+			Scope:  "caller's own raw-token budgets only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestMeUsageBudgetsRead_SelfTokenReadsOwn"},
+	},
+	{
 		ID:          "hub.experiments.read",
 		Domain:      "hub",
 		Description: "Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them",

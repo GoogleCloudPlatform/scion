@@ -136,6 +136,8 @@
 - [project.broadcast](#projectbroadcast) — Broadcast a message to a project's agents. Each recipient is then filtered by agent.message
 - [project.metrics.read](#projectmetricsread) — Read a project's metrics summary, session metrics summary and metrics dashboard
 - [project.usage.read](#projectusageread) — Read a project's Track 1 token usage summary and aggregate meter health (behind tokenomics.usage_ledger)
+- [project.usage.budgets.read](#projectusagebudgetsread) — Read a project's raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets)
+- [project.usage.budgets.override](#projectusagebudgetsoverride) — Set or clear an admin override on a raw-token budget state row belonging to this project (either project scope or user_project scope for this project; behind tokenomics.usage_ledger and tokenomics.token_budgets)
 - [project.prestarthooks.read](#projectprestarthooksread) — List or read a project's pre-start hooks
 - [project.prestarthooks.write](#projectprestarthookswrite) — Create, update, delete or activate a project pre-start hook
 - [project.settings.read](#projectsettingsread) — Read a project's settings and its resolved settings
@@ -305,6 +307,9 @@
 - [user.self.update](#userselfupdate) — Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard
 - [hub.user.usage.read](#hubuserusageread) — Read another user's Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger). Requires hub.metrics.read on the hub
 - [user.usage.self.read](#userusageselfread) — Read the caller's own Track 1 token usage summary through GET /api/v1/users/{id}/usage naming the caller's own user ID (behind tokenomics.usage_ledger). A project-boundary user access token is restricted to its boundary project
+- [hub.user.usage.budgets.read](#hubuserusagebudgetsread) — Read another user's raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets). Requires hub.metrics.read on the hub
+- [user.usage.budgets.self.read](#userusagebudgetsselfread) — Read the caller's own raw-token budgets through GET /api/v1/users/{id}/usage/budgets naming the caller's own user ID (behind tokenomics.usage_ledger and tokenomics.token_budgets). A project-boundary user access token restricts user_project rows to its boundary project
+- [quota.user.usage.budgets.override](#quotauserusagebudgetsoverride) — Set or clear an admin override on a user's raw-token budget state row (behind tokenomics.usage_ledger and tokenomics.token_budgets). Requires quota.update on the hub
 - [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [role.binding.effectivepermissions](#rolebindingeffectivepermissions) — Resolve a user principal's effective permissions and grant provenance. A token needs role_binding:read on a hub boundary; HEAD answers whether the caller may read it
@@ -373,6 +378,7 @@
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only (distinct from GET /api/v1/me/usage, which returns Track 1 token usage)
 - [hub.usage.self.read](#hubusageselfread) — Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage). A project-boundary user access token is restricted to its boundary project
+- [hub.usage.budgets.self.read](#hubusagebudgetsselfread) — Read the caller's own raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets). A project-boundary user access token restricts user_project rows to its boundary project
 - [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
 - [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
 - [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
@@ -5692,6 +5698,70 @@
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.usage.budgets.read
+
+**Domain:** project
+
+**Description:** Read a project's raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/usage/budgets` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.usage.budgets.override
+
+**Domain:** project
+
+**Description:** Set or clear an admin override on a raw-token budget state row belonging to this project (either project scope or user_project scope for this project; behind tokenomics.usage_ledger and tokenomics.token_budgets)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/usage/budgets/{budgetId}:override` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
 
 **Denial Codes:** `forbidden`
 
@@ -11789,6 +11859,104 @@
 
 ---
 
+## hub.user.usage.budgets.read
+
+**Domain:** hub
+
+**Description:** Read another user's raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets). Requires hub.metrics.read on the hub
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/usage/budgets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.metrics.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## user.usage.budgets.self.read
+
+**Domain:** user
+
+**Description:** Read the caller's own raw-token budgets through GET /api/v1/users/{id}/usage/budgets naming the caller's own user ID (behind tokenomics.usage_ledger and tokenomics.token_budgets). A project-boundary user access token restricts user_project rows to its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/usage/budgets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestUserUsageBudgetsRead_SelfTokenReadsOwn`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserUsageBudgetsRead_SelfTokenReadsOwn`
+
+### Exemptions
+
+- **authentication_only:** Returns only the caller's own raw-token budgets; carries no other user's records (scope: caller's own raw-token budgets only) — waives: `base_permission`
+
+---
+
+## quota.user.usage.budgets.override
+
+**Domain:** quota
+
+**Description:** Set or clear an admin override on a user's raw-token budget state row (behind tokenomics.usage_ledger and tokenomics.token_budgets). Requires quota.update on the hub
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/{id}/usage/budgets/{budgetId}:override` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `quota.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
 ## role.read
 
 **Domain:** role
@@ -14188,6 +14356,40 @@
 ### Exemptions
 
 - **authentication_only:** Returns only the caller's own Track 1 token usage; carries no other user's records (scope: caller's own Track 1 token usage only) — waives: `base_permission`
+
+---
+
+## hub.usage.budgets.self.read
+
+**Domain:** hub
+
+**Description:** Read the caller's own raw-token budgets and current window state (behind tokenomics.usage_ledger and tokenomics.token_budgets). A project-boundary user access token restricts user_project rows to its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/me/usage/budgets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestMeUsageBudgetsRead_SelfTokenReadsOwn`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMeUsageBudgetsRead_SelfTokenReadsOwn`
+
+### Exemptions
+
+- **authentication_only:** Returns only the caller's own raw-token budgets; carries no other user's records (scope: caller's own raw-token budgets only) — waives: `base_permission`
 
 ---
 

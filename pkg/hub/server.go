@@ -8203,6 +8203,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// no-op if it already ran.
 	_ = s.CleanupBackgroundResources(ctx)
 
+	// After the drain: wait for any in-flight async token-budget re-evaluations
+	// (honouring the shutdown ctx) before closing the audit writer / store.
+	s.mu.RLock()
+	budgetEval := s.tokenBudgetEvaluator
+	s.mu.RUnlock()
+	if budgetEval != nil {
+		_ = budgetEval.WaitReevalContext(ctx)
+	}
+
 	// After the drain: close the audit writer (bounded by its own drain
 	// timeout; idempotent).
 	_ = s.CloseAuditWriter(ctx)
@@ -8859,6 +8868,7 @@ func (s *Server) registerRoutes() {
 	// /api/v1/usage is an exact-match pattern (no trailing slash) so it never shadows /api/v1/usage/me.
 	s.mux.HandleFunc("/api/v1/usage", s.guarded("/api/v1/usage", s.handleGlobalUsage))
 	s.mux.HandleFunc("/api/v1/me/usage", s.guarded("/api/v1/me/usage", s.handleMeUsage))
+	s.mux.HandleFunc("/api/v1/me/usage/budgets", s.guarded("/api/v1/me/usage/budgets", s.handleMeUsageBudgets))
 
 	// Role management (PR-C1)
 	s.mux.HandleFunc("/api/v1/admin/roles", s.guarded("/api/v1/admin/roles", s.handleAdminRoles))

@@ -26,6 +26,13 @@ const (
 	UsageBudgetStateOK        = "ok"
 	UsageBudgetStateWarn      = "warn"
 	UsageBudgetStateExhausted = "exhausted"
+
+	// Threshold notification bitmask positions for UsageBudgetState.ThresholdsNotified.
+	// Used to deduplicate soft (50%, 80%) and hard (100%) threshold alerts and to
+	// selectively clear bits when a cap raise lowers consumption below a threshold.
+	UsageBudgetThresholdBit50  int64 = 1 << 0
+	UsageBudgetThresholdBit80  int64 = 1 << 1
+	UsageBudgetThresholdBit100 int64 = 1 << 2
 )
 
 // ErrBudgetStateConflict is returned by CompareAndSwapUsageBudgetState when
@@ -175,14 +182,40 @@ type UsageBudgetStore interface {
 	// from the overlapping episodes (each event counted at most once).
 	QueryGroupMemberUsageBreakdown(ctx context.Context, groupID, projectScopeID string, episodes []*UsageGroupSeedEpisode, windowStartUTC, windowEndUTC time.Time) ([]UsageGroupMemberBreakdown, error)
 
+	// SumUsageScopeCounterTokensByPrefix returns a map of counterScopeID ->
+	// saturating SUM(tokens_summable) from usage_scope_counters_daily for
+	// scopeKind over [fromDayUTC, toDayUTC) whose scope_id starts with
+	// scopeIDPrefix (e.g. "<user_id>:" for ScopeKind == "user_project").
+	// Returns an empty map when no counter rows match.
+	SumUsageScopeCounterTokensByPrefix(ctx context.Context, scopeKind, scopeIDPrefix string, fromDayUTC, toDayUTC time.Time) (map[string]int64, error)
+
 	// GetUsageBudgetState returns the usage_budget_state row for key, or
 	// ErrNotFound if no row exists yet.
 	GetUsageBudgetState(ctx context.Context, key UsageBudgetStateKey) (*UsageBudgetState, error)
+
+	// GetUsageBudgetStateByID returns the usage_budget_state row with the given
+	// UUID, or ErrNotFound if no such row exists.
+	GetUsageBudgetStateByID(ctx context.Context, id string) (*UsageBudgetState, error)
 
 	// ListUsageBudgetStatesForScope returns all usage_budget_state rows for
 	// (scopeKind, scopeID, projectScopeID) whose window is active at activeAt
 	// (window_start_utc <= activeAt < window_end_utc).
 	ListUsageBudgetStatesForScope(ctx context.Context, scopeKind, scopeID, projectScopeID string, activeAt time.Time) ([]*UsageBudgetState, error)
+
+	// ListOpenUsageBudgetStatesByLimit returns up to limit open-window
+	// usage_budget_state rows (window_end_utc > activeAt) for limitDefinitionID,
+	// keyset-paginated by id > afterID (when afterID is non-empty) and ordered
+	// by id ASC. When projectID is non-empty, only rows belonging to that
+	// project are returned ((scope_kind = "project" AND scope_id = projectID)
+	// OR (scope_kind IN ("user_project", "group") AND project_scope_id = projectID)).
+	// When limit <= 0, no explicit cap is applied.
+	ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, projectID, afterID string, limit int) ([]*UsageBudgetState, error)
+
+	// ListOpenUsageBudgetStatesForUser returns all open-window
+	// usage_budget_state rows (window_end_utc > activeAt) for userID across
+	// scope_kind IN ("user", "user_project"), ordered by window_start_utc ASC,
+	// id ASC.
+	ListOpenUsageBudgetStatesForUser(ctx context.Context, userID string, activeAt time.Time) ([]*UsageBudgetState, error)
 
 	// CreateUsageBudgetState inserts a new usage_budget_state row with
 	// state_version = 1 (or st.StateVersion if >= 1). Returns ErrAlreadyExists

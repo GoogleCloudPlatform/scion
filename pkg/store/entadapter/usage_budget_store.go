@@ -131,6 +131,42 @@ func (s *UsageLedgerStore) SumUsageGroupRollupTokens(ctx context.Context, groupI
 	return total, nil
 }
 
+// SumUsageScopeCounterTokensByPrefix implements store.UsageBudgetStore.SumUsageScopeCounterTokensByPrefix.
+// Queries all usage_scope_counters_daily rows matching (scopeKind, scopeIDPrefix%)
+// over [fromDayUTC, toDayUTC) in one query and returns per-scope saturating sums.
+func (s *UsageLedgerStore) SumUsageScopeCounterTokensByPrefix(ctx context.Context, scopeKind, scopeIDPrefix string, fromDayUTC, toDayUTC time.Time) (map[string]int64, error) {
+	if scopeKind == "" || scopeIDPrefix == "" {
+		return nil, fmt.Errorf("%w: scope_kind and scope_id prefix are required", store.ErrInvalidInput)
+	}
+	fromUTC := utcDayStart(fromDayUTC)
+	toUTC := utcDayStart(toDayUTC)
+	if !toUTC.After(fromUTC) {
+		return map[string]int64{}, nil
+	}
+
+	rows, err := s.client.UsageScopeCounterDaily.Query().
+		Where(
+			usagescopecounterdaily.ScopeKindEQ(scopeKind),
+			usagescopecounterdaily.ScopeIDHasPrefix(scopeIDPrefix),
+			usagescopecounterdaily.DayUtcGTE(fromUTC),
+			usagescopecounterdaily.DayUtcLT(toUTC),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	out := make(map[string]int64)
+	for _, r := range rows {
+		if r.TokensSummable > 0 {
+			out[r.ScopeID] = saturatingAddInt64(out[r.ScopeID], r.TokensSummable)
+		} else if _, exists := out[r.ScopeID]; !exists {
+			out[r.ScopeID] = 0
+		}
+	}
+	return out, nil
+}
+
 // GetUsageBudgetState implements store.UsageBudgetStore.GetUsageBudgetState.
 func (s *UsageLedgerStore) GetUsageBudgetState(ctx context.Context, key store.UsageBudgetStateKey) (*store.UsageBudgetState, error) {
 	ldUID, err := parseGetID(key.LimitDefinitionID)
@@ -153,6 +189,19 @@ func (s *UsageLedgerStore) GetUsageBudgetState(ctx context.Context, key store.Us
 	return entUsageBudgetStateToStore(row), nil
 }
 
+// GetUsageBudgetStateByID implements store.UsageBudgetStore.GetUsageBudgetStateByID.
+func (s *UsageLedgerStore) GetUsageBudgetStateByID(ctx context.Context, id string) (*store.UsageBudgetState, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.client.UsageBudgetState.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entUsageBudgetStateToStore(row), nil
+}
+
 // ListUsageBudgetStatesForScope implements store.UsageBudgetStore.ListUsageBudgetStatesForScope.
 func (s *UsageLedgerStore) ListUsageBudgetStatesForScope(ctx context.Context, scopeKind, scopeID, projectScopeID string, activeAt time.Time) ([]*store.UsageBudgetState, error) {
 	atUTC := activeAt.UTC().Truncate(time.Microsecond)
@@ -165,6 +214,76 @@ func (s *UsageLedgerStore) ListUsageBudgetStatesForScope(ctx context.Context, sc
 			usagebudgetstate.WindowEndUtcGT(atUTC),
 		).
 		Order(ent.Asc(usagebudgetstate.FieldWindowStartUtc)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.UsageBudgetState, len(rows))
+	for i, r := range rows {
+		out[i] = entUsageBudgetStateToStore(r)
+	}
+	return out, nil
+}
+
+// ListOpenUsageBudgetStatesByLimit implements store.UsageBudgetStore.ListOpenUsageBudgetStatesByLimit.
+func (s *UsageLedgerStore) ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, projectID, afterID string, limit int) ([]*store.UsageBudgetState, error) {
+	ldUID, err := parseGetID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	atUTC := activeAt.UTC().Truncate(time.Microsecond)
+	q := s.client.UsageBudgetState.Query().
+		Where(
+			usagebudgetstate.LimitDefinitionIDEQ(ldUID),
+			usagebudgetstate.WindowEndUtcGT(atUTC),
+		)
+	if projectID != "" {
+		q = q.Where(usagebudgetstate.Or(
+			usagebudgetstate.And(
+				usagebudgetstate.ScopeKindEQ(store.UsageScopeKindProject),
+				usagebudgetstate.ScopeIDEQ(projectID),
+			),
+			usagebudgetstate.And(
+				usagebudgetstate.ScopeKindIn(store.UsageScopeKindUserProject, store.UsageScopeKindGroup),
+				usagebudgetstate.ProjectScopeIDEQ(projectID),
+			),
+		))
+	}
+	if afterID != "" {
+		afterUID, err := parseGetID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where(usagebudgetstate.IDGT(afterUID))
+	}
+	q = q.Order(ent.Asc(usagebudgetstate.FieldID))
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.UsageBudgetState, len(rows))
+	for i, r := range rows {
+		out[i] = entUsageBudgetStateToStore(r)
+	}
+	return out, nil
+}
+
+// ListOpenUsageBudgetStatesForUser implements store.UsageBudgetStore.ListOpenUsageBudgetStatesForUser.
+func (s *UsageLedgerStore) ListOpenUsageBudgetStatesForUser(ctx context.Context, userID string, activeAt time.Time) ([]*store.UsageBudgetState, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("%w: user_id is required", store.ErrInvalidInput)
+	}
+	atUTC := activeAt.UTC().Truncate(time.Microsecond)
+	rows, err := s.client.UsageBudgetState.Query().
+		Where(
+			usagebudgetstate.ScopeKindIn(store.UsageScopeKindUser, store.UsageScopeKindUserProject),
+			usagebudgetstate.ScopeIDEQ(userID),
+			usagebudgetstate.WindowEndUtcGT(atUTC),
+		).
+		Order(ent.Asc(usagebudgetstate.FieldWindowStartUtc), ent.Asc(usagebudgetstate.FieldID)).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)

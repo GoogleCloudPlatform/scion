@@ -392,3 +392,211 @@ func TestQuotaStore_EntitlementBindingTokenAction(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, cleared.TokenAction)
 }
+
+func TestUsageBudgetStore_GetByIDAndListOpenByLimit(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	def1, err := cs.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         store.LimitLLMTokensPerProjectDay,
+		ResourceType: store.LimitResourceTypeLLMTokens,
+		Unit:         store.LimitUnitTokens,
+		DefaultValue: 0,
+		System:       true,
+	})
+	require.NoError(t, err)
+	def2, err := cs.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         store.LimitLLMTokensPerUserDay,
+		ResourceType: store.LimitResourceTypeLLMTokens,
+		Unit:         store.LimitUnitTokens,
+		DefaultValue: 0,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart := time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	prevStart := dayStart.AddDate(0, 0, -1)
+
+	open1, err := cs.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: def1.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           "proj-1",
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    1000,
+		CapAtEval:         1000,
+	})
+	require.NoError(t, err)
+
+	_, err = cs.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: def1.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           "proj-2",
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateWarn,
+		ConsumedAtEval:    600,
+		CapAtEval:         1000,
+	})
+	require.NoError(t, err)
+
+	// Closed window for def1 should be excluded.
+	_, err = cs.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: def1.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           "proj-closed",
+		WindowStartUTC:    prevStart,
+		WindowEndUTC:      dayStart,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    1000,
+		CapAtEval:         1000,
+	})
+	require.NoError(t, err)
+
+	// Open window for def2 should be excluded when listing def1.
+	_, err = cs.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: def2.ID,
+		ScopeKind:         store.UsageScopeKindUser,
+		ScopeID:           "user-1",
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateWarn,
+		ConsumedAtEval:    500,
+		CapAtEval:         1000,
+	})
+	require.NoError(t, err)
+
+	// GetUsageBudgetStateByID
+	got, err := cs.GetUsageBudgetStateByID(ctx, open1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, open1.ID, got.ID)
+	assert.Equal(t, "proj-1", got.ScopeID)
+
+	_, err = cs.GetUsageBudgetStateByID(ctx, "00000000-0000-0000-0000-000000000001")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// ListOpenUsageBudgetStatesByLimit (full + keyset pagination + project filter)
+	openRows, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, openRows, 2)
+
+	// Keyset pagination: page 1 (limit 1) then page 2 with afterID.
+	page1, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", "", 1)
+	require.NoError(t, err)
+	require.Len(t, page1, 1)
+	page2, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", page1[0].ID, 1)
+	require.NoError(t, err)
+	require.Len(t, page2, 1)
+	assert.NotEqual(t, page1[0].ID, page2[0].ID)
+	page3, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "", page2[0].ID, 1)
+	require.NoError(t, err)
+	assert.Empty(t, page3)
+
+	// DB-side project filter returns only matching project row.
+	projOnly, err := cs.ListOpenUsageBudgetStatesByLimit(ctx, def1.ID, now, "proj-2", "", 10)
+	require.NoError(t, err)
+	require.Len(t, projOnly, 1)
+	assert.Equal(t, "proj-2", projOnly[0].ScopeID)
+
+	// ListOpenUsageBudgetStatesForUser returns open user + user_project rows for user-1.
+	_, err = cs.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: def2.ID,
+		ScopeKind:         store.UsageScopeKindUserProject,
+		ScopeID:           "user-1",
+		ProjectScopeID:    "proj-1",
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    900,
+		CapAtEval:         800,
+	})
+	require.NoError(t, err)
+	userRows, err := cs.ListOpenUsageBudgetStatesForUser(ctx, "user-1", now)
+	require.NoError(t, err)
+	require.Len(t, userRows, 2)
+
+	// SumUsageScopeCounterTokensByPrefix groups counter sums for a user prefix in one query.
+	_, err = client.UsageScopeCounterDaily.Create().
+		SetScopeKind(store.UsageScopeKindUserProject).
+		SetScopeID("user-1:proj-a").
+		SetDayUtc(dayStart).
+		SetTokensSummable(300).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.UsageScopeCounterDaily.Create().
+		SetScopeKind(store.UsageScopeKindUserProject).
+		SetScopeID("user-1:proj-b").
+		SetDayUtc(dayStart).
+		SetTokensSummable(700).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.UsageScopeCounterDaily.Create().
+		SetScopeKind(store.UsageScopeKindUserProject).
+		SetScopeID("user-2:proj-a").
+		SetDayUtc(dayStart).
+		SetTokensSummable(999).
+		Save(ctx)
+	require.NoError(t, err)
+
+	grouped, err := cs.SumUsageScopeCounterTokensByPrefix(ctx, store.UsageScopeKindUserProject, "user-1:", dayStart, dayEnd)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int64{
+		"user-1:proj-a": 300,
+		"user-1:proj-b": 700,
+	}, grouped)
+}
+
+func TestQuotaStore_UpdateEntitlementBindingIfMatch(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	def, err := cs.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         store.LimitLLMTokensPerProjectDay,
+		ResourceType: store.LimitResourceTypeLLMTokens,
+		Unit:         store.LimitUnitTokens,
+		DefaultValue: 0,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	b, err := cs.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: def.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		SubjectID:         "",
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           "proj-cas",
+		Value:             100000,
+	})
+	require.NoError(t, err)
+	origUpdated := b.UpdatedAt
+
+	// Matching expectedUpdatedAt succeeds and strictly advances UpdatedAt.
+	b.Value = 200000
+	updated, err := cs.UpdateEntitlementBindingIfMatch(ctx, b, origUpdated)
+	require.NoError(t, err)
+	assert.Equal(t, int64(200000), updated.Value)
+	assert.True(t, updated.UpdatedAt.After(origUpdated), "updated_at must advance monotonically")
+
+	// Reusing stale origUpdated fails with ErrRevisionConflict.
+	updated.Value = 300000
+	_, err = cs.UpdateEntitlementBindingIfMatch(ctx, updated, origUpdated)
+	require.ErrorIs(t, err, store.ErrRevisionConflict)
+
+	// Using current UpdatedAt succeeds.
+	updated2, err := cs.UpdateEntitlementBindingIfMatch(ctx, updated, updated.UpdatedAt)
+	require.NoError(t, err)
+	assert.Equal(t, int64(300000), updated2.Value)
+
+	// Non-existent binding returns ErrNotFound.
+	missing := *updated2
+	missing.ID = "00000000-0000-0000-0000-000000000002"
+	_, err = cs.UpdateEntitlementBindingIfMatch(ctx, &missing, origUpdated)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}

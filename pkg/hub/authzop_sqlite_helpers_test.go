@@ -88,6 +88,8 @@ type idFixtures struct {
 	limitUD                 string
 	entitlement             string
 	entitlementUD           string
+	projectBudgetState      string
+	userBudgetState         string
 	gcpSA                   string
 	gcpSADel                string
 	accessConstraint        string
@@ -904,6 +906,41 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsUsageLedger))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsTokenBudgets))
+	srv.reconcileTokenBudgets(ctx)
+	projDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	require.NotNil(t, projDef)
+	winStart, winEnd := utcDayWindow(time.Now().UTC())
+	projBudgetRow, err := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: projDef.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           f.project,
+		WindowStartUTC:    winStart,
+		WindowEndUTC:      winEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    1000,
+		CapAtEval:         1000,
+		StateVersion:      1,
+	})
+	require.NoError(t, err)
+	f.projectBudgetState = projBudgetRow.ID
+
+	userDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserDay)
+	require.NoError(t, err)
+	require.NotNil(t, userDef)
+	userBudgetRow, err := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: userDef.ID,
+		ScopeKind:         store.UsageScopeKindUser,
+		ScopeID:           f.user,
+		WindowStartUTC:    winStart,
+		WindowEndUTC:      winEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    1000,
+		CapAtEval:         1000,
+		StateVersion:      1,
+	})
+	require.NoError(t, err)
+	f.userBudgetState = userBudgetRow.ID
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture))
 	require.True(t, srv.experimentEnabled(experiments.AccessConstraints))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
@@ -1324,6 +1361,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/metrics/summary":                   {"id": f.project},
 		"/api/v1/projects/{id}/metrics":                           {"id": f.project},
 		"/api/v1/projects/{id}/usage":                             {"id": f.project},
+		"/api/v1/projects/{id}/usage/budgets":                     {"id": f.project},
+		"/api/v1/projects/{id}/usage/budgets/{budgetId}:override": {"id": f.project, "budgetId": f.projectBudgetState},
 		"/api/v1/projects/{id}/pre-start-hooks":                   {"id": f.project},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":          {"id": f.project, "hookId": f.projectPreStartHook},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate": {"id": f.project, "hookId": f.projectPreStartHook},
@@ -1355,11 +1394,13 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
 		// --- user family ---
-		"/api/v1/users/{id}":                 {"id": f.user},
-		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
-		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
-		"/api/v1/users/{id}/deletion":        {"id": f.userDeletion},
-		"/api/v1/users/{id}/usage":           {"id": f.user},
+		"/api/v1/users/{id}":                                   {"id": f.user},
+		"/api/v1/users/{id}/revoke-sessions":                   {"id": f.user},
+		"/api/v1/users/{id}/delete-blockers":                   {"id": f.user},
+		"/api/v1/users/{id}/deletion":                          {"id": f.userDeletion},
+		"/api/v1/users/{id}/usage":                             {"id": f.user},
+		"/api/v1/users/{id}/usage/budgets":                     {"id": f.user},
+		"/api/v1/users/{id}/usage/budgets/{budgetId}:override": {"id": f.user, "budgetId": f.userBudgetState},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
