@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -65,6 +66,44 @@ func isShellAgent(agent *store.Agent) bool {
 		return true
 	}
 	return agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig == config.ShellHarnessConfigName
+}
+
+// shellRuntimeScopes is the maximum set of JWT scopes any token minted or
+// refreshed for a shell execution container may carry (ptone/scion#9743).
+// Applied as a pure intersection (never a grant) in
+// AuthzService.mintCandidateScopes and enforced as a fail-closed
+// post-condition in Server.AuthorizeAgentToken.
+var shellRuntimeScopes = []AgentTokenScope{
+	ScopeAgentStatusUpdate,
+	ScopeAgentTokenRefresh,
+	ScopeAgentPortForward,
+}
+
+// capShellRuntimeScopes returns scopes ∩ shellRuntimeScopes, preserving
+// candidate order, when isShellAgent(agent) is true; otherwise scopes
+// unchanged. It only removes scopes and never grants scopes that were not
+// already present in scopes.
+func capShellRuntimeScopes(agent *store.Agent, scopes []AgentTokenScope) []AgentTokenScope {
+	if !isShellAgent(agent) {
+		return scopes
+	}
+	var out []AgentTokenScope
+	for _, s := range scopes {
+		if slices.Contains(shellRuntimeScopes, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// scopesSubsetOf reports whether every scope in scopes is contained in allowed.
+func scopesSubsetOf(scopes, allowed []AgentTokenScope) bool {
+	for _, s := range scopes {
+		if !slices.Contains(allowed, s) {
+			return false
+		}
+	}
+	return true
 }
 
 // willBeShellAgent reports whether agent is guaranteed to resolve to the
