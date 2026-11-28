@@ -188,9 +188,9 @@ func TestHandleSkillsDiscoverDirectory_StandardSkillsDir(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	const wantURL = "https://github.com/acme/repo/archive/" + legacyTestDefaultSHA + ".tar.gz"
-	if requestedURL != wantURL {
-		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	const wantRawPrefix = "https://raw.githubusercontent.com/acme/repo/" + legacyTestDefaultSHA + "/skills/"
+	if !strings.HasPrefix(requestedURL, wantRawPrefix) {
+		t.Errorf("outbound download URL = %q, want prefix %q", requestedURL, wantRawPrefix)
 	}
 
 	resp := decodeDiscoverSkills(t, rec)
@@ -663,9 +663,9 @@ func TestHandleSkillsDiscoverDirectory_MixedCaseHost(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	const wantURL = "https://github.com/acme/repo/archive/" + legacyTestDefaultSHA + ".tar.gz"
-	if requestedURL != wantURL {
-		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	const wantRawPrefix = "https://raw.githubusercontent.com/acme/repo/" + legacyTestDefaultSHA + "/skills/"
+	if !strings.HasPrefix(requestedURL, wantRawPrefix) {
+		t.Errorf("outbound download URL = %q, want prefix %q", requestedURL, wantRawPrefix)
 	}
 
 	resp := decodeDiscoverSkills(t, rec)
@@ -741,9 +741,9 @@ func TestHandleSkillsDiscoverDirectory_StripsURLCredentials(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	const wantURL = "https://github.com/acme/repo/archive/" + legacyTestDefaultSHA + ".tar.gz"
-	if requestedURL != wantURL {
-		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	const wantRawPrefix = "https://raw.githubusercontent.com/acme/repo/" + legacyTestDefaultSHA + "/skills/"
+	if !strings.HasPrefix(requestedURL, wantRawPrefix) {
+		t.Errorf("outbound download URL = %q, want prefix %q", requestedURL, wantRawPrefix)
 	}
 	if strings.Contains(authHeader, "pasted-secret-4242") {
 		t.Errorf("pasted credential reached the wire as auth: %q", authHeader)

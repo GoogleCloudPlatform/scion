@@ -127,6 +127,7 @@ func resolveInstallSource(source string) (localPath string, cleanup func(), err 
 		fmt.Printf("Fetching remote source: %s\n", source)
 		cachePath, fetchErr := config.FetchRemoteTemplateWithOptions(context.Background(), normalized, config.FetchOptions{
 			GitHubCredential: remoteFetchCredential(normalized),
+			PrivateCacheDir:  true,
 		})
 		if fetchErr != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote source: %w", fetchErr)

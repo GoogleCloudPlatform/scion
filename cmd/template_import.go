@@ -96,6 +96,7 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Fetching remote source: %s\n", source)
 		cachePath, err := config.FetchRemoteTemplateWithOptions(context.Background(), source, config.FetchOptions{
 			GitHubCredential: remoteFetchCredential(source),
+			PrivateCacheDir:  true,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to fetch remote source: %w", err)

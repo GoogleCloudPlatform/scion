@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
@@ -181,6 +182,22 @@ func newFakeGitHubClient(t *testing.T, refs map[string]string, treePath string, 
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(buildTestGitHubTarGz(t, sha, tarFiles))
 		default:
+			// Raw file request: /<owner>/<repo>/<sha>/<treePath>/<rel>
+			parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 4)
+			if len(parts) == 4 {
+				fullPath := strings.Trim(parts[3], "/")
+				for rel, body := range files {
+					cand := strings.Trim(rel, "/")
+					if treePath != "" {
+						cand = strings.Trim(treePath, "/") + "/" + cand
+					}
+					if cand == fullPath {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(body))
+						return
+					}
+				}
+			}
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
@@ -215,16 +232,16 @@ func TestFetchRemoteTemplateWithResult_GitHubCommitAndPrivateStaging(t *testing.
 		"scion-agent.yaml": "harness: claude\n",
 	})
 
-	t.Run("resolves main, records commit SHA, uses private per-call staging dir, anonymous uses archive URL", func(t *testing.T) {
+	t.Run("resolves main, records commit SHA, uses private per-call staging dir when requested, anonymous uses archive URL", func(t *testing.T) {
 		res1, err := FetchRemoteTemplateWithResult(context.Background(),
 			"https://github.com/acme/repo/tree/main/templates/demo",
-			FetchOptions{GitHubClient: client})
+			FetchOptions{GitHubClient: client, PrivateCacheDir: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = os.RemoveAll(res1.Path) })
 
 		res2, err := FetchRemoteTemplateWithResult(context.Background(),
 			"https://github.com/acme/repo/tree/main/templates/demo",
-			FetchOptions{GitHubClient: client})
+			FetchOptions{GitHubClient: client, PrivateCacheDir: true})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = os.RemoveAll(res2.Path) })
 
@@ -232,16 +249,16 @@ func TestFetchRemoteTemplateWithResult_GitHubCommitAndPrivateStaging(t *testing.
 		assert.FileExists(t, filepath.Join(res1.Path, "scion-agent.yaml"))
 		assert.NotEqual(t, res1.Path, res2.Path, "each GitHub fetch must use its own private staging dir")
 
-		// Anonymous fetch must use archive URL and send no Authorization header.
-		sawArchive := false
+		// Anonymous fetch must send no Authorization header and never use /tarball/.
+		sawDownload := false
 		for _, r := range doer.reqs {
 			assert.Empty(t, r.Authorization, "anonymous fetch must send no Authorization")
-			if strings.Contains(r.URL, "/archive/"+wantSHA+".tar.gz") {
-				sawArchive = true
+			if strings.Contains(r.URL, "/archive/"+wantSHA+".tar.gz") || strings.Contains(r.URL, "/"+wantSHA+"/templates/demo/") {
+				sawDownload = true
 			}
 			assert.NotContains(t, r.URL, "/tarball/", "anonymous fetch must not use REST tarball")
 		}
-		assert.True(t, sawArchive, "expected anonymous archive URL request")
+		assert.True(t, sawDownload, "expected anonymous raw or archive download request")
 	})
 
 	t.Run("slashed branch feat/x/y, tag, and 40-hex SHA with credential", func(t *testing.T) {
@@ -277,6 +294,130 @@ func TestFetchRemoteTemplateWithResult_GitHubCommitAndPrivateStaging(t *testing.
 		t.Cleanup(func() { _ = os.RemoveAll(res.Path) })
 		assert.Empty(t, res.Commit)
 	})
+}
+
+func TestFindTemplateWithContext_ReusesStableCacheDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+
+	const wantSHA = "fedcba9876543210fedcba9876543210fedcba98"
+	const uri = "https://github.com/acme/repo/tree/main/templates/demo"
+
+	var failFetch atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failFetch.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		p := r.URL.Path
+		switch {
+		case strings.Contains(p, "/git/matching-refs/heads/"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"ref": "refs/heads/main", "object": map[string]any{"type": "commit", "sha": wantSHA}},
+			})
+		case strings.Contains(p, "/git/matching-refs/tags/"):
+			_, _ = w.Write([]byte("[]"))
+		case strings.Contains(p, "/commits/"):
+			_, _ = w.Write([]byte(wantSHA))
+		case strings.Contains(p, "/git/trees/"):
+			body := "harness: claude\n"
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"sha":       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"truncated": false,
+				"tree": []map[string]any{{
+					"path": "scion-agent.yaml",
+					"mode": "100644",
+					"type": "blob",
+					"sha":  testGitBlobSHA(body),
+					"size": len(body),
+				}},
+			})
+		case strings.Contains(p, "/archive/") || strings.Contains(p, "/tarball/"):
+			tarball := buildTestGitHubTarGz(t, wantSHA, map[string]string{
+				"repo-" + wantSHA + "/templates/demo/scion-agent.yaml": "harness: claude\n",
+			})
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(tarball)
+		case strings.HasSuffix(p, "/"+wantSHA+"/templates/demo/scion-agent.yaml"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("harness: claude\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	doer := &testHTTPDoer{client: srv.Client()}
+	client := githubfetch.New(githubfetch.Options{
+		Endpoint:   githubfetch.Endpoint{APIBase: srv.URL, RawBase: srv.URL, WebHost: srv.URL, Codeload: srv.URL},
+		Doer:       doer,
+		Cooldown:   githubfetch.NewCooldown(nil),
+		MaxRetries: 0,
+	})
+	restore := SetGitHubClientForTest(client)
+	t.Cleanup(restore)
+
+	cacheDir, err := remoteCacheDir()
+	require.NoError(t, err)
+	wantStable := filepath.Join(cacheDir, generateCacheKey(uri))
+
+	// 1. Repeated sequential resolutions leave exactly one directory under cacheDir.
+	for i := 0; i < 3; i++ {
+		tpl, err := FindTemplateWithContext(context.Background(), uri)
+		require.NoError(t, err)
+		assert.Equal(t, wantStable, tpl.Path)
+		assert.FileExists(t, filepath.Join(tpl.Path, "scion-agent.yaml"))
+
+		entries, err := os.ReadDir(cacheDir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "iteration %d should leave exactly one cache dir, got %v", i, entries)
+		assert.Equal(t, generateCacheKey(uri), entries[0].Name())
+	}
+
+	// 2. A failed fetch cleans up its staging dir and leaves the single stable dir intact.
+	failFetch.Store(true)
+	_, err = FindTemplateWithContext(context.Background(), uri)
+	require.Error(t, err)
+	entries, err := os.ReadDir(cacheDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "failed fetch must not leak a staging dir")
+	assert.FileExists(t, filepath.Join(wantStable, "scion-agent.yaml"))
+	failFetch.Store(false)
+
+	// 3. Concurrent resolutions of the same URI all succeed, leave one cache
+	//    dir, and leave a usable template.
+	const workers = 10
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	paths := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tpl, err := FindTemplateWithContext(context.Background(), uri)
+			if err != nil {
+				errs <- err
+				return
+			}
+			paths <- tpl.Path
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(paths)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	for p := range paths {
+		assert.Equal(t, wantStable, p)
+	}
+	entries, err = os.ReadDir(cacheDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "concurrent resolutions must leave exactly one cache dir")
+	assert.Equal(t, generateCacheKey(uri), entries[0].Name())
+	data, err := os.ReadFile(filepath.Join(wantStable, "scion-agent.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "harness: claude\n", string(data))
 }
 
 func TestFindTemplateWithContext_UsesEnvGitHubCredential(t *testing.T) {

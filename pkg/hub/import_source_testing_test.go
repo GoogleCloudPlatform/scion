@@ -180,9 +180,51 @@ func (d *testImportGitHubDoer) Open(ctx context.Context, r githubfetch.Request) 
 			bodyBytes = prependPAXSHAToTarball(bodyBytes, legacyTestDefaultSHA)
 		}
 		return &githubfetch.Response{Status: http.StatusOK, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(bodyBytes))}, nil
+	case strings.EqualFold(u.Hostname(), "raw.githubusercontent.com"):
+		// Path shape: /<owner>/<repo>/<sha>/<filePath...>
+		parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 4)
+		if len(parts) == 4 {
+			relPath, _ := url.PathUnescape(parts[3])
+			if fileBytes, ok := extractFileFromLegacyTarball(bodyBytes, relPath); ok {
+				return &githubfetch.Response{Status: http.StatusOK, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(fileBytes))}, nil
+			}
+		}
+		return nil, &remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404", Status: http.StatusNotFound}
 	default:
 		return &githubfetch.Response{Status: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(bodyBytes))}, nil
 	}
+}
+
+func extractFileFromLegacyTarball(gz []byte, wantRel string) ([]byte, bool) {
+	wantRel = strings.Trim(wantRel, "/")
+	gzr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = gzr.Close() }()
+	tr := tar.NewReader(gzr)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		name := strings.TrimPrefix(hdr.Name, "./")
+		_, rest, ok := strings.Cut(name, "/")
+		if !ok {
+			continue
+		}
+		if strings.Trim(rest, "/") == wantRel {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, false
+			}
+			return data, true
+		}
+	}
+	return nil, false
 }
 
 func extractLegacyTarballSHA(gz []byte) string {

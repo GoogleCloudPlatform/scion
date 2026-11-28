@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +51,15 @@ const (
 	// importMaxTreeFiles caps the files and directories written for one
 	// non-GitHub fetch.
 	importMaxTreeFiles = 20000
+	// importGitHubArchiveMaxRedirects bounds redirects when following
+	// https://github.com/... archive URLs to codeload.github.com.
+	importGitHubArchiveMaxRedirects = 3
 )
+
+// githubArchiveHosts is the host allowlist for hosted Hub downloads of
+// user-supplied https://github.com/... archive URLs (which redirect to
+// codeload.github.com).
+var githubArchiveHosts = []string{"github.com", "codeload.github.com"}
 
 // importDownloadOverride, when set, replaces the SSRF-safe downloader for
 // hosted server-side non-GitHub archive fetches. It exists for the pkg/hub
@@ -340,7 +349,11 @@ func (s *Server) importDownloader() config.RemoteDownloadFunc {
 }
 
 // newImportDownloader returns the SSRF-safe download hook for hosted Hubs
-// fetching allowlisted non-GitHub HTTPS archive sources (redirects are blocked).
+// fetching archive sources. User-supplied https://github.com/... archive
+// downloads follow redirects only within githubArchiveHosts (github.com and
+// codeload.github.com, up to 3 hops, NetworkVetted, never sending
+// Authorization). Allowlisted non-GitHub HTTPS archive downloads block all
+// redirects.
 func newImportDownloader(logger *slog.Logger) config.RemoteDownloadFunc {
 	if logger == nil {
 		logger = slog.Default()
@@ -351,13 +364,39 @@ func newImportDownloader(logger *slog.Logger) config.RemoteDownloadFunc {
 		DisableRedirects: true,
 		Logger:           logger,
 	})
+	githubArchive := remotefetch.New(remotefetch.Config{
+		MaxBytes:     importMaxDownloadBytes,
+		Timeout:      importDownloadTimeout,
+		MaxRedirects: importGitHubArchiveMaxRedirects,
+		AllowedHosts: githubArchiveHosts,
+		Network:      remotefetch.NetworkVetted,
+		Logger:       logger,
+	})
 	return func(ctx context.Context, rawURL, _ string) ([]byte, error) {
-		res, err := direct.FetchBytes(ctx, rawURL)
+		var (
+			res *remotefetch.Result
+			err error
+		)
+		if isGitHubArchiveDownloadURL(rawURL) {
+			res, err = githubArchive.FetchBytes(ctx, rawURL)
+		} else {
+			res, err = direct.FetchBytes(ctx, rawURL)
+		}
 		if err != nil {
 			return nil, importDownloadError(err)
 		}
 		return res.Body, nil
 	}
+}
+
+// isGitHubArchiveDownloadURL reports whether rawURL targets github.com over
+// https (for example https://github.com/<owner>/<repo>/archive/<ref>.tar.gz).
+func isGitHubArchiveDownloadURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "https") && strings.EqualFold(u.Hostname(), "github.com")
 }
 
 // errImportDownloadFailed is the caller-facing error for a failed non-GitHub

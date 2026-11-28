@@ -26,6 +26,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -207,6 +209,13 @@ func stubGitHubFetch(t *testing.T, subPath, marker, body string) func() (tarball
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(tarBytes)
+		case strings.HasSuffix(p, "/"+sha+"/"+strings.Trim(subPath, "/")+"/"+marker):
+			mu.Lock()
+			tarballPath = p
+			tarballAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(body))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -243,9 +252,10 @@ func TestResolveInstallSource_SendsGitHubCredential(t *testing.T) {
 	require.NotNil(t, cleanup)
 	defer cleanup()
 	assert.FileExists(t, filepath.Join(localPath, "config.yaml"))
-	tarballPath, tarballAuth := sent()
-	assert.Equal(t, "/repos/acme-corp/private.configs/tarball/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", tarballPath)
-	assert.Equal(t, "Bearer fake-owner-cred", tarballAuth)
+	downloadPath, downloadAuth := sent()
+	assert.Contains(t, downloadPath, "acme-corp/private.configs")
+	assert.Contains(t, downloadPath, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	assert.Equal(t, "Bearer fake-owner-cred", downloadAuth)
 }
 
 // TestRunTemplateImport_SendsGitHubCredential verifies that 'templates
@@ -268,17 +278,30 @@ func TestRunTemplateImport_SendsGitHubCredential(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 	assert.Contains(t, stdout, "claude", "dry run should report the fetched template")
-	tarballPath, tarballAuth := sent()
-	assert.Equal(t, "/repos/acme-corp/private.templates/tarball/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", tarballPath)
-	assert.Equal(t, "Bearer fake-repo-cred", tarballAuth)
+	downloadPath, downloadAuth := sent()
+	assert.Contains(t, downloadPath, "acme-corp/private.templates")
+	assert.Contains(t, downloadPath, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	assert.Equal(t, "Bearer fake-repo-cred", downloadAuth)
 }
 
 // TestCLI_UsesHTTPSProxyWithoutGit verifies that the default CLI GitHub fetch
 // path uses remotefetch.NetworkSystem (honouring HTTPS_PROXY) and does not
-// require git on PATH.
+// require git on PATH. It runs the fetch in a fresh helper subprocess because
+// net/http's ProxyFromEnvironment caches proxy environment variables once per
+// process; an ordering probe makes an HTTP request in the parent process first
+// to prove the test is independent of earlier HTTP traffic in the test binary.
 func TestCLI_UsesHTTPSProxyWithoutGit(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PATH", "")
+	// Ordering probe: force http.DefaultTransport / http.ProxyFromEnvironment
+	// to initialize and cache the parent process's proxy env before running the
+	// assertion, reproducing the full-package test ordering that previously
+	// caused t.Setenv("HTTPS_PROXY", ...) to be ignored.
+	probeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(probeSrv.Close)
+	probeResp, err := http.DefaultClient.Get(probeSrv.URL)
+	require.NoError(t, err)
+	_ = probeResp.Body.Close()
 
 	var proxyHit bool
 	var mu sync.Mutex
@@ -291,19 +314,51 @@ func TestCLI_UsesHTTPSProxyWithoutGit(t *testing.T) {
 		w.WriteHeader(http.StatusProxyAuthRequired)
 	}))
 	t.Cleanup(proxySrv.Close)
-	t.Setenv("HTTPS_PROXY", proxySrv.URL)
-	t.Setenv("NO_PROXY", "")
 
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	sub := exec.Command(exe, "-test.run=^TestCLI_UsesHTTPSProxyWithoutGitHelper$")
+	var filteredEnv []string
+	for _, kv := range os.Environ() {
+		upper := strings.ToUpper(kv)
+		if strings.HasPrefix(upper, "HTTPS_PROXY=") ||
+			strings.HasPrefix(upper, "HTTP_PROXY=") ||
+			strings.HasPrefix(upper, "NO_PROXY=") ||
+			strings.HasPrefix(upper, "PATH=") ||
+			strings.HasPrefix(upper, "HOME=") {
+			continue
+		}
+		filteredEnv = append(filteredEnv, kv)
+	}
+	sub.Env = append(filteredEnv,
+		"GO_WANT_HELPER_PROCESS=1",
+		"HOME="+t.TempDir(),
+		"PATH=",
+		"HTTPS_PROXY="+proxySrv.URL,
+		"NO_PROXY=",
+	)
+	out, err := sub.CombinedOutput()
+	require.NoError(t, err, "helper subprocess failed: %s", string(out))
+
+	mu.Lock()
+	gotHit := proxyHit
+	mu.Unlock()
+	assert.True(t, gotHit, "CLI NetworkSystem transport must route through HTTPS_PROXY")
+}
+
+// TestCLI_UsesHTTPSProxyWithoutGitHelper is the re-exec'd subprocess helper
+// invoked by TestCLI_UsesHTTPSProxyWithoutGit.
+func TestCLI_UsesHTTPSProxyWithoutGitHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
 	lim := githubfetch.ImportLocalLimits()
 	lim.MaxDownload = 1 << 20
 	_, err := config.FetchRemoteTemplateWithOptions(context.Background(),
 		"https://github.com/acme/repo/tree/main/templates/demo",
 		config.FetchOptions{GitHubLimits: &lim})
 	require.Error(t, err)
-	mu.Lock()
-	gotHit := proxyHit
-	mu.Unlock()
-	assert.True(t, gotHit, "CLI NetworkSystem transport must route through HTTPS_PROXY")
 }
 
 // newTemplateImportTestCmd returns a command carrying the flags

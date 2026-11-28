@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	gosync "sync"
 	"sync/atomic"
 	"time"
 
@@ -122,9 +123,9 @@ func NormalizeTemplateSourceURL(raw string) string {
 			}
 		}
 		if len(parts) == 2 {
-			// Just owner/repo — point to the standard templates directory
+			// Just owner/repo — point to the standard templates directory.
 			// Include /tree/main so the URL is a valid GitHub browsable path
-			// and parseGitHubURL can correctly extract the branch and sub-path.
+			// and githubfetch.ParseURL can correctly extract the ref and sub-path.
 			u.Path = "/" + parts[0] + "/" + parts[1] + "/tree/main/.scion/templates"
 			return u.String()
 		}
@@ -416,13 +417,14 @@ func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOp
 
 	// Create a unique cache key based on the URI
 	cacheKey := generateCacheKey(uri)
-	templateCachePath := filepath.Join(cacheDir, cacheKey)
+	stableCachePath := filepath.Join(cacheDir, cacheKey)
+	templateCachePath := stableCachePath
 
 	isGitHub := DetectRemoteType(uri) == RemoteTypeGitHub
-	privateDir := opts.PrivateCacheDir || isGitHub
-	if privateDir {
-		// A directory of this fetch's own, so concurrent fetches of the
-		// same URI cannot remove or mix each other's trees.
+	usePrivateStaging := opts.PrivateCacheDir || isGitHub
+	if usePrivateStaging {
+		// Stage into a private directory of this fetch's own, so concurrent
+		// fetches of the same URI cannot remove or mix each other's trees.
 		if err := os.MkdirAll(cacheDir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create cache directory: %w", err)
 		}
@@ -451,7 +453,7 @@ func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOp
 		ghLimits: opts.GitHubLimits,
 	}
 	if err := f.fetchInto(ctx, uri, templateCachePath, cred); err != nil {
-		if budget != nil || privateDir {
+		if budget != nil || usePrivateStaging {
 			_ = os.RemoveAll(templateCachePath)
 		}
 		return nil, err
@@ -464,10 +466,68 @@ func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOp
 		return nil, err
 	}
 
+	finalPath := templateCachePath
+	if isGitHub && !opts.PrivateCacheDir {
+		// Non-private callers (such as FindTemplateWithContext) do not remove
+		// the returned cache directory; swap the private staging dir into the
+		// stable per-URI cache directory so repeated resolutions do not leak
+		// unbounded cache directories.
+		swapped, err := swapRemoteCacheDir(stableCachePath, templateCachePath)
+		if err != nil {
+			_ = os.RemoveAll(templateCachePath)
+			return nil, err
+		}
+		finalPath = swapped
+	}
+
 	return &RemoteFetchResult{
-		Path:   templateCachePath,
+		Path:   finalPath,
 		Commit: f.sourceCommit,
 	}, nil
+}
+
+// remoteCacheSwapMu serializes in-process swaps into a stable per-URI remote
+// template cache directory so concurrent resolutions never leave orphaned
+// staging directories behind.
+var remoteCacheSwapMu gosync.Mutex
+
+// swapRemoteCacheDir atomically replaces stablePath with stagingPath (both
+// siblings in the same cache directory), removing the previous directory and
+// handling concurrent swaps cleanly.
+func swapRemoteCacheDir(stablePath, stagingPath string) (string, error) {
+	remoteCacheSwapMu.Lock()
+	defer remoteCacheSwapMu.Unlock()
+
+	if err := os.Rename(stagingPath, stablePath); err == nil {
+		return stablePath, nil
+	}
+
+	oldPath := stagingPath + ".old"
+	if err := os.Rename(stablePath, oldPath); err != nil && !os.IsNotExist(err) {
+		// Another process may have already replaced stablePath; if it is a
+		// usable directory, drop our losing staging dir and use it.
+		if info, statErr := os.Stat(stablePath); statErr == nil && info.IsDir() {
+			_ = os.RemoveAll(stagingPath)
+			return stablePath, nil
+		}
+		return "", fmt.Errorf("failed to rotate old cache directory %s: %w", stablePath, err)
+	}
+
+	if err := os.Rename(stagingPath, stablePath); err != nil {
+		_ = os.RemoveAll(stagingPath)
+		// If a concurrent process placed stablePath in the window, keep it
+		// and clean up our rotated oldPath.
+		if info, statErr := os.Stat(stablePath); statErr == nil && info.IsDir() {
+			_ = os.RemoveAll(oldPath)
+			return stablePath, nil
+		}
+		// Best-effort restore of the previous cache directory.
+		_ = os.Rename(oldPath, stablePath)
+		return "", fmt.Errorf("failed to swap staged cache directory into %s: %w", stablePath, err)
+	}
+
+	_ = os.RemoveAll(oldPath)
+	return stablePath, nil
 }
 
 func resolveFetchCredential(opts FetchOptions) githubfetch.Credential {
@@ -1535,8 +1595,8 @@ func CanonicalGitHubOwnerRepo(owner, repo string) (string, string, error) {
 
 // GitHubArchiveURLBySHA returns the public archive URL of a GitHub
 // repository at a commit: https://github.com/<owner>/<repo>/archive/<sha>.tar.gz.
-// It is the by-sha sibling of the branch tarball fetchGitHubTarball
-// downloads; sha must be a full 40-hex commit id.
+// It is the anonymous by-sha archive URL for a resolved commit; sha must be a
+// full 40-hex commit id.
 func GitHubArchiveURLBySHA(owner, repo, sha string) (string, error) {
 	if !IsFullGitSHA(sha) {
 		return "", fmt.Errorf("archive by sha needs a full commit id")

@@ -21,19 +21,26 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha1" //nolint:gosec // git blob object IDs are SHA-1
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -216,6 +223,24 @@ func (f *fakeImportGitHub) client(t *testing.T) *githubfetch.Client {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(buf.Bytes())
 		default:
+			// Raw file request: /<owner>/<repo>/<sha>/<subPath>/<rel>
+			parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 4)
+			if len(parts) == 4 {
+				fullPath := strings.Trim(parts[3], "/")
+				for subPath, files := range f.filesByPath {
+					for rel, body := range files {
+						cand := strings.Trim(rel, "/")
+						if subPath != "" {
+							cand = strings.Trim(subPath, "/") + "/" + cand
+						}
+						if cand == fullPath {
+							w.WriteHeader(http.StatusOK)
+							_, _ = w.Write([]byte(body))
+							return
+						}
+					}
+				}
+			}
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
@@ -297,8 +322,8 @@ func TestGitHubFetchPath2_RefsCredentialsAndAnonArchive(t *testing.T) {
 	grantUserActionOnResource(t, s, admin.ID, "template", proj.ID, ActionCreate)
 	grantUserActionOnResource(t, s, admin.ID, "harness_config", proj.ID, ActionCreate)
 
-	// 1. Anonymous public discover uses /archive/<sha>.tar.gz with no Authorization.
-	t.Run("anonymous discover uses archive URL with no Authorization", func(t *testing.T) {
+	// 1. Anonymous public discover sends no Authorization header and never uses /tarball/.
+	t.Run("anonymous discover sends no Authorization", func(t *testing.T) {
 		fake.resetReqs()
 		rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+proj.ID+"/discover-templates", map[string]string{
 			"sourceUrl": "https://github.com/acme/public-repo/tree/main/templates",
@@ -306,15 +331,15 @@ func TestGitHubFetchPath2_RefsCredentialsAndAnonArchive(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), `"alpha"`)
 
-		sawArchive := false
+		sawDownload := false
 		for _, r := range fake.reqs() {
 			assert.Empty(t, r.Auth, "anonymous request must not send Authorization: %s", r.Path)
-			if strings.Contains(r.Path, "/archive/"+sha+".tar.gz") {
-				sawArchive = true
+			if strings.Contains(r.Path, "/archive/"+sha+".tar.gz") || strings.Contains(r.Path, "/"+sha+"/templates/") {
+				sawDownload = true
 			}
 			assert.NotContains(t, r.Path, "/tarball/", "anonymous fetch must not use REST tarball")
 		}
-		assert.True(t, sawArchive, "expected anonymous archive request")
+		assert.True(t, sawDownload, "expected anonymous raw or archive download request")
 	})
 
 	// 2. Private repo across project secrets (GITHUB_TOKEN < GH_OWNER < GH_REPO),
@@ -400,6 +425,84 @@ func TestGitHubFetchPath2_RefsCredentialsAndAnonArchive(t *testing.T) {
 		fake.requireToken = ""
 	})
 
+	// 2b. GitHub App installation credential on project scope.
+	t.Run("GitHub App installation credential", func(t *testing.T) {
+		const appToken = "ghs_p2_app_installation_token"
+		appAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.URL.Path == "/app" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":          42,
+					"slug":        "fake-scion-app",
+					"permissions": map[string]string{"contents": "read"},
+				})
+				return
+			}
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens") {
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token":      appToken,
+					"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(appAPI.Close)
+
+		appProj := &store.Project{
+			ID:        tid("gf-p2-app-proj"),
+			Name:      "gf-p2-app",
+			Slug:      "gf-p2-app",
+			GitRemote: appAPI.URL + "/acme/app-priv",
+			CreatedBy: admin.ID,
+		}
+		const instID int64 = 954901
+		instIDCopy := instID
+		appProj.GitHubInstallationID = &instIDCopy
+		require.NoError(t, s.CreateProject(ctx, appProj))
+		require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+			InstallationID: instID,
+			AccountLogin:   "acme",
+			AccountType:    "Organization",
+			Repositories:   []string{"acme/app-priv"},
+			Status:         store.GitHubInstallationStatusActive,
+		}))
+		grantUserActionOnResource(t, s, admin.ID, "template", appProj.ID, ActionCreate)
+
+		privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privKey),
+		})
+		srv.mu.Lock()
+		prevAppCfg := srv.config.GitHubAppConfig
+		srv.config.GitHubAppConfig.APIBaseURL = appAPI.URL
+		srv.config.GitHubAppConfig.AppID = 42
+		srv.config.GitHubAppConfig.PrivateKey = string(pemBytes)
+		srv.mu.Unlock()
+		prevAccessCheck := srv.githubRepoAccessCheck
+		srv.githubRepoAccessCheck = func(_ context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+			return githubapp.RepoAccess{Pull: true}, nil
+		}
+		t.Cleanup(func() {
+			srv.mu.Lock()
+			srv.config.GitHubAppConfig = prevAppCfg
+			srv.mu.Unlock()
+			srv.githubRepoAccessCheck = prevAccessCheck
+		})
+
+		fake.requireToken = appToken
+		t.Cleanup(func() { fake.requireToken = "" })
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+appProj.ID+"/discover-templates", map[string]string{
+			"sourceUrl": "https://github.com/acme/app-priv/tree/main/templates",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"alpha"`)
+	})
+
 	// 3. Harness-config reimport works via githubfetch.
 	t.Run("harness-config reimport succeeds via githubfetch", func(t *testing.T) {
 		// Import the harness-config first.
@@ -429,6 +532,7 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 
 	srv, s, _ := testTemplateBootstrapServer(t)
 	srv.templateGitHubClient = fake.client(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
 	var logBuf bytes.Buffer
 	srv.resourceLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	ctx := context.Background()
@@ -453,6 +557,7 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 
 	cases := []struct {
 		name           string
+		withCred       bool
 		status         int
 		headers        map[string]string
 		wantHTTP       int
@@ -460,6 +565,7 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 		wantDiscCode   string
 		wantReimpCode  string
 		wantMsgSubstr  string
+		wantRetryAfter string
 		wantLogKind    string
 	}{
 		{
@@ -473,7 +579,19 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			wantLogKind:    "not_found",
 		},
 		{
+			name:           "404 with credential",
+			withCred:       true,
+			status:         http.StatusNotFound,
+			wantHTTP:       http.StatusBadRequest,
+			wantImportCode: "import_failed",
+			wantDiscCode:   ErrCodeDiscoverFailed,
+			wantReimpCode:  "reimport_failed",
+			wantMsgSubstr:  "configured repository credential cannot read it",
+			wantLogKind:    "not_found",
+		},
+		{
 			name:           "401 auth rejected",
+			withCred:       true,
 			status:         http.StatusUnauthorized,
 			wantHTTP:       http.StatusBadRequest,
 			wantImportCode: "import_failed",
@@ -483,7 +601,19 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			wantLogKind:    "auth_rejected",
 		},
 		{
+			name:           "403 plain forbidden",
+			withCred:       true,
+			status:         http.StatusForbidden,
+			wantHTTP:       http.StatusBadRequest,
+			wantImportCode: "import_failed",
+			wantDiscCode:   ErrCodeDiscoverFailed,
+			wantReimpCode:  "reimport_failed",
+			wantMsgSubstr:  "GitHub denied access to the repository",
+			wantLogKind:    "forbidden",
+		},
+		{
 			name:           "403 SSO forbidden",
+			withCred:       true,
 			status:         http.StatusForbidden,
 			headers:        map[string]string{"X-GitHub-SSO": "required; url=https://github.com/orgs/acme/sso"},
 			wantHTTP:       http.StatusBadRequest,
@@ -494,6 +624,21 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			wantLogKind:    "forbidden",
 		},
 		{
+			name:     "403 rate limited via X-RateLimit-Remaining 0",
+			withCred: true,
+			status:   http.StatusForbidden,
+			headers: map[string]string{
+				"X-RateLimit-Remaining": "0",
+				"X-RateLimit-Reset":     fmt.Sprintf("%d", time.Now().Add(90*time.Second).Unix()),
+			},
+			wantHTTP:       http.StatusTooManyRequests,
+			wantImportCode: "rate_limited",
+			wantDiscCode:   "rate_limited",
+			wantReimpCode:  "rate_limited",
+			wantMsgSubstr:  "rate limit exceeded",
+			wantLogKind:    "rate_limited",
+		},
+		{
 			name:           "429 rate limited",
 			status:         http.StatusTooManyRequests,
 			headers:        map[string]string{"Retry-After": "90"},
@@ -502,12 +647,24 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			wantDiscCode:   "rate_limited",
 			wantReimpCode:  "rate_limited",
 			wantMsgSubstr:  "rate limit exceeded",
+			wantRetryAfter: "90",
 			wantLogKind:    "rate_limited",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			sb := srv.GetSecretBackend()
+			if tc.withCred {
+				_, _, err := sb.Set(ctx, &secret.SetSecretInput{
+					Name: "GITHUB_TOKEN", Value: "tok-err-case", SecretType: secret.TypeEnvironment,
+					Scope: secret.ScopeProject, ScopeID: proj.ID,
+				})
+				require.NoError(t, err)
+			} else {
+				_ = sb.Delete(ctx, "GITHUB_TOKEN", secret.ScopeProject, proj.ID)
+			}
+
 			// Fresh client per subtest so cooldown from 429 doesn't leak.
 			fake.mu.Lock()
 			fake.forceStatus = tc.status
@@ -523,8 +680,10 @@ func TestGitHubFetchPath2_ErrorClassification(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), tc.wantImportCode)
 			assert.Contains(t, rec.Body.String(), tc.wantMsgSubstr)
 			assert.NotContains(t, rec.Body.String(), errImportDownloadFailed.Error(), "must not return legacy generic download error")
-			if tc.wantHTTP == http.StatusTooManyRequests {
-				assert.Equal(t, "90", rec.Header().Get("Retry-After"))
+			if tc.wantRetryAfter != "" {
+				assert.Equal(t, tc.wantRetryAfter, rec.Header().Get("Retry-After"))
+			} else if tc.wantHTTP == http.StatusTooManyRequests {
+				assert.NotEmpty(t, rec.Header().Get("Retry-After"))
 			}
 
 			// Discover
@@ -590,4 +749,160 @@ func TestTemplateReimport_WholeOperationTimeBudget(t *testing.T) {
 	var rfe *reimportFetchError
 	require.ErrorAs(t, err, &rfe)
 	assert.Equal(t, githubfetch.KindTimeout, rfe.Kind, "combined ResolveRef+ListTree+FetchFolder exceeding lim.Timeout must fail as timeout")
+}
+
+// TestHostedImport_GitHubArchiveRedirect verifies that a hosted Hub import of a
+// user-supplied https://github.com/<o>/<r>/archive/...tar.gz URL succeeds when
+// github.com 302s to codeload.github.com, refuses redirects to other hosts, and
+// never sends an Authorization header even when a project credential exists.
+func TestHostedImport_GitHubArchiveRedirect(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Build a minimal template tarball served by the codeload-like server.
+	var tarBuf bytes.Buffer
+	gzw := gzip.NewWriter(&tarBuf)
+	tw := tar.NewWriter(gzw)
+	content := []byte("schema_version: \"1\"\nharness: claude\n")
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "repo-main/alpha/scion-agent.yaml",
+		Mode:     0o644,
+		Size:     int64(len(content)),
+	}))
+	_, err := tw.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gzw.Close())
+	tarBytes := tarBuf.Bytes()
+
+	var authHeaders []string
+	var authMu sync.Mutex
+	recordAuth := func(r *http.Request) {
+		authMu.Lock()
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		authMu.Unlock()
+	}
+
+	codeloadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordAuth(r)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(tarBytes)
+	}))
+	t.Cleanup(codeloadSrv.Close)
+
+	evilSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordAuth(r)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(tarBytes)
+	}))
+	t.Cleanup(evilSrv.Close)
+
+	var redirectTarget string
+	githubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordAuth(r)
+		w.Header().Set("Location", redirectTarget)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(githubSrv.Close)
+
+	// Map githubArchiveHosts onto our httptest servers while enforcing the
+	// exact host allowlist and hop cap of newImportDownloader.
+	hostMap := map[string]string{
+		"github.com":          githubSrv.URL,
+		"codeload.github.com": codeloadSrv.URL,
+	}
+	prevOverride := importDownloadOverride
+	t.Cleanup(func() { importDownloadOverride = prevOverride })
+	importDownloadOverride = func(ctx context.Context, rawURL, auth string) ([]byte, error) {
+		assert.Empty(t, auth, "archive download must never receive an Authorization value")
+		if !isGitHubArchiveDownloadURL(rawURL) {
+			return nil, errImportDownloadFailed
+		}
+		cur := rawURL
+		for hops := 0; hops <= importGitHubArchiveMaxRedirects; hops++ {
+			u, parseErr := url.Parse(cur)
+			if parseErr != nil {
+				return nil, errImportDownloadFailed
+			}
+			host := strings.ToLower(u.Hostname())
+			allowed := false
+			for _, h := range githubArchiveHosts {
+				if host == h {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, errImportDownloadFailed
+			}
+			base, ok := hostMap[host]
+			if !ok {
+				return nil, errImportDownloadFailed
+			}
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, base+u.RequestURI(), nil)
+			if reqErr != nil {
+				return nil, errImportDownloadFailed
+			}
+			client := &http.Client{
+				CheckRedirect: func(*http.Request, []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+			resp, doErr := client.Do(req)
+			if doErr != nil {
+				return nil, errImportDownloadFailed
+			}
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				loc := resp.Header.Get("Location")
+				_ = resp.Body.Close()
+				cur = loc
+				continue
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil || resp.StatusCode != http.StatusOK {
+				return nil, errImportDownloadFailed
+			}
+			return body, nil
+		}
+		return nil, errImportDownloadFailed
+	}
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
+	ctx := context.Background()
+
+	admin := newReimportAdmin(t, s)
+	proj := &store.Project{ID: tid("gf-p2-arch-proj"), Name: "gf-p2-arch", Slug: "gf-p2-arch"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	grantUserActionOnResource(t, s, admin.ID, "template", proj.ID, ActionCreate)
+
+	// Configure a project GITHUB_TOKEN to prove archive URLs never send it.
+	_, _, err = srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+		Name: "GITHUB_TOKEN", Value: "tok-must-not-be-sent", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeProject, ScopeID: proj.ID,
+	})
+	require.NoError(t, err)
+
+	// 1. 302 to codeload.github.com succeeds, imports alpha, sends no Authorization.
+	redirectTarget = "https://codeload.github.com/acme/repo/tar.gz/refs/heads/main"
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+proj.ID+"/import-templates", map[string]string{
+		"sourceUrl": "https://github.com/acme/repo/archive/main.tar.gz",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"alpha"`)
+	authMu.Lock()
+	require.Len(t, authHeaders, 2, "expected github.com hop + codeload.github.com hop")
+	for i, h := range authHeaders {
+		assert.Empty(t, h, "hop %d must not send Authorization", i)
+	}
+	authMu.Unlock()
+
+	// 2. 302 to an off-allowlist host is refused.
+	redirectTarget = "https://evil.example/payload.tar.gz"
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+proj.ID+"/import-templates", map[string]string{
+		"sourceUrl": "https://github.com/acme/repo/archive/main.tar.gz",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), errImportDownloadFailed.Error())
 }

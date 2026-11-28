@@ -52,3 +52,11 @@ func TestImportDownloader_RefusesInternalAddresses(t *testing.T) {
 		assert.NotContains(t, err.Error(), "500")
 	}
 }
+
+func TestIsGitHubArchiveDownloadURL(t *testing.T) {
+	assert.True(t, isGitHubArchiveDownloadURL("https://github.com/acme/repo/archive/main.tar.gz"))
+	assert.True(t, isGitHubArchiveDownloadURL("https://GITHUB.COM/acme/repo/archive/refs/tags/v1.0.tar.gz"))
+	assert.False(t, isGitHubArchiveDownloadURL("http://github.com/acme/repo/archive/main.tar.gz"))
+	assert.False(t, isGitHubArchiveDownloadURL("https://codeload.github.com/acme/repo/tar.gz/main"))
+	assert.False(t, isGitHubArchiveDownloadURL("https://example.com/archive/main.tar.gz"))
+}
