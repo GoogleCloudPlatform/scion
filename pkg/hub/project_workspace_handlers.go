@@ -1404,6 +1404,10 @@ func (s *Server) projectStorageLayout() (projectfs.Layout, error) {
 // declare (projectfs.ErrNoMount). Its message is fixed and carries no path.
 var errSharedDirNotDeclared = errors.New("shared directory is not declared on this project")
 
+// errSharedDirRequiresColocatedBroker is returned on the local layout for a
+// git-backed project that has no co-located runtime broker provider.
+var errSharedDirRequiresColocatedBroker = errors.New("shared directory file browsing requires a co-located runtime broker")
+
 // resolveSharedDirPath resolves where a project's shared directory lives,
 // through the layout authority (pkg/projectfs) on the Layout from
 // sharedDirLayout.
@@ -1492,7 +1496,7 @@ func (s *Server) resolveSharedDirMount(ctx context.Context, project *store.Proje
 		return localSharedDirResolution(sdPath, providerCount, mount), nil
 	}
 
-	return nil, fmt.Errorf("shared directory file browsing requires a co-located runtime broker")
+	return nil, errSharedDirRequiresColocatedBroker
 }
 
 // localSharedDirResolution wraps a local-layout shared dir path, already

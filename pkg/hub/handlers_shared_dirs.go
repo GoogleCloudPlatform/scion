@@ -89,6 +89,10 @@ func (s *Server) handleProjectSharedDirRoutes(w http.ResponseWriter, r *http.Req
 		filePath := strings.TrimPrefix(rest, "files")
 		filePath = strings.TrimPrefix(filePath, "/")
 		s.handleSharedDirFiles(w, r, project, name, filePath)
+	case rest == "uploads" || strings.HasPrefix(rest, "uploads/"):
+		uploadSubPath := strings.TrimPrefix(rest, "uploads")
+		uploadSubPath = strings.TrimPrefix(uploadSubPath, "/")
+		s.handleProjectSharedDirUploads(w, r, project, name, uploadSubPath)
 	case rest == "":
 		s.handleProjectSharedDirByName(w, r, project, name)
 	default:
