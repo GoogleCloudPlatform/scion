@@ -794,19 +794,25 @@ describe('scion-trigger-list', () => {
     );
   });
 
-  it('renders notify editor read-only for rules with read-only action types', async () => {
-    const readonlyRule: TriggerDefinition = {
+  it('allows editing and PATCHing notify on rules with read-only action types without sending actions (R1)', async () => {
+    const execWithNotify: TriggerDefinition = {
       ...execTrigger,
       notify: {
         onOutcomes: ['failed', 'refused'],
         userNotice: true,
-        agentId: 'ag-1',
-        agentName: 'ops-agent',
       },
     };
+    const patchBodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(jsonResponse({ triggers: [readonlyRule], totalCount: 1 }))
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(execWithNotify));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [execWithNotify], totalCount: 1 }));
+      })
     );
 
     const el = document.createElement('scion-trigger-list') as ScionTriggerList;
@@ -819,17 +825,55 @@ describe('scion-trigger-list', () => {
     (el.shadowRoot?.querySelector('[data-edit-trigger="tr-exec"]') as HTMLElement).click();
     await el.updateComplete;
 
+    // Action editor stays read-only, while notify editor stays enabled.
+    const actionEditor = el.shadowRoot?.querySelector(
+      'scion-trigger-action-editor'
+    ) as HTMLElement & { readonly: boolean };
+    expect(actionEditor.readonly).toBe(true);
+
     const notifyEditor = el.shadowRoot?.querySelector(
       'scion-trigger-notify-editor'
     ) as HTMLElement & { readonly: boolean; updateComplete: Promise<boolean> };
     expect(notifyEditor).toBeTruthy();
-    expect(notifyEditor.readonly).toBe(true);
+    expect(notifyEditor.readonly).toBe(false);
     await notifyEditor.updateComplete;
     expect(
       notifyEditor.shadowRoot?.querySelector('[data-notify-user-notice]')?.hasAttribute('disabled')
-    ).toBe(true);
+    ).toBe(false);
     expect(
       notifyEditor.shadowRoot?.querySelector('[data-notify-agent-select]')?.hasAttribute('disabled')
-    ).toBe(true);
+    ).toBe(false);
+
+    // Edit notify and save -> PATCH sends only expectedRevision + notify; actions untouched.
+    notifyEditor.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused', 'skipped'],
+            userNotice: false,
+            agentId: 'ag-1',
+            agentName: 'ops-agent',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).toEqual({
+      expectedRevision: 2,
+      notify: {
+        onOutcomes: ['failed', 'refused', 'skipped'],
+        userNotice: false,
+        agentId: 'ag-1',
+        agentName: 'ops-agent',
+      },
+    });
+    expect(patchBodies[0]['action']).toBeUndefined();
+    expect(patchBodies[0]['actions']).toBeUndefined();
   });
 });

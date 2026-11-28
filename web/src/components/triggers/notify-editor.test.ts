@@ -50,6 +50,48 @@ describe('scion-trigger-notify-editor', () => {
     expect(refusedCb?.hasAttribute('checked')).toBe(true);
     expect(expiredCb?.hasAttribute('checked')).toBe(true);
     expect(skippedCb?.hasAttribute('checked')).toBe(false);
+
+    // O2: outcome checkboxes are grouped in a native fieldset with a legend.
+    const fieldset = el.shadowRoot?.querySelector('fieldset[data-notify-outcomes-group]');
+    expect(fieldset).toBeTruthy();
+    expect(fieldset?.querySelector('legend')?.textContent?.trim()).toBe('Notify on outcomes');
+  });
+
+  it('sends non-UUID free-text agent input as agentName and UUID as agentId when agents list is empty (O1)', async () => {
+    const el = document.createElement('scion-trigger-notify-editor') as ScionTriggerNotifyEditor;
+    el.notify = createDefaultNotifySpec();
+    el.agents = [];
+    const emitted: TriggerNotifySpec[] = [];
+    el.addEventListener('notify-changed', (e) => {
+      emitted.push((e as CustomEvent<{ notify: TriggerNotifySpec }>).detail.notify);
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('[data-notify-agent-input]') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    // Slug/name goes to agentName, not agentId.
+    input.value = 'triage-agent';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    expect(emitted.at(-1)?.agentId).toBe('');
+    expect(emitted.at(-1)?.agentName).toBe('triage-agent');
+
+    // UUID goes to agentId.
+    const uuid = '11111111-2222-3333-4444-555555555555';
+    input.value = uuid;
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    expect(emitted.at(-1)?.agentId).toBe(uuid);
+    expect(emitted.at(-1)?.agentName).toBe('');
+
+    // Clear resets both.
+    input.value = '';
+    input.dispatchEvent(new Event('sl-clear', { bubbles: true }));
+    await el.updateComplete;
+    expect(emitted.at(-1)?.agentId).toBe('');
+    expect(emitted.at(-1)?.agentName).toBe('');
   });
 
   it('emits notify-changed when toggling user notice, selecting/clearing agent, and changing outcomes', async () => {

@@ -54,11 +54,7 @@ import {
   type SourceIdMode,
 } from './source-extensions.js';
 import { createDefaultMessageAction } from './action-editor.js';
-import {
-  DEFAULT_NOTIFY_OUTCOMES,
-  createDefaultNotifySpec,
-  normalizeNotifySpec,
-} from './notify-editor.js';
+import { createDefaultNotifySpec, normalizeNotifySpec } from './notify-editor.js';
 import './where-editor.js';
 import './action-editor.js';
 import './notify-editor.js';
@@ -493,6 +489,10 @@ export class ScionTriggerList extends LitElement {
     return type !== 'message' && type !== 'dispatch_agent';
   }
 
+  private get hasReadOnlyActions(): boolean {
+    return this.formActions.some((a) => this.isReadOnlyActionType(a.type));
+  }
+
   private buildDiffPatchBody(
     orig: TriggerDefinition,
     effectiveSourceId: string,
@@ -550,8 +550,7 @@ export class ScionTriggerList extends LitElement {
       // P9 HOOK (ptone/scion#9065): when multiActionEnabled is true, send `actions[]`,
       // preserving read-only/exec rows unchanged (O1 default-safety).
       if (this.multiActionEnabled) {
-        const hasReadOnly = this.formActions.some((a) => this.isReadOnlyActionType(a.type));
-        if (!hasReadOnly) {
+        if (!this.hasReadOnlyActions) {
           body['actions'] = this.formActions.map((a) => this.sanitizeActionForSave(a));
         }
       } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
@@ -578,13 +577,10 @@ export class ScionTriggerList extends LitElement {
       body['maxConcurrentDispatches'] = nextConc;
     }
 
-    const hasReadOnly = this.formActions.some((a) => this.isReadOnlyActionType(a.type));
-    if (!hasReadOnly) {
-      const nextNotify = normalizeNotifySpec(this.formNotify);
-      const origNotify = normalizeNotifySpec(orig.notify);
-      if (!canonicalDeepEqual(nextNotify, origNotify)) {
-        body['notify'] = this.buildNotifyPayload(this.formNotify, true);
-      }
+    const nextNotify = normalizeNotifySpec(this.formNotify);
+    const origNotify = normalizeNotifySpec(orig.notify);
+    if (!canonicalDeepEqual(nextNotify, origNotify)) {
+      body['notify'] = this.buildNotifyPayload(this.formNotify, true);
     }
 
     return body;
@@ -596,22 +592,16 @@ export class ScionTriggerList extends LitElement {
    */
   private buildNotifyPayload(spec: TriggerNotifySpec, forPatch: boolean): Record<string, unknown> {
     const normalized = normalizeNotifySpec(spec);
-    const outcomes =
-      normalized.onOutcomes && normalized.onOutcomes.length > 0
-        ? [...normalized.onOutcomes]
-        : [...DEFAULT_NOTIFY_OUTCOMES];
     const payload: Record<string, unknown> = {
-      onOutcomes: outcomes,
-      userNotice: normalized.userNotice !== false,
+      onOutcomes: [...normalized.onOutcomes],
+      userNotice: normalized.userNotice,
     };
-    const agentId = (normalized.agentId ?? '').trim();
-    const agentName = (normalized.agentName ?? '').trim();
     if (forPatch) {
-      payload['agentId'] = agentId;
-      payload['agentName'] = agentName;
+      payload['agentId'] = normalized.agentId;
+      payload['agentName'] = normalized.agentName;
     } else {
-      if (agentId) payload['agentId'] = agentId;
-      if (agentName) payload['agentName'] = agentName;
+      if (normalized.agentId) payload['agentId'] = normalized.agentId;
+      if (normalized.agentName) payload['agentName'] = normalized.agentName;
     }
     return payload;
   }
@@ -876,11 +866,11 @@ export class ScionTriggerList extends LitElement {
   private formatNotifySummary(notify?: TriggerNotifySpec): string {
     const norm = normalizeNotifySpec(notify);
     const parts: string[] = [];
-    parts.push(`User notice: ${norm.userNotice !== false ? 'on' : 'off'}`);
+    parts.push(`User notice: ${norm.userNotice ? 'on' : 'off'}`);
     if (norm.agentName || norm.agentId) {
       parts.push(`Agent: ${norm.agentName || norm.agentId}`);
     }
-    parts.push(`On: ${(norm.onOutcomes ?? DEFAULT_NOTIFY_OUTCOMES).join(', ')}`);
+    parts.push(`On: ${norm.onOutcomes.join(', ')}`);
     return parts.join(' · ');
   }
 
@@ -1291,7 +1281,7 @@ export class ScionTriggerList extends LitElement {
               `}
 
           <div class="section-divider">${this.multiActionEnabled ? 'Actions' : 'Action'}</div>
-          ${this.formActions.some((a) => this.isReadOnlyActionType(a.type))
+          ${this.hasReadOnlyActions
             ? html`
                 <sl-alert variant="neutral" open data-readonly-actions-notice>
                   This rule includes read-only action types; these actions can only be edited with
@@ -1304,7 +1294,7 @@ export class ScionTriggerList extends LitElement {
             .agents=${this.agents}
             .subjectMode=${this.formSubjectMode}
             .multiActionEnabled=${this.multiActionEnabled}
-            .readonly=${this.formActions.some((a) => this.isReadOnlyActionType(a.type))}
+            .readonly=${this.hasReadOnlyActions}
             @actions-changed=${(e: CustomEvent<{ actions: TriggerActionSpec[] }>) => {
               this.formActions = e.detail.actions;
             }}
@@ -1382,7 +1372,6 @@ export class ScionTriggerList extends LitElement {
           <scion-trigger-notify-editor
             .notify=${this.formNotify}
             .agents=${this.agents}
-            .readonly=${this.formActions.some((a) => this.isReadOnlyActionType(a.type))}
             @notify-changed=${(e: CustomEvent<{ notify: TriggerNotifySpec }>) => {
               this.formNotify = e.detail.notify;
             }}

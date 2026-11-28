@@ -25,12 +25,19 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import type { ProjectAgentOption, TriggerNotifySpec } from './types.js';
+import { splitAgentRef, type ProjectAgentOption, type TriggerNotifySpec } from './types.js';
 
 export const ALL_NOTIFY_OUTCOMES = ['failed', 'refused', 'expired', 'skipped'] as const;
 export const DEFAULT_NOTIFY_OUTCOMES = ['failed', 'refused', 'expired'] as const;
 
 export type NotifyOutcome = (typeof ALL_NOTIFY_OUTCOMES)[number];
+
+export interface NormalizedTriggerNotifySpec {
+  onOutcomes: string[];
+  userNotice: boolean;
+  agentId: string;
+  agentName: string;
+}
 
 const OUTCOME_LABELS: Record<NotifyOutcome, string> = {
   failed: 'Failed',
@@ -42,7 +49,7 @@ const OUTCOME_LABELS: Record<NotifyOutcome, string> = {
 /**
  * Returns the default notify policy matching Hub defaults (Stage 2 §10).
  */
-export function createDefaultNotifySpec(): TriggerNotifySpec {
+export function createDefaultNotifySpec(): NormalizedTriggerNotifySpec {
   return {
     onOutcomes: [...DEFAULT_NOTIFY_OUTCOMES],
     userNotice: true,
@@ -55,7 +62,7 @@ export function createDefaultNotifySpec(): TriggerNotifySpec {
  * Normalises a stored (or absent) notify policy into canonical form for editing
  * and equality comparison against the Hub's defaults.
  */
-export function normalizeNotifySpec(spec?: TriggerNotifySpec | null): TriggerNotifySpec {
+export function normalizeNotifySpec(spec?: TriggerNotifySpec | null): NormalizedTriggerNotifySpec {
   const rawOutcomes =
     spec?.onOutcomes && spec.onOutcomes.length > 0 ? spec.onOutcomes : [...DEFAULT_NOTIFY_OUTCOMES];
   const seen = new Set(rawOutcomes);
@@ -100,10 +107,22 @@ export class ScionTriggerNotifyEditor extends LitElement {
       gap: 0.25rem;
     }
 
+    .outcomes-fieldset {
+      border: 0;
+      margin: 0;
+      padding: 0;
+      min-inline-size: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
     .outcomes-label {
       font-size: 0.8125rem;
       font-weight: 500;
       color: var(--scion-text);
+      padding: 0;
+      margin-bottom: 0.25rem;
     }
 
     .outcomes-row {
@@ -222,8 +241,8 @@ export class ScionTriggerNotifyEditor extends LitElement {
                   .value=${selectedAgentId || selectedAgentName}
                   data-notify-agent-input
                   @sl-input=${(e: Event) => {
-                    const val = (e.target as HTMLInputElement).value.trim();
-                    this.updateNotify({ agentId: val, agentName: '' });
+                    const val = (e.target as HTMLInputElement).value;
+                    this.updateNotify(splitAgentRef(val));
                   }}
                   @sl-clear=${() => {
                     this.updateNotify({ agentId: '', agentName: '' });
@@ -235,8 +254,8 @@ export class ScionTriggerNotifyEditor extends LitElement {
           </div>
         </div>
 
-        <div class="notify-row">
-          <div class="outcomes-label">Notify on outcomes</div>
+        <fieldset class="outcomes-fieldset" data-notify-outcomes-group>
+          <legend class="outcomes-label">Notify on outcomes</legend>
           <div class="outcomes-row">
             ${ALL_NOTIFY_OUTCOMES.map(
               (outcome) => html`
@@ -262,7 +281,7 @@ export class ScionTriggerNotifyEditor extends LitElement {
                 </div>
               `
             : nothing}
-        </div>
+        </fieldset>
       </div>
     `;
   }
