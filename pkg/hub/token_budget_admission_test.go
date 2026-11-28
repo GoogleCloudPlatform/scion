@@ -1032,7 +1032,7 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 		projectScopeID string
 	}
 
-	limitIDToName := make(map[string]string, 6)
+	limitIDToName := make(map[string]string, 8)
 	for _, name := range []string{
 		store.LimitLLMTokensPerProjectDay,
 		store.LimitLLMTokensPerProjectMonth,
@@ -1040,13 +1040,15 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 		store.LimitLLMTokensPerUserMonth,
 		store.LimitLLMTokensPerUserProjectDay,
 		store.LimitLLMTokensPerUserProjectMonth,
+		store.LimitLLMTokensPerGroupDay,
+		store.LimitLLMTokensPerGroupMonth,
 	} {
 		def, err := s.GetLimitDefinitionByName(ctx, name)
 		require.NoError(t, err)
 		limitIDToName[def.ID] = name
 	}
 
-	seedAllSixCaps := func(projID, userID string) {
+	seedAllCaps := func(projID, userID, groupID string) {
 		createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
 			store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, projID, 10000, store.TokenActionPauseNew)
 		createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectMonth,
@@ -1061,9 +1063,19 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 			createTokenLimitBinding(t, s, store.LimitLLMTokensPerUserProjectMonth,
 				store.EntitlementSubjectUser, userID, store.QuotaScopeProject, projID, 100000, store.TokenActionPauseNew)
 		}
+		if groupID != "" {
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+				store.EntitlementSubjectGroup, groupID, store.QuotaScopeSystem, "", 10000, store.TokenActionPauseNew)
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupMonth,
+				store.EntitlementSubjectGroup, groupID, store.QuotaScopeSystem, "", 100000, store.TokenActionPauseNew)
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+				store.EntitlementSubjectGroup, groupID, store.QuotaScopeProject, projID, 10000, store.TokenActionPauseNew)
+			createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupMonth,
+				store.EntitlementSubjectGroup, groupID, store.QuotaScopeProject, projID, 100000, store.TokenActionPauseNew)
+		}
 	}
 
-	collectPersistedScopes := func(projID, userID string) map[scopeTuple]bool {
+	collectPersistedScopes := func(projID, userID, groupID string) map[scopeTuple]bool {
 		out := make(map[scopeTuple]bool)
 		norm := func(v string) string {
 			switch v {
@@ -1072,6 +1084,10 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 			case userID:
 				if userID != "" {
 					return "USER"
+				}
+			case groupID:
+				if groupID != "" {
+					return "GROUP"
 				}
 			}
 			return v
@@ -1093,16 +1109,22 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 			collect(store.UsageScopeKindUser, userID, "")
 			collect(store.UsageScopeKindUserProject, userID, projID)
 		}
+		if groupID != "" {
+			collect(store.UsageScopeKindGroup, groupID, "")
+			collect(store.UsageScopeKindGroup, groupID, projID)
+		}
 		return out
 	}
 
 	for _, tc := range []struct {
 		name      string
 		withUser  bool
+		withGroup bool
 		wantCount int
 	}{
-		{name: "principal-less", withUser: false, wantCount: 2},
-		{name: "with-billing-user", withUser: true, wantCount: 6},
+		{name: "principal-less", withUser: false, withGroup: false, wantCount: 2},
+		{name: "with-billing-user", withUser: true, withGroup: false, wantCount: 6},
+		{name: "with-billing-user-and-group", withUser: true, withGroup: true, wantCount: 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projIngest := &store.Project{ID: uuid.NewString(), Name: "parity-ingest-" + tc.name, Slug: "parity-ingest-" + tc.name}
@@ -1113,13 +1135,38 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 			var userIngest, userAdmit string
 			var userIngestPtr *string
 			if tc.withUser {
-				userIngest = uuid.NewString()
-				userAdmit = uuid.NewString()
+				uIn := &store.User{ID: uuid.NewString(), Email: "in-" + tc.name + "@example.com", DisplayName: "In", Role: store.UserRoleMember, Status: "active"}
+				uAd := &store.User{ID: uuid.NewString(), Email: "ad-" + tc.name + "@example.com", DisplayName: "Ad", Role: store.UserRoleMember, Status: "active"}
+				require.NoError(t, s.CreateUser(ctx, uIn))
+				require.NoError(t, s.CreateUser(ctx, uAd))
+				userIngest = uIn.ID
+				userAdmit = uAd.ID
 				userIngestPtr = &userIngest
 			}
 
-			seedAllSixCaps(projIngest.ID, userIngest)
-			seedAllSixCaps(projAdmit.ID, userAdmit)
+			var grpIngest, grpAdmit string
+			var chargedGroups []string
+			if tc.withGroup {
+				gIn := &store.Group{ID: uuid.NewString(), Name: "gin-" + tc.name, Slug: "gin-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+				gAd := &store.Group{ID: uuid.NewString(), Name: "gad-" + tc.name, Slug: "gad-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+				require.NoError(t, s.CreateGroup(ctx, gIn))
+				require.NoError(t, s.CreateGroup(ctx, gAd))
+				require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+					GroupID: gIn.ID, MemberType: store.GroupMemberTypeUser, MemberID: userIngest, Role: store.GroupMemberRoleMember,
+				}))
+				require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+					GroupID: gAd.ID, MemberType: store.GroupMemberTypeUser, MemberID: userAdmit, Role: store.GroupMemberRoleMember,
+				}))
+				grpIngest = gIn.ID
+				grpAdmit = gAd.ID
+				chargedGroups = []string{grpIngest}
+			}
+
+			seedAllCaps(projIngest.ID, userIngest, grpIngest)
+			seedAllCaps(projAdmit.ID, userAdmit, grpAdmit)
+			if resolver := srv.PooledGroupResolver(); resolver != nil {
+				resolver.InvalidateAll()
+			}
 
 			// Under-cap consumption so IsScopeExhaustedForAction evaluates every spec without short-circuiting.
 			ingestTestTokens(t, s, projIngest.ID, userIngestPtr, now, 100, false)
@@ -1130,14 +1177,14 @@ func TestTokenBudgetEvaluator_IngestAndAdmissionScopeParity(t *testing.T) {
 			}
 
 			_ = eval.EvaluateIngestedEventsWithNotice(ctx, []*store.UsageEvent{
-				{ProjectID: projIngest.ID, BillingUserID: userIngestPtr, EventTS: now},
+				{ProjectID: projIngest.ID, BillingUserID: userIngestPtr, ChargedGroupIDs: chargedGroups, EventTS: now},
 			})
 			status, err := eval.IsScopeExhaustedForAction(ctx, projAdmit.ID, userAdmit, now, store.TokenActionPauseNew)
 			require.NoError(t, err)
 			require.False(t, status.Exhausted)
 
-			ingestScopes := collectPersistedScopes(projIngest.ID, userIngest)
-			admitScopes := collectPersistedScopes(projAdmit.ID, userAdmit)
+			ingestScopes := collectPersistedScopes(projIngest.ID, userIngest, grpIngest)
+			admitScopes := collectPersistedScopes(projAdmit.ID, userAdmit, grpAdmit)
 			assert.Len(t, ingestScopes, tc.wantCount)
 			assert.Equal(t, ingestScopes, admitScopes, "ingest evaluator and admission check must evaluate identical scope sets")
 		})
@@ -1199,4 +1246,312 @@ func TestTokenBudgetAdmission_ReincarnateWorkerRecheck(t *testing.T) {
 	got, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.NotEqual(t, string(state.PhaseRunning), got.Phase, "agent must remain stopped after worker budget refusal")
+}
+
+// ingestGroupTokensForAdmissionTest ingests a usage event attributed to
+// billingUserID with ChargedGroupIDs populated so usage_group_rollups_daily
+// reflects the group consumption.
+func ingestGroupTokensForAdmissionTest(t *testing.T, s store.Store, projectID, billingUserID string, groupIDs []string, ts time.Time, tokens int64) {
+	t.Helper()
+	ctx := context.Background()
+	runID := "run-grp-" + uuid.NewString()
+	agentID := uuid.NewString()
+	buPtr := tbStrPtr(billingUserID)
+	_, err := s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         runID,
+		HubID:         "hub-admit-test",
+		ProjectID:     projectID,
+		AgentID:       agentID,
+		BillingUserID: buPtr,
+		Harness:       "claude",
+	})
+	require.NoError(t, err)
+
+	ev := &store.UsageEvent{
+		EventID:         "ev-grp-" + uuid.NewString(),
+		HubID:           "hub-admit-test",
+		AgentID:         agentID,
+		ProjectID:       projectID,
+		RunID:           runID,
+		BillingUserID:   buPtr,
+		ChargedGroupIDs: groupIDs,
+		Harness:         "claude",
+		Model:           "claude-sonnet-4-6",
+		ModelSource:     "event",
+		UsageSource:     store.UsageSourceNative,
+		Status:          "success",
+		Calls:           1,
+		Input:           tbI64Ptr(tokens),
+		TokenStatus:     "reported",
+		ProducerEpoch:   "ep-grp",
+		ProducerSeq:     1,
+		EventTS:         ts,
+	}
+	res, err := s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ev.AgentID,
+		Events:  []*store.UsageEvent{ev},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Accepted)
+}
+
+func TestTokenBudgetAdmission_PooledGroupBudgets(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+
+	t.Run("system-scoped pool blocks pause_new and suspend_and_pause, allows non-member", func(t *testing.T) {
+		for _, action := range []string{store.TokenActionPauseNew, store.TokenActionSuspendAndPause} {
+			t.Run(action, func(t *testing.T) {
+				srv, s, _, proj, _ := setupBudgetAdmissionServer(t, now)
+				member := &store.User{ID: uuid.NewString(), Email: "member-" + action + "@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: "active"}
+				outsider := &store.User{ID: uuid.NewString(), Email: "outsider-" + action + "@example.com", DisplayName: "Outsider", Role: store.UserRoleMember, Status: "active"}
+				require.NoError(t, s.CreateUser(ctx, member))
+				require.NoError(t, s.CreateUser(ctx, outsider))
+
+				grp := &store.Group{ID: uuid.NewString(), Name: "sys-pool-" + action, Slug: "sys-pool-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+				require.NoError(t, s.CreateGroup(ctx, grp))
+				require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+					GroupID: grp.ID, MemberType: store.GroupMemberTypeUser, MemberID: member.ID, Role: store.GroupMemberRoleMember,
+				}))
+
+				createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+					store.EntitlementSubjectGroup, grp.ID, store.QuotaScopeSystem, "", 1000, action)
+				srv.PooledGroupResolver().InvalidateAll()
+
+				// Under cap -> admitted.
+				ingestGroupTokensForAdmissionTest(t, s, proj.ID, member.ID, []string{grp.ID}, now, 600)
+				memberAg := &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, OwnerID: member.ID}
+				require.NoError(t, srv.checkTokenBudgetAdmission(ctx, memberAg, proj))
+
+				// Exhaust system-scoped group pool -> 429 budget_exhausted.
+				ingestGroupTokensForAdmissionTest(t, s, proj.ID, member.ID, []string{grp.ID}, now, 500)
+				var bErr *TokenBudgetAdmissionError
+				require.ErrorAs(t, srv.checkTokenBudgetAdmission(ctx, memberAg, proj), &bErr)
+				assert.Equal(t, http.StatusTooManyRequests, bErr.HTTPStatus)
+				assert.Equal(t, api.LaunchCodeBudgetExhausted, bErr.Code)
+				assert.Equal(t, store.LimitLLMTokensPerGroupDay, bErr.Details["limit"])
+				assert.Equal(t, store.UsageScopeKindGroup, bErr.Details["scopeKind"])
+				assert.Equal(t, grp.ID, bErr.Details["scopeId"])
+				assert.Equal(t, int64(1100), bErr.Details["consumed"])
+				assert.Equal(t, int64(1000), bErr.Details["max"])
+
+				// Non-member in same project -> allowed.
+				outsiderAg := &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, OwnerID: outsider.ID}
+				require.NoError(t, srv.checkTokenBudgetAdmission(ctx, outsiderAg, proj))
+			})
+		}
+	})
+
+	t.Run("project-scoped pool blocks only in that project; notify_only never blocks", func(t *testing.T) {
+		srv, s, _, proj, _ := setupBudgetAdmissionServer(t, now)
+		projOther := &store.Project{ID: uuid.NewString(), Name: "other-proj", Slug: "other-proj-" + uuid.NewString()[:8]}
+		require.NoError(t, s.CreateProject(ctx, projOther))
+
+		member := &store.User{ID: uuid.NewString(), Email: "proj-member@example.com", DisplayName: "Proj Member", Role: store.UserRoleMember, Status: "active"}
+		require.NoError(t, s.CreateUser(ctx, member))
+
+		grpPause := &store.Group{ID: uuid.NewString(), Name: "proj-pause", Slug: "proj-pause-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+		grpNotify := &store.Group{ID: uuid.NewString(), Name: "proj-notify", Slug: "proj-notify-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+		require.NoError(t, s.CreateGroup(ctx, grpPause))
+		require.NoError(t, s.CreateGroup(ctx, grpNotify))
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: grpPause.ID, MemberType: store.GroupMemberTypeUser, MemberID: member.ID, Role: store.GroupMemberRoleMember,
+		}))
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: grpNotify.ID, MemberType: store.GroupMemberTypeUser, MemberID: member.ID, Role: store.GroupMemberRoleMember,
+		}))
+
+		// Project-scoped pause_new pool on proj.
+		createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+			store.EntitlementSubjectGroup, grpPause.ID, store.QuotaScopeProject, proj.ID, 500, store.TokenActionPauseNew)
+		// System-scoped notify_only pool on grpNotify.
+		createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+			store.EntitlementSubjectGroup, grpNotify.ID, store.QuotaScopeSystem, "", 500, store.TokenActionNotifyOnly)
+		srv.PooledGroupResolver().InvalidateAll()
+
+		ingestGroupTokensForAdmissionTest(t, s, proj.ID, member.ID, []string{grpPause.ID, grpNotify.ID}, now, 700)
+
+		// In proj -> blocked by project-scoped grpPause.
+		var bErr *TokenBudgetAdmissionError
+		require.ErrorAs(t, srv.checkTokenBudgetAdmission(ctx, &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, OwnerID: member.ID}, proj), &bErr)
+		assert.Equal(t, http.StatusTooManyRequests, bErr.HTTPStatus)
+		assert.Equal(t, api.LaunchCodeBudgetExhausted, bErr.Code)
+		assert.Equal(t, store.UsageScopeKindGroup, bErr.Details["scopeKind"])
+		assert.Equal(t, grpPause.ID, bErr.Details["scopeId"])
+
+		// In projOther -> grpPause doesn't apply and grpNotify is notify_only -> allowed.
+		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, &store.Agent{ID: uuid.NewString(), ProjectID: projOther.ID, OwnerID: member.ID}, projOther))
+	})
+}
+
+func TestTokenBudgetIngestNotice_PooledGroup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	srv, s, _, proj, _ := setupBudgetAdmissionServer(t, now)
+
+	member := &store.User{ID: uuid.NewString(), Email: "notice-grp-member@example.com", DisplayName: "Group Member", Role: store.UserRoleMember, Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, member))
+
+	grp := &store.Group{ID: uuid.NewString(), Name: "notice-pool", Slug: "notice-pool-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: grp.ID, MemberType: store.GroupMemberTypeUser, MemberID: member.ID, Role: store.GroupMemberRoleMember,
+	}))
+
+	createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+		store.EntitlementSubjectGroup, grp.ID, store.QuotaScopeSystem, "", 1000, store.TokenActionSuspendAndPause)
+	srv.PooledGroupResolver().InvalidateAll()
+
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "grp-notice-ag-1",
+		Name:      "grp-notice-ag-1",
+		ProjectID: proj.ID,
+		OwnerID:   member.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	runID := "run-grp-notice-1"
+	_, err := s.SetAgentRunID(ctx, ag.ID, runID, nil)
+	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	// Ingest event exhausting the group pool -> HTTP 200 with group exhausted budget_notice.
+	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events: []telemetrycontract.UsageEvent{
+			makeWireUsageEvent("hub-admit-test", ag.ID, proj.ID, runID, "ev-grp-1", 1, now, 1100, 0),
+		},
+		RunID:         runID,
+		ProducerEpoch: "ep-grp-1",
+		ProducerSeq:   1,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp telemetrycontract.UsageIngestResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.BudgetNotice, "ingest response must surface group exhaustion notice")
+	assert.Equal(t, store.UsageBudgetStateExhausted, resp.BudgetNotice.State)
+	assert.Equal(t, store.UsageScopeKindGroup, resp.BudgetNotice.ScopeKind)
+	assert.Equal(t, store.LimitLLMTokensPerGroupDay, resp.BudgetNotice.Limit)
+	assert.Equal(t, int64(1100), resp.BudgetNotice.Consumed)
+	assert.Equal(t, int64(1000), resp.BudgetNotice.Max)
+	assert.Equal(t, store.TokenActionSuspendAndPause, resp.BudgetNotice.TokenAction)
+
+	// Empty heartbeat on a second agent owned by member -> HighestActiveBudgetNotice
+	// fallback resolves member's pooled group and returns the group exhaustion notice.
+	ag2 := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "grp-notice-ag-2",
+		Name:      "grp-notice-ag-2",
+		ProjectID: proj.ID,
+		OwnerID:   member.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag2))
+	runID2 := "run-grp-notice-2"
+	_, err = s.SetAgentRunID(ctx, ag2.ID, runID2, nil)
+	require.NoError(t, err)
+	tok2 := srv.generateRecordedAgentToken(t, ag2.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	rec = doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag2.ID), tok2, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{},
+		RunID:         runID2,
+		ProducerEpoch: "ep-grp-2",
+		ProducerSeq:   1,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	resp = telemetrycontract.UsageIngestResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.BudgetNotice, "heartbeat fallback must surface group exhaustion notice")
+	assert.Equal(t, store.UsageBudgetStateExhausted, resp.BudgetNotice.State)
+	assert.Equal(t, store.UsageScopeKindGroup, resp.BudgetNotice.ScopeKind)
+	assert.Equal(t, store.LimitLLMTokensPerGroupDay, resp.BudgetNotice.Limit)
+	assert.Equal(t, store.TokenActionSuspendAndPause, resp.BudgetNotice.TokenAction)
+}
+
+func TestTokenBudgetAdmission_UnmeasuredPolicyGroupCapOnly(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	srv, s, _, proj, _ := setupBudgetAdmissionServer(t, now)
+
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingUsageUnmeasuredPolicy] = UsageUnmeasuredPolicyDeny
+	require.NoError(t, s.UpdateProject(ctx, proj))
+
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hc-unmeasured-grp",
+		Slug:    "hc-unmeasured-grp",
+		Harness: "hermes",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: proj.ID,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "hermes",
+			Usage:   &api.HarnessUsageCapabilities{Live: api.HarnessUsageLiveCapabilities{Source: api.UsageLiveSourceNone}},
+		},
+	}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hc-measured-grp",
+		Slug:    "hc-measured-grp",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: proj.ID,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "claude",
+			Usage: &api.HarnessUsageCapabilities{
+				Live: api.HarnessUsageLiveCapabilities{
+					Source:                  api.UsageLiveSourceNative,
+					TokenTypes:              []string{"input", "output", "cache_read"},
+					NotApplicableTokenTypes: []string{"cache_write"},
+				},
+			},
+		},
+	}))
+
+	member := &store.User{ID: uuid.NewString(), Email: "unmeas-member@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: "active"}
+	outsider := &store.User{ID: uuid.NewString(), Email: "unmeas-outsider@example.com", DisplayName: "Outsider", Role: store.UserRoleMember, Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, member))
+	require.NoError(t, s.CreateUser(ctx, outsider))
+
+	grp := &store.Group{ID: uuid.NewString(), Name: "unmeas-pool", Slug: "unmeas-pool-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: grp.ID, MemberType: store.GroupMemberTypeUser, MemberID: member.ID, Role: store.GroupMemberRoleMember,
+	}))
+
+	// ONLY a group cap is active (no project/user/user_project caps).
+	createTokenLimitBinding(t, s, store.LimitLLMTokensPerGroupDay,
+		store.EntitlementSubjectGroup, grp.ID, store.QuotaScopeSystem, "", 10000, store.TokenActionPauseNew)
+	srv.PooledGroupResolver().InvalidateAll()
+
+	// Member with unmeasured harness -> refused 403 budget_unmeasured.
+	var bErr *TokenBudgetAdmissionError
+	require.ErrorAs(t, srv.checkTokenBudgetAdmission(ctx, &store.Agent{
+		ID:            uuid.NewString(),
+		ProjectID:     proj.ID,
+		OwnerID:       member.ID,
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "hc-unmeasured-grp"},
+	}, proj), &bErr)
+	assert.Equal(t, http.StatusForbidden, bErr.HTTPStatus)
+	assert.Equal(t, api.LaunchCodeBudgetUnmeasured, bErr.Code)
+
+	// Member with measured harness -> allowed.
+	require.NoError(t, srv.checkTokenBudgetAdmission(ctx, &store.Agent{
+		ID:            uuid.NewString(),
+		ProjectID:     proj.ID,
+		OwnerID:       member.ID,
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "hc-measured-grp"},
+	}, proj))
+
+	// Non-member with unmeasured harness -> allowed (no active cap applies).
+	require.NoError(t, srv.checkTokenBudgetAdmission(ctx, &store.Agent{
+		ID:            uuid.NewString(),
+		ProjectID:     proj.ID,
+		OwnerID:       outsider.ID,
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "hc-unmeasured-grp"},
+	}, proj))
 }
