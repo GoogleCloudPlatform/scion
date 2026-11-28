@@ -129,7 +129,7 @@ func TestSharedDirUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 	// Seed a visible file so archive and listing have at least one real entry.
 	require.NoError(t, os.WriteFile(filepath.Join(sdPath, "readme.txt"), []byte("visible"), 0o644))
 
-	payload := bytes.Repeat([]byte("scion-shared-dir-upload-"), 200) // 4800 bytes
+	payload := bytes.Repeat([]byte("scion-shared-dir-upload-01234567"), (uploadMinChunkBytes/32)+64) // 1 MiB + 2 KiB
 	wantSum := sha256.Sum256(payload)
 	wantHex := hex.EncodeToString(wantSum[:])
 
@@ -152,13 +152,13 @@ func TestSharedDirUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 	assert.Equal(t, srv.WorkspaceUploadMaxFileBytes(context.Background()), started.MaxBytes)
 	assert.Positive(t, started.ChunkBytes)
 
-	// 2. Chunk 1 (first 2000 bytes)
+	// 2. Chunk 1 (1 MiB non-final chunk)
 	chunkURL := fmt.Sprintf("%s/%s", uploadsBase, started.ID)
-	c1 := sdDoChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:2000])
+	c1 := sdDoChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:uploadMinChunkBytes])
 	require.Equal(t, http.StatusOK, c1.Code, "body: %s", c1.Body.String())
 	var c1Resp UploadChunkResponse
 	require.NoError(t, json.Unmarshal(c1.Body.Bytes(), &c1Resp))
-	assert.Equal(t, int64(2000), c1Resp.Received)
+	assert.Equal(t, int64(uploadMinChunkBytes), c1Resp.Received)
 
 	// Status GET reflects committed offset.
 	statusRec := doRequest(t, srv, http.MethodGet, chunkURL, nil)
@@ -167,7 +167,7 @@ func TestSharedDirUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &statusResp))
 	assert.Equal(t, started.ID, statusResp.ID)
 	assert.Equal(t, store.UploadStateUploading, statusResp.State)
-	assert.Equal(t, int64(2000), statusResp.Received)
+	assert.Equal(t, int64(uploadMinChunkBytes), statusResp.Received)
 	assert.Equal(t, int64(len(payload)), statusResp.DeclaredSize)
 
 	// Partial file exists on disk, but is hidden from shared-dir listing, search, and archive.
@@ -202,8 +202,8 @@ func TestSharedDirUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 		assert.False(t, isUploadPartialName(filepath.Base(zf.Name)), "partial leaked into shared-dir archive: %s", zf.Name)
 	}
 
-	// 3. Chunk 2 (remaining bytes)
-	c2 := sdDoChunkPut(t, srv, "", chunkURL+"?offset=2000", payload[2000:])
+	// 3. Chunk 2 (remaining 2 KiB final short chunk)
+	c2 := sdDoChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), payload[uploadMinChunkBytes:])
 	require.Equal(t, http.StatusOK, c2.Code, "body: %s", c2.Body.String())
 	var c2Resp UploadChunkResponse
 	require.NoError(t, json.Unmarshal(c2.Body.Bytes(), &c2Resp))
@@ -404,12 +404,12 @@ func TestSharedDirUploads_SecurityPathTraversalSymlinkAndAtomicity(t *testing.T)
 
 	// Case A: abort after uploading a chunk.
 	s1Rec := doRequest(t, srv, http.MethodPost, uploadsURL,
-		UploadStartRequest{Name: "keep.txt", Path: "keep.txt", Size: 10, Overwrite: true})
+		UploadStartRequest{Name: "keep.txt", Path: "keep.txt", Size: uploadMinChunkBytes + 5, Overwrite: true})
 	require.Equal(t, http.StatusCreated, s1Rec.Code)
 	var s1 UploadStartResponse
 	require.NoError(t, json.Unmarshal(s1Rec.Body.Bytes(), &s1))
 	u1 := fmt.Sprintf("%s/%s", uploadsURL, s1.ID)
-	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u1+"?offset=0", []byte("12345")).Code)
+	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u1+"?offset=0", bytes.Repeat([]byte("1"), uploadMinChunkBytes)).Code)
 	abortRec := doRequest(t, srv, http.MethodDelete, u1, nil)
 	require.Equal(t, http.StatusNoContent, abortRec.Code)
 	_, err := os.Stat(filepath.Join(sdPath, uploadPartialName(s1.ID)))
@@ -457,12 +457,12 @@ func TestSharedDirUploads_SweeperRemovesPartialsThroughSharedDirRoot(t *testing.
 
 	uploadsURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad/uploads", project.ID)
 	startRec := doRequest(t, srv, http.MethodPost, uploadsURL,
-		UploadStartRequest{Name: "sweep.bin", Path: "sweep.bin", Size: 20, Overwrite: true})
+		UploadStartRequest{Name: "sweep.bin", Path: "sweep.bin", Size: uploadMinChunkBytes + 10, Overwrite: true})
 	require.Equal(t, http.StatusCreated, startRec.Code)
 	var started UploadStartResponse
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	u := fmt.Sprintf("%s/%s", uploadsURL, started.ID)
-	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u+"?offset=0", []byte("0123456789")).Code)
+	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u+"?offset=0", bytes.Repeat([]byte("0"), uploadMinChunkBytes)).Code)
 
 	partialPath := filepath.Join(sdPath, uploadPartialName(started.ID))
 	_, err := os.Stat(partialPath)
@@ -498,21 +498,21 @@ func TestSharedDirUploads_WriteGateRevocationStopsNextChunk(t *testing.T) {
 	project, _ := createTestProjectWithSharedDirs(t, srv, st, "SD Uploads WriteGate", "scratchpad")
 	uploadsURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad/uploads", project.ID)
 
-	// Start and upload chunk 1 while writes are allowed.
+	// Start and upload chunk 1 (1 MiB) while writes are allowed.
 	startRec := doRequest(t, srv, http.MethodPost, uploadsURL,
-		UploadStartRequest{Name: "gated.bin", Path: "gated.bin", Size: 16, Overwrite: true})
+		UploadStartRequest{Name: "gated.bin", Path: "gated.bin", Size: uploadMinChunkBytes + 8, Overwrite: true})
 	require.Equal(t, http.StatusCreated, startRec.Code, "body: %s", startRec.Body.String())
 	var started UploadStartResponse
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	u := fmt.Sprintf("%s/%s", uploadsURL, started.ID)
-	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u+"?offset=0", []byte("01234567")).Code)
+	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u+"?offset=0", bytes.Repeat([]byte("0"), uploadMinChunkBytes)).Code)
 
 	// Activate Cloud Run non-durable write gate: shared-dir writes are now refused.
 	t.Setenv("K_SERVICE", "scion-hub")
 	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{Backend: "local"}
 
 	// Next chunk is refused with 503 shared_dir_writes_unavailable.
-	c2 := sdDoChunkPut(t, srv, "", u+"?offset=8", []byte("89abcdef"))
+	c2 := sdDoChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), []byte("89abcdef"))
 	require.Equal(t, http.StatusServiceUnavailable, c2.Code, "body: %s", c2.Body.String())
 	assert.Equal(t, "shared_dir_writes_unavailable", sdDecodeUploadAPIError(t, c2).Code)
 
@@ -616,7 +616,7 @@ func TestSharedDirUploads_RoleRevocationStopsNextChunk(t *testing.T) {
 
 	uploadsURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad/uploads", project.ID)
 	startRec := doRequestAsUser(t, srv, member, http.MethodPost, uploadsURL,
-		UploadStartRequest{Name: "revoke.bin", Path: "revoke.bin", Size: 16, Overwrite: true})
+		UploadStartRequest{Name: "revoke.bin", Path: "revoke.bin", Size: uploadMinChunkBytes + 8, Overwrite: true})
 	require.Equal(t, http.StatusCreated, startRec.Code, "body: %s", startRec.Body.String())
 	var started UploadStartResponse
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
@@ -626,7 +626,7 @@ func TestSharedDirUploads_RoleRevocationStopsNextChunk(t *testing.T) {
 	require.NoError(t, err)
 
 	u := fmt.Sprintf("%s/%s", uploadsURL, started.ID)
-	c1 := sdDoChunkPut(t, srv, memberToken, u+"?offset=0", []byte("01234567"))
+	c1 := sdDoChunkPut(t, srv, memberToken, u+"?offset=0", bytes.Repeat([]byte("0"), uploadMinChunkBytes))
 	require.Equal(t, http.StatusOK, c1.Code, "body: %s", c1.Body.String())
 
 	// Revoke the user's project role binding between chunks.
@@ -634,7 +634,61 @@ func TestSharedDirUploads_RoleRevocationStopsNextChunk(t *testing.T) {
 	require.NoError(t, err)
 
 	// Next chunk PUT must be rejected by route authorization (403 or 404).
-	c2 := sdDoChunkPut(t, srv, memberToken, u+"?offset=8", []byte("89abcdef"))
+	c2 := sdDoChunkPut(t, srv, memberToken, fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), []byte("89abcdef"))
 	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, c2.Code,
 		"revoked project role must stop the next chunk, got %d: %s", c2.Code, c2.Body.String())
+}
+
+// TestSharedDirUploads_MinChunkFloor verifies ptone decision p2-min-chunk-floor
+// on the shared-dir target: sub-floor non-final chunks are refused with 400
+// chunk_too_small before lease claim (no partial created, idle_expires_at
+// unchanged), while 1 MiB plus a short final chunk succeeds.
+func TestSharedDirUploads_MinChunkFloor(t *testing.T) {
+	srv, st := testServer(t)
+	sdSetLargeUploadsExperiment(t, srv, true)
+	project, sdPaths := createTestProjectWithSharedDirs(t, srv, st, "SD Uploads MinChunk Floor", "scratchpad")
+	sdPath := sdPaths["scratchpad"]
+
+	chunk0 := bytes.Repeat([]byte("s"), uploadMinChunkBytes)
+	chunk1 := []byte("sd-tail")
+	payload := append(append([]byte(nil), chunk0...), chunk1...)
+
+	uploadsURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad/uploads", project.ID)
+	startRec := doRequest(t, srv, http.MethodPost, uploadsURL,
+		UploadStartRequest{Name: "floor.bin", Path: "floor.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("%s/%s", uploadsURL, started.ID)
+
+	before, err := st.GetUploadSession(context.Background(), started.ID)
+	require.NoError(t, err)
+
+	origNow := uploadNowFn
+	t.Cleanup(func() { uploadNowFn = origNow })
+	uploadNowFn = func() time.Time { return time.Now().UTC().Add(5 * time.Minute).Truncate(time.Microsecond) }
+
+	// Sub-floor non-final chunk is refused before lease claim.
+	smallRec := sdDoChunkPut(t, srv, "", u+"?offset=0", []byte("too-small"))
+	require.Equal(t, http.StatusBadRequest, smallRec.Code, "body: %s", smallRec.Body.String())
+	errObj := sdDecodeUploadAPIError(t, smallRec)
+	assert.Equal(t, errCodeUploadChunkTooSmall, errObj.Code)
+	assert.Equal(t, float64(uploadMinChunkBytes), errObj.Details["minChunkBytes"])
+
+	after, err := st.GetUploadSession(context.Background(), started.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), after.Received)
+	assert.True(t, before.IdleExpiresAt.Equal(after.IdleExpiresAt), "refused sub-floor chunk must not extend idle_expires_at")
+	_, statErr := os.Stat(filepath.Join(sdPath, uploadPartialName(started.ID)))
+	assert.True(t, os.IsNotExist(statErr), "refused sub-floor chunk must not create partial file")
+
+	// Valid 1 MiB chunk + short final chunk succeeds.
+	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", u+"?offset=0", chunk0).Code)
+	require.Equal(t, http.StatusOK, sdDoChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), chunk1).Code)
+	compRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusOK, compRec.Code, "body: %s", compRec.Body.String())
+
+	got, err := os.ReadFile(filepath.Join(sdPath, "floor.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, sha256.Sum256(payload), sha256.Sum256(got))
 }
