@@ -2279,18 +2279,18 @@ func TestUpdateAgentStatus_PreRunningToRunningClearsStaleMessage(t *testing.T) {
 		assert.Empty(t, got.Message, "stale message must be cleared on suspended -> running")
 	})
 
-	t.Run("starting rollback to error preserves error message", func(t *testing.T) {
+	t.Run("suspended restore to running preserves message", func(t *testing.T) {
 		s, projectID := newTestAgentStore(t)
-		a := makeAgent(projectID, "starting-rollback-msg")
-		a.Phase = "starting"
-		a.Message = staleErr
+		a := makeAgent(projectID, "suspended-restore-msg")
+		a.Phase = "suspended"
+		a.Message = "prior status"
 		require.NoError(t, s.CreateAgent(ctx, a))
 
-		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "error", IfPhase: "starting", Restore: true}))
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Restore: true}))
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.Equal(t, "error", got.Phase)
-		assert.Equal(t, staleErr, got.Message, "rollback to error must keep the error message")
+		assert.Equal(t, "running", got.Phase)
+		assert.Equal(t, "prior status", got.Message, "Restore write must not clear message")
 	})
 }
 

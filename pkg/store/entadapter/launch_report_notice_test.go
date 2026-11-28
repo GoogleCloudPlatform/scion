@@ -30,7 +30,7 @@ import (
 
 // A succeeded report's message (the start's notice, for example the repository
 // git config keys left out of the agent's private copy) becomes the agent's
-// status message. A succeeded report without one leaves an empty message empty.
+// status message.
 func TestReport_SucceededMessageBecomesAgentMessage(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -103,15 +103,24 @@ func TestReport_SucceededWithoutMessageClearsStaleErrorMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, staleErr, starting.Message)
 
-	// Launch succeeds with no notice message: stale error must be cleared.
+	// Seed a stale stalled marker on the pre-running row so the succeeded
+	// report's own StalledFromActivity clear is exercised directly.
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).SetStalledFromActivity("working").Save(ctx)
+	require.NoError(t, err)
+
+	// Launch succeeds with no notice message: stale error and stalled marker must be cleared.
 	_, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "running", updated.Phase)
 	assert.Empty(t, updated.Message, "stale launch error must be cleared when a subsequent launch succeeds")
+	assert.Empty(t, updated.StalledFromActivity, "stale stalled marker must be cleared when a subsequent launch succeeds")
 
 	persisted, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Empty(t, persisted.Message)
+	assert.Empty(t, persisted.StalledFromActivity)
 }
