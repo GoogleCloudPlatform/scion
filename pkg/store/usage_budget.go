@@ -207,7 +207,7 @@ type UsageBudgetStore interface {
 	// keyset-paginated by id > afterID (when afterID is non-empty) and ordered
 	// by id ASC. When projectID is non-empty, only rows belonging to that
 	// project are returned ((scope_kind = "project" AND scope_id = projectID)
-	// OR (scope_kind = "user_project" AND project_scope_id = projectID)).
+	// OR (scope_kind IN ("user_project", "group") AND project_scope_id = projectID)).
 	// When limit <= 0, no explicit cap is applied.
 	ListOpenUsageBudgetStatesByLimit(ctx context.Context, limitDefinitionID string, activeAt time.Time, projectID, afterID string, limit int) ([]*UsageBudgetState, error)
 

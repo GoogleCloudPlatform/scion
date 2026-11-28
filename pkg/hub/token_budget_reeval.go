@@ -118,12 +118,36 @@ func (e *TokenBudgetEvaluator) ReevalUnprocessed() int64 {
 }
 
 // WaitReeval blocks until all asynchronously scheduled limit-change
-// re-evaluation goroutines have finished (used by tests and graceful shutdown).
+// re-evaluation goroutines have finished (used by tests).
 func (e *TokenBudgetEvaluator) WaitReeval() {
 	if e == nil {
 		return
 	}
 	e.reevalWG.Wait()
+}
+
+// WaitReevalContext blocks until all asynchronously scheduled limit-change
+// re-evaluation goroutines finish or ctx is cancelled. If ctx expires before
+// in-flight re-evaluations drain, it logs a warning, increments the lower-bound
+// reeval_unprocessed counter, and returns ctx.Err().
+func (e *TokenBudgetEvaluator) WaitReevalContext(ctx context.Context) error {
+	if e == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		e.reevalWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		e.recordReevalUnprocessed(1)
+		e.logger.Warn("shutdown context expired while waiting for in-flight token budget re-evaluations",
+			"error", ctx.Err())
+		return ctx.Err()
+	}
 }
 
 // ScheduleReevaluateAfterEntitlementChange dispatches
@@ -237,12 +261,14 @@ func budgetWindowForLimit(limitName string, now time.Time) (start, end time.Time
 	switch limitName {
 	case store.LimitLLMTokensPerProjectDay,
 		store.LimitLLMTokensPerUserDay,
-		store.LimitLLMTokensPerUserProjectDay:
+		store.LimitLLMTokensPerUserProjectDay,
+		store.LimitLLMTokensPerGroupDay:
 		s, e := utcDayWindow(now)
 		return s, e, true
 	case store.LimitLLMTokensPerProjectMonth,
 		store.LimitLLMTokensPerUserMonth,
-		store.LimitLLMTokensPerUserProjectMonth:
+		store.LimitLLMTokensPerUserProjectMonth,
+		store.LimitLLMTokensPerGroupMonth:
 		s, e := utcMonthWindow(now)
 		return s, e, true
 	default:
@@ -279,6 +305,14 @@ func budgetEvalSpecFromRow(def *store.LimitDefinition, row *store.UsageBudgetSta
 		spec.bindingSubject = row.ScopeID
 		spec.bindingScope = store.QuotaScopeProject
 		spec.bindingScopeID = row.ProjectScopeID
+	case store.UsageScopeKindGroup:
+		if row.ProjectScopeID != "" {
+			spec.bindingScope = store.QuotaScopeProject
+			spec.bindingScopeID = row.ProjectScopeID
+		} else {
+			spec.bindingScope = store.QuotaScopeSystem
+			spec.bindingScopeID = ""
+		}
 	default:
 		return budgetEvalSpec{}, false
 	}
@@ -315,41 +349,69 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 	if row == nil {
 		return nil, store.ErrNotFound
 	}
+	// Re-read the row inside the CAS attempt so the CAS candidate is built from
+	// the authoritative row at expectedVersion rather than the handler's earlier
+	// snapshot (O2). If the version already moved, reject immediately with 412.
+	current, err := e.store.GetUsageBudgetStateByID(ctx, row.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current.StateVersion != expectedVersion {
+		return nil, store.ErrBudgetStateConflict
+	}
+
 	now := e.now()
-	if !row.WindowEndUTC.After(now) {
+	if !current.WindowEndUTC.After(now) {
 		return nil, ErrBudgetWindowClosed
 	}
 
 	var nextOverride *time.Time
 	if overrideUntil != nil {
 		t := overrideUntil.UTC().Truncate(time.Microsecond)
-		if !t.After(now) || t.After(row.WindowEndUTC) {
+		if !t.After(now) || t.After(current.WindowEndUTC) {
 			return nil, ErrBudgetOverrideInvalidRange
 		}
 		nextOverride = &t
 	}
 
-	def, err := e.store.GetLimitDefinition(ctx, row.LimitDefinitionID)
+	def, err := e.store.GetLimitDefinition(ctx, current.LimitDefinitionID)
 	if err != nil {
 		return nil, fmt.Errorf("get limit definition: %w", err)
 	}
-	spec, ok := budgetEvalSpecFromRow(def, row)
+	spec, ok := budgetEvalSpecFromRow(def, current)
 	if !ok {
-		return nil, fmt.Errorf("%w: unsupported budget scope kind %q", store.ErrInvalidInput, row.ScopeKind)
+		return nil, fmt.Errorf("%w: unsupported budget scope kind %q", store.ErrInvalidInput, current.ScopeKind)
 	}
 
-	// Structural fresh-cap rule: ResolveEffectiveTokenLimit constructs a fresh
-	// uncached tokenLimitEvalCache after row has already been read.
-	capVal, action, err := e.quota.ResolveEffectiveTokenLimit(
-		ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-	)
+	// Structural fresh-cap writer rule (strict): construct a fresh uncached
+	// strict cache AFTER reading current so binding-load errors are never
+	// mistaken for cap 0 (unlimited) on an override-clear lowering path (O1).
+	freshCache := newStrictTokenLimitEvalCache(e.quota)
+	var capVal int64
+	var action string
+	if spec.scopeKind == store.UsageScopeKindGroup {
+		capVal, action, err = freshCache.resolveGroupByID(
+			ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+		)
+	} else {
+		capVal, action, err = freshCache.resolveByID(
+			ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve effective token limit: %w", err)
 	}
 
-	consumed, err := e.store.SumUsageScopeCounterTokens(
-		ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
-	)
+	var consumed int64
+	if spec.scopeKind == store.UsageScopeKindGroup {
+		consumed, err = e.store.SumUsageGroupRollupTokens(
+			ctx, spec.scopeID, spec.projectScopeID, spec.windowStartUTC, spec.windowEndUTC,
+		)
+	} else {
+		consumed, err = e.store.SumUsageScopeCounterTokens(
+			ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("sum scope counter tokens: %w", err)
 	}
@@ -368,8 +430,8 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 		}
 	}
 
-	beforeCopy := *row
-	candidate := *row
+	beforeCopy := *current
+	candidate := *current
 	candidate.State = nextState
 	candidate.ConsumedAtEval = consumed
 	candidate.CapAtEval = capVal
@@ -495,6 +557,33 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			bindingSubject: binding.SubjectID,
 			bindingScope:   store.QuotaScopeProject,
 			bindingScopeID: binding.ScopeID,
+			windowStartUTC: winStart,
+			windowEndUTC:   winEnd,
+		}
+		if err := e.reevaluateSpec(reevalCtx, spec, def, now); err != nil {
+			e.recordReevalUnprocessed(1)
+			e.recordReevalError(spec, err)
+		}
+		return
+
+	case binding.SubjectType == store.EntitlementSubjectGroup &&
+		binding.SubjectID != "" &&
+		(def.Name == store.LimitLLMTokensPerGroupDay || def.Name == store.LimitLLMTokensPerGroupMonth):
+		projectScopeID := ""
+		bindingScope := store.QuotaScopeSystem
+		bindingScopeID := ""
+		if binding.ScopeType == store.QuotaScopeProject && binding.ScopeID != "" {
+			projectScopeID = binding.ScopeID
+			bindingScope = store.QuotaScopeProject
+			bindingScopeID = binding.ScopeID
+		}
+		spec := budgetEvalSpec{
+			limitName:      def.Name,
+			scopeKind:      store.UsageScopeKindGroup,
+			scopeID:        binding.SubjectID,
+			projectScopeID: projectScopeID,
+			bindingScope:   bindingScope,
+			bindingScopeID: bindingScopeID,
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
@@ -642,11 +731,11 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 			return fmt.Errorf("get usage budget state: %w", err)
 		}
 
-		// Structural fresh-cap writer rule: resolve cap FRESH (uncached) AFTER
-		// reading existing on every CAS attempt so concurrent binding edits
-		// cannot write an outdated cap on retry (applies uniformly to project,
-		// user, user_project, and group scopes).
-		freshCache := newTokenLimitEvalCache(e.quota)
+		// Structural fresh-cap writer rule (strict): resolve cap FRESH (uncached,
+		// propagating binding-load errors) AFTER reading existing on every CAS
+		// attempt so concurrent binding edits cannot write an outdated cap on
+		// retry and transient store errors are never treated as cap 0 (unlimited).
+		freshCache := newStrictTokenLimitEvalCache(e.quota)
 		var capVal int64
 		var action string
 		if spec.scopeKind == store.UsageScopeKindGroup {

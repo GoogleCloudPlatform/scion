@@ -244,7 +244,7 @@ func (s *UsageLedgerStore) ListOpenUsageBudgetStatesByLimit(ctx context.Context,
 				usagebudgetstate.ScopeIDEQ(projectID),
 			),
 			usagebudgetstate.And(
-				usagebudgetstate.ScopeKindEQ(store.UsageScopeKindUserProject),
+				usagebudgetstate.ScopeKindIn(store.UsageScopeKindUserProject, store.UsageScopeKindGroup),
 				usagebudgetstate.ProjectScopeIDEQ(projectID),
 			),
 		))

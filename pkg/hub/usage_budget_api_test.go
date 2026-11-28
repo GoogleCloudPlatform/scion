@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -1693,4 +1694,362 @@ func TestTokenBudgetEvaluator_OTelMetrics(t *testing.T) {
 	}
 	assert.Equal(t, int64(1), counts["scion.hub.budget.eval_errors"])
 	assert.Equal(t, int64(3), counts["scion.hub.budget.reeval_unprocessed"])
+}
+
+func TestUsageBudgets_GroupLimitChangeReevaluation(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-grp-reeval")
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart, _ := utcDayWindow(now)
+	eval := srv.TokenBudgetEvaluator()
+	eval.nowFn = func() time.Time { return now }
+
+	var hookMu sync.Mutex
+	var crossings []BudgetThresholdCrossing
+	eval.SetThresholdHook(func(_ context.Context, c BudgetThresholdCrossing) {
+		hookMu.Lock()
+		crossings = append(crossings, c)
+		hookMu.Unlock()
+	})
+
+	admin := &store.User{ID: uuid.NewString(), Email: "grp-reeval-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+
+	proj := &store.Project{ID: tid("grp-reeval-proj"), Name: "grp-reeval-proj", Slug: "grp-reeval-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{ID: tid("grp-reeval-ag"), Slug: "grp-reeval-ag", Name: "grp-reeval-ag", ProjectID: proj.ID, OwnerID: admin.ID, CreatedBy: admin.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-grp-reeval", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-grp-reeval", Generation: 1, HubID: "hub-bud-grp-reeval", ProjectID: proj.ID, AgentID: ag.ID, BillingUserID: &admin.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+
+	grp := &store.Group{
+		ID:        uuid.NewString(),
+		Name:      "pooled-reeval-team",
+		Slug:      "pooled-reeval-team-" + uuid.NewString()[:8],
+		GroupType: store.GroupTypeExplicit,
+	}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+
+	// Charge 1200 tokens to grp (populates both system and project rollups).
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag.ID,
+		Events: []*store.UsageEvent{{
+			HubID: "hub-bud-grp-reeval", EventID: "ev-grp-reeval-1", RunID: "run-grp-reeval", ProjectID: proj.ID, AgentID: ag.ID,
+			Harness: "claude", Model: "claude-sonnet-4-6", ModelSource: telemetrycontract.ModelSourceEvent,
+			UsageSource: store.UsageSourceNative, Status: telemetrycontract.StatusSuccess, Calls: 1,
+			Input: usageInt64p(1200), Output: usageInt64p(0), TokenStatus: telemetrycontract.TokenStatusReported,
+			EventTS: now, ReceivedAt: now, ProducerEpoch: "ep-1", ProducerSeq: 1,
+			ChargedGroupIDs: []string{grp.ID},
+		}},
+	})
+	require.NoError(t, err)
+
+	defGroupDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupDay)
+	require.NoError(t, err)
+
+	// --- (1) System-scoped pooled group binding (G, "") ---
+	recCreateSys := doUserJSONRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+defGroupDay.ID+"/entitlements", admin, map[string]any{
+		"subjectType": store.EntitlementSubjectGroup,
+		"subjectId":   grp.ID,
+		"scopeType":   store.QuotaScopeSystem,
+		"value":       1000,
+	}, nil)
+	require.Equal(t, http.StatusCreated, recCreateSys.Code, recCreateSys.Body.String())
+	eval.WaitReeval()
+
+	var sysBinding store.EntitlementBinding
+	require.NoError(t, json.Unmarshal(recCreateSys.Body.Bytes(), &sysBinding))
+
+	sysKey := store.UsageBudgetStateKey{
+		LimitDefinitionID: defGroupDay.ID,
+		ScopeKind:         store.UsageScopeKindGroup,
+		ScopeID:           grp.ID,
+		ProjectScopeID:    "",
+		WindowStartUTC:    dayStart,
+	}
+	stSys, err := s.GetUsageBudgetState(ctx, sysKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, stSys.State, "creating a group cap below existing rollup must immediately raise to exhausted")
+	assert.Equal(t, int64(1000), stSys.CapAtEval)
+
+	// Mark 80/100 bits as notified so we verify bit clearing on raise/delete.
+	stSys.ThresholdsNotified = store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100
+	_, err = s.CompareAndSwapUsageBudgetState(ctx, stSys.StateVersion, stSys)
+	require.NoError(t, err)
+
+	// (a) PUT binding raising cap 1000 -> 5000: exhausted -> ok, bits cleared.
+	recRaiseSys := doUserJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+sysBinding.ID, admin, map[string]any{
+		"subjectType": store.EntitlementSubjectGroup,
+		"subjectId":   grp.ID,
+		"scopeType":   store.QuotaScopeSystem,
+		"value":       5000,
+	}, nil)
+	require.Equal(t, http.StatusOK, recRaiseSys.Code, recRaiseSys.Body.String())
+	eval.WaitReeval()
+
+	stSys, err = s.GetUsageBudgetState(ctx, sysKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateOK, stSys.State)
+	assert.Equal(t, int64(5000), stSys.CapAtEval)
+	assert.Equal(t, int64(0), stSys.ThresholdsNotified, "raising group cap must clear unmet 80/100 threshold bits")
+
+	// (b) PUT binding lowering cap 5000 -> 800: ok -> exhausted, fires hook once.
+	hookMu.Lock()
+	crossings = nil
+	hookMu.Unlock()
+	recLowerSys := doUserJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+sysBinding.ID, admin, map[string]any{
+		"subjectType": store.EntitlementSubjectGroup,
+		"subjectId":   grp.ID,
+		"scopeType":   store.QuotaScopeSystem,
+		"value":       800,
+	}, nil)
+	require.Equal(t, http.StatusOK, recLowerSys.Code, recLowerSys.Body.String())
+	eval.WaitReeval()
+
+	stSys, err = s.GetUsageBudgetState(ctx, sysKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, stSys.State)
+	assert.Equal(t, int64(800), stSys.CapAtEval)
+	hookMu.Lock()
+	require.Len(t, crossings, 1, "lowering group cap below consumption must fire threshold hook once")
+	assert.Equal(t, store.UsageBudgetStateOK, crossings[0].PrevState)
+	assert.Equal(t, store.UsageBudgetStateExhausted, crossings[0].NewState)
+	assert.Equal(t, store.UsageScopeKindGroup, crossings[0].ScopeKind)
+	assert.Equal(t, grp.ID, crossings[0].ScopeID)
+	hookMu.Unlock()
+
+	// (c) DELETE binding: exhausted -> ok, cap 0.
+	recDelSys := doUserJSONRequest(t, srv, http.MethodDelete, "/api/v1/admin/entitlements/"+sysBinding.ID, admin, nil, nil)
+	require.Equal(t, http.StatusNoContent, recDelSys.Code, recDelSys.Body.String())
+	eval.WaitReeval()
+
+	stSys, err = s.GetUsageBudgetState(ctx, sysKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateOK, stSys.State, "deleting group binding must lower exhausted pool to ok")
+	assert.Equal(t, int64(0), stSys.CapAtEval)
+
+	// --- (2) Project-scoped pooled group binding (G, P) ---
+	recCreateProj := doUserJSONRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+defGroupDay.ID+"/entitlements", admin, map[string]any{
+		"subjectType": store.EntitlementSubjectGroup,
+		"subjectId":   grp.ID,
+		"scopeType":   store.QuotaScopeProject,
+		"scopeId":     proj.ID,
+		"value":       1000,
+	}, nil)
+	require.Equal(t, http.StatusCreated, recCreateProj.Code, recCreateProj.Body.String())
+	eval.WaitReeval()
+
+	var projBinding store.EntitlementBinding
+	require.NoError(t, json.Unmarshal(recCreateProj.Body.Bytes(), &projBinding))
+
+	projKey := store.UsageBudgetStateKey{
+		LimitDefinitionID: defGroupDay.ID,
+		ScopeKind:         store.UsageScopeKindGroup,
+		ScopeID:           grp.ID,
+		ProjectScopeID:    proj.ID,
+		WindowStartUTC:    dayStart,
+	}
+	stProj, err := s.GetUsageBudgetState(ctx, projKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, stProj.State)
+
+	// Verify ListOpenUsageBudgetStatesByLimit project filter includes (G, P) and excludes (G, "").
+	filtered, err := s.ListOpenUsageBudgetStatesByLimit(ctx, defGroupDay.ID, now, proj.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, stProj.ID, filtered[0].ID)
+
+	// Raise project-scoped group cap 1000 -> 5000 -> ok.
+	recRaiseProj := doUserJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+projBinding.ID, admin, map[string]any{
+		"subjectType": store.EntitlementSubjectGroup,
+		"subjectId":   grp.ID,
+		"scopeType":   store.QuotaScopeProject,
+		"scopeId":     proj.ID,
+		"value":       5000,
+	}, nil)
+	require.Equal(t, http.StatusOK, recRaiseProj.Code, recRaiseProj.Body.String())
+	eval.WaitReeval()
+
+	stProj, err = s.GetUsageBudgetState(ctx, projKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateOK, stProj.State)
+	assert.Equal(t, int64(5000), stProj.CapAtEval)
+
+	// Lower project-scoped group cap 5000 -> 900 -> exhausted, hook fired once.
+	hookMu.Lock()
+	crossings = nil
+	hookMu.Unlock()
+	recLowerProj := doUserJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+projBinding.ID, admin, map[string]any{
+		"subjectType": store.EntitlementSubjectGroup,
+		"subjectId":   grp.ID,
+		"scopeType":   store.QuotaScopeProject,
+		"scopeId":     proj.ID,
+		"value":       900,
+	}, nil)
+	require.Equal(t, http.StatusOK, recLowerProj.Code, recLowerProj.Body.String())
+	eval.WaitReeval()
+
+	stProj, err = s.GetUsageBudgetState(ctx, projKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, stProj.State)
+	hookMu.Lock()
+	require.Len(t, crossings, 1)
+	assert.Equal(t, proj.ID, crossings[0].ProjectScopeID)
+	hookMu.Unlock()
+
+	// Delete project-scoped group binding -> ok.
+	recDelProj := doUserJSONRequest(t, srv, http.MethodDelete, "/api/v1/admin/entitlements/"+projBinding.ID, admin, nil, nil)
+	require.Equal(t, http.StatusNoContent, recDelProj.Code, recDelProj.Body.String())
+	eval.WaitReeval()
+
+	stProj, err = s.GetUsageBudgetState(ctx, projKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateOK, stProj.State)
+}
+
+type failingSystemBindingsStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingSystemBindingsStore) ListEntitlementBindingsForSubject(ctx context.Context, subjectType, subjectID string) ([]*store.EntitlementBinding, error) {
+	if subjectType == store.EntitlementSubjectSystemDefault {
+		return nil, f.err
+	}
+	return f.Store.ListEntitlementBindingsForSubject(ctx, subjectType, subjectID)
+}
+
+func TestUsageBudgets_BindingLoadErrorAbortsReevaluation(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart, dayEnd := utcDayWindow(now)
+
+	proj := &store.Project{ID: tid("o1-proj"), Name: "o1-proj", Slug: "o1-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	defProjDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defProjDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	origBits := int64(store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100)
+	_, err = s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID:  defProjDay.ID,
+		ScopeKind:          store.UsageScopeKindProject,
+		ScopeID:            proj.ID,
+		WindowStartUTC:     dayStart,
+		WindowEndUTC:       dayEnd,
+		State:              store.UsageBudgetStateExhausted,
+		ConsumedAtEval:     1200,
+		CapAtEval:          1000,
+		ThresholdsNotified: origBits,
+		StateVersion:       1,
+	})
+	require.NoError(t, err)
+
+	faultStore := &failingSystemBindingsStore{Store: s, err: errors.New("injected transient DB error")}
+	eval := NewTokenBudgetEvaluator(faultStore, &QuotaService{store: faultStore}, nil, func() bool { return true })
+	eval.nowFn = func() time.Time { return now }
+
+	spec := budgetEvalSpec{
+		limitName:      store.LimitLLMTokensPerProjectDay,
+		scopeKind:      store.UsageScopeKindProject,
+		scopeID:        proj.ID,
+		counterScopeID: proj.ID,
+		bindingScope:   store.QuotaScopeProject,
+		bindingScopeID: proj.ID,
+		windowStartUTC: dayStart,
+		windowEndUTC:   dayEnd,
+	}
+	err = eval.reevaluateSpec(ctx, spec, defProjDay, now)
+	require.Error(t, err, "binding-load store error must abort reevaluateSpec instead of treating cap as 0")
+
+	// Verify the row was NOT lowered to ok and bits were NOT cleared.
+	after, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, after.State)
+	assert.Equal(t, int64(1000), after.CapAtEval)
+	assert.Equal(t, origBits, after.ThresholdsNotified)
+}
+
+func TestUsageBudgets_OverrideBuildsCandidateFromFreshRow(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart, dayEnd := utcDayWindow(now)
+	eval := srv.TokenBudgetEvaluator()
+	eval.nowFn = func() time.Time { return now }
+
+	proj := &store.Project{ID: tid("o2-proj"), Name: "o2-proj", Slug: "o2-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	defProjDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+
+	rowV1, err := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID:  defProjDay.ID,
+		ScopeKind:          store.UsageScopeKindProject,
+		ScopeID:            proj.ID,
+		WindowStartUTC:     dayStart,
+		WindowEndUTC:       dayEnd,
+		State:              store.UsageBudgetStateExhausted,
+		ConsumedAtEval:     1200,
+		CapAtEval:          1000,
+		ThresholdsNotified: 0,
+		StateVersion:       1,
+	})
+	require.NoError(t, err)
+	staleSnapshot := *rowV1 // version 1, ThresholdsNotified == 0
+
+	// Advance row in DB to version 2 with ThresholdsNotified set.
+	v2Bits := int64(store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100)
+	v2 := *rowV1
+	v2.ThresholdsNotified = v2Bits
+	_, err = s.CompareAndSwapUsageBudgetState(ctx, 1, &v2)
+	require.NoError(t, err)
+
+	future := now.Add(2 * time.Hour)
+	// Client passes expectedVersion=2 while handler snapshot is stale version 1.
+	res, err := eval.OverrideBudgetState(ctx, &staleSnapshot, &future, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), res.After.StateVersion)
+	assert.Equal(t, v2Bits, res.After.ThresholdsNotified, "override must build CAS candidate from fresh v2 row, preserving v2 ThresholdsNotified")
+
+	// Calling with outdated expectedVersion=2 now that DB is at version 3 must fail with conflict.
+	_, err = eval.OverrideBudgetState(ctx, &staleSnapshot, &future, 2)
+	assert.ErrorIs(t, err, store.ErrBudgetStateConflict)
+}
+
+func TestTokenBudgetEvaluator_WaitReevalContextHonorsCancel(t *testing.T) {
+	eval := NewTokenBudgetEvaluator(nil, nil, nil, func() bool { return true })
+	eval.reevalWG.Add(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := eval.WaitReevalContext(ctx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, int64(1), eval.ReevalUnprocessed())
+
+	eval.reevalWG.Done()
+	assert.NoError(t, eval.WaitReevalContext(context.Background()))
 }

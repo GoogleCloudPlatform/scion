@@ -758,7 +758,8 @@ func (qs *QuotaService) ResolveEffectiveTokenLimit(ctx context.Context, limitDef
 // IsScopeExhaustedForAction call so evaluating all 6 raw-token limits for a
 // user/project does not repeat identical store queries.
 type tokenLimitEvalCache struct {
-	qs *QuotaService
+	qs     *QuotaService
+	strict bool
 
 	defsLoaded bool
 	defsByName map[string]*store.LimitDefinition
@@ -783,6 +784,17 @@ func newTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
 	}
 }
 
+// newStrictTokenLimitEvalCache constructs a fresh cache that propagates
+// binding-load and group-membership lookup errors instead of swallowing them.
+// Used by all budget-state writer and lowering paths (reevaluateSpec,
+// OverrideBudgetState, evaluateSpec fresh resolve) so a transient store error
+// can never be mistaken for an unlimited (cap 0) limit.
+func newStrictTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
+	c := newTokenLimitEvalCache(qs)
+	c.strict = true
+	return c
+}
+
 func (c *tokenLimitEvalCache) lookupLimitDef(ctx context.Context, name string) (*store.LimitDefinition, error) {
 	if !c.defsLoaded {
 		defs, err := c.qs.store.ListLimitDefinitions(ctx)
@@ -798,12 +810,15 @@ func (c *tokenLimitEvalCache) lookupLimitDef(ctx context.Context, name string) (
 	return c.defsByName[name], nil
 }
 
-func (c *tokenLimitEvalCache) loadSystemBindings(ctx context.Context) []*store.EntitlementBinding {
+func (c *tokenLimitEvalCache) loadSystemBindings(ctx context.Context) ([]*store.EntitlementBinding, error) {
 	if c.sysLoaded {
-		return c.sysBindings
+		return c.sysBindings, nil
 	}
 	sysBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectSystemDefault, "")
 	if err != nil {
+		if c.strict {
+			return nil, fmt.Errorf("list system_default bindings: %w", err)
+		}
 		if c.qs.logger != nil {
 			c.qs.logger.Debug("failed to list system default bindings for token budget resolution", "error", err)
 		}
@@ -811,7 +826,7 @@ func (c *tokenLimitEvalCache) loadSystemBindings(ctx context.Context) []*store.E
 		c.sysBindings = sysBindings
 	}
 	c.sysLoaded = true
-	return c.sysBindings
+	return c.sysBindings, nil
 }
 
 func (c *tokenLimitEvalCache) loadSubjectBindings(ctx context.Context, subjectID string) ([]*store.EntitlementBinding, error) {
@@ -831,6 +846,9 @@ func (c *tokenLimitEvalCache) loadSubjectBindings(ctx context.Context, subjectID
 
 	groupMemberships, err := c.qs.store.GetUserGroups(ctx, subjectID)
 	if err != nil {
+		if c.strict {
+			return nil, fmt.Errorf("get user groups: %w", err)
+		}
 		if c.qs.logger != nil {
 			c.qs.logger.Debug("failed to get user groups for token budget resolution",
 				"subject_id", subjectID, "error", err)
@@ -839,6 +857,9 @@ func (c *tokenLimitEvalCache) loadSubjectBindings(ctx context.Context, subjectID
 		for _, gm := range groupMemberships {
 			groupBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, gm.GroupID)
 			if err != nil {
+				if c.strict {
+					return nil, fmt.Errorf("list group bindings for %s: %w", gm.GroupID, err)
+				}
 				if c.qs.logger != nil {
 					c.qs.logger.Debug("failed to list group bindings for token budget resolution",
 						"group_id", gm.GroupID, "error", err)
@@ -877,7 +898,11 @@ func (c *tokenLimitEvalCache) resolve(ctx context.Context, limitDefID string, de
 		}
 	}
 
-	for _, b := range c.loadSystemBindings(ctx) {
+	sysBindings, err := c.loadSystemBindings(ctx)
+	if err != nil {
+		return 0, store.TokenActionPauseNew, err
+	}
+	for _, b := range sysBindings {
 		if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
 			matchingBindings = append(matchingBindings, b)
 		}

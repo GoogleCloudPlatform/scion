@@ -550,7 +550,11 @@ func (s *Server) listCandidateUserProjectsForCaller(
 				hasHubWideUPDefault = true
 			}
 		}
-		for _, b := range evalCache.loadSystemBindings(ctx) {
+		sysBindings, err := evalCache.loadSystemBindings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range sysBindings {
 			if !upDefIDs[b.LimitDefinitionID] || b.Value <= 0 {
 				continue
 			}
