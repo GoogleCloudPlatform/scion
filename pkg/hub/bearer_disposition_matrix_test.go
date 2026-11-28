@@ -251,6 +251,26 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
 		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
 	},
+	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}/complete"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
 	{OperationID: "project.messagepolicy.test", Method: "POST", Pattern: "/api/v1/projects/{id}/message-policies/test"}: {
 		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
 		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",

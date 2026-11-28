@@ -6180,6 +6180,7 @@
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files/{path}` |
+| http_route | GET | `/api/v1/projects/{id}/workspace/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
@@ -6215,6 +6216,10 @@
 | http_route | PUT | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/pull` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/uploads` |
+| http_route | PUT | `/api/v1/projects/{id}/workspace/uploads/{sid}` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/uploads/{sid}/complete` |
+| http_route | DELETE | `/api/v1/projects/{id}/workspace/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
