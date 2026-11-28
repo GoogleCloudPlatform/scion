@@ -639,6 +639,9 @@ type Store interface {
 
 	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
 	AgentSuspendScreenStore
+
+	// Resumable chunked web upload sessions (ptone/scion#8654)
+	UploadSessionStore
 }
 
 // StallCutoffs holds the activity-age cutoffs used by MarkStalledAgents.

@@ -54,7 +54,11 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { projectDisplayName } from '../../client/project-label.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
-import { getUploadLimits, validateWorkspaceUploadFiles } from '../../client/upload-limits.js';
+import {
+  getUploadLimits,
+  legacyWorkspaceMaxFileSize,
+  validateWorkspaceUploadFiles,
+} from '../../client/upload-limits.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { dragAxis, wheelNotches } from '../../shared/terminal-wheel.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
@@ -2366,9 +2370,12 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private async _handleFileDrop(files: FileList): Promise<void> {
-    // Client-side size validation using hub-published limits.
+    // Client-side size validation using hub-published limits (clamped to legacy 100 MiB cap).
     const limits = await getUploadLimits();
-    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
+    const sizeErr = validateWorkspaceUploadFiles(
+      files,
+      legacyWorkspaceMaxFileSize(limits.maxWorkspaceFileSize)
+    );
     if (sizeErr) {
       this._showUploadError(sizeErr);
       return;

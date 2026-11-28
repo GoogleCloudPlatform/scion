@@ -118,6 +118,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
@@ -4456,6 +4457,56 @@ func init() {
 	triggersubjectclaimDescID := triggersubjectclaimFields[0].Descriptor()
 	// triggersubjectclaim.DefaultID holds the default value on creation for the id field.
 	triggersubjectclaim.DefaultID = triggersubjectclaimDescID.Default.(func() uuid.UUID)
+	uploadsessionFields := schema.UploadSession{}.Fields()
+	_ = uploadsessionFields
+	// uploadsessionDescHubID is the schema descriptor for hub_id field.
+	uploadsessionDescHubID := uploadsessionFields[1].Descriptor()
+	// uploadsession.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	uploadsession.HubIDValidator = uploadsessionDescHubID.Validators[0].(func(string) error)
+	// uploadsessionDescOwnerKind is the schema descriptor for owner_kind field.
+	uploadsessionDescOwnerKind := uploadsessionFields[2].Descriptor()
+	// uploadsession.OwnerKindValidator is a validator for the "owner_kind" field. It is called by the builders before save.
+	uploadsession.OwnerKindValidator = uploadsessionDescOwnerKind.Validators[0].(func(string) error)
+	// uploadsessionDescOwnerID is the schema descriptor for owner_id field.
+	uploadsessionDescOwnerID := uploadsessionFields[3].Descriptor()
+	// uploadsession.OwnerIDValidator is a validator for the "owner_id" field. It is called by the builders before save.
+	uploadsession.OwnerIDValidator = uploadsessionDescOwnerID.Validators[0].(func(string) error)
+	// uploadsessionDescOverwrite is the schema descriptor for overwrite field.
+	uploadsessionDescOverwrite := uploadsessionFields[8].Descriptor()
+	// uploadsession.DefaultOverwrite holds the default value on creation for the overwrite field.
+	uploadsession.DefaultOverwrite = uploadsessionDescOverwrite.Default.(bool)
+	// uploadsessionDescFileName is the schema descriptor for file_name field.
+	uploadsessionDescFileName := uploadsessionFields[9].Descriptor()
+	// uploadsession.FileNameValidator is a validator for the "file_name" field. It is called by the builders before save.
+	uploadsession.FileNameValidator = uploadsessionDescFileName.Validators[0].(func(string) error)
+	// uploadsessionDescMediaType is the schema descriptor for media_type field.
+	uploadsessionDescMediaType := uploadsessionFields[10].Descriptor()
+	// uploadsession.DefaultMediaType holds the default value on creation for the media_type field.
+	uploadsession.DefaultMediaType = uploadsessionDescMediaType.Default.(string)
+	// uploadsessionDescDeclaredSize is the schema descriptor for declared_size field.
+	uploadsessionDescDeclaredSize := uploadsessionFields[11].Descriptor()
+	// uploadsession.DeclaredSizeValidator is a validator for the "declared_size" field. It is called by the builders before save.
+	uploadsession.DeclaredSizeValidator = uploadsessionDescDeclaredSize.Validators[0].(func(int64) error)
+	// uploadsessionDescReceived is the schema descriptor for received field.
+	uploadsessionDescReceived := uploadsessionFields[12].Descriptor()
+	// uploadsession.DefaultReceived holds the default value on creation for the received field.
+	uploadsession.DefaultReceived = uploadsessionDescReceived.Default.(int64)
+	// uploadsession.ReceivedValidator is a validator for the "received" field. It is called by the builders before save.
+	uploadsession.ReceivedValidator = uploadsessionDescReceived.Validators[0].(func(int64) error)
+	// uploadsessionDescStagingRef is the schema descriptor for staging_ref field.
+	uploadsessionDescStagingRef := uploadsessionFields[16].Descriptor()
+	// uploadsession.StagingRefValidator is a validator for the "staging_ref" field. It is called by the builders before save.
+	uploadsession.StagingRefValidator = uploadsessionDescStagingRef.Validators[0].(func(string) error)
+	// uploadsessionDescTakeovers is the schema descriptor for takeovers field.
+	uploadsessionDescTakeovers := uploadsessionFields[20].Descriptor()
+	// uploadsession.DefaultTakeovers holds the default value on creation for the takeovers field.
+	uploadsession.DefaultTakeovers = uploadsessionDescTakeovers.Default.(int)
+	// uploadsession.TakeoversValidator is a validator for the "takeovers" field. It is called by the builders before save.
+	uploadsession.TakeoversValidator = uploadsessionDescTakeovers.Validators[0].(func(int) error)
+	// uploadsessionDescID is the schema descriptor for id field.
+	uploadsessionDescID := uploadsessionFields[0].Descriptor()
+	// uploadsession.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	uploadsession.IDValidator = uploadsessionDescID.Validators[0].(func(string) error)
 	usagebudgetstateFields := schema.UsageBudgetState{}.Fields()
 	_ = usagebudgetstateFields
 	// usagebudgetstateDescScopeKind is the schema descriptor for scope_kind field.

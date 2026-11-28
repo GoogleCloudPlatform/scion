@@ -128,6 +128,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
@@ -373,6 +374,8 @@ type Client struct {
 	TriggerFire *TriggerFireClient
 	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
 	TriggerSubjectClaim *TriggerSubjectClaimClient
+	// UploadSession is the client for interacting with the UploadSession builders.
+	UploadSession *UploadSessionClient
 	// UsageBudgetState is the client for interacting with the UsageBudgetState builders.
 	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
@@ -524,6 +527,7 @@ func (c *Client) init() {
 	c.TriggerEvent = NewTriggerEventClient(c.config)
 	c.TriggerFire = NewTriggerFireClient(c.config)
 	c.TriggerSubjectClaim = NewTriggerSubjectClaimClient(c.config)
+	c.UploadSession = NewUploadSessionClient(c.config)
 	c.UsageBudgetState = NewUsageBudgetStateClient(c.config)
 	c.UsageEvent = NewUsageEventClient(c.config)
 	c.UsageGroupRollupDaily = NewUsageGroupRollupDailyClient(c.config)
@@ -742,6 +746,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
 		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
+		UploadSession:                 NewUploadSessionClient(cfg),
 		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
 		UsageGroupRollupDaily:         NewUsageGroupRollupDailyClient(cfg),
@@ -887,6 +892,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
 		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
+		UploadSession:                 NewUploadSessionClient(cfg),
 		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
 		UsageGroupRollupDaily:         NewUsageGroupRollupDailyClient(cfg),
@@ -960,10 +966,11 @@ func (c *Client) Use(hooks ...Hook) {
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
 		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UsageBudgetState, c.UsageEvent, c.UsageGroupRollupDaily, c.UsageReservation,
-		c.UsageRollupDaily, c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupRollupDaily,
+		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
+		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -1003,10 +1010,11 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
 		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UsageBudgetState, c.UsageEvent, c.UsageGroupRollupDaily, c.UsageReservation,
-		c.UsageRollupDaily, c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupRollupDaily,
+		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
+		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1239,6 +1247,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.TriggerFire.mutate(ctx, m)
 	case *TriggerSubjectClaimMutation:
 		return c.TriggerSubjectClaim.mutate(ctx, m)
+	case *UploadSessionMutation:
+		return c.UploadSession.mutate(ctx, m)
 	case *UsageBudgetStateMutation:
 		return c.UsageBudgetState.mutate(ctx, m)
 	case *UsageEventMutation:
@@ -16792,6 +16802,139 @@ func (c *TriggerSubjectClaimClient) mutate(ctx context.Context, m *TriggerSubjec
 	}
 }
 
+// UploadSessionClient is a client for the UploadSession schema.
+type UploadSessionClient struct {
+	config
+}
+
+// NewUploadSessionClient returns a client for the UploadSession from the given config.
+func NewUploadSessionClient(c config) *UploadSessionClient {
+	return &UploadSessionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `uploadsession.Hooks(f(g(h())))`.
+func (c *UploadSessionClient) Use(hooks ...Hook) {
+	c.hooks.UploadSession = append(c.hooks.UploadSession, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `uploadsession.Intercept(f(g(h())))`.
+func (c *UploadSessionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UploadSession = append(c.inters.UploadSession, interceptors...)
+}
+
+// Create returns a builder for creating a UploadSession entity.
+func (c *UploadSessionClient) Create() *UploadSessionCreate {
+	mutation := newUploadSessionMutation(c.config, OpCreate)
+	return &UploadSessionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UploadSession entities.
+func (c *UploadSessionClient) CreateBulk(builders ...*UploadSessionCreate) *UploadSessionCreateBulk {
+	return &UploadSessionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UploadSessionClient) MapCreateBulk(slice any, setFunc func(*UploadSessionCreate, int)) *UploadSessionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UploadSessionCreateBulk{err: fmt.Errorf("calling to UploadSessionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UploadSessionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UploadSessionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UploadSession.
+func (c *UploadSessionClient) Update() *UploadSessionUpdate {
+	mutation := newUploadSessionMutation(c.config, OpUpdate)
+	return &UploadSessionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UploadSessionClient) UpdateOne(_m *UploadSession) *UploadSessionUpdateOne {
+	mutation := newUploadSessionMutation(c.config, OpUpdateOne, withUploadSession(_m))
+	return &UploadSessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UploadSessionClient) UpdateOneID(id string) *UploadSessionUpdateOne {
+	mutation := newUploadSessionMutation(c.config, OpUpdateOne, withUploadSessionID(id))
+	return &UploadSessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UploadSession.
+func (c *UploadSessionClient) Delete() *UploadSessionDelete {
+	mutation := newUploadSessionMutation(c.config, OpDelete)
+	return &UploadSessionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UploadSessionClient) DeleteOne(_m *UploadSession) *UploadSessionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UploadSessionClient) DeleteOneID(id string) *UploadSessionDeleteOne {
+	builder := c.Delete().Where(uploadsession.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UploadSessionDeleteOne{builder}
+}
+
+// Query returns a query builder for UploadSession.
+func (c *UploadSessionClient) Query() *UploadSessionQuery {
+	return &UploadSessionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUploadSession},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UploadSession entity by its id.
+func (c *UploadSessionClient) Get(ctx context.Context, id string) (*UploadSession, error) {
+	return c.Query().Where(uploadsession.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UploadSessionClient) GetX(ctx context.Context, id string) *UploadSession {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UploadSessionClient) Hooks() []Hook {
+	return c.hooks.UploadSession
+}
+
+// Interceptors returns the client interceptors.
+func (c *UploadSessionClient) Interceptors() []Interceptor {
+	return c.inters.UploadSession
+}
+
+func (c *UploadSessionClient) mutate(ctx context.Context, m *UploadSessionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UploadSessionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UploadSessionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UploadSessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UploadSessionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UploadSession mutation op: %q", m.Op())
+	}
+}
+
 // UsageBudgetStateClient is a client for the UsageBudgetState schema.
 type UsageBudgetStateClient struct {
 	config
@@ -18891,9 +19034,9 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UsageBudgetState, UsageEvent, UsageGroupRollupDaily, UsageReservation,
-		UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily, User,
-		UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UploadSession, UsageBudgetState, UsageEvent, UsageGroupRollupDaily,
+		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
+		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
 		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
@@ -18923,9 +19066,9 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UsageBudgetState, UsageEvent, UsageGroupRollupDaily, UsageReservation,
-		UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily, User,
-		UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UploadSession, UsageBudgetState, UsageEvent, UsageGroupRollupDaily,
+		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
+		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
 		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )

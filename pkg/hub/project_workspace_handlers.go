@@ -57,6 +57,13 @@ const maxUploadTotalSize = 100 * 1024 * 1024
 // use server.hub.uploads.max_workspace_file_size instead.
 const maxUploadFileSize = 50 * 1024 * 1024
 
+// WorkspaceUploadMaxFileBytes returns the effective per-file size limit for
+// workspace and shared-dir uploads, backed by live Layer-1 opsettings
+// (server.hub.uploads.max_workspace_file_size, ptone/scion#9619).
+func (s *Server) WorkspaceUploadMaxFileBytes(_ context.Context) int64 {
+	return s.ResolvedUploads().EffectiveMaxWorkspaceFileSize()
+}
+
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 
@@ -318,6 +325,9 @@ func (walkDirSearcher) Search(root *os.Root, query string, limit int) (FileSearc
 			return err
 		}
 		if path == "." || d.IsDir() {
+			return nil
+		}
+		if isUploadPartialName(d.Name()) {
 			return nil
 		}
 		info, infoErr := d.Info()
@@ -730,7 +740,10 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 
 	// Validate every file (the field name is its relative path) before
 	// writing any, so a refused file leaves the workspace unchanged.
-	maxFile := s.ResolvedUploads().EffectiveMaxWorkspaceFileSize()
+	// Legacy single-request multipart uploads remain clamped to 100 MiB
+	// (config.MaxUploadFileSize) regardless of max_workspace_file_size; larger
+	// files use resumable chunked uploads.
+	maxFile := min(s.ResolvedUploads().EffectiveMaxWorkspaceFileSize(), config.MaxUploadFileSize)
 	for relPath, fileHeaders := range r.MultipartForm.File {
 		if err := validateWorkspaceWritePath(relPath); err != nil {
 			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))
@@ -919,6 +932,9 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 		}
 
 		if path == "." || d.IsDir() {
+			return nil
+		}
+		if isUploadPartialName(d.Name()) {
 			return nil
 		}
 
@@ -1991,6 +2007,11 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 		filePath := strings.TrimPrefix(subPath, "workspace/files")
 		filePath = strings.TrimPrefix(filePath, "/")
 		s.handleProjectWorkspace(w, r, project, filePath)
+
+	case subPath == "workspace/uploads" || strings.HasPrefix(subPath, "workspace/uploads/"):
+		uploadSubPath := strings.TrimPrefix(subPath, "workspace/uploads")
+		uploadSubPath = strings.TrimPrefix(uploadSubPath, "/")
+		s.handleProjectWorkspaceUploads(w, r, project, uploadSubPath)
 
 	default:
 		// Reached only for a workspace subpath with no handler, e.g.

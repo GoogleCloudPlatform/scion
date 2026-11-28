@@ -118,8 +118,14 @@ var layer1RoundTripSamples = map[string]string{
 	"server.hub.observability.metrics_enabled": `true`,
 	"server.hub.observability.tracing_enabled": `false`,
 	// uploads
-	"server.hub.uploads.max_attachment_size":     `20971520`,
-	"server.hub.uploads.max_workspace_file_size": `83886080`,
+	"server.hub.uploads.max_attachment_size":        `20971520`,
+	"server.hub.uploads.max_workspace_file_size":    `83886080`,
+	"server.hub.uploads.chunk_bytes":                `4194304`,
+	"server.hub.uploads.session_idle_ttl":           `"2h"`,
+	"server.hub.uploads.session_max_lifetime":       `"48h"`,
+	"server.hub.uploads.max_sessions_per_user":      `8`,
+	"server.hub.uploads.max_pending_bytes_per_user": `4294967296`,
+	"server.hub.uploads.max_pending_bytes_hub":      `34359738368`,
 	// branding (deep-merged)
 	"server.hub.branding.name":                         `"Acme Cloud"`,
 	"server.hub.branding.short_name":                   `"Acme"`,

@@ -1353,6 +1353,18 @@ func (f TriggerSubjectClaimFunc) Mutate(ctx context.Context, m ent.Mutation) (en
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerSubjectClaimMutation", m)
 }
 
+// The UploadSessionFunc type is an adapter to allow the use of ordinary
+// function as UploadSession mutator.
+type UploadSessionFunc func(context.Context, *ent.UploadSessionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UploadSessionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UploadSessionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UploadSessionMutation", m)
+}
+
 // The UsageBudgetStateFunc type is an adapter to allow the use of ordinary
 // function as UsageBudgetState mutator.
 type UsageBudgetStateFunc func(context.Context, *ent.UsageBudgetStateMutation) (ent.Value, error)

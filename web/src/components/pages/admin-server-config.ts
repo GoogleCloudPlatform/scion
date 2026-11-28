@@ -214,6 +214,23 @@ interface V1ServerHubConfig {
   gcp_iam_check_mode?: string;
   gcp_iam_deny_unknown_policy?: string;
   observability?: V1ServerHubObservabilityConfig;
+  uploads?: V1ServerHubUploadsConfig;
+}
+
+/**
+ * Hub upload limits, chunk sizing, and resumable session quotas
+ * (server.hub.uploads, ptone/scion#9619 & #8654). Omitted keys keep their
+ * stored value; null resets a key to its default.
+ */
+interface V1ServerHubUploadsConfig {
+  max_attachment_size?: number | null;
+  max_workspace_file_size?: number | null;
+  chunk_bytes?: number | null;
+  session_idle_ttl?: string | null;
+  session_max_lifetime?: string | null;
+  max_sessions_per_user?: number | null;
+  max_pending_bytes_per_user?: number | null;
+  max_pending_bytes_hub?: number | null;
 }
 
 /**
@@ -728,6 +745,15 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // hub_observability section
   'server.hub.observability.metrics_enabled': 'Hub Metrics Export',
   'server.hub.observability.tracing_enabled': 'Hub Trace Export',
+  // uploads section
+  'server.hub.uploads.max_attachment_size': 'Uploads: Max Attachment Size',
+  'server.hub.uploads.max_workspace_file_size': 'Uploads: Max Workspace File Size',
+  'server.hub.uploads.chunk_bytes': 'Uploads: Chunk Size',
+  'server.hub.uploads.session_idle_ttl': 'Uploads: Session Idle TTL',
+  'server.hub.uploads.session_max_lifetime': 'Uploads: Session Max Lifetime',
+  'server.hub.uploads.max_sessions_per_user': 'Uploads: Max Sessions Per User',
+  'server.hub.uploads.max_pending_bytes_per_user': 'Uploads: Max Pending Bytes Per User',
+  'server.hub.uploads.max_pending_bytes_hub': 'Uploads: Max Pending Bytes (Hub)',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // quotas section
@@ -901,6 +927,127 @@ const CLOUD_LOGGING_KEY = 'telemetry.cloud.cloud_logging';
 const PUBLIC_URL_KEY = 'server.hub.public_url';
 const HUB_METRICS_ENABLED_KEY = 'server.hub.observability.metrics_enabled';
 const HUB_TRACING_ENABLED_KEY = 'server.hub.observability.tracing_enabled';
+
+type HubUploadFieldKey = keyof V1ServerHubUploadsConfig;
+
+interface HubUploadFieldSpec {
+  key: HubUploadFieldKey;
+  label: string;
+  kind: 'int' | 'duration';
+  defaultLabel: string;
+  placeholder: string;
+  hint: string;
+  min?: number;
+  max?: number;
+}
+
+/**
+ * Editable fields under `server.hub.uploads` (Layer-1 section `uploads`).
+ * `max_workspace_file_size` intentionally omits a hard-coded `max` attribute
+ * so its upper bound stays data-driven / enforced by the server.
+ */
+const HUB_UPLOAD_FIELDS: readonly HubUploadFieldSpec[] = [
+  {
+    key: 'max_attachment_size',
+    label: 'Max Attachment Size (bytes)',
+    kind: 'int',
+    defaultLabel: '10 MiB (default)',
+    placeholder: '10485760',
+    hint: '0–104857600 bytes (default 10 MiB).',
+    min: 0,
+    max: 104857600,
+  },
+  {
+    key: 'max_workspace_file_size',
+    label: 'Max Workspace File Size (bytes)',
+    kind: 'int',
+    defaultLabel: '50 MiB (default)',
+    placeholder: '52428800',
+    hint: 'Maximum single workspace/shared-dir file size in bytes (default 50 MiB; validated by server).',
+    min: 0,
+  },
+  {
+    key: 'chunk_bytes',
+    label: 'Chunk Size (bytes)',
+    kind: 'int',
+    defaultLabel: '8 MiB (default)',
+    placeholder: '8388608',
+    hint: '1048576–16777216 bytes (1 MiB–16 MiB, default 8 MiB).',
+    min: 1048576,
+    max: 16777216,
+  },
+  {
+    key: 'session_idle_ttl',
+    label: 'Session Idle TTL',
+    kind: 'duration',
+    defaultLabel: '1h (default)',
+    placeholder: '1h',
+    hint: 'Go duration between 5m and 24h (default 1h).',
+  },
+  {
+    key: 'session_max_lifetime',
+    label: 'Session Max Lifetime',
+    kind: 'duration',
+    defaultLabel: '24h (default)',
+    placeholder: '24h',
+    hint: 'Go duration ≥ Session Idle TTL and ≤ 7d (default 24h).',
+  },
+  {
+    key: 'max_sessions_per_user',
+    label: 'Max Sessions Per User',
+    kind: 'int',
+    defaultLabel: '4 (default)',
+    placeholder: '4',
+    hint: '1–64 concurrent upload sessions per user (default 4).',
+    min: 1,
+    max: 64,
+  },
+  {
+    key: 'max_pending_bytes_per_user',
+    label: 'Max Pending Bytes Per User',
+    kind: 'int',
+    defaultLabel: '2 GiB (default)',
+    placeholder: '2147483648',
+    hint: '≥ 1 byte (default 2 GiB). Warns if below the largest per-file limit.',
+    min: 1,
+  },
+  {
+    key: 'max_pending_bytes_hub',
+    label: 'Max Pending Bytes (Hub)',
+    kind: 'int',
+    defaultLabel: '16 GiB (default)',
+    placeholder: '17179869184',
+    hint: '≥ Max Pending Bytes Per User (default 16 GiB).',
+    min: 1,
+  },
+];
+
+function emptyHubUploads(): Record<HubUploadFieldKey, string> {
+  return {
+    max_attachment_size: '',
+    max_workspace_file_size: '',
+    chunk_bytes: '',
+    session_idle_ttl: '',
+    session_max_lifetime: '',
+    max_sessions_per_user: '',
+    max_pending_bytes_per_user: '',
+    max_pending_bytes_hub: '',
+  };
+}
+
+function hubUploadsFrom(uploads?: V1ServerHubUploadsConfig): Record<HubUploadFieldKey, string> {
+  const out = emptyHubUploads();
+  if (!uploads) return out;
+  for (const field of HUB_UPLOAD_FIELDS) {
+    const val = uploads[field.key];
+    if (field.kind === 'int' && typeof val === 'number' && Number.isFinite(val)) {
+      out[field.key] = String(val);
+    } else if (field.kind === 'duration' && typeof val === 'string' && val.trim()) {
+      out[field.key] = val.trim();
+    }
+  }
+  return out;
+}
 
 /**
  * Workstation fields that `scion server start` overrides at every start
@@ -1384,6 +1531,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubTracingEnabled: boolean | null = null;
   private loadedHubMetricsEnabled: boolean | null = null;
   private loadedHubTracingEnabled: boolean | null = null;
+
+  // ── Hub uploads (server.hub.uploads, ptone/scion#9619 & #8654) ──
+  // Empty string = unset (hub default). Sent only when changed; cleared = null.
+  @state() private hubUploads: Record<HubUploadFieldKey, string> = emptyHubUploads();
+  private loadedHubUploads: Record<HubUploadFieldKey, string> = emptyHubUploads();
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   // Warnings the last save returned (accepted values worth a look, such
@@ -2468,6 +2620,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.loadedHubMetricsEnabled = this.hubMetricsEnabled;
     this.loadedHubTracingEnabled = this.hubTracingEnabled;
 
+    // Hub uploads — absent means unset (hub default).
+    this.hubUploads = hubUploadsFrom(data.server?.hub?.uploads);
+    this.loadedHubUploads = { ...this.hubUploads };
+
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
       ? stripRemovedStorageOverrides(
@@ -3061,6 +3217,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     )
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     this.addHubObservability(hub, ok);
+    this.addHubUploads(hub, ok);
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -3239,6 +3396,31 @@ export class ScionPageAdminServerConfig extends LitElement {
       obs.tracing_enabled = this.hubTracingEnabled;
     }
     if (Object.keys(obs).length > 0) hub.observability = obs;
+  }
+
+  /**
+   * Adds changed `server.hub.uploads` fields to a hub payload block:
+   * omitted keys keep their stored value, and clearing a field sends `null`
+   * to reset it to its default.
+   */
+  private addHubUploads(hub: Record<string, unknown>, ok: (key: string) => boolean): void {
+    const uploads: Record<string, unknown> = {};
+    for (const field of HUB_UPLOAD_FIELDS) {
+      const fullKey = `server.hub.uploads.${field.key}`;
+      if (!ok(fullKey)) continue;
+      const cur = this.hubUploads[field.key].trim();
+      const prev = this.loadedHubUploads[field.key].trim();
+      if (cur === prev) continue;
+      if (cur === '') {
+        uploads[field.key] = null;
+      } else if (field.kind === 'int') {
+        const parsed = Number(cur);
+        uploads[field.key] = Number.isFinite(parsed) ? Math.trunc(parsed) : cur;
+      } else {
+        uploads[field.key] = cur;
+      }
+    }
+    if (Object.keys(uploads).length > 0) hub.uploads = uploads;
   }
 
   /**
@@ -3516,6 +3698,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     this.addHubObservability(hub, ok);
+    this.addHubUploads(hub, ok);
     server.hub = hub;
 
     // Broker
@@ -5820,8 +6003,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderStartTimings()}
       </div>
 
-      ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
-      ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
+      ${this.renderHubUploadsSection()} ${this.renderHubObservabilitySection()}
+      ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
+      ${this.renderCrossProjectMessagingSection()}
       <scion-admin-chat-retention></scion-admin-chat-retention>
       <scion-admin-decision-retention></scion-admin-decision-retention>
     `;
@@ -5864,6 +6048,53 @@ export class ScionPageAdminServerConfig extends LitElement {
         })}
       </div>
     </div>`;
+  }
+
+  /**
+   * Hub upload limits, chunk sizing, and resumable session quotas
+   * (`server.hub.uploads`, Layer-1 section `uploads`).
+   */
+  private renderHubUploadsSection(): ReturnType<typeof html> {
+    return html`
+      <div class="section" data-section="uploads">
+        ${this.renderSectionHeader('Uploads', 'uploads')} ${this.renderSectionMeta('uploads')}
+        <p class="hint" style="margin: 0 0 1rem 0;">
+          Per-file upload limits, chunk sizing, and resumable session quotas. Leave a field empty to
+          use the hub default. Changes apply live across all replicas.
+        </p>
+        <div class="form-grid">
+          ${HUB_UPLOAD_FIELDS.map((field) => {
+            const fullKey = `server.hub.uploads.${field.key}`;
+            const val = this.hubUploads[field.key];
+            const display = val || field.defaultLabel;
+            return html`
+              <div class="form-field">
+                <label>${field.label}</label>
+                <span class="hint">${field.hint}</span>
+                ${this.renderFieldValue(
+                  fullKey,
+                  display,
+                  html`${this.renderEnvBadge(fullKey)}<sl-input
+                      data-field=${fullKey}
+                      type=${field.kind === 'int' ? 'number' : 'text'}
+                      min=${field.min !== undefined ? String(field.min) : nothing}
+                      max=${field.max !== undefined ? String(field.max) : nothing}
+                      value=${val}
+                      placeholder=${field.placeholder}
+                      @sl-input=${(e: Event): void => {
+                        this.hubUploads = {
+                          ...this.hubUploads,
+                          [field.key]: (e.target as HTMLInputElement).value,
+                        };
+                      }}
+                    ></sl-input>`
+                )}
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+    `;
   }
 
   /**

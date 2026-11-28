@@ -251,6 +251,8 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockTriggerOfflineQueue", LockTriggerOfflineQueue},
 		{"LockNeverSuspendQuota", LockNeverSuspendQuota},
 		{"LockCommandRequestQuota", LockCommandRequestQuota},
+		{"LockUploadQuota", LockUploadQuota},
+		{"LockUploadSessionSweep", LockUploadSessionSweep},
 	}
 
 	// --- Check 1: value uniqueness ---

@@ -255,6 +255,12 @@ func init() {
 			KoanfPaths: []string{
 				config.HubUploadsMaxAttachmentSizeKey,
 				config.HubUploadsMaxWorkspaceFileSizeKey,
+				config.HubUploadsChunkBytesKey,
+				config.HubUploadsSessionIdleTTLKey,
+				config.HubUploadsSessionMaxLifetimeKey,
+				config.HubUploadsMaxSessionsPerUserKey,
+				config.HubUploadsMaxPendingBytesPerUserKey,
+				config.HubUploadsMaxPendingBytesHubKey,
 			},
 			New: func() any { return &UploadsSettings{} },
 		},
@@ -1254,18 +1260,7 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 		}
 		return errs
 	case UploadsSectionName:
-		var us UploadsSettings
-		if err := json.Unmarshal(doc, &us); err != nil {
-			return []config.ValidationError{{Message: fmt.Sprintf("invalid uploads JSON: %v", err)}}
-		}
-		var cfg config.HubUploadsConfig
-		if us.MaxAttachmentSize != nil {
-			cfg.MaxAttachmentSize = *us.MaxAttachmentSize
-		}
-		if us.MaxWorkspaceFileSize != nil {
-			cfg.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
-		}
-		if err := cfg.Validate(); err != nil {
+		if _, err := ParseUploadsDoc(doc); err != nil {
 			return []config.ValidationError{{Message: err.Error()}}
 		}
 		return nil

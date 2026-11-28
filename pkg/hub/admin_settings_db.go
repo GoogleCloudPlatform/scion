@@ -412,10 +412,19 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 
 	// Uploads: saved or bootstrap value; nil when unset.
 	resp.Server.Hub.Uploads = nil
-	if !snap.Uploads.IsZero() {
+	us := snap.UploadsSettings
+	if !snap.Uploads.IsZero() || us.ChunkBytes != nil || us.SessionIdleTTL != "" ||
+		us.SessionMaxLifetime != "" || us.MaxSessionsPerUser != nil ||
+		us.MaxPendingBytesPerUser != nil || us.MaxPendingBytesHub != nil {
 		resp.Server.Hub.Uploads = &config.V1ServerHubUploadsConfig{
-			MaxAttachmentSize:    snap.Uploads.MaxAttachmentSize,
-			MaxWorkspaceFileSize: snap.Uploads.MaxWorkspaceFileSize,
+			MaxAttachmentSize:      snap.Uploads.MaxAttachmentSize,
+			MaxWorkspaceFileSize:   snap.Uploads.MaxWorkspaceFileSize,
+			ChunkBytes:             us.ChunkBytes,
+			SessionIdleTTL:         us.SessionIdleTTL,
+			SessionMaxLifetime:     us.SessionMaxLifetime,
+			MaxSessionsPerUser:     us.MaxSessionsPerUser,
+			MaxPendingBytesPerUser: us.MaxPendingBytesPerUser,
+			MaxPendingBytesHub:     us.MaxPendingBytesHub,
 		}
 	}
 
@@ -2014,6 +2023,30 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// uploads.max_pending_bytes_per_user warning (§3.11): warn (do not reject)
+	// when the per-user pending cap is below the largest effective per-file
+	// upload limit across workspace, attachment, and artifact settings.
+	if doc, ok := sectionDocs[opsettings.UploadsSectionName]; ok {
+		if cfg, err := opsettings.ParseUploadsDoc(doc); err == nil {
+			var us opsettings.UploadsSettings
+			_ = json.Unmarshal(doc, &us)
+			limits := s.ResolvedUploads()
+			if us.MaxAttachmentSize != nil {
+				limits.MaxAttachmentSize = *us.MaxAttachmentSize
+			}
+			if us.MaxWorkspaceFileSize != nil {
+				limits.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
+			}
+			largest := max(limits.EffectiveMaxWorkspaceFileSize(), limits.EffectiveMaxAttachmentSize())
+			if art := ops.Artifacts(); art.MaxFileBytes > largest {
+				largest = art.MaxFileBytes
+			}
+			if warn := cfg.PendingBytesWarning(largest); warn != "" {
+				saveWarnings = append(saveWarnings, warn)
+			}
+		}
+	}
+
 	// Workstation: validate and prepare the settings.yaml part before any DB
 	// write, so a bad file-routed value or a file that cannot be edited
 	// writes nothing. The settings-file lock is held from here to the
@@ -2734,6 +2767,24 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 				if u.MaxWorkspaceFileSize != 0 {
 					keys = append(keys, config.HubUploadsMaxWorkspaceFileSizeKey)
 				}
+				if u.ChunkBytes != nil {
+					keys = append(keys, config.HubUploadsChunkBytesKey)
+				}
+				if u.SessionIdleTTL != "" {
+					keys = append(keys, config.HubUploadsSessionIdleTTLKey)
+				}
+				if u.SessionMaxLifetime != "" {
+					keys = append(keys, config.HubUploadsSessionMaxLifetimeKey)
+				}
+				if u.MaxSessionsPerUser != nil {
+					keys = append(keys, config.HubUploadsMaxSessionsPerUserKey)
+				}
+				if u.MaxPendingBytesPerUser != nil {
+					keys = append(keys, config.HubUploadsMaxPendingBytesPerUserKey)
+				}
+				if u.MaxPendingBytesHub != nil {
+					keys = append(keys, config.HubUploadsMaxPendingBytesHubKey)
+				}
 			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
@@ -3278,12 +3329,19 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		// (bodyMergedSections): an omitted key keeps its value, null clears it.
 		d := &opsettings.UploadsSettings{}
 		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Uploads != nil {
-			if v := req.Server.Hub.Uploads.MaxAttachmentSize; v != 0 {
+			u := req.Server.Hub.Uploads
+			if v := u.MaxAttachmentSize; v != 0 {
 				d.MaxAttachmentSize = &v
 			}
-			if v := req.Server.Hub.Uploads.MaxWorkspaceFileSize; v != 0 {
+			if v := u.MaxWorkspaceFileSize; v != 0 {
 				d.MaxWorkspaceFileSize = &v
 			}
+			d.ChunkBytes = u.ChunkBytes
+			d.SessionIdleTTL = u.SessionIdleTTL
+			d.SessionMaxLifetime = u.SessionMaxLifetime
+			d.MaxSessionsPerUser = u.MaxSessionsPerUser
+			d.MaxPendingBytesPerUser = u.MaxPendingBytesPerUser
+			d.MaxPendingBytesHub = u.MaxPendingBytesHub
 		}
 		doc = d
 
@@ -3791,7 +3849,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
 	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
 	"branding":          settingsTokenRefused,       // unauthenticated /login content, logos, icons and palette
-	"uploads":           settingsTokenConfiguration, // per-file web upload limits
+	"uploads":           settingsTokenConfiguration, // per-file web upload limits and chunked-upload quotas
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys

@@ -235,7 +235,7 @@ Per-file limits for files users upload from the web UI: chat attachments (legacy
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `max_attachment_size` | int | `10485760` (10 MiB) | Per-file limit of a chat attachment stored by the Hub's attachment store. Attachments stored in the artifact service keep that service's `artifacts.max_file_bytes` limit instead. At most 100 MiB (`104857600`). Env: `SCION_SERVER_HUB_UPLOADS_MAXATTACHMENTSIZE`. |
-| `max_workspace_file_size` | int | `52428800` (50 MiB) | Per-file limit of an upload to a project workspace or shared directory. At most 100 MiB (`104857600`), matching the single-request body cap. Env: `SCION_SERVER_HUB_UPLOADS_MAXWORKSPACEFILESIZE`. |
+| `max_workspace_file_size` | int | `52428800` (50 MiB) | Per-file limit of an upload to a project workspace or shared directory. At most 1 GiB (`1073741824`). Legacy single-request multipart uploads remain clamped to 100 MiB (`104857600`); larger files use resumable chunked uploads. Env: `SCION_SERVER_HUB_UPLOADS_MAXWORKSPACEFILESIZE`. |
 
 #### Observability export (`server.hub.observability`)
 

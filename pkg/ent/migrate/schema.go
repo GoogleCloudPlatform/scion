@@ -4680,6 +4680,59 @@ var (
 			},
 		},
 	}
+	// UploadSessionsColumns holds the columns for the "upload_sessions" table.
+	UploadSessionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "owner_kind", Type: field.TypeString},
+		{Name: "owner_id", Type: field.TypeString},
+		{Name: "target_kind", Type: field.TypeEnum, Enums: []string{"chat_attachment", "workspace", "shared_dir"}},
+		{Name: "scope_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "scope_shared_dir", Type: field.TypeString, Nullable: true},
+		{Name: "dest_path", Type: field.TypeString, Nullable: true},
+		{Name: "overwrite", Type: field.TypeBool, Default: false},
+		{Name: "file_name", Type: field.TypeString},
+		{Name: "media_type", Type: field.TypeString, Default: ""},
+		{Name: "declared_size", Type: field.TypeInt64},
+		{Name: "received", Type: field.TypeInt64, Default: 0},
+		{Name: "hash_state", Type: field.TypeBytes, Nullable: true},
+		{Name: "head", Type: field.TypeBytes, Nullable: true},
+		{Name: "parts", Type: field.TypeJSON, Nullable: true},
+		{Name: "staging_ref", Type: field.TypeString},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"uploading", "finalizing", "completed", "failed", "aborted", "expired"}, Default: "uploading"},
+		{Name: "lease_token", Type: field.TypeString, Nullable: true},
+		{Name: "lease_until", Type: field.TypeTime, Nullable: true},
+		{Name: "takeovers", Type: field.TypeInt, Default: 0},
+		{Name: "result", Type: field.TypeJSON, Nullable: true},
+		{Name: "artifact_id", Type: field.TypeString, Nullable: true},
+		{Name: "idle_expires_at", Type: field.TypeTime},
+		{Name: "hard_expires_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// UploadSessionsTable holds the schema information for the "upload_sessions" table.
+	UploadSessionsTable = &schema.Table{
+		Name:       "upload_sessions",
+		Columns:    UploadSessionsColumns,
+		PrimaryKey: []*schema.Column{UploadSessionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "uploadsession_owner_kind_owner_id_state",
+				Unique:  false,
+				Columns: []*schema.Column{UploadSessionsColumns[2], UploadSessionsColumns[3], UploadSessionsColumns[17]},
+			},
+			{
+				Name:    "uploadsession_state_idle_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{UploadSessionsColumns[17], UploadSessionsColumns[23]},
+			},
+			{
+				Name:    "uploadsession_state_hard_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{UploadSessionsColumns[17], UploadSessionsColumns[24]},
+			},
+		},
+	}
 	// UsageBudgetStateColumns holds the columns for the "usage_budget_state" table.
 	UsageBudgetStateColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -5451,6 +5504,7 @@ var (
 		TriggerEventsTable,
 		TriggerFiresTable,
 		TriggerSubjectClaimsTable,
+		UploadSessionsTable,
 		UsageBudgetStateTable,
 		UsageEventsTable,
 		UsageGroupRollupsDailyTable,
@@ -5768,6 +5822,9 @@ func init() {
 	}
 	TriggerSubjectClaimsTable.Annotation = &entsql.Annotation{
 		Table: "trigger_subject_claims",
+	}
+	UploadSessionsTable.Annotation = &entsql.Annotation{
+		Table: "upload_sessions",
 	}
 	UsageBudgetStateTable.Annotation = &entsql.Annotation{
 		Table: "usage_budget_state",
