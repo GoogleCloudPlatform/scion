@@ -74,6 +74,7 @@ type wpEntry struct {
 	linkname string
 	raw      bool
 	size     int64 // when set, overrides len(body) in the header
+	mode     int64 // when set, overrides default 0o644 mode in the header
 }
 
 // wpArchive builds a GitHub-style archive: a pax global header carrying
@@ -100,7 +101,11 @@ func wpArchive(t *testing.T, comment, top string, entries []wpEntry) []byte {
 		if tf == 0 {
 			tf = tar.TypeReg
 		}
-		hdr := &tar.Header{Typeflag: tf, Name: name, Mode: 0o644, Linkname: e.linkname, Format: tar.FormatPAX}
+		mode := e.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		hdr := &tar.Header{Typeflag: tf, Name: name, Mode: mode, Linkname: e.linkname, Format: tar.FormatPAX}
 		if tf == tar.TypeReg {
 			hdr.Size = int64(len(e.body))
 			if e.size > 0 {
