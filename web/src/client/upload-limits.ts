@@ -39,6 +39,21 @@ export const DEFAULT_UPLOAD_LIMITS: Readonly<UploadLimits> = Object.freeze({
  */
 export const MAX_WORKSPACE_REQUEST_BODY = 100 * 1024 * 1024;
 
+/**
+ * Per-file ceiling for legacy single-request workspace and shared-directory
+ * uploads (mirrors `config.MaxUploadFileSize` in Go, 100 MiB). Limits above
+ * this apply only on the chunked upload path.
+ */
+export const MAX_LEGACY_WORKSPACE_FILE_SIZE = 100 * 1024 * 1024;
+
+/**
+ * Clamp a hub-published workspace per-file limit to the legacy single-request
+ * ceiling ({@link MAX_LEGACY_WORKSPACE_FILE_SIZE}, 100 MiB).
+ */
+export function legacyWorkspaceMaxFileSize(maxWorkspaceFileSize: number): number {
+  return Math.min(maxWorkspaceFileSize, MAX_LEGACY_WORKSPACE_FILE_SIZE);
+}
+
 function positive(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }

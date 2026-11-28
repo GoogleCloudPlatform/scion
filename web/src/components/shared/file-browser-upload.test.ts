@@ -21,17 +21,21 @@ import {
   UploadCancelledError,
   UploadHttpError,
 } from '../../client/chunked-upload.js';
+import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { FileBrowserDataSource, FileListResult, ScionFileBrowser } from './file-browser.js';
 
 let WorkspaceDataSourceCtor: typeof import('./file-browser.js').WorkspaceFileBrowserDataSource;
+let SharedDirDataSourceCtor: typeof import('./file-browser.js').SharedDirFileBrowserDataSource;
 
 beforeAll(async () => {
   const mod = await import('./file-browser.js');
   WorkspaceDataSourceCtor = mod.WorkspaceFileBrowserDataSource;
+  SharedDirDataSourceCtor = mod.SharedDirFileBrowserDataSource;
 });
 
 beforeEach(() => {
+  invalidatePublicSettings();
   resetServerFlagStateForTests();
   delete window.__SCION_FEATURES__;
   _setUploadTestConfig({ retryDelayMs: 0, maxBackoffMs: 0 });
@@ -40,6 +44,7 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = '';
   delete window.__SCION_FEATURES__;
+  invalidatePublicSettings();
   resetServerFlagStateForTests();
   _setUploadTestConfig(null);
   vi.unstubAllGlobals();
@@ -86,6 +91,66 @@ describe('WorkspaceFileBrowserDataSource upload routing', () => {
     await ds.uploadFiles(makeFileList([big]));
 
     expect(uploadUrls).toEqual(['/api/v1/projects/proj-1/workspace/files']);
+  });
+
+  it('clamps legacy workspace pre-send check to 100 MiB when hub limit is 1 GiB and experiment is off', async () => {
+    setFeatureFlag('hub.large_uploads', false);
+    const uploadUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = requestUrl(input);
+        if (url === '/api/v1/settings/public') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ uploads: { maxWorkspaceFileSize: 1 << 30 } }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        uploadUrls.push(url);
+        return Promise.resolve(new Response(JSON.stringify({ files: [] }), { status: 200 }));
+      })
+    );
+
+    const ds = new WorkspaceDataSourceCtor('proj-1');
+    const huge = new File([new Uint8Array(10)], 'huge.bin');
+    Object.defineProperty(huge, 'size', { value: 200 * 1024 * 1024 });
+
+    await expect(ds.uploadFiles(makeFileList([huge]))).rejects.toThrow(
+      'File "huge.bin" exceeds the maximum size of 100 MiB'
+    );
+    expect(uploadUrls).toEqual([]);
+  });
+
+  it('clamps shared-dir pre-send check to 100 MiB when hub limit is 1 GiB', async () => {
+    setFeatureFlag('hub.large_uploads', true);
+    const uploadUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = requestUrl(input);
+        if (url === '/api/v1/settings/public') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ uploads: { maxWorkspaceFileSize: 1 << 30 } }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        uploadUrls.push(url);
+        return Promise.resolve(new Response(JSON.stringify({ files: [] }), { status: 200 }));
+      })
+    );
+
+    const ds = new SharedDirDataSourceCtor('proj-1', 'scratchpad');
+    const huge = new File([new Uint8Array(10)], 'huge.bin');
+    Object.defineProperty(huge, 'size', { value: 200 * 1024 * 1024 });
+
+    await expect(ds.uploadFiles(makeFileList([huge]))).rejects.toThrow(
+      'File "huge.bin" exceeds the maximum size of 100 MiB'
+    );
+    expect(uploadUrls).toEqual([]);
   });
 
   it('uses chunked upload session when hub.large_uploads is on and file exceeds chunkBytes', async () => {

@@ -29,7 +29,11 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { getUploadLimits, validateWorkspaceUploadFiles } from '../../client/upload-limits.js';
+import {
+  getUploadLimits,
+  legacyWorkspaceMaxFileSize,
+  validateWorkspaceUploadFiles,
+} from '../../client/upload-limits.js';
 import {
   UploadCancelledError,
   UploadHttpError,
@@ -186,7 +190,10 @@ export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
     }
 
     const limits = await getUploadLimits();
-    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
+    const sizeErr = validateWorkspaceUploadFiles(
+      files,
+      legacyWorkspaceMaxFileSize(limits.maxWorkspaceFileSize)
+    );
     if (sizeErr) {
       throw new Error(sizeErr);
     }
@@ -263,7 +270,10 @@ export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
 
   async uploadFiles(files: FileList): Promise<void> {
     const limits = await getUploadLimits();
-    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
+    const sizeErr = validateWorkspaceUploadFiles(
+      files,
+      legacyWorkspaceMaxFileSize(limits.maxWorkspaceFileSize)
+    );
     if (sizeErr) {
       throw new Error(sizeErr);
     }
