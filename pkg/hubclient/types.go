@@ -54,8 +54,11 @@ type Agent struct {
 	Kubernetes        *KubernetesInfo   `json:"kubernetes,omitempty"`
 	Created           time.Time         `json:"created"`
 	Updated           time.Time         `json:"updated"`
+	StartedAt         time.Time         `json:"startedAt,omitempty"`
 	LastSeen          time.Time         `json:"lastSeen,omitempty"`
 	LastActivityEvent time.Time         `json:"lastActivityEvent,omitempty"`
+	ActivitySince     *time.Time        `json:"activitySince,omitempty"`
+	IdleSuspendAt     *time.Time        `json:"idleSuspendAt,omitempty"`
 	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`

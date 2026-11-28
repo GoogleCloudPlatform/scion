@@ -1108,6 +1108,10 @@ export interface Agent {
   launch?: AgentLaunch;
   lastSeen?: string;
   lastActivityEvent?: string;
+  /** When the current activity began while running; absent when not running. Set on single-agent GET. */
+  activitySince?: string;
+  /** Hub-computed earliest instant the agent becomes due for idle auto-suspend; absent when ineligible or blocked. Set on single-agent GET. */
+  idleSuspendAt?: string;
   // Backend sends "created"/"updated"; legacy frontend code uses "createdAt"/"updatedAt".
   // Accept both so existing pages and new API responses both work.
   created?: string;
