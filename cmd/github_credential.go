@@ -15,32 +15,22 @@
 package cmd
 
 import (
-	"os"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // remoteFetchCredential returns the GitHub credential the CLI sends when it
-// fetches source itself, or "" to fetch unauthenticated. For a GitHub folder
-// URL it reads the caller's environment in the same order the Hub uses for
-// project credentials: GH_{OWNER}__{REPO}, then GH_{OWNER} (see pkg/ghauth), then
-// GITHUB_TOKEN. Other sources (archives, rclone, other hosts) read nothing:
-// FetchRemoteTemplate sends a credential only for GitHub folders. Only the
-// variable name is logged, never its value.
-func remoteFetchCredential(source string) string {
-	owner, repo, ok := config.GitHubRepoForURL(source)
-	if !ok {
-		return ""
+// fetches source itself, or an anonymous githubfetch.Credential. For a GitHub
+// folder URL it reads the caller's environment in the same order the Hub uses
+// for project credentials: GH_{OWNER}__{REPO}, then GH_{OWNER} (see
+// pkg/ghauth), then GITHUB_TOKEN. Other sources (archives, rclone, other
+// hosts) read nothing. Only the variable name is logged, never its value.
+func remoteFetchCredential(source string) githubfetch.Credential {
+	cred, name := config.EnvGitHubCredentialWithName(source)
+	if name != "" {
+		owner, repo, _ := config.GitHubRepoForURL(source)
+		util.Debugf("github: using credential %s for %s/%s", name, owner, repo)
 	}
-	val, name := ghauth.Lookup(owner, repo, os.Getenv)
-	if val == "" {
-		val, name = os.Getenv(ghauth.DefaultKey), ghauth.DefaultKey
-	}
-	if val == "" {
-		return ""
-	}
-	util.Debugf("github: using credential %s for %s/%s", name, owner, repo)
-	return val
+	return cred
 }

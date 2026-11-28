@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -365,6 +366,78 @@ func TestOpen_NetworkSystem(t *testing.T) {
 		_, err = sf.Open(context.Background(), Request{URL: startSrv.URL + "/loop"})
 		if got := reasonOf(t, err); got != ReasonRedirects {
 			t.Fatalf("redirect loop reason = %s, want %s", got, ReasonRedirects)
+		}
+	})
+
+	// L1: same-hostname redirect to a different port in NetworkSystem must strip
+	// hop-0 Authorization, while canonicalOrigin normalizes default port 443.
+	t.Run("same-host different-port redirect strips Authorization", func(t *testing.T) {
+		var hop0Auth, hop1Auth string
+
+		otherPortSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hop1Auth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("other-port-ok"))
+		}))
+		t.Cleanup(otherPortSrv.Close)
+
+		startSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hop0Auth = r.Header.Get("Authorization")
+			http.Redirect(w, r, otherPortSrv.URL+"/final", http.StatusFound)
+		}))
+		t.Cleanup(startSrv.Close)
+
+		pool := x509.NewCertPool()
+		pool.AddCert(startSrv.Certificate())
+		pool.AddCert(otherPortSrv.Certificate())
+
+		sf := New(Config{
+			Network:      NetworkSystem,
+			MaxBytes:     1024,
+			MaxRedirects: 2,
+			AllowedHosts: []string{"127.0.0.1"},
+		})
+		sf.rootCAs = pool
+
+		resp, err := sf.Open(context.Background(), Request{
+			URL:           startSrv.URL + "/start",
+			Authorization: "Bearer port-secret-token",
+		})
+		if err != nil {
+			t.Fatalf("NetworkSystem same-host port-change redirect Open: %v", err)
+		}
+		gotBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if string(gotBody) != "other-port-ok" {
+			t.Fatalf("body = %q, want other-port-ok", string(gotBody))
+		}
+		if hop0Auth != "Bearer port-secret-token" {
+			t.Errorf("hop 0 auth = %q, want Bearer port-secret-token", hop0Auth)
+		}
+		if hop1Auth != "" {
+			t.Errorf("hop 1 auth leaked across port change on same host: %q", hop1Auth)
+		}
+	})
+
+	t.Run("canonicalOrigin normalizes default port 443 in both modes", func(t *testing.T) {
+		vetted := New(Config{Network: NetworkVetted})
+		sys := New(Config{Network: NetworkSystem})
+
+		mustParse := func(raw string) *url.URL {
+			t.Helper()
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatalf("parse %q: %v", raw, err)
+			}
+			return u
+		}
+		for name, f := range map[string]*Fetcher{"vetted": vetted, "system": sys} {
+			if got, want := f.canonicalOrigin(mustParse("https://api.github.com/a")), f.canonicalOrigin(mustParse("https://API.GITHUB.COM.:443/b")); got != want {
+				t.Errorf("%s: default port 443 mismatch: %q vs %q", name, got, want)
+			}
+			if a, b := f.canonicalOrigin(mustParse("https://api.github.com/a")), f.canonicalOrigin(mustParse("https://api.github.com:8443/b")); a == b {
+				t.Errorf("%s: different ports must not share origin: both %q", name, a)
+			}
 		}
 	})
 }

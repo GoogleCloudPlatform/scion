@@ -29,6 +29,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -231,7 +232,9 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 		}
 
 		// Fetch the remote template to local cache
-		cachedPath, err := FetchRemoteTemplate(ctx, name)
+		cachedPath, err := FetchRemoteTemplateWithOptions(ctx, name, FetchOptions{
+			GitHubCredential: EnvGitHubCredential(name),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch remote template: %w", err)
 		}
@@ -379,15 +382,11 @@ func FriendlyTemplateName(ref string) string {
 // DeriveTemplateName extracts a short template name from a URI for display purposes.
 func DeriveTemplateName(uri string) string {
 	// For GitHub URLs, extract the folder name
-	if parts, err := parseGitHubURL(uri); err == nil {
-		if parts.Path != "" {
-			// Return the last path component
-			pathParts := filepath.SplitList(parts.Path)
-			if len(pathParts) > 0 {
-				return filepath.Base(parts.Path)
-			}
+	if src, err := githubfetch.ParseURL(uri); err == nil {
+		if src.Path != "" {
+			return path.Base(src.Path)
 		}
-		return parts.Repo
+		return src.Repo
 	}
 
 	// For HTTP(S) URLs, use the last element of the URL path only: the

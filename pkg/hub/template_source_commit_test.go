@@ -65,11 +65,7 @@ func TestTemplateSourceCommit_InitialRemoteImportMultiTemplate(t *testing.T) {
 		{name: "repo-main/templates/beta/scion-agent.yaml", body: "schema_version: \"1\"\nharness: gemini\n"},
 	})
 
-	prevOverride := importDownloadOverride
-	importDownloadOverride = func(_ context.Context, _, _ string) ([]byte, error) {
-		return archive, nil
-	}
-	t.Cleanup(func() { importDownloadOverride = prevOverride })
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: archive})
 
 	names, err := srv.importFromRemote(
 		ctx, "", "https://github.com/acme/repo/tree/main/templates",

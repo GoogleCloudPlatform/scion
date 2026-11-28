@@ -455,17 +455,18 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, auth
 // non-redirect *http.Response and its URL string.
 func (f *Fetcher) doFollow(ctx context.Context, rawURL string, mode fetchMode, authorization string, reqHeader http.Header) (*http.Response, string, error) {
 	current := rawURL
-	authHost := ""
+	authOrigin := ""
 	for hop := 0; ; hop++ {
 		u, err := f.checkURL(current)
 		if err != nil {
 			return nil, current, hideDetail(err, current)
 		}
+		origin := f.canonicalOrigin(u)
 		if hop == 0 {
-			authHost = u.Hostname()
+			authOrigin = origin
 		}
 		hopAuth := ""
-		if strings.EqualFold(u.Hostname(), authHost) {
+		if origin == authOrigin {
 			hopAuth = authorization
 		}
 		var resp *http.Response
@@ -565,6 +566,23 @@ func (f *Fetcher) checkURL(raw string) (*url.URL, error) {
 		return nil, fail(ReasonHost, "host %q is neither an IP literal nor a DNS name", host)
 	}
 	return u, nil
+}
+
+// canonicalOrigin returns the normalized host:port for u so that hop-0
+// Authorization is never sent across a host or port change in either
+// NetworkVetted or NetworkSystem mode. An omitted port defaults to f.port in
+// NetworkVetted mode ("443" in production) and "443" in NetworkSystem mode.
+func (f *Fetcher) canonicalOrigin(u *url.URL) string {
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	port := u.Port()
+	if port == "" {
+		if f.cfg.Network == NetworkVetted && f.port != "" {
+			port = f.port
+		} else {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // hostAllowed reports whether host is in Config.AllowedHosts.

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -205,11 +206,18 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 
 	cachePath, err := s.fetchRemoteForImport(ctx, store.TemplateScopeProject, req.ProjectID, base)
 	if err != nil {
-		// Never echo err: the sparse-checkout fallback shells out to git with a
-		// "https://x-access-token:<TOKEN>@github.com/..." remote, and git's stderr
-		// embeds that URL verbatim on failure.
+		kind := ""
+		var ife *importFetchError
+		if errors.As(err, &ife) {
+			kind = string(ife.Kind)
+		} else {
+			var ghe *githubfetch.Error
+			if errors.As(err, &ghe) {
+				kind = string(ghe.Kind)
+			}
+		}
 		s.resourceLog.Warn("skill discovery fetch failed",
-			"sourceURL", base, "projectID", req.ProjectID, "error", err)
+			"sourceURL", base, "projectID", req.ProjectID, "kind", kind, "error", err)
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed,
 			"Failed to fetch remote skills; check the URL and repository access", nil)
 		return

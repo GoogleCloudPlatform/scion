@@ -1627,7 +1627,10 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		if writeImportContentRefusal(w, err) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
+		if writeImportRateLimitError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, "reimport_failed", importFetchErrorMessage(err), nil)
 		return
 	}
 

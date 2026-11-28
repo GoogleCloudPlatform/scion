@@ -347,8 +347,14 @@ func TestHarnessConfigReimport_ScopeCredentialOnTheWire(t *testing.T) {
 			if tt.want200 && rec.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 			}
-			if len(auths) != 1 || auths[0] != tt.wantAuth {
-				t.Errorf("Authorization headers = %q, want exactly one fetch with %q (status %d: %s)", auths, tt.wantAuth, rec.Code, rec.Body.String())
+			if len(auths) == 0 {
+				t.Errorf("expected outbound GitHub requests with %q, got none (status %d: %s)", tt.wantAuth, rec.Code, rec.Body.String())
+			}
+			for _, a := range auths {
+				if a != tt.wantAuth {
+					t.Errorf("Authorization headers = %q, want all requests with %q (status %d: %s)", auths, tt.wantAuth, rec.Code, rec.Body.String())
+					break
+				}
 			}
 		})
 	}

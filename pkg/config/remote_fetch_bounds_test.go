@@ -21,7 +21,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -222,91 +221,4 @@ func gitHubTarball(t *testing.T, files map[string]string) []byte {
 	require.NoError(t, tw.Close())
 	require.NoError(t, gz.Close())
 	return buf.Bytes()
-}
-
-// TestFetchRemoteTemplateWithOptions_GitHubTagAndCommitRefs: a limited
-// GitHub fetch whose ref is not a branch tries the tag archive, then the
-// commit archive, and names the ref when none exists.
-func TestFetchRemoteTemplateWithOptions_GitHubTagAndCommitRefs(t *testing.T) {
-	restoreLs := SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
-		return nil, errors.New("no git")
-	})
-	t.Cleanup(restoreLs)
-	archive := gitHubTarball(t, map[string]string{"templates/scion-agent.yaml": "x"})
-	serving := func(okURL string, asked *[]string) RemoteDownloadFunc {
-		return func(_ context.Context, rawURL, _ string) ([]byte, error) {
-			*asked = append(*asked, rawURL)
-			if rawURL == okURL {
-				return archive, nil
-			}
-			return nil, errors.New("the source could not be downloaded")
-		}
-	}
-	const base = "https://github.com/acme/repo/archive/"
-
-	for _, tc := range []struct{ name, ref, okURL string }{
-		{"tag", "v1.2.0", base + "refs/tags/v1.2.0.tar.gz"},
-		{"commit", "0123456789abcdef0123456789abcdef01234567", base + "0123456789abcdef0123456789abcdef01234567.tar.gz"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			var asked []string
-			path, err := FetchRemoteTemplateWithOptions(context.Background(),
-				"https://github.com/acme/repo/tree/"+tc.ref+"/templates",
-				FetchOptions{Download: serving(tc.okURL, &asked), MaxFiles: 100, PrivateCacheDir: true})
-			require.NoError(t, err, "asked %v", asked)
-			assert.FileExists(t, filepath.Join(path, "scion-agent.yaml"))
-			assert.Equal(t, base+"refs/heads/"+tc.ref+".tar.gz", asked[0], "a branch is tried first")
-		})
-	}
-
-	t.Run("no such ref", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		var asked []string
-		_, err := FetchRemoteTemplateWithOptions(context.Background(),
-			"https://github.com/acme/repo/tree/nope/templates",
-			FetchOptions{Download: serving("", &asked), MaxFiles: 100, PrivateCacheDir: true})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `branch, tag or commit "nope" was not found`)
-		assert.Equal(t, []string{
-			base + "refs/heads/nope.tar.gz", base + "refs/tags/nope.tar.gz", base + "nope.tar.gz",
-		}, asked)
-	})
-
-	t.Run("a download limit or timeout stops the fallback", func(t *testing.T) {
-		for _, failure := range []error{
-			fmt.Errorf("%w (the download is larger than 64 MiB)", ErrRemoteFetchLimit),
-			ErrRemoteDownloadTimeout,
-		} {
-			t.Setenv("HOME", t.TempDir())
-			var asked []string
-			download := func(_ context.Context, rawURL, _ string) ([]byte, error) {
-				asked = append(asked, rawURL)
-				return nil, failure
-			}
-			_, err := FetchRemoteTemplateWithOptions(context.Background(),
-				"https://github.com/acme/repo/tree/v1.2.0/templates",
-				FetchOptions{Download: download, MaxFiles: 100, PrivateCacheDir: true})
-			require.ErrorIs(t, err, failure)
-			assert.NotContains(t, err.Error(), "was not found")
-			assert.Equal(t, []string{base + "refs/heads/v1.2.0.tar.gz"}, asked)
-		}
-	})
-
-	t.Run("whole repository over the limit", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		files := map[string]string{"templates/scion-agent.yaml": "x"}
-		for i := 0; i < 20; i++ {
-			files[fmt.Sprintf("other/f%d", i)] = "x"
-		}
-		big := gitHubTarball(t, files)
-		download := func(context.Context, string, string) ([]byte, error) { return big, nil }
-		_, err := FetchRemoteTemplateWithOptions(context.Background(),
-			"https://github.com/acme/repo/tree/main/templates",
-			FetchOptions{Download: download, MaxFiles: 10, PrivateCacheDir: true})
-		require.ErrorIs(t, err, ErrRemoteFetchLimit)
-		assert.Contains(t, err.Error(), "more than 10")
-		assert.Contains(t, err.Error(), "whole repository")
-		assert.Contains(t, err.Error(), AllowedImportSourcesKey)
-	})
 }
