@@ -863,7 +863,7 @@ func (e *Engine) evaluateInlineSafe(
 			dec = Decision{}
 			err = &FailedError{
 				Reason: ReasonEvalFailed,
-				Cause:  fmt.Errorf("dialect panic: %v", rec),
+				Cause:  errDialectPanic,
 			}
 		}
 	}()
@@ -897,7 +897,39 @@ func (e *Engine) compileAndEvaluateSource(
 			}
 		}
 		compileStart := time.Now()
-		compiled, hit, err := e.CachedCompileWithGate(dom.Ctx, spec.dialect, src.Scope, src.Expr, src.Kind, src.EnvRef, beforeCompile)
+		var (
+			compiled     Compiled
+			hit          bool
+			err          error
+			compilePanic bool
+			panicElapsed time.Duration
+		)
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					compilePanic = true
+					panicElapsed = max(time.Since(compileStart), time.Duration(0))
+					if src.CompileBudget != nil {
+						src.CompileBudget.Charge(panicElapsed)
+					}
+					if src.OnCompileMiss != nil {
+						src.OnCompileMiss(spec.dialect)
+					}
+					slog.Error("ruleengine: inline dialect compile panic recovered",
+						"dialect", spec.dialect,
+						"panic", fmt.Sprint(rec),
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
+			compiled, hit, err = e.CachedCompileWithGate(dom.Ctx, spec.dialect, src.Scope, src.Expr, src.Kind, src.EnvRef, beforeCompile)
+		}()
+		if compilePanic {
+			return Decision{}, panicElapsed, &FailedError{
+				Reason: ReasonEvalFailed,
+				Cause:  errDialectPanic,
+			}
+		}
 		if !hit && !errors.Is(err, errSourceCompileBudgetExhausted) {
 			if src.CompileBudget != nil {
 				src.CompileBudget.Charge(max(time.Since(compileStart), time.Duration(0)))
@@ -1025,7 +1057,10 @@ func (e *Engine) compileAndEvaluateSource(
 	return dec, totalElapsed, nil
 }
 
-var errSourceCompileBudgetExhausted = errors.New("ruleengine: compile budget exhausted")
+var (
+	errSourceCompileBudgetExhausted = errors.New("ruleengine: compile budget exhausted")
+	errDialectPanic                 = errors.New("dialect panic")
+)
 
 type sourceCompileError struct {
 	cause error
@@ -1055,7 +1090,7 @@ func (e *Engine) evaluateCoreSafe(ctx context.Context, c Compiled, input Input, 
 			dec = Decision{}
 			err = &FailedError{
 				Reason: ReasonEvalFailed,
-				Cause:  fmt.Errorf("dialect panic: %v", rec),
+				Cause:  errDialectPanic,
 			}
 		}
 	}()
@@ -2288,8 +2323,19 @@ func encodeCanonicalAdditionValue(buf *bytes.Buffer, v any) error {
 		buf.Write(x)
 		buf.WriteByte(';')
 	case time.Time:
+		ts := x.Format(time.RFC3339Nano)
+		locName := x.Location().String()
+		_, offsetSec := x.Zone()
 		buf.WriteString("time:")
-		buf.WriteString(x.UTC().Format(time.RFC3339Nano))
+		buf.WriteString(strconv.Itoa(len(ts)))
+		buf.WriteByte(':')
+		buf.WriteString(ts)
+		buf.WriteByte('|')
+		buf.WriteString(strconv.Itoa(len(locName)))
+		buf.WriteByte(':')
+		buf.WriteString(locName)
+		buf.WriteByte('|')
+		buf.WriteString(strconv.Itoa(offsetSec))
 		buf.WriteByte(';')
 	case time.Duration:
 		buf.WriteString("dur:")

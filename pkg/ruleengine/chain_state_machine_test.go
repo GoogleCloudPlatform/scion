@@ -547,9 +547,13 @@ func TestC1_StateTransitionTable(t *testing.T) {
 // cancel the shared group evalCtx, because the dispatcher holds an interest
 // across the claim loop and r2 (a distinct, live run) is about to join.
 func TestProbe9801_GroupEarlyWithdrawBeforeSecondClaimMustNotCancelSurvivor(t *testing.T) {
+	if prev := runtime.GOMAXPROCS(0); prev < 4 {
+		runtime.GOMAXPROCS(4)
+		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	}
 	const (
 		targetHits  = 2
-		maxAttempts = 40
+		maxAttempts = 500
 	)
 	hits, defects := 0, 0
 	for i := 0; i < maxAttempts && hits < targetHits; i++ {
@@ -678,6 +682,10 @@ func (c *customDoneCtx) Err() error {
 // releasing the claim-phase guard drops remaining to 0, evalCtx cancels, and
 // 0 dialect calls are made.
 func TestC1_R1_AllMembersTerminateDuringClaimCancelsGroupCtx(t *testing.T) {
+	if prev := runtime.GOMAXPROCS(0); prev < 4 {
+		runtime.GOMAXPROCS(4)
+		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	}
 	const maxAttempts = 500
 	for range maxAttempts {
 		io := newCountingFakeIODialect("io_r1_all", 5*time.Second)
