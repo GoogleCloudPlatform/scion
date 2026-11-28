@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -425,7 +426,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -433,7 +434,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 	ctx, cancel := listRequestContext(cmdContext(cmd), convMsgAll)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -594,7 +595,7 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -602,7 +603,7 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -710,7 +711,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -722,7 +723,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmdContext(cmd), timeout)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -826,7 +827,7 @@ func writeGetMessageText(ctx context.Context, client hubclient.Client, out io.Wr
 }
 
 func runConversationSetDefault(cmd *cobra.Command, args []string) error {
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -834,7 +835,7 @@ func runConversationSetDefault(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -854,7 +855,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -862,7 +863,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -885,7 +886,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationJoin(cmd *cobra.Command, args []string) error {
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -893,7 +894,7 @@ func runConversationJoin(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -917,7 +918,7 @@ func runConversationJoin(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationLeave(cmd *cobra.Command, args []string) error {
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -925,7 +926,7 @@ func runConversationLeave(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -947,7 +948,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -955,7 +956,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 	ctx, cancel := listRequestContext(cmdContext(cmd), convCatchUpAll)
 	defer cancel()
 
-	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	conversationID, err := resolveConversationRef(ctx, client, optionalProjectID(settings), args[0])
 	if err != nil {
 		return err
 	}
@@ -1105,10 +1106,25 @@ func conversationListName(conv hubclient.ConversationDetail) string {
 	return "-"
 }
 
+// optionalProjectID returns the resolved project ID from settings or "" if no
+// project context is configured. Commands that also work in agent mode (where
+// the hub infers the caller's project from its token) or via DM list fallback
+// use this instead of failing early on an unresolved local project.
+func optionalProjectID(settings *config.Settings) string {
+	projectID, err := resolveProjectID(settings, "")
+	if err != nil {
+		return ""
+	}
+	return projectID
+}
+
 // resolveConversationRef resolves a conversation reference string to a conversation ID.
-// Supports conv:<uuid> and bare 36-character <uuid> directly. For @agent and
-// #thread, it first lists the caller's conversations and tries to match.
-func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr string) (string, error) {
+// Supports conv:<uuid> and bare 36-character <uuid> directly. For @agent it
+// uses the hub's canonical conversation resolution endpoint (falling back to
+// direct-conversation listing by DMPeer when no project context is set or no
+// live agent matched). For #thread it lists group conversations and matches by
+// display name.
+func resolveConversationRef(ctx context.Context, client hubclient.Client, projectID, refStr string) (string, error) {
 	if len(refStr) == 36 {
 		if id, err := uuid.Parse(refStr); err == nil {
 			return id.String(), nil
@@ -1129,20 +1145,7 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr
 		return ref.Value, nil
 
 	case messaging.RefAgent:
-		// @<agent-name> — find direct conversation with this agent
-		convs, listErr := client.Conversations().List(ctx, &hubclient.ListConversationsOptions{
-			Kind: "direct",
-		})
-		if listErr != nil {
-			return "", fmt.Errorf("failed to list conversations for reference resolution: %w", listErr)
-		}
-		// Look for a conversation that matches this agent name in participants or display name
-		for _, conv := range convs.Conversations {
-			if conv.DisplayName == ref.Value || conv.DisplayName == "@"+ref.Value {
-				return conv.ID, nil
-			}
-		}
-		return "", fmt.Errorf("no conversation found for @%s", ref.Value)
+		return resolveAgentConversationRef(ctx, client, projectID, ref)
 
 	case messaging.RefThread:
 		// #<thread-name> — find group conversation by name
@@ -1161,6 +1164,70 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr
 
 	default:
 		return "", newUsageError("unsupported conversation reference type: %s", refStr)
+	}
+}
+
+// resolveAgentConversationRef resolves an @<agent> reference to the caller's
+// direct conversation with that agent. It first queries the hub's canonical
+// read-only GET /api/v1/conversations/resolve endpoint (the same canonical
+// agent + DM-key resolution path used by messaging). When the hub reports no
+// live agent match or requires a project ID (e.g. a human caller outside a
+// linked project), it falls back to matching direct conversations by DMPeer
+// (and DisplayName) from Conversations().List.
+func resolveAgentConversationRef(ctx context.Context, client hubclient.Client, projectID string, ref *messaging.Reference) (string, error) {
+	res, err := client.Messaging().ResolveConversation(ctx, ref.Raw, projectID)
+	if err == nil {
+		if res != nil && res.Exists && res.Conversation != nil && res.Conversation.ID != "" {
+			return res.Conversation.ID, nil
+		}
+		if res != nil && !res.Exists && res.PeerAgent != nil {
+			return "", fmt.Errorf("no direct conversation exists with @%s yet; send a message with 'scion message @%s ...' to start one, or run 'scion conversation list' to see existing conversations", ref.Value, ref.Value)
+		}
+		// PeerAgent is nil (agent not found as a live agent in projectID, e.g.
+		// historical DM with a deleted agent): fall back to listing the caller's
+		// direct conversations by DMPeer.
+		return resolveAgentDMFromList(ctx, client, ref.Value, false)
+	}
+
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.IsBadRequest() && strings.Contains(apiErr.Message, "Project ID is required") {
+		return resolveAgentDMFromList(ctx, client, ref.Value, true)
+	}
+	return "", fmt.Errorf("failed to resolve conversation for @%s: %w", ref.Value, err)
+}
+
+func resolveAgentDMFromList(ctx context.Context, client hubclient.Client, agentRef string, missingProject bool) (string, error) {
+	convs, listErr := client.Conversations().List(ctx, &hubclient.ListConversationsOptions{
+		Kind: "direct",
+	})
+	if listErr != nil {
+		return "", fmt.Errorf("failed to list conversations for reference resolution: %w", listErr)
+	}
+
+	var matches []hubclient.ConversationDetail
+	for _, conv := range convs.Conversations {
+		peerMatch := conv.DMPeer != nil && conv.DMPeer.Kind == "agent" &&
+			(conv.DMPeer.Name == agentRef || conv.DMPeer.ID == agentRef)
+		displayMatch := conv.DisplayName == agentRef || conv.DisplayName == "@"+agentRef
+		if peerMatch || displayMatch {
+			matches = append(matches, conv)
+		}
+	}
+
+	switch len(matches) {
+	case 1:
+		return matches[0].ID, nil
+	case 0:
+		if missingProject {
+			return "", fmt.Errorf("no direct conversation found for @%s (specify --project <id> or pass conv:<uuid> from 'scion conversation list')", agentRef)
+		}
+		return "", fmt.Errorf("no direct conversation found for @%s (run 'scion conversation list' to see existing conversations, or pass conv:<uuid>)", agentRef)
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, m := range matches {
+			ids = append(ids, "conv:"+m.ID)
+		}
+		return "", fmt.Errorf("multiple direct conversations match @%s (%s); pass conv:<uuid> explicitly or specify --project", agentRef, strings.Join(ids, ", "))
 	}
 }
 

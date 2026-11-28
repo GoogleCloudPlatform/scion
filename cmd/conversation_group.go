@@ -499,7 +499,7 @@ func runConversationGroupAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	conversationID, err := resolveConversationRef(ctx, tg.client, args[1])
+	conversationID, err := resolveConversationRef(ctx, tg.client, tg.projectID, args[1])
 	if err != nil {
 		return err
 	}
@@ -524,7 +524,7 @@ func runConversationGroupRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	conversationID, err := resolveConversationRef(ctx, tg.client, args[1])
+	conversationID, err := resolveConversationRef(ctx, tg.client, tg.projectID, args[1])
 	if err != nil {
 		return err
 	}

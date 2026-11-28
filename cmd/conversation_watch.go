@@ -162,7 +162,7 @@ func runConversationWatch(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -174,7 +174,7 @@ func runConversationWatch(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	resolveCtx, resolveCancel := context.WithTimeout(sigCtx, 30*time.Second)
-	conversationID, err := resolveConversationRef(resolveCtx, client, args[0])
+	conversationID, err := resolveConversationRef(resolveCtx, client, optionalProjectID(settings), args[0])
 	resolveCancel()
 	if err != nil {
 		if errors.Is(sigCtx.Err(), context.Canceled) {
