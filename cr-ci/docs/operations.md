@@ -408,13 +408,15 @@ logged (a unit test enforces this).
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
 | `SECURITY_REJECT_FORK_PR` | WARNING | A run outside the allowlist was refused a runner: a fork PR (`reason=head_repository_differs`), or any event but `push` and `pull_request` (`reason=event_not_allowed:<event>`). **Alert on this.** |
 | `SECURITY_KILL_HIJACKED_RUNNER` | ERROR / WARNING | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on the ERROR and review the run.** While GitHub still shows the untrusted job running it refuses to delete the busy registration: the ERROR then has `registration_deleted=false` and GitHub's 422 in `registration_error`, and every later guard pass retries at WARNING (`repeat=true`) until GitHub times the job out, about 10 minutes. The WARNING `hijacked runner's registration deleted` follows when GitHub's `completed` delivery for that job arrives (if it is lost, reconcile forgets the runner after an hour). The execution is gone from the first line on |
+| `runner_check_deferred` | WARNING | The hijack guard hit a transient GitHub error (rate limit, 5xx or transport error) when looking up a run not in its cache, and deferred the verdict instead of killing (`reason=run_lookup_transient`, `deferred_for`). Reconcile retries it; if lookups stay transient past 15 minutes the guard fails closed (`SECURITY_KILL_HIJACKED_RUNNER`, `reason=run_lookup_failed`). The runner's own job-started hook still blocks untrusted steps before they run |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
 | `runner_rebind` | INFO | Follows `runner_swap`: the idle runner launched for the job that took the runner (`rebound_runner`) now serves the displaced job (`rebound_to_job_id`). In a chain of swaps the displaced job is handed on once per swap, so several runners can carry the same `served_job_id` over time; only the latest one serves it |
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
 | `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |
-| `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors, skipped). Any error makes `/reconcile` answer 500; skipped items do not |
-| `reconcile_skip` | WARNING | GitHub answered one repo's, run's or job's call in a reconcile with a 5xx (`stage`); that item is skipped and retried next pass, the rest of the pass goes on and `/reconcile` still answers 200 (listed under `skipped`). Only the same `stage` across many passes needs a look |
+| `reconcile` | INFO | Reconcile summary (`claims_expired`, `runners_reaped`, `executions_reaped`, `hijacks_killed`, `checks_deferred`, `backfilled`, `left_queued`, `errors`, `skipped`, `budget_stopped`, `rate_limit_remaining`). Any error makes `/reconcile` answer 500; skipped items do not |
+| `reconcile_overlap` | INFO | A `/reconcile` tick arrived while the previous pass was still running and was skipped (`200 {"overlap":true}`) rather than stacked |
+| `reconcile_skip` | WARNING | A reconcile step hit a transient GitHub error (5xx or rate limit) or stopped at the rate-limit budget reserve (`stage`); that item is skipped and retried next pass, the rest of the pass goes on and `/reconcile` still answers 200 (listed under `skipped`). Only the same `stage` across many passes needs a look |
 | `reconcile_all_skipped` | ERROR | Every repo's runs lists got a GitHub 5xx: the pass discovered nothing, and `/reconcile` answers 500 (Cloud Scheduler shows the job failing). A sustained GitHub outage; jobs are not backfilled until it ends. **Alert on this.** |
 | `reconcile_denied` | WARNING | `/reconcile` called without a valid scheduler ID token |
 | `runner_reaped` / `execution_reaped` | WARNING | Stale registration deleted / execution past the task timeout cancelled |
@@ -427,6 +429,29 @@ logged (a unit test enforces this).
   capacity or check for stuck executions); missing `reconcile` lines for
   more than two intervals (scheduler broken).
 - TODO(P6): execution results and memory utilisation of runner executions.
+
+### GitHub API budget
+
+Reconcile uses conditional (`If-None-Match` / `304`) GETs for `ListRuns` and
+`ListJobs` so unchanged runs do not consume the GitHub App installation quota,
+and runs single-flight (`reconcile_overlap` when a tick arrives during a pass).
+Every `reconcile` summary line logs:
+
+- `rate_limit_remaining`: lowest `X-RateLimit-Remaining` observed across target
+  installations (`-1` if no API response with rate-limit headers has been seen).
+- `budget_stopped`: `true` when discovery stopped listing lower-priority
+  (`in_progress` / `queued`) runs because `rate_limit_remaining` fell below the
+  reserve (`max(500, limit/10)`). Runs that already hold an active `cr-job-*`
+  runner (P0) are still checked so hijack-guard coverage continues, and headroom
+  is preserved for webhooks and runner launches.
+- `checks_deferred`: number of hijack-guard checks still waiting on a transient
+  `GetRun` error (`runner_check_deferred`). Deferrals resolve on the next
+  reconcile once GitHub recovers, or fail closed after 15 minutes.
+
+A **sustained `budget_stopped=true`** across passes means the backlog of
+actively changing runs has outgrown the installation's hourly quota. The fix is
+workflow gating or a smaller job fan-out to reduce the backlog, not a faster
+`RECONCILE_SCHEDULE`.
 
 ## Troubleshooting
 
