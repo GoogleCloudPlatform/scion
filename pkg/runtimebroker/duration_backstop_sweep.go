@@ -337,7 +337,8 @@ func (s *Server) reportDurationBackstopStop(ctx context.Context, a api.AgentInfo
 	}
 
 	hb := &hubclient.BrokerHeartbeat{
-		Status: "online",
+		Status:  "online",
+		Version: s.version,
 		Projects: []hubclient.ProjectHeartbeat{
 			{
 				ProjectID:  projectID,

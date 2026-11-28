@@ -348,6 +348,43 @@ func TestServer_ReportDurationBackstopStop_NoHubConnectionDropsCleanly(t *testin
 	})
 }
 
+func TestServer_ReportDurationBackstopStop_IncludesVersion(t *testing.T) {
+	brokers := &mockRuntimeBrokerService{}
+	s := &Server{
+		version: "v1.3.0",
+		hubConnections: map[string]*HubConnection{
+			"hub-1": {
+				Name:      "hub-1",
+				BrokerID:  "broker-1",
+				HubClient: &stubBrokerHubClient{brokers: brokers},
+			},
+		},
+	}
+
+	s.reportDurationBackstopStop(context.Background(), api.AgentInfo{
+		Name:      "expired-agent",
+		ProjectID: "proj-1",
+		RunID:     "run-1",
+	})
+
+	calls := brokers.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 heartbeat call, got %d", len(calls))
+	}
+	if calls[0].BrokerID != "broker-1" {
+		t.Errorf("BrokerID = %q, want %q", calls[0].BrokerID, "broker-1")
+	}
+	if calls[0].Heartbeat.Version != "v1.3.0" {
+		t.Errorf("Heartbeat.Version = %q, want %q", calls[0].Heartbeat.Version, "v1.3.0")
+	}
+	if len(calls[0].Heartbeat.Projects) != 1 || len(calls[0].Heartbeat.Projects[0].Agents) != 1 {
+		t.Fatalf("unexpected heartbeat projects: %+v", calls[0].Heartbeat.Projects)
+	}
+	if got := calls[0].Heartbeat.Projects[0].Agents[0].ExitReason; got != string(state.ExitReasonLimitsExceeded) {
+		t.Errorf("ExitReason = %q, want %q", got, state.ExitReasonLimitsExceeded)
+	}
+}
+
 func TestDurationBackstopSweeper_StopsExpiredSubstrateRun(t *testing.T) {
 	now := time.Date(2026, 11, 26, 18, 0, 0, 0, time.UTC)
 	expired := now.Add(-1 * time.Minute).Format(time.RFC3339)
