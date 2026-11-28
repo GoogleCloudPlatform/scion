@@ -3133,6 +3133,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
+				if err := s.checkDirectThreadIDMatchesDMKey(w, conv.ID, conv.ExternalRef, structuredMsg.ThreadID); err != nil {
+					return
+				}
 			case "group":
 				// Deny when either project ID is unset (empty or zero UUID).
 				// Two unset IDs comparing equal would authorize a request
@@ -3167,6 +3170,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						return
 					}
 					senderMayJoin = decision.MayJoin
+				}
+
+				if err := s.checkGroupThreadIDNotDMKey(w, conv.ID, structuredMsg.ThreadID); err != nil {
+					return
 				}
 
 				// Auto-register the sender (when its mode allows joining by
@@ -3257,14 +3264,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				// thread conversation is resolved, so a refused post writes
 				// no row (group_message_mode.go). Every other sender of a
 				// thread post was decided by decideKeyedPostSender.
-				if kind == "group" && authKind == "agent" {
-					sender, ok := s.loadGroupPostSender(ctx, w, authID)
-					if !ok {
+				if kind == "group" {
+					if err := s.checkGroupThreadIDNotDMKey(w, "", structuredMsg.ThreadID); err != nil {
 						return
 					}
-					threadPostSender = sender
-					if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
-						return
+					if authKind == "agent" {
+						sender, ok := s.loadGroupPostSender(ctx, w, authID)
+						if !ok {
+							return
+						}
+						threadPostSender = sender
+						if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
+							return
+						}
 					}
 				}
 				var keyOpts []messaging.ConversationByKeyOption

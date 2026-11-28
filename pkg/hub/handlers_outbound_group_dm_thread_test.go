@@ -17,10 +17,16 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -433,23 +439,160 @@ func TestDirectConversation_WhitespacePaddedDMThreadID_Rejected(t *testing.T) {
 func TestDerivedGroupThread_WhitespacePaddedDMThreadID_Rejected(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
-	setupWebChannelBroker(t, srv, s, project)
+
+	// Register an external channel ("discord") in addition to "web" so
+	// outboundThreadGateApplies("discord") is false and the request reaches
+	// the derived kind=="group" guard without being intercepted by the
+	// web thread-existence gate (422).
+	inprocessBus := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inprocessBus},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+		{Name: "discord", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return nil }, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.subscribeProjectUserMessages(project.ID)
 
 	dmKey := mustDMKey(t, "agent", agent.ID, "user", user.ID)
 
-	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
-		Recipient:   "user:" + user.Email,
-		RecipientID: user.ID,
-		Msg:         "derived group thread with whitespace-padded dm thread_id",
-		ThreadID:    " " + dmKey,
-		Channel:     "web",
-	})
-	require.Equal(t, http.StatusBadRequest, rr.Code,
-		"derived group thread with whitespace-padded dm: thread_id must be rejected 400: %s",
-		rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "non-DM conversation")
+	for _, ch := range []string{"web", "discord"} {
+		t.Run("channel_"+ch, func(t *testing.T) {
+			rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+				Recipient:   "user:" + user.Email,
+				RecipientID: user.ID,
+				Msg:         "derived group thread with whitespace-padded dm thread_id",
+				ThreadID:    " " + dmKey,
+				Channel:     ch,
+			})
+			require.Equal(t, http.StatusBadRequest, rr.Code,
+				"derived group thread (%s) with whitespace-padded dm: thread_id must be rejected 400: %s",
+				ch, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), "non-DM conversation")
 
-	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+			msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, msgs.Items, "rejected send must not persist a message")
+		})
+	}
+}
+
+func TestAgentMessage_GroupAndDirect_DMThreadID_Rejected(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+
+	agent.Phase = string(state.PhaseRunning)
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	ensureHubMembership(ctx, s, user.ID)
+	project.OwnerID = user.ID
+	project.CreatedBy = user.ID
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	otherUser := &store.User{
+		ID:          tid("agent-msg-other-user"),
+		Email:       "agent-msg-other@example.com",
+		DisplayName: "Other Agent Message User",
+	}
+	require.NoError(t, s.CreateUser(ctx, otherUser))
+
+	legacyGroup, nativeGroup := createTestGroupConversations(t, ctx, s, project.ID, user.ID)
+	dmKey := mustDMKey(t, "agent", agent.ID, "user", user.ID)
+	otherDMKey := mustDMKey(t, "agent", agent.ID, "user", otherUser.ID)
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
 	require.NoError(t, err)
-	assert.Empty(t, msgs.Items, "rejected send must not persist a message")
+
+	postAgentMsg := func(t *testing.T, sm *messages.StructuredMessage) *httptest.ResponseRecorder {
+		t.Helper()
+		body, marshalErr := json.Marshal(MessageRequest{StructuredMessage: sm})
+		require.NoError(t, marshalErr)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		ident := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, store.UserRoleAdmin, "web")
+		req = req.WithContext(contextWithIdentity(req.Context(), ident))
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, agent.ID)
+		return rr
+	}
+
+	cases := []struct {
+		name        string
+		msg         *messages.StructuredMessage
+		wantContain string
+		checkGroup  string
+	}{
+		{
+			name: "legacy_group_conv_id_dm_thread_id",
+			msg: &messages.StructuredMessage{
+				Msg:            "group msg with dm thread_id",
+				Type:           messages.TypeInstruction,
+				Channel:        "web",
+				ConversationID: legacyGroup.ID,
+				ThreadID:       dmKey,
+			},
+			wantContain: "non-DM conversation",
+			checkGroup:  legacyGroup.ID,
+		},
+		{
+			name: "native_group_conv_id_whitespace_dm_thread_id",
+			msg: &messages.StructuredMessage{
+				Msg:            "native group msg with whitespace dm thread_id",
+				Type:           messages.TypeInstruction,
+				Channel:        "web",
+				ConversationID: nativeGroup.ID,
+				ThreadID:       " " + dmKey,
+			},
+			wantContain: "non-DM conversation",
+			checkGroup:  nativeGroup.ID,
+		},
+		{
+			name: "direct_conv_id_whitespace_mismatched_dm_thread_id",
+			msg: &messages.StructuredMessage{
+				Msg:            "direct msg with whitespace mismatched dm thread_id",
+				Type:           messages.TypeInstruction,
+				Channel:        "web",
+				ConversationID: dmConv.ID,
+				ThreadID:       " " + otherDMKey,
+			},
+			wantContain: "does not match the direct conversation's key",
+		},
+		{
+			name: "derived_group_whitespace_dm_thread_id",
+			msg: &messages.StructuredMessage{
+				Msg:      "derived group msg with whitespace dm thread_id",
+				Type:     messages.TypeInstruction,
+				Channel:  "web",
+				ThreadID: " " + dmKey,
+			},
+			wantContain: "non-DM conversation",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postAgentMsg(t, tc.msg)
+			require.Equal(t, http.StatusBadRequest, rr.Code,
+				"%s: expected 400 BadRequest, got %d: %s", tc.name, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), tc.wantContain)
+
+			msgs, listErr := s.ListMessages(ctx, store.MessageFilter{RecipientID: agent.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, listErr)
+			assert.Empty(t, msgs.Items, "rejected send must not persist a message")
+
+			if tc.checkGroup != "" {
+				assertAgentNotParticipant(t, ctx, s, tc.checkGroup, agent.ID)
+			}
+		})
+	}
 }
