@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -71,11 +70,6 @@ type overrideBudgetRequest struct {
 	OverrideUntil json.RawMessage `json:"override_until"`
 	StateVersion  *int64          `json:"state_version,omitempty"`
 	Reason        string          `json:"reason,omitempty"`
-}
-
-func (s *Server) tokenBudgetsEnabled() bool {
-	return s.experimentEnabled(experiments.TokenomicsUsageLedger) &&
-		s.experimentEnabled(experiments.TokenomicsTokenBudgets)
 }
 
 // parseUsageBudgetOverrideSubpath parses "usage/budgets/{budgetId}:override"
