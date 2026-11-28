@@ -38,29 +38,14 @@ import {
 import { formatInstantWithZone } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { srOnlyStyles } from '../shared/styles.js';
+import defaultProbeSpec from './admin-system-one-default-probe-spec.json';
 import './not-found.js';
 
 const ADAPTERS_PATH = '/api/v1/admin/system-one/adapters';
 const INSTANCES_PATH = '/api/v1/admin/system-one/instances';
 const PROJECTS_PATH = '/api/v1/projects';
 
-const DEFAULT_PROBE_SPEC = JSON.stringify(
-  {
-    version: 1,
-    questions: [
-      {
-        id: 'q1',
-        type: 'binary',
-        question: 'Is this synthetic message a routine connectivity check?',
-      },
-    ],
-    output: {
-      question: 'q1',
-    },
-  },
-  null,
-  2
-);
+const DEFAULT_PROBE_SPEC = JSON.stringify(defaultProbeSpec, null, 2);
 
 const DEFAULT_PROBE_TEXT = 'Synthetic connectivity check from Scion System One admin UI.';
 
