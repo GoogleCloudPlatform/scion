@@ -57,6 +57,8 @@ import { agentParentTrail, current, type Named } from '../../client/crumbs.js';
 import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
 import { isZeroDurationLimit } from '../../shared/duration-limit.js';
 
+const IDLE_SUSPEND_ACTIVITIES = new Set<string>(['idle', 'completed', 'harness_error']);
+
 interface AgentNotificationsResponse {
   userNotifications: Notification[];
   agentNotifications: Notification[];
@@ -1124,11 +1126,30 @@ export class ScionPageAgentDetail extends LitElement {
     }
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
-      this.agent = { ...this.agent, ...updatedAgent };
+      const prevPhase = this.agent.phase;
+      const prevActivity = this.agent.activity;
+      const merged: Agent = { ...this.agent, ...updatedAgent };
+      const phaseOrActivityChanged = merged.phase !== prevPhase || merged.activity !== prevActivity;
+      if (phaseOrActivityChanged) {
+        if (
+          merged.phase !== 'running' ||
+          !merged.activity ||
+          !IDLE_SUSPEND_ACTIVITIES.has(merged.activity)
+        ) {
+          delete merged.idleSuspendAt;
+        }
+        if (merged.phase !== 'running') {
+          delete merged.activitySince;
+        }
+      }
+      this.agent = merged;
       setAgentPageCurrentAgent({
         agentId: this.agentId,
         name: this.agent.name || this.agentId,
       });
+      if (phaseOrActivityChanged && merged.phase === 'running' && !this.deleted) {
+        this.backgroundRefresh();
+      }
       return;
     }
     // The agent is missing from stateManager's map. That alone does not
@@ -1569,6 +1590,91 @@ export class ScionPageAgentDetail extends LitElement {
             >${hint}</span
           ></span
         >
+      </div>
+    `;
+  }
+
+  /**
+   * The Container started row inside Status -> Current State.
+   */
+  private renderContainerStarted(agent: Agent) {
+    const hasStarted = Boolean(agent.startedAt && !this.isZeroDate(agent.startedAt));
+    return html`
+      <div class="info-item" data-testid="agent-container-started">
+        <span class="info-label">Container started</span>
+        <span class="info-value">
+          ${hasStarted
+            ? html`${this.formatDate(agent.startedAt!)}<span
+                  style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
+                  >(${this.formatRelativeTime(agent.startedAt!)})</span
+                >`
+            : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
+        </span>
+      </div>
+    `;
+  }
+
+  /**
+   * Formats a hub-computed idleSuspendAt timestamp as a countdown string,
+   * clamping past-due instants (within the 5m sweep cadence) to "Suspends soon".
+   */
+  private formatSuspendCountdown(iso: string): string {
+    const targetMs = new Date(iso).getTime();
+    if (Number.isNaN(targetMs)) return '';
+    if (targetMs - Date.now() <= 500) {
+      return 'Suspends soon';
+    }
+    return `Suspends ${formatRelative(iso)}`;
+  }
+
+  /**
+   * The Idle since / Auto-suspend countdown row inside Status -> Current State.
+   * Shows "Idle since …" when running in a suspend-eligible activity with
+   * activitySince, paired with "Suspends in …" / "Suspends soon" when the hub
+   * supplies idleSuspendAt, "Never suspends" when never-suspend applies, or no
+   * countdown when idleSuspendAt is absent.
+   */
+  private renderIdleSuspendStatus(agent: Agent) {
+    const isRunning = agent.phase === 'running';
+    if (!isRunning) return nothing;
+
+    const isIdleActivity = Boolean(agent.activity && IDLE_SUSPEND_ACTIVITIES.has(agent.activity));
+    const hasActivitySince = Boolean(agent.activitySince && !this.isZeroDate(agent.activitySince));
+    const hasIdleSuspendAt = Boolean(agent.idleSuspendAt && !this.isZeroDate(agent.idleSuspendAt));
+    const showIdleSince = hasActivitySince && (isIdleActivity || hasIdleSuspendAt);
+    const isNeverSuspend = isNeverSuspendActive(agent);
+
+    const countdownText = isNeverSuspend
+      ? 'Never suspends'
+      : hasIdleSuspendAt
+        ? this.formatSuspendCountdown(agent.idleSuspendAt!)
+        : '';
+
+    if (!showIdleSince && !countdownText) return nothing;
+
+    const countdownTitle =
+      hasIdleSuspendAt && !isNeverSuspend ? this.formatDate(agent.idleSuspendAt!) : '';
+
+    return html`
+      <div class="info-item" data-testid="agent-idle-suspend">
+        <span class="info-label">Auto-suspend</span>
+        <span class="info-value">
+          ${showIdleSince
+            ? html`<span title=${this.formatDate(agent.activitySince!)}
+                >Idle since ${this.formatRelativeTime(agent.activitySince!)}</span
+              >`
+            : nothing}${showIdleSince && countdownText
+            ? html`<span style="color: var(--scion-text-muted, #64748b); margin: 0 0.35em;"
+                >·</span
+              >`
+            : nothing}${countdownText
+            ? html`<span
+                title=${countdownTitle}
+                style=${isNeverSuspend ? 'color: var(--scion-text-muted, #64748b);' : ''}
+                >${countdownText}</span
+              >`
+            : nothing}
+        </span>
       </div>
     `;
   }
@@ -2634,6 +2740,13 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private renderCurrentStateCard(agent: Agent) {
+    const activityTimestamp =
+      (agent.activitySince && !this.isZeroDate(agent.activitySince) && agent.activitySince) ||
+      (agent.lastActivityEvent &&
+        !this.isZeroDate(agent.lastActivityEvent) &&
+        agent.lastActivityEvent) ||
+      agent.updated ||
+      agent.updatedAt;
     return html`
       <div class="card">
         <div class="card-title-row">
@@ -2684,21 +2797,18 @@ export class ScionPageAgentDetail extends LitElement {
                     status: agent.activity,
                     label: stateLabel(agent.activity),
                     size: 'small',
-                  })}${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
-                  agent.updated ||
-                  agent.updatedAt
+                  })}${activityTimestamp
                     ? html`<span
+                        data-testid="agent-activity-since"
+                        title=${this.formatDate(activityTimestamp)}
                         style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
-                        >${this.formatRelativeTime(
-                          (agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)
-                            ? agent.lastActivityEvent
-                            : agent.updated || agent.updatedAt)!
-                        )}</span
+                        >${this.formatRelativeTime(activityTimestamp)}</span
                       >`
                     : ''}`
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
+          ${this.renderContainerStarted(agent)} ${this.renderIdleSuspendStatus(agent)}
           ${this.renderSuspendReason(agent)} ${this.renderSuspendPolicy(agent)}
           ${agent.detail?.toolName
             ? html`

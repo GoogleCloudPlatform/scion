@@ -5141,6 +5141,21 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 	s.enrichAgent(ctx, agent, nil, nil)
 	s.setDeletionBlocksStart(ctx, agent)
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
+	var activitySince *time.Time
+	if agent.ActivitySince != nil {
+		t := agent.ActivitySince.UTC()
+		activitySince = &t
+	}
+	idleSuspendEnabled, idleSuspendAfter := s.idleSuspendSettings()
+	harnessSupportsResume := !isManagedAgentRuntime(agent.Runtime) && harnessCaps.Resume.Support != api.SupportNo
+	idleSuspendAt := computeAgentIdleSuspendView(
+		agent,
+		time.Now(),
+		s.experimentEnabled(experiments.IdleSuspend) && idleSuspendEnabled,
+		idleSuspendAfter,
+		s.neverSuspendActive(agent),
+		harnessSupportsResume,
+	)
 
 	// Compute capabilities for this agent
 	resp := AgentWithCapabilities{
@@ -5152,6 +5167,8 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		EffectiveConfig:     agentEffectiveConfigView(agent.EffectiveConfig),
 		CloudLogging:        s.logQueryService != nil,
 		SSHHostKey:          s.agentSSHHostKey(agent),
+		ActivitySince:       activitySince,
+		IdleSuspendAt:       idleSuspendAt,
 	}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, agentResource(agent))

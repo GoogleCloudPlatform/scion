@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgent_JSON(t *testing.T) {
@@ -86,6 +87,49 @@ func TestAgent_JSON(t *testing.T) {
 		}
 		if _, ok := m["groveId"]; ok {
 			t.Errorf("groveId = %v, want key absent", m["groveId"])
+		}
+	})
+
+	t.Run("unmarshal startedAt, activitySince, and idleSuspendAt", func(t *testing.T) {
+		startedAt := time.Date(2026, 11, 28, 10, 0, 0, 0, time.UTC)
+		activitySince := time.Date(2026, 11, 28, 11, 50, 0, 0, time.UTC)
+		idleSuspendAt := time.Date(2026, 11, 28, 12, 5, 0, 0, time.UTC)
+		jsonData := `{
+			"id": "agent-1",
+			"startedAt": "2026-11-28T10:00:00Z",
+			"activitySince": "2026-11-28T11:50:00Z",
+			"idleSuspendAt": "2026-11-28T12:05:00Z"
+		}`
+		var a Agent
+		if err := json.Unmarshal([]byte(jsonData), &a); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if !a.StartedAt.Equal(startedAt) {
+			t.Errorf("StartedAt = %v, want %v", a.StartedAt, startedAt)
+		}
+		if a.ActivitySince == nil || !a.ActivitySince.Equal(activitySince) {
+			t.Errorf("ActivitySince = %v, want %v", a.ActivitySince, activitySince)
+		}
+		if a.IdleSuspendAt == nil || !a.IdleSuspendAt.Equal(idleSuspendAt) {
+			t.Errorf("IdleSuspendAt = %v, want %v", a.IdleSuspendAt, idleSuspendAt)
+		}
+	})
+
+	t.Run("omits nil activitySince and idleSuspendAt on marshal", func(t *testing.T) {
+		a := Agent{ID: "agent-1"}
+		data, err := json.Marshal(a)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+		if _, ok := m["activitySince"]; ok {
+			t.Errorf("activitySince = %v, want key absent", m["activitySince"])
+		}
+		if _, ok := m["idleSuspendAt"]; ok {
+			t.Errorf("idleSuspendAt = %v, want key absent", m["idleSuspendAt"])
 		}
 	})
 }

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -70,6 +71,13 @@ type AgentWithCapabilities struct {
 	// request carries include=authority; never for a request made with an
 	// agent delegated credential.
 	Authority *api.AgentAuthority `json:"authority,omitempty"`
+	// ActivitySince is when the agent's current activity began while running
+	// (nil when not running or unset). Set on the single-agent GET only.
+	ActivitySince *time.Time `json:"activitySince,omitempty"`
+	// IdleSuspendAt is the hub-computed earliest instant the agent becomes due
+	// for idle auto-suspend, or nil when ineligible/blocked/disabled. Set on
+	// the single-agent GET only.
+	IdleSuspendAt *time.Time `json:"idleSuspendAt,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Agent.
@@ -91,6 +99,8 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
 		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
 		Authority           *api.AgentAuthority              `json:"authority,omitempty"`
+		ActivitySince       *time.Time                       `json:"activitySince,omitempty"`
+		IdleSuspendAt       *time.Time                       `json:"idleSuspendAt,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -107,6 +117,8 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedTimezone:    a.ResolvedTimezone,
 		TimezoneSource:      a.TimezoneSource,
 		Authority:           a.Authority,
+		ActivitySince:       a.ActivitySince,
+		IdleSuspendAt:       a.IdleSuspendAt,
 	})
 }
 
@@ -130,6 +142,8 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
 		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
 		Authority           *api.AgentAuthority              `json:"authority,omitempty"`
+		ActivitySince       *time.Time                       `json:"activitySince,omitempty"`
+		IdleSuspendAt       *time.Time                       `json:"idleSuspendAt,omitempty"`
 	}
 	var wrapper WrapperFields
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -149,6 +163,8 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.ResolvedTimezone = wrapper.ResolvedTimezone
 	a.TimezoneSource = wrapper.TimezoneSource
 	a.Authority = wrapper.Authority
+	a.ActivitySince = wrapper.ActivitySince
+	a.IdleSuspendAt = wrapper.IdleSuspendAt
 	return nil
 }
 
