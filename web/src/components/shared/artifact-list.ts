@@ -98,6 +98,7 @@ export class ScionArtifactList extends LitElement {
     }
     .toolbar {
       display: flex;
+      flex-wrap: wrap;
       gap: 0.75rem;
       align-items: center;
       margin-bottom: 0.75rem;

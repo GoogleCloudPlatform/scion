@@ -297,4 +297,66 @@ describe('notification tray: review summary', () => {
       'Bob dismissed your review request on "Launch Plan"\n“Out of scope this week”'
     );
   });
+
+  it('shows in-tray item titles for ARTIFACT_REVIEW_SUBMITTED and ARTIFACT_REVIEW_REQUESTED', () => {
+    // Review submitted with summary note ("... (v3 of your artifact):").
+    const withNote = renderRow(summary());
+    expect(withNote.querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review submitted on v3'
+    );
+
+    // Review submitted without note ("Review (v7) of your artifact ...").
+    const withoutNote = renderRow(
+      summary({ excerpt: undefined, message: 'Review (v7) of your artifact submitted by Alice.' })
+    );
+    expect(withoutNote.querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review submitted on v7'
+    );
+
+    // Fallback when message carries no recognized version pattern.
+    const fallback = renderRow(summary({ excerpt: undefined, message: 'A review was submitted.' }));
+    expect(fallback.querySelector('.notif-title')?.textContent?.trim()).toBe('Review submitted');
+
+    // Review requested in-tray title and browser popup title.
+    const reqNotif = summary({
+      id: 'notif-requested',
+      kind: ARTIFACT_REVIEW_REQUEST_KIND,
+      status: ARTIFACT_REVIEW_REQUESTED_STATUS,
+      message: 'Alice asked you to review "Launch Plan" (v2): scion://artifact/' + ARTIFACT_ID,
+      excerpt: 'Please check section 2',
+    });
+    const reqHost = renderRow(reqNotif);
+    expect(reqHost.querySelector('.notif-title')?.textContent?.trim()).toBe('Review requested');
+
+    const tray: any = document.createElement('scion-notification-tray');
+    tray.dispatchBrowserNotification(reqNotif);
+    expect(popups).toHaveLength(1);
+    expect(popups[0].title).toBe('Review requested');
+  });
+
+  it('cannot be spoofed by hostile reviewer labels containing version-like text in either submitted message form', () => {
+    const withHostileSummary = summary({
+      message: 'Review summary from X (v9 of your artifact): (v2 of your artifact):',
+      excerpt: 'Looks good.',
+    });
+    expect(renderRow(withHostileSummary).querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review submitted on v2'
+    );
+
+    const withoutNoteHostile = summary({
+      excerpt: undefined,
+      message: 'Review (v2) of your artifact submitted by Y (v9 of your artifact):.',
+    });
+    expect(renderRow(withoutNoteHostile).querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review submitted on v2'
+    );
+
+    const tray: any = document.createElement('scion-notification-tray');
+    tray.dispatchBrowserNotification(withHostileSummary);
+    tray.dispatchBrowserNotification(withoutNoteHostile);
+    expect(popups.map((p) => p.title)).toEqual([
+      'Review submitted on v2',
+      'Review submitted on v2',
+    ]);
+  });
 });

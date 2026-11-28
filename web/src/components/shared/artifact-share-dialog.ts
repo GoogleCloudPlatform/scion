@@ -50,6 +50,7 @@ import { live } from 'lit/directives/live.js';
 
 import { apiFetch } from '../../client/api.js';
 import {
+  BOUNDED_REVIEW_CREATOR,
   linkLifetimeChoices,
   PERMISSION_LABELS,
   SELECTABLE_PERMISSIONS,
@@ -476,6 +477,16 @@ export class ScionArtifactShareDialog extends LitElement {
         const [kind, ref] = splitPrincipal(g.subjectRef);
         if (kind) add(`${kind}:${ref}`, () => principalName(kind, ref));
       }
+    }
+    const a = this.artifact;
+    if (
+      a?.ownerKind === 'agent' &&
+      a.ownerRef &&
+      this.grants.some(
+        (g) => g.createdBy === BOUNDED_REVIEW_CREATOR && !this.boundedGrantPredatesTransfer(g, a)
+      )
+    ) {
+      add(`agent:${a.ownerRef}`, () => principalName('agent', a.ownerRef));
     }
     for (const [key, p] of want) {
       void p.then((name) => {
@@ -1062,6 +1073,40 @@ export class ScionArtifactShareDialog extends LitElement {
     `;
   }
 
+  /**
+   * Whether a bounded grant was created earlier than the artifact's last
+   * ownership transfer (or has an unparseable timestamp while a transfer is
+   * recorded). In that case the current owner may not be the agent that wrote
+   * the grant, so its slug must not be attributed.
+   */
+  private boundedGrantPredatesTransfer(g: ArtifactGrant, a: Artifact | null): boolean {
+    if (!a?.transferredAt) return false;
+    const transferMs = Date.parse(a.transferredAt);
+    if (!Number.isFinite(transferMs)) return true;
+    const grantMs = Date.parse(g.createdAt);
+    if (!Number.isFinite(grantMs)) return true;
+    return grantMs < transferMs;
+  }
+
+  /**
+   * Role-gated label for a bounded review grant written by an agent review
+   * request (ptone/scion#5550, #9311). The hub writes bounded grants only for
+   * the owning agent, so the owner slug is only trusted for grants created
+   * after the last transfer; earlier grants use the slug-less form. Sponsor
+   * grants (system:sponsor_review) keep the plain "Can review" label.
+   */
+  private boundedGrantLabel(g: ArtifactGrant): string | null {
+    if (g.createdBy !== BOUNDED_REVIEW_CREATOR) return null;
+    const a = this.artifact;
+    const slug =
+      a?.ownerKind === 'agent' && a.ownerRef && !this.boundedGrantPredatesTransfer(g, a)
+        ? this.names.get(`agent:${a.ownerRef}`) || a.ownerRef
+        : '';
+    return slug
+      ? `${PERMISSION_LABELS.review} · requested by agent ${slug} · while they have a project role`
+      : `${PERMISSION_LABELS.review} · requested by agent · while they have a project role`;
+  }
+
   /** A grant in retention mode: its permission as text, and Remove unless it is the home project's. */
   private renderGrantReadOnly(g: ArtifactGrant): TemplateResult {
     const isScope = g.subjectKind === 'scope';
@@ -1072,6 +1117,7 @@ export class ScionArtifactShareDialog extends LitElement {
       const [kind, ref] = splitPrincipal(g.subjectRef);
       who = kind ? this.label(kind, ref) : g.subjectRef;
     }
+    const boundedLabel = this.boundedGrantLabel(g);
     return html`<div class="grant">
       <sl-icon name=${isScope ? 'folder' : 'person'}></sl-icon>
       <span class="who">
@@ -1081,8 +1127,11 @@ export class ScionArtifactShareDialog extends LitElement {
           : isScope
             ? html`<span class="muted">(project)</span>`
             : nothing}
+        ${boundedLabel ? html`<small class="grant-bounded">${boundedLabel}</small>` : nothing}
       </span>
-      <span class="muted permission">${PERMISSION_LABELS[g.permission]}</span>
+      ${boundedLabel
+        ? nothing
+        : html`<span class="muted permission">${PERMISSION_LABELS[g.permission]}</span>`}
       ${g.home
         ? nothing
         : html`<sl-button
@@ -1142,6 +1191,7 @@ export class ScionArtifactShareDialog extends LitElement {
     // While cross-project sharing is off, a grant to another project can
     // still be removed but not changed (ptone/scion#4586).
     const locked = isScope && !this.crossProjectSharing;
+    const boundedLabel = this.boundedGrantLabel(g);
     return html`<div class="grant">
       <sl-icon name=${isScope ? 'folder' : 'person'}></sl-icon>
       <span class="who">
@@ -1154,12 +1204,15 @@ export class ScionArtifactShareDialog extends LitElement {
               >Cross-project sharing is off: this grant can be removed but not changed</small
             >`
           : nothing}
+        ${boundedLabel ? html`<small class="grant-bounded">${boundedLabel}</small>` : nothing}
       </span>
-      ${g.permission === 'review'
-        ? html`<span class="muted">${PERMISSION_LABELS.review}</span>`
-        : this.renderPermissionSelect(g.permission, !!this.busyId || locked, (p) => {
-            void this.changePermission(g, p);
-          })}
+      ${boundedLabel
+        ? nothing
+        : g.permission === 'review'
+          ? html`<span class="muted">${PERMISSION_LABELS.review}</span>`
+          : this.renderPermissionSelect(g.permission, !!this.busyId || locked, (p) => {
+              void this.changePermission(g, p);
+            })}
       <sl-button
         size="small"
         variant="text"

@@ -17,8 +17,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './artifact-request-review-dialog.js';
+import { reviewerAccessHint } from './artifact-request-review-dialog.js';
 import type { ScionArtifactRequestReviewDialog } from './artifact-request-review-dialog.js';
-import type { Artifact, CreateReviewRequestsResponse } from '../../client/artifacts.js';
+import type {
+  Artifact,
+  ArtifactGrant,
+  CreateReviewRequestsResponse,
+} from '../../client/artifacts.js';
 
 const ARTIFACT: Artifact = {
   id: '22222222-2222-2222-2222-222222222222',
@@ -172,8 +177,8 @@ describe('scion-artifact-request-review-dialog', () => {
       }
     }
 
-    const tags = [...el.shadowRoot!.querySelectorAll('.selected-list sl-tag')];
-    expect(tags).toHaveLength(4);
+    const selectedRows = [...el.shadowRoot!.querySelectorAll('.selected-list .selected-row')];
+    expect(selectedRows).toHaveLength(4);
 
     // Note > 1000 runes disables Submit (emoji counts as 1 rune each).
     const textarea = el.shadowRoot!.querySelector('.request-note') as HTMLElement & {
@@ -311,5 +316,206 @@ describe('scion-artifact-request-review-dialog', () => {
     dialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
     await settle(el);
     expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows per-user picker access hints for existing, raised (admin), and bounded (agent-owned) grants', async () => {
+    const agentArtifact: Artifact = {
+      ...ARTIFACT,
+      ownerKind: 'agent',
+      ownerRef: 'ag-arch',
+    };
+    fetchMock.mockImplementation((input: string | URL) => {
+      const url = String(input);
+      if (url === `/api/v1/artifacts/${agentArtifact.id}/grants`) {
+        return Promise.resolve(
+          jsonResponse({
+            crossProjectSharing: false,
+            grants: [
+              {
+                id: 'g-home',
+                subjectKind: 'scope',
+                subjectRef: agentArtifact.scopeRef,
+                permission: 'read',
+                home: true,
+                createdAt: '2026-11-25T00:00:00Z',
+              },
+              {
+                id: 'g-bob',
+                subjectKind: 'principal',
+                subjectRef: 'user:u-bob',
+                permission: 'review',
+                createdAt: '2026-11-25T00:00:00Z',
+                createdBy: 'user:u-alice',
+              },
+              {
+                id: 'g-carol',
+                subjectKind: 'principal',
+                subjectRef: 'user:u-carol',
+                permission: 'review',
+                createdAt: '2026-11-25T00:00:00Z',
+                createdBy: 'system:review_request',
+              },
+            ],
+          })
+        );
+      }
+      if (url.startsWith('/api/v1/users?search=')) {
+        return Promise.resolve(
+          jsonResponse({
+            users: [
+              { id: 'u-bob', email: 'bob@example.com', displayName: 'Bob' },
+              { id: 'u-carol', email: 'carol@example.com', displayName: 'Carol' },
+              { id: 'u-dana', email: 'dana@example.com', displayName: 'Dana' },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected' }, 500));
+    });
+
+    const el = document.createElement(
+      'scion-artifact-request-review-dialog'
+    ) as ScionArtifactRequestReviewDialog;
+    el.artifact = agentArtifact;
+    el.currentUserId = 'u-alice';
+    el.canAdminister = true;
+    el.open = true;
+    document.body.appendChild(el);
+    await settle(el);
+
+    const searchInput = el.shadowRoot!.querySelector('.reviewer-search') as HTMLElement & {
+      value: string;
+    };
+    for (let i = 0; i < 3; i++) {
+      searchInput.value = 'example';
+      searchInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      await settle(el);
+      (el.shadowRoot!.querySelector('.suggestions button') as HTMLButtonElement).click();
+      await settle(el);
+    }
+
+    const selectedRows = [...el.shadowRoot!.querySelectorAll('.selected-list .selected-row')];
+    expect(selectedRows).toHaveLength(3);
+    expect(selectedRows[0].querySelector('.selected-hint')?.textContent?.trim()).toBe(
+      'can already review'
+    );
+    expect(selectedRows[1].querySelector('.selected-hint')?.textContent?.trim()).toBe(
+      'can review while they have a project role'
+    );
+    expect(selectedRows[2].querySelector('.selected-hint')?.textContent?.trim()).toBe(
+      'will be given Can review'
+    );
+
+    // Removing a picked row drops it from the list.
+    (selectedRows[1].querySelector('sl-icon-button') as HTMLElement).click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelectorAll('.selected-list .selected-row')).toHaveLength(2);
+  });
+
+  it('does not fetch grants or guess raised hints when caller cannot administer', async () => {
+    fetchMock.mockImplementation((input: string | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/v1/users?search=')) {
+        return Promise.resolve(
+          jsonResponse({
+            users: [{ id: 'u-dana', email: 'dana@example.com', displayName: 'Dana' }],
+          })
+        );
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected' }, 500));
+    });
+
+    const el = await mount();
+    const searchInput = el.shadowRoot!.querySelector('.reviewer-search') as HTMLElement & {
+      value: string;
+    };
+    searchInput.value = 'dana';
+    searchInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    await settle(el);
+    (el.shadowRoot!.querySelector('.suggestions button') as HTMLButtonElement).click();
+    await settle(el);
+
+    const row = el.shadowRoot!.querySelector('.selected-list .selected-row');
+    expect(row).not.toBeNull();
+    expect(row!.querySelector('.selected-hint')).toBeNull();
+    expect(
+      fetchMock.mock.calls.some((c) => {
+        const u =
+          typeof c[0] === 'string' ? c[0] : c[0] instanceof URL ? c[0].toString() : c[0].url;
+        return u.endsWith('/grants');
+      })
+    ).toBe(false);
+  });
+
+  it('omits raised hint when a home or cross-project scope grant is write/admin, keeps raised for read-only home grant, and maps sponsor review grants to bounded', () => {
+    const homeRead: ArtifactGrant = {
+      id: 'g-home-read',
+      subjectKind: 'scope',
+      subjectRef: ARTIFACT.scopeRef,
+      permission: 'read',
+      home: true,
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    const homeWrite: ArtifactGrant = {
+      ...homeRead,
+      id: 'g-home-write',
+      permission: 'write',
+    };
+    const crossProjectWrite: ArtifactGrant = {
+      id: 'g-other-write',
+      subjectKind: 'scope',
+      subjectRef: '33333333-3333-3333-3333-333333333333',
+      permission: 'write',
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    const sponsorReview: ArtifactGrant = {
+      id: 'g-sponsor',
+      subjectKind: 'principal',
+      subjectRef: 'user:u-sponsor',
+      permission: 'review',
+      createdAt: '2026-11-25T00:00:00Z',
+      createdBy: 'system:sponsor_review',
+    };
+
+    // (a) Home grant is write and picked user has no principal grant -> no hint.
+    expect(reviewerAccessHint('user:u-member', ARTIFACT, [homeWrite], true, true)).toBeNull();
+
+    // (b) Cross-project scope grant at write -> no hint.
+    expect(
+      reviewerAccessHint('user:u-member', ARTIFACT, [homeRead, crossProjectWrite], true, true)
+    ).toBeNull();
+
+    // (c) Home grant is read only -> still raised for admin caller.
+    expect(reviewerAccessHint('user:u-dana', ARTIFACT, [homeRead], true, true)).toBe('raised');
+
+    // (R2) Sponsor review grant is role-gated -> maps to bounded hint ("can review while they have a project role").
+    expect(
+      reviewerAccessHint('user:u-sponsor', ARTIFACT, [homeRead, sponsorReview], true, true)
+    ).toBe('bounded');
+
+    // (N3) User owner and principal write/admin grants -> existing ("can already review").
+    const writeGrant: ArtifactGrant = {
+      id: 'g-write',
+      subjectKind: 'principal',
+      subjectRef: 'user:u-writer',
+      permission: 'write',
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    const adminGrant: ArtifactGrant = {
+      id: 'g-admin',
+      subjectKind: 'principal',
+      subjectRef: 'user:u-admin',
+      permission: 'admin',
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    expect(reviewerAccessHint('user:u-alice', ARTIFACT, [], false, false)).toBe('existing');
+    expect(reviewerAccessHint('user:u-writer', ARTIFACT, [homeRead, writeGrant], true, true)).toBe(
+      'existing'
+    );
+    expect(reviewerAccessHint('user:u-admin', ARTIFACT, [homeRead, adminGrant], true, true)).toBe(
+      'existing'
+    );
   });
 });

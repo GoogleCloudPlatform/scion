@@ -3436,6 +3436,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ? html`<scion-artifact-request-review-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
+            .canAdminister=${!!(this.data.canManage || this.data.canShare)}
             ?open=${this.requestReviewOpen}
             @artifact-review-requested=${(): void => {
               void this.loadReviewRequests();
