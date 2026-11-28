@@ -2244,6 +2244,7 @@ func SetTokenHome(dir string) func() {
 	origMode := tokenStoreMode
 	origRuntimePath := runtimeTokenPath
 	origMem := memoryToken
+	origMemTransport := memoryTransportToken
 	origRuntimeOverridden := runtimeStoreOverridden
 	tokenStoreMu.Unlock()
 
@@ -2256,6 +2257,7 @@ func SetTokenHome(dir string) func() {
 		tokenStoreMode = origMode
 		runtimeTokenPath = origRuntimePath
 		memoryToken = origMem
+		memoryTransportToken = origMemTransport
 		runtimeStoreOverridden = origRuntimeOverridden
 		tokenStoreMu.Unlock()
 	}
@@ -2347,25 +2349,61 @@ func WriteTokenFile(token string, uid, gid int) error {
 	return nil
 }
 
-// TransportTokenFilePath returns the path of the transport token file, a
-// sibling of the agent credential file. Like TokenFilePath it resolves to
-// the scion user's home so that root (sciontool init) and the scion user
-// (child processes) agree on the same path.
+// TransportTokenFilePath returns the path of the active transport token file,
+// a sibling of the active agent credential file. In default TokenStoreHome
+// mode it resolves to <scion home>/.scion/transport-token; in
+// TokenStoreRuntimeFile mode it resolves to <runtime dir>/transport-token
+// (e.g. /run/scion/transport-token); in TokenStoreMemory mode it returns "".
 func TransportTokenFilePath() string {
-	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
+	mode, rPath, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreRuntimeFile:
+		return filepath.Join(filepath.Dir(rPath), transportauth.TransportTokenFileName)
+	case TokenStoreMemory:
+		return ""
+	default:
+		return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
+	}
 }
 
 // NewTransportTokenFileSource returns a file-backed transport source on
 // TransportTokenFilePath() that reads with the same guarded, no-follow
-// reader as the agent token file. It has no bootstrap value.
+// reader as the agent token file. In TokenStoreMemory mode it seeds the
+// source's in-memory bootstrap value from the memory transport store and
+// reads nothing from disk.
 func NewTransportTokenFileSource() *transportauth.FileSource {
-	return transportauth.NewFileSource(TransportTokenFilePath(), ReadTransportTokenFileGuarded)
+	src := transportauth.NewFileSource(TransportTokenFilePath(), ReadTransportTokenFileGuarded)
+	if CurrentTokenStoreMode() == TokenStoreMemory {
+		if memTok := getMemoryTransportToken(); memTok != "" {
+			src.SetBootstrap(memTok)
+		}
+	}
+	return src
 }
 
 // WriteTransportTokenFile persists the hub-provided transport token to the
-// transport token file, mode 0600, through the same fchown-then-rename
-// path WriteTokenFile uses. uid <= 0 skips the chown.
+// active transport token store. In TokenStoreMemory mode it stores the value
+// in memory only and writes nothing to disk. In TokenStoreRuntimeFile mode it
+// writes to the runtime path (dir 0700, file 0600, atomic temp+rename).
+// uid <= 0 skips the chown.
 func WriteTransportTokenFile(token string, uid, gid int) error {
+	mode, _, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreMemory:
+		setMemoryTransportToken(token)
+		return nil
+	case TokenStoreRuntimeFile:
+		path := TransportTokenFilePath()
+		checkRuntimeStoreTestGuard(path, "WriteTransportTokenFile")
+		if err := ensureRuntimeTokenDir(path); err != nil {
+			return fmt.Errorf("failed to prepare runtime transport token directory: %w", err)
+		}
+		if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
+			return fmt.Errorf("failed to write runtime transport token file: %w", err)
+		}
+		return nil
+	}
+
 	if testing.Testing() && !tokenHomeOverridden {
 		panic("scion/hub: WriteTransportTokenFile called during a test without SetTokenHome(); " +
 			"call SetTokenHome(t.TempDir()) so tests never overwrite the real ~/.scion/transport-token")
@@ -2385,9 +2423,10 @@ func WriteTransportTokenFile(token string, uid, gid int) error {
 }
 
 // SeedTransportTokenFile writes the injected bootstrap transport token to
-// the transport token file unless the file already holds a token that
+// the active transport token store unless it already holds a token that
 // expires later (for example after an in-place container restart, where
-// the bootstrap value is older than the last refresh). Returns the path.
+// the bootstrap value is older than the last refresh). Returns the path
+// ("" in TokenStoreMemory mode).
 func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 	path := TransportTokenFilePath()
 	if existing, err := ReadTransportTokenFileGuarded(path); err == nil {
@@ -2407,7 +2446,11 @@ func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 // written from outside this process (reset-auth writes it through the
 // broker), rewrites it so its mode and ownership are 0600 and uid:gid
 // (uid <= 0 skips the chown), and hands the value to this client's
-// transport source. It returns false, with no error, when there is no
+// transport source. In isolated token-store mode it takes and unconditionally
+// unlinks the handoff file (<scion home>/.scion/transport-token), never
+// restores an unparseable candidate back to the handoff path, and persists an
+// adopted token only to the runtime store (/run/scion/transport-token or
+// memory) with uid=gid=0. It returns false, with no error, when there is no
 // transport token file or the client does not use a hub-provided transport
 // token. A value whose expiry cannot be parsed is not adopted: the current
 // credential is kept, and an error is returned.
@@ -2415,7 +2458,16 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if !c.hasHubProvidedTransport() {
 		return false, nil
 	}
-	tok, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
+	isolated := IsIsolatedTokenStore()
+	var (
+		tok string
+		err error
+	)
+	if isolated {
+		tok, err = TakeHandoffTransportToken()
+	} else {
+		tok, err = ReadTransportTokenFileGuarded(TransportTokenFilePath())
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -2426,12 +2478,18 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if tok == "" {
 		return false, nil
 	}
+	if isolated {
+		uid, gid = 0, 0
+	}
 	expiry, err := transportauth.ParseTokenExpiry(tok)
 	if err != nil {
-		// Not a usable credential: keep the current one in memory, restore
-		// the file from it so other processes keep using it, and record the
-		// reset as failed rather than successful.
-		c.restoreTransportTokenFile(uid, gid)
+		// Not a usable credential: keep the current one in memory. In
+		// non-isolated mode restore the shared file so other processes keep
+		// using it; in isolated mode the handoff file is already unlinked and
+		// the runtime store is untouched.
+		if !isolated {
+			c.restoreTransportTokenFile(uid, gid)
+		}
 		st := TransportRefreshStatus{
 			At:      time.Now().UTC(),
 			Outcome: TransportRefreshOutcomeFailed,
@@ -2488,20 +2546,32 @@ func (c *Client) restoreTransportTokenFile(uid, gid int) {
 	c.noteTransportFile(cur)
 }
 
-// RemoveTransportTokenFile removes the transport token file and its refresh
-// status file, resolving parent directories without following symlinks. A
-// missing file is not an error. It returns true if the token file was
-// removed.
+// RemoveTransportTokenFile removes the active transport token file and its
+// refresh status file, resolving parent directories without following
+// symlinks. In TokenStoreMemory mode it clears the in-memory transport token.
+// A missing file is not an error. It returns true if a file was removed.
 func RemoveTransportTokenFile() (bool, error) {
-	if testing.Testing() && !tokenHomeOverridden {
-		panic("scion/hub: RemoveTransportTokenFile called during a test without SetTokenHome()")
+	mode, _, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreMemory:
+		had := getMemoryTransportToken() != ""
+		setMemoryTransportToken("")
+		return had, nil
+	case TokenStoreRuntimeFile:
+		checkRuntimeStoreTestGuard(TransportTokenFilePath(), "RemoveTransportTokenFile")
+	default:
+		if testing.Testing() && !tokenHomeOverridden {
+			panic("scion/hub: RemoveTransportTokenFile called during a test without SetTokenHome()")
+		}
 	}
 	removed, err := removeFileNoFollow(TransportTokenFilePath())
 	if err != nil {
 		return removed, err
 	}
-	if _, err := removeFileNoFollow(TransportRefreshStatusPath()); err != nil {
-		return removed, fmt.Errorf("failed to remove transport refresh status: %w", err)
+	if statusPath := TransportRefreshStatusPath(); statusPath != "" {
+		if _, err := removeFileNoFollow(statusPath); err != nil {
+			return removed, fmt.Errorf("failed to remove transport refresh status: %w", err)
+		}
 	}
 	return removed, nil
 }
@@ -2554,22 +2624,37 @@ type TransportRefreshStatus struct {
 }
 
 // TransportRefreshStatusPath returns the path of the transport refresh
-// status file.
+// status file ("" in TokenStoreMemory mode).
 func TransportRefreshStatusPath() string {
-	return filepath.Join(tokenHomeResolver(), ".scion", transportRefreshStatusFileName)
+	mode, rPath, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreRuntimeFile:
+		return filepath.Join(filepath.Dir(rPath), transportRefreshStatusFileName)
+	case TokenStoreMemory:
+		return ""
+	default:
+		return filepath.Join(tokenHomeResolver(), ".scion", transportRefreshStatusFileName)
+	}
 }
 
 // WriteTransportRefreshStatus persists st to the transport refresh status
-// file (mode 0600, chowned to uid:gid when uid > 0).
+// file (mode 0600, chowned to uid:gid when uid > 0). In TokenStoreMemory mode
+// nothing is written to disk.
 func WriteTransportRefreshStatus(st TransportRefreshStatus, uid, gid int) error {
-	if testing.Testing() && !tokenHomeOverridden {
+	mode, _, _ := snapshotTokenStore()
+	if mode == TokenStoreMemory {
+		return nil
+	}
+	path := TransportRefreshStatusPath()
+	if mode == TokenStoreRuntimeFile {
+		checkRuntimeStoreTestGuard(path, "WriteTransportRefreshStatus")
+	} else if testing.Testing() && !tokenHomeOverridden {
 		panic("scion/hub: WriteTransportRefreshStatus called during a test without SetTokenHome()")
 	}
 	data, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
-	path := TransportRefreshStatusPath()
 	d, err := dirfd.EnsureDirNoFollow(filepath.Dir(path), 0700)
 	if err != nil {
 		return fmt.Errorf("failed to create transport status directory: %w", err)
@@ -2582,7 +2667,11 @@ func WriteTransportRefreshStatus(st TransportRefreshStatus, uid, gid int) error 
 // ok is false when the file does not exist or cannot be parsed.
 func ReadTransportRefreshStatus() (TransportRefreshStatus, bool) {
 	var st TransportRefreshStatus
-	data, err := readTokenFileGuarded(TransportRefreshStatusPath())
+	path := TransportRefreshStatusPath()
+	if path == "" {
+		return st, false
+	}
+	data, err := readTokenFileGuarded(path)
 	if err != nil {
 		return st, false
 	}
@@ -2598,11 +2687,21 @@ func ReadTransportRefreshStatus() (TransportRefreshStatus, bool) {
 // It is a transportauth.FileReadFunc; pass it to
 // transportauth.FromEnvWithReader from processes that may run as root.
 //
+// In TokenStoreMemory mode when path is "", it returns the in-memory transport
+// token (or fs.ErrNotExist when unset).
+//
 // Under go test without SetTokenHome it refuses to read the default path,
 // because the token home resolves to the real agent user's home (not
 // $HOME) and tests must never pick up a live transport token.
 func ReadTransportTokenFileGuarded(path string) (string, error) {
-	if testing.Testing() && !tokenHomeOverridden && path == TransportTokenFilePath() {
+	if path == "" && CurrentTokenStoreMode() == TokenStoreMemory {
+		tok := getMemoryTransportToken()
+		if tok == "" {
+			return "", fs.ErrNotExist
+		}
+		return tok, nil
+	}
+	if testing.Testing() && !tokenHomeOverridden && path == HandoffTransportTokenFilePath() {
 		return "", fmt.Errorf("scion/hub: refusing to read %s during a test without SetTokenHome()", path)
 	}
 	return readTokenFileGuarded(path)

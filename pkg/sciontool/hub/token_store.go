@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // TokenStoreMode selects where PID 1 stores its runtime agent token.
@@ -47,6 +49,9 @@ const (
 	// DefaultRuntimeTokenPath is the root-only runtime path for the isolated
 	// agent token.
 	DefaultRuntimeTokenPath = "/run/scion/" + TokenFile
+	// DefaultRuntimeTransportTokenPath is the root-only runtime path for the
+	// isolated transport token.
+	DefaultRuntimeTransportTokenPath = "/run/scion/" + transportauth.TransportTokenFileName
 )
 
 // ErrHandoffUnlinkFailed is returned when PID 1 cannot remove the handoff
@@ -59,6 +64,7 @@ var (
 	tokenStoreMode         TokenStoreMode = TokenStoreHome
 	runtimeTokenPath       string
 	memoryToken            string
+	memoryTransportToken   string
 	runtimeStoreOverridden bool
 )
 
@@ -87,6 +93,19 @@ func HandoffTokenTmpFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", TokenFile+".tmp")
 }
 
+// HandoffTransportTokenFilePath always returns the broker handoff drop-box
+// path for the transport token (<scion home>/.scion/transport-token),
+// regardless of the active TokenStoreMode.
+func HandoffTransportTokenFilePath() string {
+	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
+}
+
+// HandoffTransportTokenTmpFilePath returns the stale temp-file path alongside
+// the handoff transport token (<scion home>/.scion/transport-token.tmp).
+func HandoffTransportTokenTmpFilePath() string {
+	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName+".tmp")
+}
+
 // SetRuntimeTokenStoreForTest permits tests to configure a runtime token store
 // path and automatically restores the previous token-store state on cleanup.
 func SetRuntimeTokenStoreForTest() func() {
@@ -94,6 +113,7 @@ func SetRuntimeTokenStoreForTest() func() {
 	origMode := tokenStoreMode
 	origPath := runtimeTokenPath
 	origMem := memoryToken
+	origMemTransport := memoryTransportToken
 	origOverridden := runtimeStoreOverridden
 	runtimeStoreOverridden = true
 	tokenStoreMu.Unlock()
@@ -103,18 +123,20 @@ func SetRuntimeTokenStoreForTest() func() {
 		tokenStoreMode = origMode
 		runtimeTokenPath = origPath
 		memoryToken = origMem
+		memoryTransportToken = origMemTransport
 		runtimeStoreOverridden = origOverridden
 		tokenStoreMu.Unlock()
 	}
 }
 
 // ResetTokenStore restores the default TokenStoreHome mode and clears any
-// isolated runtime path or in-memory token.
+// isolated runtime path or in-memory tokens.
 func ResetTokenStore() {
 	tokenStoreMu.Lock()
 	tokenStoreMode = TokenStoreHome
 	runtimeTokenPath = ""
 	memoryToken = ""
+	memoryTransportToken = ""
 	tokenStoreMu.Unlock()
 }
 
@@ -193,5 +215,17 @@ func snapshotTokenStore() (mode TokenStoreMode, rPath, memTok string) {
 func setMemoryToken(tok string) {
 	tokenStoreMu.Lock()
 	memoryToken = strings.TrimSpace(tok)
+	tokenStoreMu.Unlock()
+}
+
+func getMemoryTransportToken() string {
+	tokenStoreMu.RLock()
+	defer tokenStoreMu.RUnlock()
+	return memoryTransportToken
+}
+
+func setMemoryTransportToken(tok string) {
+	tokenStoreMu.Lock()
+	memoryTransportToken = strings.TrimSpace(tok)
 	tokenStoreMu.Unlock()
 }

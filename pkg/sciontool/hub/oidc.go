@@ -118,6 +118,31 @@ func (c *Client) configureMetadataTransport(mode transportauth.HeaderMode) bool 
 func newTransportFileSource() *transportauth.FileSource {
 	envTok := os.Getenv(transportauth.EnvTransportToken)
 	path := os.Getenv(transportauth.EnvTransportTokenFile)
+	mode := CurrentTokenStoreMode()
+	if mode == TokenStoreMemory {
+		memTok := getMemoryTransportToken()
+		if envTok == "" && memTok == "" && path == "" {
+			return nil
+		}
+		src := transportauth.NewFileSource("", ReadTransportTokenFileGuarded)
+		if envTok != "" {
+			src.SetBootstrap(envTok)
+		} else if memTok != "" {
+			src.SetBootstrap(memTok)
+		}
+		return src
+	}
+	if mode == TokenStoreRuntimeFile {
+		runtimePath := TransportTokenFilePath()
+		if envTok == "" && path == "" {
+			if _, err := ReadTransportTokenFileGuarded(runtimePath); err != nil {
+				return nil
+			}
+		}
+		src := transportauth.NewFileSource(runtimePath, ReadTransportTokenFileGuarded)
+		src.SetBootstrap(envTok)
+		return src
+	}
 	if envTok == "" && path == "" {
 		return nil
 	}

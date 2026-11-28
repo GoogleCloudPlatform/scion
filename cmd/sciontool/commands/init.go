@@ -558,7 +558,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the refresh loop keeps current; the env value is only valid for about
 	// an hour. When staged secrets are also present, the single re-exec
 	// below restarts init with the cleaned environment for both.
-	transportCleared := stageTransportToken(targetUID, targetGID)
+	var transportCleared bool
+	if shellIsolation {
+		transportCleared = stageTransportTokenForShell(targetUID, rootless)
+	} else {
+		transportCleared = stageTransportToken(targetUID, targetGID)
+	}
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file secrets into this single base64 blob
@@ -2834,9 +2839,10 @@ func (r *authResetter) reset(source authResetSource) {
 	}
 
 	// Reset-auth may also have written a fresh transport token. Adopt it so
-	// this process uses it immediately and the file is owned by the scion
-	// user for every other hub client in the container.
-	if adopted, err := hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+	// this process uses it immediately; in isolated mode it is taken from the
+	// handoff path and stored at /run/scion/transport-token (0600 root:root) or
+	// in memory only (chownUID=chownGID=0).
+	if adopted, err := hubClient.AdoptTransportTokenFile(chownUID, chownGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
@@ -2940,7 +2946,8 @@ func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
 	if !r.hubClient.TransportTokenFileChanged() {
 		return
 	}
-	if adopted, err := r.hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+	chownUID, chownGID := r.tokenChownOwner()
+	if adopted, err := r.hubClient.AdoptTransportTokenFile(chownUID, chownGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)

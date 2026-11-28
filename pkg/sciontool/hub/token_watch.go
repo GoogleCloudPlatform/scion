@@ -364,10 +364,12 @@ func readTokenFileQuiet() string {
 	return strings.TrimSpace(v)
 }
 
-// readTransportTokenForWatch reads the transport token file through the
-// guarded reader, returning "" when it is missing, refused or empty.
+// readTransportTokenForWatch reads the transport token handoff file through the
+// guarded reader, returning "" when it is missing, refused or empty. In default
+// TokenStoreHome mode HandoffTransportTokenFilePath() equals
+// TransportTokenFilePath(); in isolated mode it watches the handoff drop-box.
 func readTransportTokenForWatch() string {
-	v, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
+	v, err := ReadTransportTokenFileGuarded(HandoffTransportTokenFilePath())
 	if err != nil {
 		return ""
 	}

@@ -39,3 +39,18 @@ func RemoveStaleHandoffTmpFile() error {
 func VerifyHandoffTokenAbsent() error {
 	return fmt.Errorf("verify handoff token absent: %w on this platform", errors.ErrUnsupported)
 }
+
+// TakeHandoffTransportToken is unsupported on non-unix platforms.
+func TakeHandoffTransportToken() (string, error) {
+	return "", fmt.Errorf("take handoff transport token: %w on this platform", errors.ErrUnsupported)
+}
+
+// RemoveStaleHandoffTransportTmpFile is unsupported on non-unix platforms.
+func RemoveStaleHandoffTransportTmpFile() error {
+	return fmt.Errorf("remove stale handoff transport tmp file: %w on this platform", errors.ErrUnsupported)
+}
+
+// VerifyHandoffTransportTokenAbsent is unsupported on non-unix platforms.
+func VerifyHandoffTransportTokenAbsent() error {
+	return fmt.Errorf("verify handoff transport token absent: %w on this platform", errors.ErrUnsupported)
+}

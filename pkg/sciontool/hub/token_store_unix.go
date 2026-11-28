@@ -144,6 +144,35 @@ func VerifyHandoffTokenAbsent() error {
 	return verifyHandoffAbsent(HandoffTokenFilePath())
 }
 
+// TakeHandoffTransportToken reads the broker transport-token handoff file
+// (<scion home>/.scion/transport-token) through the same no-follow,
+// size-bounded, single-link regular-file reader as TakeHandoffToken and
+// unlinks it unconditionally.
+func TakeHandoffTransportToken() (string, error) {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: TakeHandoffTransportToken called during a test without SetTokenHome()")
+	}
+	return takeHandoffFile(HandoffTransportTokenFilePath())
+}
+
+// RemoveStaleHandoffTransportTmpFile removes any leftover
+// <scion home>/.scion/transport-token.tmp without following symlinks.
+func RemoveStaleHandoffTransportTmpFile() error {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: RemoveStaleHandoffTransportTmpFile called during a test without SetTokenHome()")
+	}
+	return removeHandoffSiblingNoFollow(HandoffTransportTokenTmpFilePath())
+}
+
+// VerifyHandoffTransportTokenAbsent asserts via dirfd no-follow that the
+// handoff transport token path does not exist.
+func VerifyHandoffTransportTokenAbsent() error {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: VerifyHandoffTransportTokenAbsent called during a test without SetTokenHome()")
+	}
+	return verifyHandoffAbsent(HandoffTransportTokenFilePath())
+}
+
 func verifyHandoffAbsent(path string) error {
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {

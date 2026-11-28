@@ -490,3 +490,70 @@ func TestRunInit_NonShell_PreservesHomeTokenFile(t *testing.T) {
 		t.Fatalf("non-shell mode = %v, want TokenStoreHome", mode)
 	}
 }
+
+func TestRunInit_ShellIsolation_TransportTokenHandoffAbsentBeforeSupervisorRun(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+	origSetup := runSetupHostUser
+	origBeforeSup := beforeSupervisorRunForTest
+	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	t.Cleanup(func() {
+		runSetupHostUser = origSetup
+		beforeSupervisorRunForTest = origBeforeSup
+	})
+
+	handoffTransport := hub.HandoffTransportTokenFilePath()
+	if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handoffTransport, []byte("pre-sup-transport-tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleTransportTmp := hub.HandoffTransportTokenTmpFilePath()
+	if err := os.WriteFile(staleTransportTmp, []byte("stale-transport-tmp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_AGENT_ID", "")
+
+	var observed bool
+	var transportHandoffExisted bool
+	var transportTmpExisted bool
+	var memTransportTok string
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		observed = true
+		_, err := os.Lstat(handoffTransport)
+		transportHandoffExisted = !os.IsNotExist(err)
+		_, tmpErr := os.Lstat(staleTransportTmp)
+		transportTmpExisted = !os.IsNotExist(tmpErr)
+		memTransportTok, _ = hub.ReadTransportTokenFileGuarded("")
+	}
+
+	code := RunInit([]string{"true"}, InitRunOptions{
+		DisableReExec:               true,
+		DisableTermSignalForwarding: true,
+		DisablePortForwarding:       true,
+	})
+	if code != 0 {
+		t.Fatalf("RunInit exited %d, want 0", code)
+	}
+	if !observed {
+		t.Fatal("beforeSupervisorRunForTest was not called")
+	}
+	if transportHandoffExisted {
+		t.Fatal("handoff transport-token still existed at sup.Run")
+	}
+	if transportTmpExisted {
+		t.Fatal("stale transport-token.tmp still existed at sup.Run")
+	}
+	if memTransportTok != "pre-sup-transport-tok" {
+		t.Fatalf("in-memory transport token = %q, want %q", memTransportTok, "pre-sup-transport-tok")
+	}
+}
