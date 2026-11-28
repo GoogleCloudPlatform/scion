@@ -1325,21 +1325,19 @@ func (m *bearerMatrixFixture) mintAgentTokenWithScopes(t *testing.T, agentID, pr
 // agentProjectReadScopeExemptions lists catalogued GET entry points that admit
 // PrincipalAgent + CredentialAgentJWT but by policy are NOT gated by
 // ScopeProjectRead (agent self-service routes, caller-owned inbox/DM routes,
-// hub-level discovery routes, user-only endpoints, or routes gated by a
+// hub-level discovery routes, parentless-only routes, or routes gated by a
 // different scope/authority such as project:secret:read, project:artifact:read,
 // or agent.attach).
+//
+// Routes that refuse every agent token (including routes whose handlers call
+// checkAgentReadScope before a kernel or user-only refusal) belong in
+// agentProjectReadRefusedForAllAgents instead, so both token dispositions are
+// pinned rather than skipped.
 //
 // Every entry must carry a non-empty policy reason and is staleness-checked
 // against both the live catalog and live enforcement behavior.
 var agentProjectReadScopeExemptions = map[liveInventoryKey]string{
-	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/logs"}:                                       "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
-	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/logs"}:                  "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
-	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs"}:                                 "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
-	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs"}:            "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
-	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs/stream"}:                          "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
-	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream"}:     "authorizeAgentLogsRead requires kernel agent.read, which has no AgentScopes mapping (refuses all agent tokens)",
-	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages"}:                               "user-only agent message history endpoint (refuses all agent tokens regardless of scope)",
-	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages/stream"}:                        "user-only stream endpoint (agents are refused even with a stream backend installed)",
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages/stream"}:                        "user-only stream endpoint (agents are refused with a stream backend installed; 501 without publisher in fixture)",
 	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}:                        "self-only port proxy (authorizePortAccess admits only the owning agent)",
 	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:              "self-only port proxy (authorizePortAccess admits only the owning agent)",
 	{"agent.port.list", http.MethodGet, "/api/v1/agents/{id}/ports"}:                                      "agent self-service route listing only the calling agent's own exposed ports",
@@ -1378,9 +1376,61 @@ var agentProjectReadScopeExemptions = map[liveInventoryKey]string{
 	{"env.hub.read", http.MethodGet, "/api/v1/env/{key}"}:                                                 "hub-level env key lookup, not a project read",
 	{"secret.hub.read", http.MethodGet, "/api/v1/secrets"}:                                                "hub-level secret listing, not a project read",
 	{"secret.hub.read", http.MethodGet, "/api/v1/secrets/{key}"}:                                          "hub-level secret key lookup, not a project read",
+	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts/{id}"}:                            "serves parentless (hub/user) accounts only; project-scoped accounts return 404 before auth",
 	{"agent.delegation.list", http.MethodGet, "/api/v1/agents/{id}/delegations"}:                          "agent self-service listing only its own delegations",
-	{"agent.delegation.list", http.MethodGet, "/api/v1/users/me/delegations"}:                             "user-only self delegations endpoint (refuses all agent tokens regardless of scope)",
 	{"agent.delegation.read", http.MethodGet, "/api/v1/agents/{id}/delegations/{grantId}"}:                "agent self-service reading only its own delegation grant",
+}
+
+// agentProjectReadRefusedPin describes the expected refusal behavior for a
+// catalogued GET entry point that refuses all agent tokens (both with and
+// without ScopeProjectRead).
+type agentProjectReadRefusedPin struct {
+	// RequireScopeRefusal is true when the handler calls checkAgentReadScope
+	// before the downstream agent refusal, so the token lacking
+	// ScopeProjectRead must specifically receive the project:read scope refusal.
+	RequireScopeRefusal bool
+	Reason              string
+}
+
+// agentProjectReadRefusedForAllAgents pins catalogued GET entry points that
+// refuse every agent token (both without and with ScopeProjectRead). Unlike
+// agentProjectReadScopeExemptions, every entry here is actively asserted for
+// both token kinds and fails if either token is admitted or if a
+// checkAgentReadScope-guarded route stops returning the scope refusal.
+// Entries are staleness-checked against the live catalog and live responses.
+var agentProjectReadRefusedForAllAgents = map[liveInventoryKey]agentProjectReadRefusedPin{
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogs calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs/stream"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogsStream calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentCloudLogsStream calls checkAgentReadScope then authorizeAgentLogsRead (kernel agent.read refuses all agent tokens)",
+	},
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/messages"}: {
+		RequireScopeRefusal: true,
+		Reason:              "handleAgentMessages calls checkAgentReadScope then requires a UserIdentity (refuses all agent tokens)",
+	},
+	{"agent.delegation.list", http.MethodGet, "/api/v1/users/me/delegations"}: {
+		RequireScopeRefusal: false,
+		Reason:              "handleUserMeDelegations is session-only (admitAgentDelegationCaller refuses all agent tokens)",
+	},
 }
 
 // agentProjectReadFixturePending lists catalogued GET entry points that cannot
@@ -1392,7 +1442,6 @@ var agentProjectReadFixturePending = map[liveInventoryKey]string{
 	{"schedule.event.read", http.MethodGet, "/api/v1/projects/{projectId}/scheduled-events/{id}/output"}: "requires an exec-type scheduled event with captured output and live agent:attach on the target agent",
 	{"project.messagepolicy.read", http.MethodGet, "/api/v1/projects/{id}/message-policies"}:             "answers 404 while hub.message_policies experiment is off in the bearer-matrix fixture",
 	{"project.messagepolicy.read", http.MethodGet, "/api/v1/projects/{id}/message-policies/{policyId}"}:  "answers 404 while hub.message_policies experiment is off in the bearer-matrix fixture",
-	{"gcp.identity.read", http.MethodGet, "/api/v1/gcp-service-accounts/{id}"}:                           "top-level lookup uses an unseeded SA ID in the live-inventory fixture (404 before auth)",
 }
 
 // agentProjectReadPositiveAdmitted reports whether rec represents a valid
@@ -1432,20 +1481,39 @@ func agentProjectReadRefusedByScope(key liveInventoryKey, rec *httptest.Response
 		strings.Contains(resp.Error.Message, "Insufficient permissions")
 }
 
+// agentProjectReadRefusedByScopeCheck reports whether rec is specifically the
+// checkAgentReadScope refusal (HTTP 403 forbidden mentioning ScopeProjectRead).
+func agentProjectReadRefusedByScopeCheck(rec *httptest.ResponseRecorder) bool {
+	if rec.Code != http.StatusForbidden {
+		return false
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return false
+	}
+	return resp.Error.Code == ErrCodeForbidden && strings.Contains(resp.Error.Message, string(ScopeProjectRead))
+}
+
 // TestAgentProjectReadScopeMatrix_CatalogEntryPoints drives real agent JWTs
 // through every catalogued GET entry point that admits PrincipalAgent with
 // CredentialAgentJWT (deny-by-default).
 //
 // The admitting token carries ScopesForRole(AgentRoleFull) (which includes
 // ScopeProjectRead); the refused token carries the exact same bundle minus
-// ScopeProjectRead. Every non-exempt, non-fixture-pending entry point must:
+// ScopeProjectRead. Every non-exempt, non-refused-all, non-fixture-pending
+// entry point must:
 //  1. Pass a positive control with ScopeProjectRead (2xx, or its documented
 //     post-auth 5xx in bearerMatrixPositiveServerErrors), and
 //  2. Be refused specifically by the scope/permission check without
 //     ScopeProjectRead.
 //
-// Both agentProjectReadScopeExemptions and agentProjectReadFixturePending are
-// checked for staleness against the live catalog and live handler behavior.
+// Routes that refuse every agent token (including checkAgentReadScope-guarded
+// routes that are also refused downstream for all agents) are pinned in
+// agentProjectReadRefusedForAllAgents and asserted for both token kinds.
+//
+// agentProjectReadScopeExemptions, agentProjectReadRefusedForAllAgents, and
+// agentProjectReadFixturePending are all checked for staleness against the
+// live catalog and live handler behavior.
 func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 	ctx := t.Context()
@@ -1541,6 +1609,7 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 
 	seen := map[liveInventoryKey]bool{}
 	enforced := 0
+	refusedAll := 0
 	exempted := 0
 	fixturePending := 0
 
@@ -1555,6 +1624,36 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 
 		recWithout := send(e, withoutScope)
 		recWith := send(e, withScope)
+
+		if pin, ok := agentProjectReadRefusedForAllAgents[key]; ok {
+			if strings.TrimSpace(pin.Reason) == "" {
+				t.Errorf("refused-for-all-agents entry %v has an empty reason", key)
+			}
+			if _, dup := agentProjectReadScopeExemptions[key]; dup {
+				t.Errorf("key %v appears in both agentProjectReadRefusedForAllAgents and agentProjectReadScopeExemptions", key)
+			}
+			if _, dup := agentProjectReadFixturePending[key]; dup {
+				t.Errorf("key %v appears in both agentProjectReadRefusedForAllAgents and agentProjectReadFixturePending", key)
+			}
+			if pin.RequireScopeRefusal {
+				if !agentProjectReadRefusedByScopeCheck(recWithout) {
+					t.Errorf("%s: agent token without %s got %d (%s), want %s scope refusal: %s",
+						label, ScopeProjectRead, recWithout.Code, bearerMatrixErrorCode(recWithout), ScopeProjectRead, recWithout.Body.String())
+				}
+			} else if !bearerMatrixRefused(ep.Method, recWithout.Code) {
+				t.Errorf("%s: agent token without %s got %d, want %s: %s",
+					label, ScopeProjectRead, recWithout.Code, bearerMatrixRefusal(ep.Method), recWithout.Body.String())
+			}
+			if agentProjectReadPositiveAdmitted(key, recWith) {
+				t.Errorf("stale refused-for-all-agents entry %s: with-scope agent token was admitted (with=%d); promote to enforced",
+					label, recWith.Code)
+			} else if !bearerMatrixRefused(ep.Method, recWith.Code) {
+				t.Errorf("%s: agent token with %s got %d, want %s: %s",
+					label, ScopeProjectRead, recWith.Code, bearerMatrixRefusal(ep.Method), recWith.Body.String())
+			}
+			refusedAll++
+			continue
+		}
 
 		if reason, ok := agentProjectReadScopeExemptions[key]; ok {
 			if strings.TrimSpace(reason) == "" {
@@ -1596,6 +1695,11 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 		enforced++
 	}
 
+	for key := range agentProjectReadRefusedForAllAgents {
+		if !seen[key] {
+			t.Errorf("stale refused-for-all-agents entry %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
+		}
+	}
 	for key := range agentProjectReadScopeExemptions {
 		if !seen[key] {
 			t.Errorf("stale exemption %v: no live catalog GET entry point admits PrincipalAgent with CredentialAgentJWT", key)
@@ -1610,7 +1714,7 @@ func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
 	if enforced == 0 {
 		t.Fatal("matrix exercised no catalog entry points enforcing agent project:read")
 	}
-	t.Logf("agent project:read scope matrix: enforced=%d exempted=%d fixture_pending=%d", enforced, exempted, fixturePending)
+	t.Logf("agent project:read scope matrix: enforced=%d refused_all=%d exempted=%d fixture_pending=%d", enforced, refusedAll, exempted, fixturePending)
 }
 
 // TestProjectMetricsRoutes_AgentProjectReadScope verifies that the three
