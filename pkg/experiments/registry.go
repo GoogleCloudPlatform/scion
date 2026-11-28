@@ -633,7 +633,7 @@ const Triggers = "hub.triggers"
 
 // MessagePolicies gates project-scoped message admission policies
 // (ptone/scion#8047): /api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]],
-// scion message-policy create|list|get|delete|test|decisions, and the outbound
+// scion message-policy create|update|list|get|delete|test|decisions, and the outbound
 // agent message gate (agent_to_user, agent_to_conversation, agent_dm,
 // mention_delivery; shadow and enforce modes). Server layer: while it is off,
 // the message policy routes answer 404, the outbound gate evaluates and records
