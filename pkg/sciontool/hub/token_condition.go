@@ -50,6 +50,16 @@ const (
 // (TokenFilePath), read through the same guarded reader as ReadTokenFile.
 // It never returns or logs the value.
 func CheckTokenFile() TokenFileCondition {
+	mode, _, memTok := snapshotTokenStore()
+	if mode == TokenStoreMemory {
+		if memTok == "" {
+			return TokenFileAbsent
+		}
+		if !wellFormedTokenText(memTok) {
+			return TokenFileMalformed
+		}
+		return TokenFilePresent
+	}
 	token, err := readTokenFileGuarded(TokenFilePath())
 	if err != nil {
 		return classifyTokenFileErr(err)
@@ -139,8 +149,17 @@ func HubClientUnconfiguredReason() string {
 // that is already gone is not an error. Like WriteTokenFile, it refuses to
 // run under `go test` unless SetTokenHome isolated the token home.
 func RemoveTokenFile() error {
-	if testing.Testing() && !tokenHomeOverridden {
-		panic("scion/hub: RemoveTokenFile called during a test without SetTokenHome()")
+	mode, rPath, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreMemory:
+		setMemoryToken("")
+		return nil
+	case TokenStoreRuntimeFile:
+		checkRuntimeStoreTestGuard(rPath, "RemoveTokenFile")
+	default:
+		if testing.Testing() && !tokenHomeOverridden {
+			panic("scion/hub: RemoveTokenFile called during a test without SetTokenHome()")
+		}
 	}
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(TokenFilePath())
 	if err != nil {

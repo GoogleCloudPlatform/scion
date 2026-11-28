@@ -2235,15 +2235,29 @@ func SetHubTestSandboxed() func() {
 var tokenHomeOverridden bool
 
 // SetTokenHome overrides the token home directory for testing.
-// Returns a cleanup function that restores the original resolver.
+// Returns a cleanup function that restores the original resolver and token
+// store configuration.
 func SetTokenHome(dir string) func() {
 	orig := tokenHomeResolver
 	origOverridden := tokenHomeOverridden
+	tokenStoreMu.Lock()
+	origMode := tokenStoreMode
+	origRuntimePath := runtimeTokenPath
+	origMem := memoryToken
+	origRuntimeOverridden := runtimeStoreOverridden
+	tokenStoreMu.Unlock()
+
 	tokenHomeResolver = func() string { return dir }
 	tokenHomeOverridden = true
 	return func() {
 		tokenHomeResolver = orig
 		tokenHomeOverridden = origOverridden
+		tokenStoreMu.Lock()
+		tokenStoreMode = origMode
+		runtimeTokenPath = origRuntimePath
+		memoryToken = origMem
+		runtimeStoreOverridden = origRuntimeOverridden
+		tokenStoreMu.Unlock()
 	}
 }
 
@@ -2256,26 +2270,50 @@ func TokenHomeIsolated() bool {
 	return !testing.Testing() || tokenHomeOverridden
 }
 
-// TokenFilePath returns the path to the canonical token file.
-// In agent containers it always resolves to the scion user's home
-// directory so that root (sciontool init) and scion (child processes)
-// agree on the same path.
+// TokenFilePath returns the path to the active agent token file.
+// In default TokenStoreHome mode it resolves to <scion home>/.scion/scion-token.
+// In TokenStoreRuntimeFile mode it resolves to the configured runtime path
+// (e.g. /run/scion/scion-token). In TokenStoreMemory mode it returns "".
 func TokenFilePath() string {
-	return filepath.Join(tokenHomeResolver(), ".scion", TokenFile)
+	mode, rPath, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreRuntimeFile:
+		return rPath
+	case TokenStoreMemory:
+		return ""
+	default:
+		return filepath.Join(tokenHomeResolver(), ".scion", TokenFile)
+	}
 }
 
 // tokenFileMode is the mode the agent token file is created with.
 const tokenFileMode = 0600
 
-// WriteTokenFile writes the agent token to the canonical token file. Called
+// WriteTokenFile writes the agent token to the active token store. Called
 // by sciontool init to seed the initial value and by the refresh loop to
-// persist updated tokens. When uid > 0, the final file is chowned to
-// uid:gid (the scion container user) via WriteFileNoFollowChown — an fchown
-// on the open file descriptor, before the rename, never a path-based chown
-// that a symlink swapped in afterwards could redirect. uid <= 0 leaves
-// ownership as the writing process, matching the zero-value "skip chown"
-// contract TokenRefreshConfig.ChownUID already documents.
+// persist updated tokens. In TokenStoreMemory mode it updates the in-memory
+// store and writes nothing to disk. In TokenStoreRuntimeFile mode it writes
+// to the runtime path (dir 0700, file 0600, atomic temp+rename). When uid > 0,
+// the final file is chowned to uid:gid via WriteFileNoFollowChown — an fchown
+// on the open file descriptor, before the rename. uid <= 0 leaves ownership as
+// the writing process.
 func WriteTokenFile(token string, uid, gid int) error {
+	mode, rPath, _ := snapshotTokenStore()
+	switch mode {
+	case TokenStoreMemory:
+		setMemoryToken(token)
+		return nil
+	case TokenStoreRuntimeFile:
+		checkRuntimeStoreTestGuard(rPath, "WriteTokenFile")
+		if err := ensureRuntimeTokenDir(rPath); err != nil {
+			return fmt.Errorf("failed to prepare runtime token directory: %w", err)
+		}
+		if err := WriteFileNoFollowChown(rPath, []byte(token), tokenFileMode, uid, gid); err != nil {
+			return fmt.Errorf("failed to write runtime token file: %w", err)
+		}
+		return nil
+	}
+
 	// Guardrail: under `go test`, refuse to write the real token file unless a
 	// test has explicitly isolated it via SetTokenHome. resolveTokenHome
 	// resolves to the live scion user's home inside agent containers, so a test
@@ -2592,6 +2630,10 @@ var warnTokenFile = log.Warn
 // to one) and have root read that file's contents back and forward them to
 // the Hub as if they were the agent's bearer token.
 func ReadTokenFile() string {
+	mode, _, memTok := snapshotTokenStore()
+	if mode == TokenStoreMemory {
+		return memTok
+	}
 	token, err := readTokenFileGuarded(TokenFilePath())
 	if err != nil {
 		if errors.Is(err, dirfd.ErrTooLarge) {

@@ -49,6 +49,9 @@ import (
 // token-provisioning path, only on the one that requires privilege drop.
 func ChownTokenFile(uid, gid int) error {
 	path := TokenFilePath()
+	if path == "" {
+		return nil
+	}
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {
 		return fmt.Errorf("failed to open parent directory of token file: %w", err)

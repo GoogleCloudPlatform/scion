@@ -350,12 +350,14 @@ func (c *Client) TransportTokenFileChanged() bool {
 	return !c.transportFPSet || fp != c.transportFP
 }
 
-// readTokenFileQuiet reads the agent credential file like ReadTokenFile,
+// readTokenFileQuiet reads the agent credential handoff file like ReadTokenFile,
 // through the same guarded reader, but without warning about a refused
 // file: the watcher reads every few seconds, and a refused file is reported
-// by the reset path when it reads the file.
+// by the reset path when it reads the file. In default TokenStoreHome mode
+// HandoffTokenFilePath() equals TokenFilePath(); in isolated mode it watches
+// the handoff drop-box rather than the runtime store.
 func readTokenFileQuiet() string {
-	v, err := readTokenFileGuarded(TokenFilePath())
+	v, err := readTokenFileGuarded(HandoffTokenFilePath())
 	if err != nil {
 		return ""
 	}

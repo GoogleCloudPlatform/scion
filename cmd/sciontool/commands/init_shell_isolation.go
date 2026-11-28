@@ -17,6 +17,7 @@ package commands
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/clicontextseed"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -75,6 +77,72 @@ var beforeSupervisorRunForTest func(cfg supervisor.Config)
 // context.yaml. Replaced only in unit tests so ownership handoff can be
 // verified without CAP_CHOWN.
 var shellContextSeedChown = dirfd.Fchown
+
+// runtimeTokenPathForInit is the root-only runtime token file path used in
+// isolated mode on root-init runtimes. Replaced only in unit tests so tests
+// never touch /run/scion.
+var runtimeTokenPathForInit = hub.DefaultRuntimeTokenPath
+
+// initEffectiveUID returns the process's effective UID. Replaced only in unit
+// tests to exercise root-init vs rootless token-store selection.
+var initEffectiveUID = os.Geteuid
+
+// setupShellIsolatedTokenStore configures the isolated runtime token store
+// (root-only /run/scion/scion-token on root-init runtimes, or memory-only on
+// rootless/shared-UID runtimes or unwritable /run), takes and unconditionally
+// unlinks the broker handoff file (~/.scion/scion-token), and removes any
+// stale ~/.scion/scion-token.tmp.
+//
+// It returns a non-nil error only when the handoff file or stale temp file
+// cannot be unlinked (fail-closed: init must refuse to start the workload).
+func setupShellIsolatedTokenStore(targetUID int, rootless bool) error {
+	euid := initEffectiveUID()
+	rootInit := euid == 0 && targetUID > 0 && !rootless
+	if rootInit {
+		if err := hub.ConfigureIsolatedTokenStore(hub.TokenStoreRuntimeFile, runtimeTokenPathForInit); err != nil {
+			log.Warn("Failed to initialize runtime token store at %s (%v); falling back to in-memory token store", runtimeTokenPathForInit, err)
+			_ = hub.ConfigureIsolatedTokenStore(hub.TokenStoreMemory, "")
+		}
+	} else {
+		log.Warn("Running without root-to-workload UID boundary (euid=%d, targetUID=%d, rootless=%v); keeping runtime token in memory only", euid, targetUID, rootless)
+		_ = hub.ConfigureIsolatedTokenStore(hub.TokenStoreMemory, "")
+	}
+
+	tok, err := hub.TakeHandoffToken()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// No handoff token present (e.g., local mode or no hub configured).
+		} else if errors.Is(err, hub.ErrHandoffUnlinkFailed) {
+			return fmt.Errorf("cannot isolate handoff token: %w", err)
+		} else {
+			// Entry was refused (symlink, FIFO, oversize, hardlink) and was
+			// already unlinked by TakeHandoffToken.
+			log.Warn("Ignored and removed invalid handoff token entry: %v", err)
+		}
+	} else if tok != "" {
+		if werr := hub.WriteTokenFile(tok, 0, 0); werr != nil {
+			if hub.CurrentTokenStoreMode() == hub.TokenStoreRuntimeFile {
+				log.Warn("Failed to write runtime token file at %s (%v); falling back to in-memory token store", runtimeTokenPathForInit, werr)
+				_ = hub.ConfigureIsolatedTokenStore(hub.TokenStoreMemory, "")
+				_ = hub.WriteTokenFile(tok, 0, 0)
+			} else {
+				return fmt.Errorf("store isolated runtime token: %w", werr)
+			}
+		}
+	}
+
+	if err := hub.RemoveStaleHandoffTmpFile(); err != nil {
+		return fmt.Errorf("cannot remove stale handoff token temp file: %w", err)
+	}
+	return nil
+}
+
+// verifyShellHandoffTokenAbsent asserts that the handoff token path does not
+// exist before the workload starts. Returns an error wrapping
+// hub.ErrHandoffUnlinkFailed if it still exists or cannot be inspected safely.
+func verifyShellHandoffTokenAbsent() error {
+	return hub.VerifyHandoffTokenAbsent()
+}
 
 // isShellExecContainer reports whether PID 1 is running inside a shell
 // execution container (ptone/scion#9743), delegating to the canonical
