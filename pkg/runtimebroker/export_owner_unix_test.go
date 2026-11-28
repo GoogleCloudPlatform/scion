@@ -152,12 +152,23 @@ func TestShareHealth_OwnerCheck(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "1000:1000\n", string(raw))
 
-		// Creation logs INFO (in addition to share visible INFO); a second check
-		// does not re-create or log creation again.
-		infoAfterFirst := logs.count(slog.LevelInfo)
-		require.GreaterOrEqual(t, infoAfterFirst, 2)
+		// Creation logs the canonical-owner INFO record exactly once; a second
+		// check does not re-create or log creation again.
+		const createdMsg = "Recorded canonical project storage owner marker"
+		countCreatedLog := func() int {
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			n := 0
+			for _, r := range logs.records {
+				if r.Level == slog.LevelInfo && r.Message == createdMsg {
+					n++
+				}
+			}
+			return n
+		}
+		require.Equal(t, 1, countCreatedLog())
 		f.srv.checkShareHealth(ctx)
-		require.Equal(t, infoAfterFirst, logs.count(slog.LevelInfo))
+		require.Equal(t, 1, countCreatedLog())
 	})
 
 	t.Run("match reports healthy with no warning", func(t *testing.T) {
