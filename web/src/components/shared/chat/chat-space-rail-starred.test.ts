@@ -121,7 +121,7 @@ async function mount(): Promise<any> {
 }
 
 function filterButtons(el: any): HTMLButtonElement[] {
-  return Array.from(el.shadowRoot.querySelectorAll('.filter-toggle button'));
+  return Array.from(el.shadowRoot.querySelectorAll('.filter-toggle button[aria-pressed]'));
 }
 
 function button(el: any, label: string): HTMLButtonElement {
