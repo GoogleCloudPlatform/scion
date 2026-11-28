@@ -366,7 +366,7 @@ export class ScionPageAgents extends LitElement {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
-        margin-bottom: 0.75rem;
+        margin-bottom: 0.5rem;
         gap: 0.5rem;
         /* Cards are minmax(320px, 1fr), so the header has ~270px to work with
            and the badges claim most of it. Wrapping lets them drop to their own
@@ -382,7 +382,7 @@ export class ScionPageAgents extends LitElement {
          flex:1 matters as much as min-width:0. With only min-width:0 the
          column sizes to its content and, because the badges never shrink,
          absorbs the entire overflow — collapsing to a few characters and
-         wrapping the meta lines into a narrow ribbon. Growing into the space
+         wrapping the name into a narrow ribbon. Growing into the space
          the badges leave keeps names on as few lines as possible. */
       .agent-header > div {
         /* Full-width basis, so the badges always wrap to their own row rather
@@ -452,7 +452,7 @@ export class ScionPageAgents extends LitElement {
       .agent-meta {
         font-size: 0.813rem;
         color: var(--scion-text-muted, #64748b);
-        margin-top: 0.25rem;
+        margin-top: 0;
         display: flex;
         flex-direction: column;
         gap: 0.125rem;
@@ -2340,33 +2340,6 @@ export class ScionPageAgents extends LitElement {
                 ${agent.name}
               </a>
             </h3>
-            <div class="agent-meta">
-              ${agent.project
-                ? html`<div>
-                    <sl-icon name="folder"></sl-icon>
-                    <a
-                      href="/projects/${agent.projectId}"
-                      @click=${(e: MouseEvent) => e.stopPropagation()}
-                      >${agent.project}</a
-                    >
-                  </div>`
-                : ''}
-              <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
-              ${agent.runtimeBrokerId
-                ? html`<div>
-                    <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                      <sl-icon name="hdd-rack"></sl-icon>
-                      ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-                    </a>
-                  </div>`
-                : ''}
-              ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
-                ? html`<div data-testid="agent-card-reincarnated">
-                    <sl-icon name="arrow-repeat"></sl-icon>
-                    Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
-                  </div>`
-                : nothing}
-            </div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
           ${neverSuspendBadge(agent, { compact: true })}
@@ -2386,6 +2359,34 @@ export class ScionPageAgents extends LitElement {
                   size="small"
                 ></scion-messageability-indicator>
               `
+            : nothing}
+        </div>
+
+        <div class="agent-meta">
+          ${agent.project
+            ? html`<div>
+                <sl-icon name="folder"></sl-icon>
+                <a
+                  href="/projects/${agent.projectId}"
+                  @click=${(e: MouseEvent) => e.stopPropagation()}
+                  >${agent.project}</a
+                >
+              </div>`
+            : ''}
+          <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
+          ${agent.runtimeBrokerId
+            ? html`<div>
+                <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                  <sl-icon name="hdd-rack"></sl-icon>
+                  ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                </a>
+              </div>`
+            : ''}
+          ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
+            ? html`<div data-testid="agent-card-reincarnated">
+                <sl-icon name="arrow-repeat"></sl-icon>
+                Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
+              </div>`
             : nothing}
         </div>
 

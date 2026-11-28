@@ -273,7 +273,7 @@ export const brokerAreaStyles = css`
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.5rem;
     gap: 0.5rem;
     flex-wrap: wrap;
   }
@@ -313,7 +313,7 @@ export const brokerAreaStyles = css`
   .agent-meta {
     font-size: 0.813rem;
     color: var(--scion-text-muted, #64748b);
-    margin-top: 0.25rem;
+    margin-top: 0;
   }
 
   .agent-meta sl-icon {

@@ -172,6 +172,24 @@ describe('scion-page-agents agent badges', () => {
     });
   }
 
+  it('grid: the status badge row sits between the name and the metadata (miller79/scion#112)', async () => {
+    localStorage.setItem('scion-view-agents', 'grid');
+    const el = await mount([agent('a1', { project: 'One', runtimeBrokerId: 'b1' })]);
+
+    const card = el.shadowRoot!.querySelector('.agent-card')!;
+    expect(card).not.toBeNull();
+    const name = card.querySelector('h3')!;
+    const status = card.querySelector('.agent-header > scion-status-badge')!;
+    const meta = card.querySelector('.agent-meta')!;
+    expect(status).not.toBeNull();
+    expect(meta).not.toBeNull();
+    // Name, then status, then configuration, in document order.
+    expect(name.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(status.compareDocumentPosition(meta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The metadata is no longer in the header's name column.
+    expect(meta.closest('.agent-header')).toBeNull();
+  });
+
   it('an SSE-created agent shows its badges with no request, and a status event clears its size', async () => {
     window.__SCION_FEATURES__ = { 'web.agent_badges': true };
     const el = await mount([agent('a1')]);

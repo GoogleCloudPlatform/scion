@@ -964,7 +964,7 @@ export class ScionPageProjectDetail extends LitElement {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
-        margin-bottom: 0.75rem;
+        margin-bottom: 0.5rem;
         gap: 0.5rem;
         flex-wrap: wrap;
       }
@@ -1012,7 +1012,7 @@ export class ScionPageProjectDetail extends LitElement {
       .agent-meta {
         font-size: 0.813rem;
         color: var(--scion-text-muted, #64748b);
-        margin-top: 0.25rem;
+        margin-top: 0;
       }
 
       .agent-meta sl-icon {
@@ -4637,23 +4637,6 @@ export class ScionPageProjectDetail extends LitElement {
                 ${agent.name}
               </a>
             </h3>
-            <div class="agent-meta">
-              <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
-              ${agent.runtimeBrokerId
-                ? html`<div>
-                    <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                      <sl-icon name="hdd-rack"></sl-icon>
-                      ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-                    </a>
-                  </div>`
-                : ''}
-              ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
-                ? html`<div data-testid="agent-card-reincarnated">
-                    <sl-icon name="arrow-repeat"></sl-icon>
-                    Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
-                  </div>`
-                : nothing}
-            </div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
           ${neverSuspendBadge(agent, { compact: true })}
@@ -4662,6 +4645,24 @@ export class ScionPageProjectDetail extends LitElement {
             size="small"
           ></scion-deletion-badge>
           <scion-authority-badge .authority=${agent.authority} size="small"></scion-authority-badge>
+        </div>
+
+        <div class="agent-meta">
+          <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
+          ${agent.runtimeBrokerId
+            ? html`<div>
+                <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                  <sl-icon name="hdd-rack"></sl-icon>
+                  ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                </a>
+              </div>`
+            : ''}
+          ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
+            ? html`<div data-testid="agent-card-reincarnated">
+                <sl-icon name="arrow-repeat"></sl-icon>
+                Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
+              </div>`
+            : nothing}
         </div>
 
         ${this.renderDeletionBanner(agent, false)}

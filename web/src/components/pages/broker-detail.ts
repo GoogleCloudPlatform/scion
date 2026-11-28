@@ -357,7 +357,7 @@ export class ScionPageBrokerDetail extends LitElement {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
-        margin-bottom: 0.75rem;
+        margin-bottom: 0.5rem;
         gap: 0.5rem;
         flex-wrap: wrap;
       }
@@ -401,7 +401,7 @@ export class ScionPageBrokerDetail extends LitElement {
       .agent-meta {
         font-size: 0.813rem;
         color: var(--scion-text-muted, #64748b);
-        margin-top: 0.25rem;
+        margin-top: 0;
       }
 
       .agent-meta sl-icon {
@@ -1238,10 +1238,10 @@ export class ScionPageBrokerDetail extends LitElement {
               <sl-icon name="cpu"></sl-icon>
               <span>${agent.name}</span>
             </h3>
-            <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
         </div>
+        <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
       </a>
     `;

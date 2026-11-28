@@ -94,4 +94,22 @@ describe('Brokers area tabs', () => {
       'Default for project'
     );
   });
+
+  it('Agents & projects: the status badge sits between the name and the metadata (miller79/scion#112)', async () => {
+    const root = await mount('scion-broker-area-agents', {
+      projects: [{ projectId: 'p1', projectName: 'One', agentCount: 1 }],
+      agents: [{ id: 'a1', name: 'a1', projectId: 'p1', template: 't', phase: 'running' }],
+      defaultFor: new Set(),
+    });
+    const card = root.querySelector('.agent-card')!;
+    expect(card).not.toBeNull();
+    const name = card.querySelector('h3')!;
+    const status = card.querySelector('.agent-header > scion-status-badge')!;
+    const meta = card.querySelector('.agent-meta')!;
+    expect(status).not.toBeNull();
+    expect(meta).not.toBeNull();
+    expect(name.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(status.compareDocumentPosition(meta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(meta.closest('.agent-header')).toBeNull();
+  });
 });

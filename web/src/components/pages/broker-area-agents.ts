@@ -61,10 +61,10 @@ export class ScionBrokerAreaAgents extends LitElement {
               <sl-icon name="cpu"></sl-icon>
               <span>${agent.name}</span>
             </h3>
-            <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
         </div>
+        <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : nothing}
       </a>
     `;

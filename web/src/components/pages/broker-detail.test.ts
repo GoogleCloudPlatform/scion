@@ -66,6 +66,17 @@ describe('broker detail agent card status badge', () => {
     expect(badge.getAttribute('label')).toBe('created');
     expect(badge.hasAttribute('tooltip')).toBe(false);
   });
+
+  it('puts the status badge between the name and the metadata (miller79/scion#112)', () => {
+    const badge = cardBadge(makeAgent({}));
+    const card = badge.closest('.agent-card')!;
+    const name = card.querySelector('h3')!;
+    const meta = card.querySelector('.agent-meta')!;
+    expect(meta).not.toBeNull();
+    expect(name.compareDocumentPosition(badge) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(badge.compareDocumentPosition(meta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(meta.closest('.agent-header')).toBeNull();
+  });
 });
 
 /** Render the page header for `broker` and return the "Created" stat text. */
