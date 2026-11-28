@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 const maxConsecutiveFailures = 3
@@ -50,9 +51,10 @@ var ErrPrivilegeDropRequired = errors.New("privilege drop required but UID/GID w
 
 // Manager manages sidecar service lifecycles.
 type Manager struct {
-	services    []*managedService
-	gracePeriod time.Duration
-	mu          sync.Mutex
+	services          []*managedService
+	gracePeriod       time.Duration
+	workloadIsolation bool
+	mu                sync.Mutex
 }
 
 type managedService struct {
@@ -162,6 +164,22 @@ func New(gracePeriod time.Duration) *Manager {
 	}
 }
 
+// SetWorkloadIsolation configures whether sidecar services have SCION_*
+// control environment variables stripped before launch (matching
+// supervisor.Config.WorkloadIsolation for shell execution containers).
+func (m *Manager) SetWorkloadIsolation(enabled bool) {
+	m.mu.Lock()
+	m.workloadIsolation = enabled
+	m.mu.Unlock()
+}
+
+// WorkloadIsolation reports whether workload environment isolation is enabled.
+func (m *Manager) WorkloadIsolation() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.workloadIsolation
+}
+
 // Start launches all services in order, honoring ready checks between them.
 //
 // Every service's log files are opened (and, if running as root, chowned)
@@ -222,6 +240,7 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 
 	m.mu.Lock()
 	m.services = make([]*managedService, 0, len(specs))
+	workloadIsolation := m.workloadIsolation
 	m.mu.Unlock()
 
 	svcs := make([]*managedService, 0, len(specs))
@@ -240,6 +259,10 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 			openErrs = append(openErrs, fmt.Sprintf("%s: %v", safeName, err))
 			continue
 		}
+		svcEnv := mergeEnv(os.Environ(), spec.Env, uid, username)
+		if workloadIsolation {
+			svcEnv = supervisor.StripScionControlEnv(svcEnv)
+		}
 		svc := &managedService{
 			spec:                 spec,
 			done:                 make(chan struct{}),
@@ -247,7 +270,7 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 			uid:                  uid,
 			gid:                  gid,
 			username:             username,
-			env:                  mergeEnv(os.Environ(), spec.Env, uid, username),
+			env:                  svcEnv,
 			requirePrivilegeDrop: requirePrivilegeDrop,
 		}
 

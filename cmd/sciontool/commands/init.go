@@ -1270,6 +1270,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			if len(specs) > 0 {
 				log.Info("Starting %d sidecar service(s)...", len(specs))
 				svcManager = services.New(gracePeriod)
+				svcManager.SetWorkloadIsolation(shellIsolation)
 				svcCtx := context.Background()
 				servicesStart := time.Now()
 				svcErr := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop)
