@@ -145,19 +145,19 @@ When a `dispatch_agent` trigger creates you:
   sender-influenced JSON. Always parse it with `jq` or a JSON parser—never
   expand `$SCION_TRIGGER_CONTEXT` unquoted in a shell. Never put secrets in
   `argv` (`commandSha256` is visible to trigger readers without `agent.attach`).
-<!-- P7a: verify -->
 - **Failure notifications:** triggers notify the creator (or your delegating
-  user) by default on `failed`, `refused`, and `expired` fires (`--notify-user`,
-  `--notify-agent`, `--notify-on`), with a 1-hour cooldown per reason.
-<!-- /P7a: verify -->
+  user, if they still hold `trigger.read`) by default on `failed`, `refused`,
+  and `expired` fires (`--notify-user`, `--notify-agent`, `--notify-on`), at
+  most once per `(trigger, sink, outcome, reason)` per fixed UTC hour bucket
+  (fires reaped after a Hub crash or cancelled by coalescing do not notify).
 
 ## What agents can and cannot author
 
 | Operation | Agent authority |
 | :--- | :--- |
-| Create a webhook endpoint (unbound or `--to-self`) | Allowed for an in-standing agent with `project:read` (includes `readonly`) <!-- floor: pending ptone decision agent-authoring-floor --> (binding is optional; max 5 bound endpoints per agent; agents can bind only themselves) |
-| `webhook update`, `disable`, `enable`, `rotate-secret`, `delete` | Allowed on endpoints you own (binding changes are user-only) |
-| Create a `message` trigger | Allowed for an in-standing agent with `project:read` (includes `readonly`) <!-- floor: pending ptone decision agent-authoring-floor -->. On webhook sources you may target any agent you are allowed to message; on `github` sources you may target only yourself. `--wake` permission (`agent.lifecycle`) is checked at **fire time** (not authoring), so a missing permission refuses the wake when the trigger fires |
+| Create a webhook endpoint (unbound or `--to-self`) | Allowed at `baseline` and above (`readonly` and `none` receive `403`; binding is optional; max 5 bound endpoints per agent; agents can bind only themselves) |
+| `webhook update`, `disable`, `enable`, `rotate-secret`, `delete` | Allowed on endpoints you own (binding changes are user-only; `readonly`/`none` may still read, `disable`, and `delete` their own endpoints, while widening/enabling requires `baseline`) |
+| Create a `message` trigger | Allowed at `baseline` and above (`readonly` and `none` receive `403`; agent-authored triggers whose author later drops below `baseline` are refused at fire time; `pause`/`delete` of own triggers stay allowed). On webhook sources you may target any agent you are allowed to message; on `github` sources you may target only yourself. `--wake` permission (`agent.lifecycle`) is checked at **fire time** (not authoring), so a missing permission refuses the wake when the trigger fires |
 | Create a `dispatch-agent` trigger | Requires `full` role within your delegation ceiling and a replay-protected source (`scion_v1`, `stripe_v1`, `hub_token`, or `github`). Senders on `scion_v1`/`stripe_v1` endpoints must always send a unique `X-Scion-Delivery` (or `--dedup-path` value) or the fire is refused (`missing delivery id`) |
 | `scion trigger update` (`PATCH`) | User-only (not available in agent mode) |
 | Visibility (`list` / `get` / `event`) | You see only triggers you own, endpoints you own or are bound to, and events for those endpoints, events that fired a trigger you hold, or events that dispatched you |

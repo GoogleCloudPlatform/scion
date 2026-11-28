@@ -65,14 +65,13 @@ When `--auth hmac` is selected, choose the signature format that matches your se
 HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
 SECRET="<one-time-secret>"
 TS="$(date +%s)"
-DELIVERY="$(uuidgen)"
-EVENT="deploy.finished"
-SUBJECT="service/api"
+DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"
+# X-Scion-Event: <name> sets event.type=webhook.<name> (default webhook.received rules then stop matching; use --type webhook.<name>)
+EVENT=""
+# X-Scion-Subject is stored as event.subject=webhook:<endpoint-id>/<subject>
+SUBJECT=""
 BODY='{"status":"ok","commit":"abc1234"}'
-
-SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" \
-  | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
-
+SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"
 curl -fsS -X POST "$HOOK_URL" \
   -H "Content-Type: application/json" \
   -H "X-Scion-Signature: t=${TS},v1=${SIG}" \
@@ -82,7 +81,11 @@ curl -fsS -X POST "$HOOK_URL" \
   --data-raw "$BODY"
 ```
 
-Requests must use `Content-Type: application/json` and a valid JSON body. `X-Scion-Event: <name>` sets `event.type` to `webhook.<name>` (omitting it sets `webhook.received`).
+Requests must use `Content-Type: application/json` and a valid JSON body. Pay attention to the `X-Scion-Event` and `X-Scion-Subject` headers:
+
+- **`X-Scion-Event: <name>`** sets `event.type` to `webhook.<name>`. Omitting it (or sending an empty header) sets `webhook.received`. Once you send a non-empty `X-Scion-Event`, default `webhook.received` triggers **stop matching** until updated with `--type webhook.<name>`.
+- **`X-Scion-Subject: <value>`** sets `event.subject` to `webhook:<endpoint-id>/<value>` (the raw unprefixed value is stored in `event.attributes.subject`).
+- **Both values are part of the `scion_v1` signature:** whatever values you sign in the canonical string must match the headers sent on the request (leave both `EVENT=""` and `SUBJECT=""` empty as above unless you intentionally route on them).
 
 ### Routing hints
 
@@ -136,6 +139,18 @@ A webhook endpoint is always project-owned, but it can be **bound** to a specifi
 Restoring a soft-deleted agent does not restore a deleted `agent`-lifetime endpoint or automatically rebind a `persistent` endpoint. A bound agent can read its endpoint and that endpoint's events (`scion trigger event list`/`get`), and can disable, enable, rotate, or delete endpoints it owns. Each agent may have at most **5** bound endpoints (counting toward the project's 20-endpoint cap).
 
 ## Match Rules
+
+:::tip[Where is my JSON body?]
+Your verified JSON request body lives under **`event.payload.<path>`**—**not** `event.attributes.body...`.
+
+- `event.attributes` is a flat `map<string, string>` of transport metadata only (`endpoint_name`, `event`, `delivery`, `subject`, `signature_mode`, `content_type`, `payload_bytes`, `remote_ip`, plus `sender` for `hub_token`).
+- Example for a nested JSON payload (such as a GitHub push):
+  - CEL `--where`: `has(event.payload) && has(event.payload.head_commit) && event.payload.head_commit.message.contains("deploy")`
+  - Template placeholder: `${event.payload.head_commit.id}`
+- Always guard optional fields with `has(...)` so missing keys evaluate cleanly.
+- `event.payload` is available only for **inline bodies ≤ 64 KiB** (`has(event.payload)` is `false` for overflow bodies > 64 KiB).
+- Template placeholders under `event.payload.*` are untrusted and covered by `untrustedVars` / `--allow` (see [Template grammar, trust, and `scion trigger render`](#template-grammar-trust-and-scion-trigger-render)).
+:::
 
 A trigger filters incoming events in two stages:
 
@@ -273,7 +288,9 @@ Templates are plain UTF-8 text with `${<path>}` (required—missing value refuse
 
 `template`, environment variables, secrets, and workspace settings can never be templated. Exceeding a slot's byte or charset bound **refuses** the fire (values are never truncated).
 
-- **Opt-in list (`--allow` / `untrustedVars`):** the Hub requires every untrusted placeholder to be covered by `untrustedVars` (exact path or trailing `.*`). In the CLI, omitting `--allow` automatically derives the exact list from your templates and prints which event values will be inserted as data; pass `--allow` to override it explicitly.
+<!-- 9776: verify -->
+- **Opt-in list (`--allow` / `untrustedVars`):** untrusted placeholders (`${event.payload.*}`, `${event.attributes.*}`, `${event.type}`, `${event.subject}`, `${event.occurred_at}`) are listed on the rule (`untrustedVars`, exact path or trailing `.*`) for both `dispatch_agent` and `message` actions; the Hub derives the list from the templates unless the author supplies a narrower one, and values arrive framed as data. In the CLI, `--allow` is an optional narrowing list (when omitted, the derived untrusted paths are printed and stored). If an explicit narrower list omits a placeholder used by a template, authoring is refused with `untrusted template variable "<path>" is not allowed in slot "<slot>"`.
+<!-- /9776: verify -->
 - **Dry-run preview:** test templates against any stored event without firing or creating resources:
 
   ```bash
@@ -306,31 +323,43 @@ By default, webhook endpoints accept JSON bodies up to **64 KiB**, stored inline
   - Each project has a **256 MiB** budget of live overflow objects over the 7-day retention window (above that, ingress returns `429 queue full`). Objects are purged with their event rows after 7 days (and an hourly orphan sweep cleans up unreferenced objects older than 5 minutes).
   - Ensure any reverse proxy in front of your Hub permits request bodies up to your configured `--max-body`.
 
-<!-- P7a: verify -->
 ## Notify-on-Failure
 
 Triggers can notify a human and/or an in-project agent when a fire fails, is refused, expires in the offline queue, or (optionally) is skipped:
 
-- **User notice sink (default on):** sends a content-free Hub user notification (`trigger_fire_failed`) to the trigger's creator—or, when the trigger was authored by an agent, to that agent's delegating user—with the trigger name, outcome, generic reason, and a link to the fire history row. Never contains event payloads or `exec` argv.
-- **Agent message sink (optional):** delivers a synthetic `trigger.fire_failed` message to an in-project agent under the trigger's recorded authority (checked at authoring and at every notification; never uses `wake`, never recurses). Recorded as a `trigger_fires` row with `action_type: notify`.
-- **Cooldown:** notifications are rate-limited per `(trigger, outcome, reason)` with a **1-hour** default cooldown so a flapping target does not flood recipients.
-- **Project live-agent cap:** breaching the 25-agent per-project trigger cap also routes through notify-on-failure (once per hour per trigger).
+- **User notice sink (default on):** sends a content-free Hub user notification (`trigger_fire_failed`) to the trigger's creator—or, when the trigger was authored by an agent, to that agent's delegating user—with the trigger name, outcome, generic reason, and a link to the fire history row. Never contains event payloads or `exec` argv. A user notice is skipped if the recipient no longer holds `trigger.read` on the project.
+- **Agent message sink (optional):** delivers a synthetic `trigger.fire_failed` message to an in-project agent under the trigger's recorded authority (checked at authoring, update, resume, and every notification; never wakes—including suppressing auto-wake—and never recurses). Recorded as a `trigger_fires` row with `action_type: notify` (`action_index: -1`, visible in history; the user-notice cooldown claim uses `action_index: -2` and is hidden from history).
+- **Fixed-window cooldown:** notifications are rate-limited durably across replicas to **at most one notice per `(trigger, sink, outcome, reason)` per UTC hour bucket** (`floor(now / 1h)`). Because it is a fixed window rather than a sliding window, two notices for the same key can arrive minutes apart across an hour boundary (for example, `10:59` and `11:01` UTC).
+- **At-most-once semantics:** the cooldown bucket is claimed before recipient lookup, authorization, or delivery, so a failed or skipped delivery consumes the bucket for the remainder of the hour. A Hub crash between committing the terminal fire outcome and dispatching the notification loses the notice, and fires reaped after a Hub crash (`hub restarted during fire`) or cancelled by coalescing do not notify.
+- **Project live-agent cap:** breaching the 25-agent per-project trigger cap always routes through notify-on-failure (once per hour bucket per trigger) even when `skipped` is not opted in.
 
 CLI flags (`scion trigger create` / `scion trigger update`):
 
 - `--notify-user` / `--notify-user=false` — toggle creator user notices (default `true`).
-- `--notify-agent <name|id>` — optional in-project agent to notify.
-- `--notify-on failed,refused,expired[,skipped]` — outcomes that trigger a notification (default `failed,refused,expired`).
+- `--notify-agent <name|id>` — optional in-project agent to notify (pass `""` on `update` to clear).
+- `--notify-on failed,refused,expired[,skipped]` — comma-separated outcomes that trigger a notification (default `failed,refused,expired`).
 
 Editing `notify` settings bumps `authorization_revision`.
-<!-- /P7a: verify -->
+
+## Why Didn't My Rule Fire?
+
+Webhook events are recorded at ingress even when no trigger matches. Fire history (`scion trigger history`) shows only rules that matched (or recorded `skipped` on `Uncertain`, `Failed`, or budget exhaustion); a silent non-match leaves **no** fire history row (non-matches are not `skipped`).
+
+To debug why an event did not fire a rule:
+
+1. **Find the recorded event** in the Web UI's **Events** tab, with `scion trigger event list` and `scion trigger event get <event-id>`, or via `GET /api/v1/projects/{p}/trigger-events`.
+2. **Check `event.type` against `--type`:** sending `X-Scion-Event: deploy` sets `event.type` to `webhook.deploy`, which a default `webhook.received` rule does **not** match.
+3. **Check `event.subject`:** for webhook events, `event.subject` is stored prefixed as `webhook:<endpoint-id>/<subject>`, while the raw header or routing-hint value is in `event.attributes.subject`.
+4. **Preview template rendering** against the stored event with `scion trigger render <trigger-id-or-name> --event <event-id>` (or click **Preview** in the Web UI rule editor to render against the endpoint's latest event).
+
+Visibility into non-matching rule evaluations is tracked in `ptone/scion#9780`.
 
 ## Web UI
 
 When `hub.triggers` is enabled, each project displays a **Triggers** button in its header linking to `/projects/{id}/triggers` with four tabs:
 
 - **Endpoints** — create endpoints (shows the one-time signing secret and sender example in a result dialog; secrets are never kept in component state), edit settings/bindings, disable/enable, rotate secrets, and delete (listing rules that will pause).
-- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, <!-- P7a: verify -->notify settings,<!-- /P7a: verify --> and a **Preview** button calling `POST .../render` against the endpoint's latest event with untrusted values highlighted.
+- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, notify settings, and a **Preview** button calling `POST .../render` against the endpoint's latest event with untrusted values highlighted.
 - **Events** — browse received events filtered by endpoint, status, or time; inspect attributes, headers, `external_payload` (with download for overflow bodies), and resulting fires.
 - **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or time, linking to the event, created agent, or `waiting` deadline (`wait_until`).
 
