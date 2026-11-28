@@ -74,7 +74,7 @@ func newMPChainP1Fixture(t *testing.T, policiesOn, chainsOn bool) *mpChainP1Fixt
 	}
 	require.NoError(t, s.CreateUser(ctx, owner))
 	ensureHubMembership(ctx, s, owner.ID)
-	bindProjectOwner(t, s, project.ID, owner.ID)
+	bindProjectMember(t, s, project.ID, owner.ID)
 
 	alice := &store.User{
 		ID:          tid("mp-chain-p1-alice"),
