@@ -1403,7 +1403,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 				}
 				if deferFire {
-					retryAt, timeoutOut, dErr := d.deferReuseFire(ctx, &fire, claimNow, deferReason, deferReason)
+					retryAt, timeoutOut, dErr := d.deferReuseFire(ctx, &fire, claimNow, deferReason)
 					if dErr != nil {
 						cancelFire()
 						flushTrigCounters()
@@ -1554,12 +1554,12 @@ func ActionSubjectToPreFireGuards(actionType string) bool {
 // deferReuseFire defers a reuse fire row non-terminally with bounded backoff
 // (ReuseDeferBackoff) and a bounded total wait (ReuseDeferTimeout) counted from
 // first deferral (Stage 3 §6.2 rev 1.16, ptone/scion#9135). When the total wait
-// has elapsed, it returns a terminal failed FireOutcome with timeoutReason.
+// has elapsed, it returns a terminal failed FireOutcome with reason.
 func (d *Dispatcher) deferReuseFire(
 	ctx context.Context,
 	fire *store.TriggerFire,
 	claimNow time.Time,
-	deferReason, timeoutReason string,
+	reason string,
 ) (retryAt time.Time, timeoutOut *hubfire.FireOutcome, err error) {
 	firstDeferred := claimNow
 	if fire.DeferredAt != nil && !fire.DeferredAt.IsZero() {
@@ -1567,7 +1567,7 @@ func (d *Dispatcher) deferReuseFire(
 		if claimNow.Sub(firstDeferred) >= ReuseDeferTimeout {
 			return time.Time{}, &hubfire.FireOutcome{
 				Status: hubfire.FireStatusFailed,
-				Error:  timeoutReason,
+				Error:  reason,
 			}, nil
 		}
 	}
@@ -1576,7 +1576,7 @@ func (d *Dispatcher) deferReuseFire(
 		nextRetry = deadline
 	}
 	writeCtx, cancelWrite := storeWriteContext(ctx)
-	deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, nextRetry, nextRetry.Add(FireLeaseHorizon), deferReason)
+	deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, nextRetry, nextRetry.Add(FireLeaseHorizon), reason)
 	cancelWrite()
 	if dErr != nil {
 		return time.Time{}, nil, dErr

@@ -1930,11 +1930,15 @@ func TestDispatcher_SubjectModeReuse_CrashMidDeferralResumesExactlyOnce(t *testi
 	require.Len(t, firesBBefore.Items, 1)
 	origFireIDB := firesBBefore.Items[0].ID
 
-	// Reap expired deferred fire during hub outage.
+	// Reap expired deferred fire during hub outage, verifying this iteration's fire row.
 	advance(trigger.ReuseDeferBackoff + trigger.FireLeaseHorizon + time.Minute)
-	reaped, err := cs.ReapExpiredTriggerFires(ctx, clock(), 10)
+	reaped, err := cs.ReapExpiredTriggerFires(ctx, clock(), 100)
 	require.NoError(t, err)
-	assert.Equal(t, 1, reaped)
+	assert.GreaterOrEqual(t, reaped, 1)
+	reapedB, err := cs.GetTriggerFire(ctx, origFireIDB)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFailed, reapedB.Status)
+	assert.Equal(t, trigger.ErrFireReapedDuringDefer, reapedB.Error)
 
 	// Winner's claim is now bound to a running agent.
 	agB := &store.Agent{
@@ -2109,4 +2113,96 @@ func TestDispatcher_SubjectModeReuse_MultiActionP9DeferralDoesNotBlockSibling(t 
 	require.NoError(t, err)
 	assert.Equal(t, 1, updatedTr.FireCount)
 	assert.Equal(t, 0, updatedTr.ErrorCount)
+}
+
+// TestDispatcher_SubjectModeReuse_PromoteDeferredClearsError pins that
+// promoting a deferred fire row back to firing clears its persisted deferral
+// reason while in flight (killing the ClearError mutant in
+// ClaimTriggerFireCoalescing).
+func TestDispatcher_SubjectModeReuse_PromoteDeferredClearsError(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	t.Logf("dialect=%s", entClient.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 28, 17, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	tr := makeActiveTrigger(projID, "", "reuse-promote-clears-err", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	const subject = "github:octo/repo#9135-clear-err"
+	claim, existing, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, existing)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.issue_comment.created",
+		Subject:    subject,
+		DedupKey:   "del-clear-err-" + evID,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	var (
+		observedMidFireStatus string
+		observedMidFireErr    string
+		origFireID            string
+	)
+	core := &g4aTestCore{
+		fireFn: func(fctx context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			// Inspect persisted row while status == firing (before FinishTriggerFire).
+			mid, gErr := cs.GetTriggerFire(fctx, origFireID)
+			if gErr == nil && mid != nil {
+				observedMidFireStatus = mid.Status
+				observedMidFireErr = mid.Error
+			}
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-ok"}
+		},
+	}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	// 1. Defer with ErrFireSubjectDispatchInProgress.
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	require.False(t, res1.Done)
+	fires1, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	origFireID = fires1.Items[0].ID
+	require.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
+	require.Equal(t, trigger.ErrFireSubjectDispatchInProgress, fires1.Items[0].Error)
+
+	// 2. Bind claim to running agent and promote at RetryAt.
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "clear-err-ag",
+		Name:      "clear-err-ag",
+		ProjectID: projID,
+		Phase:     "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+	require.NoError(t, claims.Bind(ctx, claim, ag.ID))
+	now = res1.RetryAt
+
+	res2 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	require.True(t, res2.Done)
+	assert.Equal(t, store.TriggerFireStatusFiring, observedMidFireStatus, "row must be in firing status during Fire")
+	assert.Empty(t, observedMidFireErr, "deferred->firing promotion must clear persisted deferral reason")
 }
