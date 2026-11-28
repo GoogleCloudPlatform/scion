@@ -433,4 +433,63 @@ func TestExtractTarGz_SelectorMode(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("selector mode fails closed when MaxFiles, MaxFileBytes, or MaxTotal is non-positive", func(t *testing.T) {
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/", typeflag: tar.TypeDir},
+			{name: "repo-sha/skills/tdd/SKILL.md", body: []byte("tdd\n")},
+		})
+		for _, tc := range []struct {
+			name   string
+			mutate func(*Limits)
+		}{
+			{name: "MaxFiles zero", mutate: func(l *Limits) { l.MaxFiles = 0 }},
+			{name: "MaxFiles negative", mutate: func(l *Limits) { l.MaxFiles = -1 }},
+			{name: "MaxFileBytes zero", mutate: func(l *Limits) { l.MaxFileBytes = 0 }},
+			{name: "MaxFileBytes negative", mutate: func(l *Limits) { l.MaxFileBytes = -1 }},
+			{name: "MaxTotal zero", mutate: func(l *Limits) { l.MaxTotal = 0 }},
+			{name: "MaxTotal negative", mutate: func(l *Limits) { l.MaxTotal = -1 }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, err := os.OpenRoot(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = root.Close() }()
+
+				opts := baseOpts(&ExtractBudget{})
+				tc.mutate(&opts.Limits)
+				_, err = ExtractTarGz(bytes.NewReader(tarData), root, opts)
+				assertErrorKind(t, err, KindTooLarge)
+			})
+		}
+	})
+
+	t.Run("RequireLeadingPAX fails closed without a full 40-hex ExpectedSHA", func(t *testing.T) {
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/", typeflag: tar.TypeDir},
+			{name: "repo-sha/skills/tdd/SKILL.md", body: []byte("tdd\n")},
+		})
+		for _, tc := range []struct {
+			name        string
+			expectedSHA string
+		}{
+			{name: "empty SHA", expectedSHA: ""},
+			{name: "short SHA", expectedSHA: "abcdef1234"},
+			{name: "non-hex 40 chars", expectedSHA: strings.Repeat("z", 40)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, err := os.OpenRoot(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = root.Close() }()
+
+				opts := baseOpts(&ExtractBudget{})
+				opts.ExpectedSHA = tc.expectedSHA
+				_, err = ExtractTarGz(bytes.NewReader(tarData), root, opts)
+				assertErrorKind(t, err, KindInvalidSource)
+			})
+		}
+	})
 }

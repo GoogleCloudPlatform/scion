@@ -131,6 +131,12 @@ func ExtractTarGz(r io.Reader, dst *os.Root, opts TarExtractOptions) (ExtractRes
 	if opts.Select != nil && (opts.Tree != nil || opts.SubPath != "") {
 		return ExtractResult{}, &Error{Kind: KindInvalidSource, Repo: repo, Hint: "Select cannot be combined with SubPath or Tree"}
 	}
+	if opts.Select != nil && (l.MaxFiles <= 0 || l.MaxFileBytes <= 0 || l.MaxTotal <= 0) {
+		return ExtractResult{}, &Error{Kind: KindTooLarge, Repo: repo, Hint: "selector extraction requires positive MaxFiles, MaxFileBytes, and MaxTotal limits"}
+	}
+	if opts.RequireLeadingPAX && !IsFullCommitSHA(strings.ToLower(opts.ExpectedSHA)) {
+		return ExtractResult{}, &Error{Kind: KindInvalidSource, Repo: repo, Hint: "RequireLeadingPAX requires a full 40-hex ExpectedSHA"}
+	}
 	dirMode := opts.DirMode
 	if dirMode == 0 {
 		dirMode = 0o755
