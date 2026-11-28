@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "questions": [
+    {
+      "id": "q1",
+      "type": "binary",
+      "instructions": "Is this synthetic message a routine connectivity check?"
+    }
+  ],
+  "output": {
+    "question": "q1"
+  }
+}

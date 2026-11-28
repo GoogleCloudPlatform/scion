@@ -702,8 +702,22 @@ describe('scion-page-admin-system-one', () => {
     expect(probeRequests[0]?.body).toMatchObject({
       project: 'proj-1',
       probe: { text: expect.any(String) as unknown },
-      spec: { version: 1 },
+      spec: {
+        version: 1,
+        questions: [
+          {
+            id: 'q1',
+            type: 'binary',
+            instructions: expect.any(String) as unknown,
+          },
+        ],
+        output: { question: 'q1' },
+      },
     });
+    const firstQuestion = ((
+      probeRequests[0]?.body.spec as { questions?: Array<Record<string, unknown>> }
+    )?.questions ?? [])[0];
+    expect(firstQuestion).not.toHaveProperty('question');
 
     // Close dialog and reopen for gemini-adc BEFORE first probe resolves (R1)
     const closeBtn = Array.from(
