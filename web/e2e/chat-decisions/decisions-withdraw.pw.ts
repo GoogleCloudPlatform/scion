@@ -532,7 +532,7 @@ test.describe('Withdraw decisions on real hub (ptone/scion#8193)', () => {
       ).toHaveAttribute('data-status', 'withdrawn', { timeout: 15_000 });
 
       // 8. Forced answer in staleChatTab receives HTTP 409 `withdrawn`, updates card, and shows toast.
-      await staleSingleCard.locator('sl-button[data-choice="yes"]').click();
+      await staleSingleCard.locator('button[data-choice="yes"]').click();
       await expect(staleSingleCard.locator(`[data-row="${singleRowId}"]`)).toHaveAttribute(
         'data-status',
         'withdrawn',

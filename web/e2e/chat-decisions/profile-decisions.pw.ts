@@ -450,7 +450,7 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
       );
 
       const betaCard = decisionsPage.locator(`[data-prompt-card="${betaSend.message_id}"]`);
-      await betaCard.locator('sl-button[data-choice="dark"]').click();
+      await betaCard.locator('button[data-choice="dark"]').click();
 
       const [answerReq, answerRes] = await Promise.all([answerReqPromise, answerResPromise]);
       expect(answerRes.status()).toBe(200);

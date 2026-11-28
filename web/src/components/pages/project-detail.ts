@@ -912,8 +912,28 @@ export class ScionPageProjectDetail extends LitElement {
       }
 
       .agents-expand-toggle {
+        appearance: none;
+        background: transparent;
+        border: none;
+        padding: 0.375rem;
+        margin: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         font-size: 1rem;
         color: var(--scion-text-muted, #64748b);
+        border-radius: var(--scion-radius-sm, 0.25rem);
+        cursor: pointer;
+        transition: color var(--scion-transition-fast, 150ms ease);
+      }
+
+      .agents-expand-toggle:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
+
+      .agents-expand-toggle:focus-visible {
+        outline: var(--sl-focus-ring, 2px solid var(--scion-primary, #3b82f6));
+        outline-offset: var(--sl-focus-ring-offset, 1px);
       }
 
       .agent-card scion-deletion-banner {
@@ -3649,13 +3669,18 @@ export class ScionPageProjectDetail extends LitElement {
           ${this.agentStats.total > 0 && this.viewMode !== 'graph'
             ? html`
                 <sl-tooltip content=${this.agentsExpanded ? 'Collapse' : 'Expand'}>
-                  <sl-icon-button
+                  <button
+                    type="button"
                     class="agents-expand-toggle"
-                    name=${this.agentsExpanded ? 'arrows-angle-contract' : 'arrows-angle-expand'}
-                    label=${this.agentsExpanded ? 'Collapse agents' : 'Expand agents'}
+                    aria-label=${this.agentsExpanded ? 'Collapse agents' : 'Expand agents'}
                     aria-expanded=${this.agentsExpanded ? 'true' : 'false'}
                     @click=${() => this.toggleAgentsExpanded()}
-                  ></sl-icon-button>
+                  >
+                    <sl-icon
+                      name=${this.agentsExpanded ? 'arrows-angle-contract' : 'arrows-angle-expand'}
+                      aria-hidden="true"
+                    ></sl-icon>
+                  </button>
                 </sl-tooltip>
               `
             : nothing}

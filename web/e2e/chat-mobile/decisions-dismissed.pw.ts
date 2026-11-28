@@ -345,14 +345,8 @@ for (const theme of ['light', 'dark'] as const) {
 
       const c = card(page, 'prompt-x1');
       await expect(c.locator('.row.dismissed')).toBeVisible();
-      await expect(c.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      );
-      await expect(c.locator('sl-button[data-choice="no"]')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      );
+      await expect(c.locator('button[data-choice="yes"]')).toHaveAttribute('aria-disabled', 'true');
+      await expect(c.locator('button[data-choice="no"]')).toHaveAttribute('aria-disabled', 'true');
       await expect(c.locator('[data-card-menu]')).toHaveCount(0);
       await expect(c.locator('.wd sl-icon[name="x-circle"]')).toHaveCount(1);
       await expect(c.locator('.wd')).toContainText('Dismissed by alice');

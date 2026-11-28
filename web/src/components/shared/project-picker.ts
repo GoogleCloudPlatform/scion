@@ -607,7 +607,10 @@ export class ScionProjectPicker extends LitElement {
         autocomplete="off"
         ?clearable=${clearable}
         role="combobox"
-        aria-expanded=${this.searchOpen ? 'true' : 'false'}
+        aria-expanded=${
+          // scion-a11y-ignore: pre-existing sl-input combobox; tracked in ptone/scion#9870
+          this.searchOpen ? 'true' : 'false'
+        }
         aria-controls="project-picker-listbox"
         aria-activedescendant=${this.activeDescendantIndex >= 0
           ? `project-picker-option-${this.activeDescendantIndex}`

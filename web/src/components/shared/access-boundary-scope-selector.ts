@@ -456,7 +456,10 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
                   type="text"
                   autocomplete="off"
                   role="combobox"
-                  aria-expanded=${this.projectSearchOpen ? 'true' : 'false'}
+                  aria-expanded=${
+                    // scion-a11y-ignore: pre-existing sl-input combobox; tracked in ptone/scion#9870
+                    this.projectSearchOpen ? 'true' : 'false'
+                  }
                   aria-controls="project-search-listbox"
                   aria-activedescendant=${this.activeDescendantIndex >= 0
                     ? `project-option-${this.activeDescendantIndex}`

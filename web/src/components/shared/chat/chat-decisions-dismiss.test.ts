@@ -135,7 +135,7 @@ describe('<scion-chat-decisions> dismissed state (ptone/scion#8213)', () => {
     const rowOther = elOther.shadowRoot!.querySelector('.row.dismissed')!;
     expect(rowOther).not.toBeNull();
     expect(rowOther.getAttribute('data-status')).toBe('dismissed');
-    for (const btn of Array.from(rowOther.querySelectorAll('sl-button'))) {
+    for (const btn of Array.from(rowOther.querySelectorAll('button[data-choice]'))) {
       expect(btn.hasAttribute('disabled')).toBe(true);
     }
     const wdOther = rowOther.querySelector('.wd')!;
@@ -266,7 +266,7 @@ describe('<scion-chat-decisions> dismissed state (ptone/scion#8213)', () => {
         },
       })
     );
-    elSingle.shadowRoot!.querySelector<HTMLElement>('sl-button[data-choice="yes"]')!.click();
+    elSingle.shadowRoot!.querySelector<HTMLElement>('button[data-choice="yes"]')!.click();
     await new Promise((r) => setTimeout(r, 15));
     await elSingle.updateComplete;
 

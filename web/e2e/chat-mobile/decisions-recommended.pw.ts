@@ -638,7 +638,7 @@ for (const theme of ['light', 'dark'] as const) {
 
       const ship = card(page, 'p-ship');
       await expect(ship.locator('[data-choice="yes"] [data-rec-mark]')).toHaveText('recommended');
-      await expect(ship.locator('[data-choice="yes"]')).toHaveAttribute('variant', 'primary');
+      await expect(ship.locator('[data-choice="yes"]')).toHaveAttribute('data-look', 'filled');
 
       const set = card(page, 'p-set');
       for (const [rowId, choice] of [

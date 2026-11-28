@@ -332,11 +332,11 @@ test.describe('Interactive chat decisions on real hub (web.decisions)', () => {
       await expect(row).toContainText('Which rollout strategy should we use?');
       await expect(row).toContainText('Awaiting your answer');
 
-      await row.locator('sl-button[data-choice="bluegreen"]').click();
+      await row.locator('button[data-choice="bluegreen"]').click();
 
       await expect(row).toHaveAttribute('data-status', 'decided', { timeout: 15_000 });
       await expect(row.locator('.row-foot')).toContainText('Answered by you');
-      await expect(row.locator('sl-button[data-choice="canary"]')).toHaveAttribute(
+      await expect(row.locator('button[data-choice="canary"]')).toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -411,7 +411,7 @@ test.describe('Interactive chat decisions on real hub (web.decisions)', () => {
       await expect(cardB.locator(`[data-row="${rowId}"]`)).toContainText('Awaiting your answer');
 
       // User A clicks PostgreSQL.
-      await cardA.locator(`[data-row="${rowId}"] sl-button[data-choice="postgres"]`).click();
+      await cardA.locator(`[data-row="${rowId}"] button[data-choice="postgres"]`).click();
 
       // User A sees their own decided state.
       await expect(cardA.locator(`[data-row="${rowId}"]`)).toHaveAttribute(
@@ -427,7 +427,7 @@ test.describe('Interactive chat decisions on real hub (web.decisions)', () => {
       const rowB = cardB.locator(`[data-row="${rowId}"]`);
       await expect(rowB).toHaveAttribute('data-status', 'decided', { timeout: 15_000 });
       await expect(rowB.locator('.row-foot')).toContainText('Answered by Alice Choices');
-      await expect(rowB.locator('sl-button[data-choice="sqlite"]')).toHaveAttribute(
+      await expect(rowB.locator('button[data-choice="sqlite"]')).toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -702,7 +702,7 @@ test.describe('Interactive chat decisions on real hub (web.decisions)', () => {
       await expect(v1Row).toHaveAttribute('data-status', 'replaced', { timeout: 15_000 });
       await expect(v1Row.locator('.row-foot')).toContainText('Replaced by v2');
       await expect(v1Row.locator('a.jump')).toContainText('Jump to v2');
-      await expect(v1Row.locator('sl-button[data-choice="ship"]')).toHaveAttribute(
+      await expect(v1Row.locator('button[data-choice="ship"]')).toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -1046,7 +1046,7 @@ test.describe('Interactive chat decisions on real hub (web.decisions)', () => {
       await new Promise((resolve) => setTimeout(resolve, 2_500));
 
       // 2. User A overrides S-OVER via the inline change bar (response 2: delivered to agent).
-      await cardOverA.locator('sl-button[data-choice="30m"]').click();
+      await cardOverA.locator('button[data-choice="30m"]').click();
       await expect(cardOverA.locator('.confirmbar')).toContainText(
         'Change your answer from 5 minutes to 30 minutes? choices-single-p2 will be told.'
       );
