@@ -75,14 +75,14 @@ func ancestorCandidates(a *store.Agent) []string {
 // nil) when no ancestor qualifies, and a non-nil error on a transient store or
 // authorization fault (stopping the walk rather than skipping to a wrong
 // ancestor).
-func (s *Server) resolveArtifactSuccessor(ctx context.Context, child *store.Agent) (artifactSuccessor, bool, error) {
+func (h *artifactHost) resolveArtifactSuccessor(ctx context.Context, child *store.Agent) (artifactSuccessor, bool, error) {
 	if child == nil || child.ProjectID == "" {
 		return artifactSuccessor{}, false, nil
 	}
-	if s == nil || s.store == nil || s.authzService == nil {
+	if h == nil || h.server == nil || h.server.store == nil || h.server.authzService == nil {
 		return artifactSuccessor{}, false, errors.New("artifacts: resolve successor: hub services unavailable")
 	}
-	host := newArtifactHost(s)
+	s := h.server
 	for _, candID := range ancestorCandidates(child) {
 		cand, err := s.store.GetAgent(ctx, candID)
 		if err != nil {
@@ -109,14 +109,14 @@ func (s *Server) resolveArtifactSuccessor(ctx context.Context, child *store.Agen
 			}
 			return artifactSuccessor{}, false, stErr
 		}
-		sponsor, err := host.DelegatingUser(ctx, cand.ID)
+		sponsor, err := h.DelegatingUser(ctx, cand.ID)
 		if err != nil {
 			return artifactSuccessor{}, false, err
 		}
 		if sponsor == "" {
 			continue
 		}
-		sponsorReviewGrant := host.SponsorReviewGrant(ctx, child.ProjectID, sponsor) == nil
+		sponsorReviewGrant := h.SponsorReviewGrant(ctx, child.ProjectID, sponsor) == nil
 		return artifactSuccessor{
 			AgentID:            cand.ID,
 			Sponsor:            sponsor,
@@ -129,18 +129,11 @@ func (s *Server) resolveArtifactSuccessor(ctx context.Context, child *store.Agen
 // succeedAgentArtifacts transfers live artifacts owned by child in
 // child.ProjectID to its nearest live eligible ancestor agent. Errors are
 // logged and swallowed; the caller's agent deletion is never rolled back.
-func (s *Server) succeedAgentArtifacts(ctx context.Context, child *store.Agent, trigger string) {
-	if s == nil || child == nil || child.ID == "" || child.ProjectID == "" {
+func (h *artifactHost) succeedAgentArtifacts(ctx context.Context, st artifacts.Store, child *store.Agent, trigger string) {
+	if h == nil || h.server == nil || st == nil || child == nil || child.ID == "" || child.ProjectID == "" {
 		return
 	}
-	if !s.artifactsEnabled() || !s.experimentEnabled(experiments.Artifacts) {
-		return
-	}
-	st := s.ArtifactStore()
-	if st == nil {
-		return
-	}
-	succ, found, err := s.resolveArtifactSuccessor(ctx, child)
+	succ, found, err := h.resolveArtifactSuccessor(ctx, child)
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: resolve successor failed on agent delete",
 			"agent_id", child.ID, "project_id", child.ProjectID, "trigger", trigger, "error", err)
@@ -149,7 +142,6 @@ func (s *Server) succeedAgentArtifacts(ctx context.Context, child *store.Agent, 
 	if !found {
 		return
 	}
-	host := newArtifactHost(s)
 	fromRef := artifacts.PrincipalRef(artifacts.PrincipalKindAgent, child.ID)
 	toRef := artifacts.PrincipalRef(artifacts.PrincipalKindAgent, succ.AgentID)
 	res, err := artifacts.TransferToSuccessor(ctx, st, artifacts.Succession{
@@ -160,9 +152,9 @@ func (s *Server) succeedAgentArtifacts(ctx context.Context, child *store.Agent, 
 		SponsorReviewGrant: succ.SponsorReviewGrant,
 		Trigger:            trigger,
 		OnTransferred: func(a *artifacts.Artifact, _ artifacts.TransferResult) {
-			host.RecordTransfer(ctx, a.ID, fromRef, toRef, artifacts.AuthorityAncestorSuccession)
+			h.RecordTransfer(ctx, a.ID, fromRef, toRef, artifacts.AuthorityAncestorSuccession)
 		},
-	}, time.Now(), s.artifactLog())
+	}, time.Now(), h.server.artifactLog())
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: ancestor succession stopped with error",
 			"agent_id", child.ID, "successor_id", succ.AgentID, "project_id", child.ProjectID,
@@ -202,7 +194,7 @@ func (h *artifactHost) ResolveOwnerSuccessor(ctx context.Context, agentID string
 		// Live row (restore race): do not transfer.
 		return artifacts.Succession{}, false, nil
 	}
-	succ, found, err := h.server.resolveArtifactSuccessor(ctx, row)
+	succ, found, err := h.resolveArtifactSuccessor(ctx, row)
 	if err != nil {
 		return artifacts.Succession{}, false, err
 	}

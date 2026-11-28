@@ -282,12 +282,15 @@ func TestArtifactSuccession_SoftDeleteHappyPath(t *testing.T) {
 	assert.Empty(t, sf.dispatchedCalls(), "automatic succession must not send chat/DM notices")
 
 	// MutationAuditRecord exists with type artifact.ownership_transfer and authority ancestor_succession.
-	audits, _, err := sf.s.ListMutationAudits(ctx, store.MutationAuditFilter{
-		MutationType: mutationTypeArtifactOwnershipTransfer,
-		TargetID:     artID,
-	})
-	require.NoError(t, err)
-	require.Len(t, audits, 1)
+	var audits []*store.MutationAuditRecord
+	require.Eventually(t, func() bool {
+		var listErr error
+		audits, _, listErr = sf.s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeArtifactOwnershipTransfer,
+			TargetID:     artID,
+		})
+		return listErr == nil && len(audits) == 1
+	}, 2*time.Second, 20*time.Millisecond, "expected ownership transfer MutationAuditRecord")
 	assert.Contains(t, audits[0].BeforeSummary, "agent:"+child.ID)
 	assert.Contains(t, audits[0].AfterSummary, "agent:"+parent.ID)
 	assert.Contains(t, audits[0].AfterSummary, artifacts.AuthorityAncestorSuccession)

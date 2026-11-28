@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // artifactStoreState tracks the startup lifecycle of the server's artifact
@@ -413,6 +414,26 @@ func (s *Server) retireArtifactAttachments(ctx context.Context, st artifacts.Sto
 	if res.Unsent > 0 || res.Orphaned > 0 {
 		slog.InfoContext(ctx, "artifacts: retired attachments", "unsent", res.Unsent, "orphaned", res.Orphaned)
 	}
+}
+
+// succeedAgentArtifacts transfers live artifacts owned by child in
+// child.ProjectID to its nearest live eligible ancestor agent
+// (ptone/scion#9846). Built here so newArtifactHost(s) remains confined to
+// artifacts_store.go (TestArtifactServiceReachableOnlyThroughHTTPAuth).
+// Errors are logged and swallowed; the caller's agent deletion is never
+// rolled back.
+func (s *Server) succeedAgentArtifacts(ctx context.Context, child *store.Agent, trigger string) {
+	if s == nil || child == nil || child.ID == "" || child.ProjectID == "" {
+		return
+	}
+	if !s.artifactsEnabled() || !s.experimentEnabled(experiments.Artifacts) {
+		return
+	}
+	st := s.ArtifactStore()
+	if st == nil {
+		return
+	}
+	newArtifactHost(s).succeedAgentArtifacts(ctx, st, child, trigger)
 }
 
 // SecretKeyArtifactViewKey is the secret key name of the key that signs
