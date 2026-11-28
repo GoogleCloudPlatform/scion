@@ -63,8 +63,55 @@ type UsageBudgetState struct {
 	UpdatedAt           time.Time  `json:"updatedAt"`
 }
 
+// UsageGroupSeedStateSection is the internal hub_settings section that
+// persists D6 pooled-group seeder activation/finalization records across
+// replicas and restarts.
+const UsageGroupSeedStateSection = "system.usage_group_budget_seeds"
+
+// UsageGroupRollupDay holds one daily bucket computed for
+// usage_group_rollups_daily (origin="seed").
+type UsageGroupRollupDay struct {
+	DayUTC         time.Time
+	TokensSummable int64
+	Input          int64
+	Output         int64
+	CacheRead      int64
+	CacheWrite     int64
+	Calls          int64
+	Events         int64
+}
+
+// UsageGroupSeedRecord tracks D6 seed state for one (group, project_scope, window).
+type UsageGroupSeedRecord struct {
+	GroupID           string    `json:"group_id"`
+	ProjectScopeID    string    `json:"project_scope_id"`
+	WindowStartUTC    time.Time `json:"window_start_utc"`
+	WindowEndUTC      time.Time `json:"window_end_utc"`
+	ActivatedAt       time.Time `json:"activated_at"`
+	CutoffAt          time.Time `json:"cutoff_at"`
+	FrozenMemberIDs   []string  `json:"frozen_member_ids,omitempty"`
+	MemberSnapshotSet bool      `json:"member_snapshot_set"`
+	Finalized         bool      `json:"finalized"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// UsageGroupSeedState holds all tracked D6 seed records keyed by
+// "<group_id>|<project_scope_id>|<YYYY-MM-DD>".
+type UsageGroupSeedState struct {
+	Records map[string]*UsageGroupSeedRecord `json:"records"`
+}
+
+// UsageGroupMemberBreakdown holds one user's attributed consumption within a
+// pooled group budget window.
+type UsageGroupMemberBreakdown struct {
+	UserID         string `json:"userId"`
+	TokensSummable int64  `json:"tokensSummable"`
+	Calls          int64  `json:"calls"`
+	Events         int64  `json:"events"`
+}
+
 // UsageBudgetStore defines persistence operations for raw-token budget state
-// and scope-counter window sums (Tokenomics P3.1).
+// and scope-counter window sums (Tokenomics P3.1, P3.3).
 type UsageBudgetStore interface {
 	// SumUsageScopeCounterTokens returns the saturating SUM(tokens_summable)
 	// from usage_scope_counters_daily for (scopeKind, counterScopeID) over the
@@ -77,6 +124,30 @@ type UsageBudgetStore interface {
 	// for (groupID, projectScopeID) over the half-open UTC day range
 	// [fromDayUTC, toDayUTC). projectScopeID == "" selects the system-wide pool.
 	SumUsageGroupRollupTokens(ctx context.Context, groupID, projectScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error)
+
+	// ComputeUnchargedGroupRollupSeed aggregates usage_events in [fromTS, toTS)
+	// for memberUserIDs (optionally restricted to projectScopeID when non-empty)
+	// where groupID is NOT present in usage_events.charged_group_ids.
+	// Anomalous events are excluded from token counters identically to ingest.
+	ComputeUnchargedGroupRollupSeed(ctx context.Context, groupID, projectScopeID string, memberUserIDs []string, fromTS, toTS time.Time) ([]UsageGroupRollupDay, error)
+
+	// ReplaceUsageGroupRollupSeed idempotently replaces (SET, never adds) all
+	// origin="seed" rows for (groupID, projectScopeID) in [windowStartUTC,
+	// windowEndUTC) in a single transaction, never touching origin="ingest" rows.
+	ReplaceUsageGroupRollupSeed(ctx context.Context, groupID, projectScopeID string, windowStartUTC, windowEndUTC time.Time, rows []UsageGroupRollupDay) error
+
+	// GetUsageGroupSeedState loads the persisted D6 pooled-group seed state.
+	GetUsageGroupSeedState(ctx context.Context) (*UsageGroupSeedState, error)
+
+	// SaveUsageGroupSeedState persists the D6 pooled-group seed state.
+	SaveUsageGroupSeedState(ctx context.Context, state *UsageGroupSeedState) error
+
+	// QueryGroupMemberUsageBreakdown aggregates per-member consumption from
+	// usage_events over [windowStartUTC, windowEndUTC) for (groupID,
+	// projectScopeID), covering both ingest-charged events (groupID in
+	// charged_group_ids) and pre-activation seeded events (uncharged events in
+	// [seedFromTS, seedToTS) by seededMemberUserIDs).
+	QueryGroupMemberUsageBreakdown(ctx context.Context, groupID, projectScopeID string, seededMemberUserIDs []string, seedFromTS, seedToTS, windowStartUTC, windowEndUTC time.Time) ([]UsageGroupMemberBreakdown, error)
 
 	// GetUsageBudgetState returns the usage_budget_state row for key, or
 	// ErrNotFound if no row exists yet.

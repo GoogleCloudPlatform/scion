@@ -452,6 +452,58 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 	}
 }
 
+// EvaluateGroupScope evaluates the active UTC day and month pooled-group
+// budgets for (groupID, projectScopeID) at `now`. Called by the pooled-group
+// seeder right after writing origin="seed" rows so usage_budget_state reflects
+// newly seeded spend immediately.
+func (e *TokenBudgetEvaluator) EvaluateGroupScope(ctx context.Context, groupID, projectScopeID string, now time.Time) error {
+	if !e.enabled() || groupID == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = e.now()
+	} else {
+		now = now.UTC()
+	}
+	dayStart, dayEnd := utcDayWindow(now)
+	monthStart, monthEnd := utcMonthWindow(now)
+	bindingScope := store.QuotaScopeSystem
+	bindingScopeID := ""
+	if projectScopeID != "" {
+		bindingScope = store.QuotaScopeProject
+		bindingScopeID = projectScopeID
+	}
+	specs := []budgetEvalSpec{
+		{
+			limitName:      store.LimitLLMTokensPerGroupDay,
+			scopeKind:      store.UsageScopeKindGroup,
+			scopeID:        groupID,
+			projectScopeID: projectScopeID,
+			bindingScope:   bindingScope,
+			bindingScopeID: bindingScopeID,
+			windowStartUTC: dayStart,
+			windowEndUTC:   dayEnd,
+		},
+		{
+			limitName:      store.LimitLLMTokensPerGroupMonth,
+			scopeKind:      store.UsageScopeKindGroup,
+			scopeID:        groupID,
+			projectScopeID: projectScopeID,
+			bindingScope:   bindingScope,
+			bindingScopeID: bindingScopeID,
+			windowStartUTC: monthStart,
+			windowEndUTC:   monthEnd,
+		},
+	}
+	evalCache := newTokenLimitEvalCache(e.quota)
+	for _, spec := range specs {
+		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // IsScopeExhaustedForAction checks whether any applicable non-zero raw-token
 // limit for (projectID, billingUserID) in the active UTC day or month window
 // at `now` is exhausted (respecting override_until > now) with an effective
@@ -865,4 +917,5 @@ func (s *Server) reconcileTokenBudgets(ctx context.Context) {
 		return
 	}
 	seedTokenBudgetLimitDefinitions(ctx, s.store)
+	s.startGroupBudgetSeedDrainer(ctx)
 }

@@ -361,6 +361,11 @@ const (
 	// so at most one replica sweeps expired/terminal upload sessions per tick.
 	LockUploadSessionSweep AdvisoryLockKey = 0x5C100039
 
+	// LockUsageGroupSeedReconcile guards the nightly pooled-group budget seed
+	// reconciliation job ("usage-group-seed-reconcile", ptone/scion#9243),
+	// ensuring at most one replica scans for missing/incomplete seeds at a time.
+	LockUsageGroupSeedReconcile AdvisoryLockKey = 0x5C10003A
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

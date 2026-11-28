@@ -3317,6 +3317,11 @@ type GroupStore interface {
 	// including the implicit project_agents group and transitive parent groups.
 	GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error)
 
+	// GetEffectiveGroupMemberUserIDs returns all distinct active (non-expired)
+	// user IDs who belong to groupID directly or transitively through nested
+	// child groups, sorted ascending.
+	GetEffectiveGroupMemberUserIDs(ctx context.Context, groupID string) ([]string, error)
+
 	// GetParentGroups returns all ancestor groups of the given group —
 	// i.e., groups that transitively contain this group as a child.
 	// Used by delegation checks to compute the full authority inherited

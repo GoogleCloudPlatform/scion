@@ -287,6 +287,7 @@
 - [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [group.read](#groupread) — Read group details
+- [quota.group.budgets.read](#quotagroupbudgetsread) — Read pooled raw-token budgets for a user group (behind tokenomics.usage_ledger and tokenomics.token_budgets). Hub admins (quota.read) and group owners/admins see per-member breakdown; regular effective members see pool totals only
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
 - [group.update](#groupupdate) — Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist
@@ -11175,6 +11176,39 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## quota.group.budgets.read
+
+**Domain:** quota
+
+**Description:** Read pooled raw-token budgets for a user group (behind tokenomics.usage_ledger and tokenomics.token_budgets). Hub admins (quota.read) and group owners/admins see per-member breakdown; regular effective members see pool totals only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/groups/{id}/usage/budgets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
+
+**Base Permission:** `quota.read`
+
+**Resource Resolver:** group-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupUsageBudgets_ReadAndAuthz`
 
 ---
 

@@ -824,6 +824,27 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "quota.group.budgets.read",
+		Domain:      "quota",
+		Description: "Read pooled raw-token budgets for a user group (behind tokenomics.usage_ledger and tokenomics.token_budgets). Hub admins (quota.read) and group owners/admins see per-member breakdown; regular effective members see pool totals only",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/usage/budgets", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "group-from-url",
+		BasePermission:   "quota.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupUsageBudgets_ReadAndAuthz"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
+	},
+	{
 		ID:          "group.list",
 		Domain:      "group",
 		Description: "List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub",

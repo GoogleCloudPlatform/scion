@@ -619,6 +619,21 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		"binding_id", created.ID, "limit_id", limitID, "actor", user.Email())
 	if pooledGroupLimit(limitDef.Name) {
 		s.InvalidatePooledGroupCacheAll()
+		if created.Value > 0 {
+			_ = s.TokenBudgetEvaluator()
+			if seeder := s.GroupBudgetSeeder(); seeder != nil {
+				actAt := created.UpdatedAt
+				if actAt.IsZero() {
+					actAt = created.CreatedAt
+				}
+				if seedErr := seeder.EnqueueForBindingActivation(
+					r.Context(), limitDef.Name, created.SubjectID, created.ScopeType, created.ScopeID, actAt,
+				); seedErr != nil {
+					slog.Warn("failed to enqueue pooled group budget seed on binding create",
+						"binding_id", created.ID, "group_id", created.SubjectID, "error", seedErr)
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, created)
@@ -721,6 +736,11 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	prevValue := existing.Value
+	prevSubjectID := existing.SubjectID
+	prevScopeType := existing.ScopeType
+	prevScopeID := existing.ScopeID
+
 	existing.SubjectType = req.SubjectType
 	existing.SubjectID = req.SubjectID
 	existing.ScopeType = req.ScopeType
@@ -743,6 +763,21 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		"binding_id", updated.ID, "actor", user.Email())
 	if pooledGroupLimit(limitDef.Name) {
 		s.InvalidatePooledGroupCacheAll()
+		activated := updated.Value > 0 && (prevValue <= 0 ||
+			prevSubjectID != updated.SubjectID ||
+			prevScopeType != updated.ScopeType ||
+			prevScopeID != updated.ScopeID)
+		if activated {
+			_ = s.TokenBudgetEvaluator()
+			if seeder := s.GroupBudgetSeeder(); seeder != nil {
+				if seedErr := seeder.EnqueueForBindingActivation(
+					r.Context(), limitDef.Name, updated.SubjectID, updated.ScopeType, updated.ScopeID, updated.UpdatedAt,
+				); seedErr != nil {
+					slog.Warn("failed to enqueue pooled group budget seed on binding update",
+						"binding_id", updated.ID, "group_id", updated.SubjectID, "error", seedErr)
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, updated)

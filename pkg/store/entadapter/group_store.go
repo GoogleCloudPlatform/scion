@@ -1014,6 +1014,71 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 	return s.walkEffectiveGroups(ctx, seedIDs)
 }
 
+// GetEffectiveGroupMemberUserIDs returns all distinct active (non-expired) user
+// IDs who belong to groupID directly or transitively through nested child
+// groups, sorted ascending. Uses a recursive CTE walking child_groups downward
+// from groupID (UNION ends on cycles), then queries active user memberships.
+func (s *GroupStore) GetEffectiveGroupMemberUserIDs(ctx context.Context, groupID string) ([]string, error) {
+	rootUID, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	drv := s.client.Driver()
+	d := drv.Dialect()
+	query := fmt.Sprintf(`WITH RECURSIVE descendants(id) AS (
+    SELECT %s AS id
+    UNION
+    SELECT gc.parent_group_id FROM group_child_groups gc
+    JOIN descendants d ON gc.group_id = d.id
+)
+SELECT id FROM descendants`, sqlUUIDPh(d, 1))
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, []any{rootUID}, rows); err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	descendantUIDs, err := scanUUIDRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(descendantUIDs) == 0 {
+		return []string{}, nil
+	}
+
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for start := 0; start < len(descendantUIDs); start += effectiveGroupsUserChunkSize {
+		end := start + effectiveGroupsUserChunkSize
+		if end > len(descendantUIDs) {
+			end = len(descendantUIDs)
+		}
+		memberships, err := s.client.GroupMembership.Query().
+			Where(
+				groupmembership.GroupIDIn(descendantUIDs[start:end]...),
+				groupmembership.UserIDNotNil(),
+			).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, m := range s.activeMemberships(memberships) {
+			if m.UserID == nil {
+				continue
+			}
+			uidStr := m.UserID.String()
+			if _, dup := seen[uidStr]; !dup {
+				seen[uidStr] = struct{}{}
+				out = append(out, uidStr)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 const (
 	// effectiveGroupsUserChunkSize bounds the IN-list size per chunk in
 	// GetEffectiveGroupsForUsers.
