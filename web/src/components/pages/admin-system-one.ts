@@ -500,8 +500,8 @@ export class ScionPageAdminSystemOne extends LitElement {
         color: var(--scion-text-muted, #64748b);
       }
 
-      .empty-state sl-icon,
-      .error-state sl-icon {
+      .empty-state > sl-icon,
+      .error-state > sl-icon {
         font-size: 2.5rem;
         margin-bottom: 0.75rem;
         opacity: 0.6;
