@@ -47,6 +47,7 @@ func setNoticeTestExperiments(t *testing.T, srv *Server, s store.Store, override
 }
 
 func TestTrajectoryCaptureNotice_RunAttributionAndUsageRead(t *testing.T) {
+	assert.Equal(t, telemetrycontract.TrajectoryCaptureProjectAnnotation, projectSettingTrajectoryCapture)
 	srv, s := testServer(t)
 	ctx := t.Context()
 
