@@ -244,6 +244,14 @@ func (sw *UsageRetentionSweeper) registerDefaultTargets(st store.UsageRetentionS
 		SweepBatch:    st.SweepUsageScopeCountersDailyBatch,
 	})
 	sw.RegisterTarget(UsageRetentionTarget{
+		Name: "usage_group_rollups_daily",
+		RetentionDays: func(cfg config.ResolvedTelemetryRetention) int {
+			return cfg.GroupRollupsDays
+		},
+		ComputeCutoff: scopeCountersRetentionCutoff,
+		SweepBatch:    st.SweepUsageGroupRollupsDailyBatch,
+	})
+	sw.RegisterTarget(UsageRetentionTarget{
 		Name: "usage_budget_state",
 		RetentionDays: func(cfg config.ResolvedTelemetryRetention) int {
 			return cfg.BudgetStateDays

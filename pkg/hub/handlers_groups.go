@@ -438,6 +438,11 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if parentEdge != nil {
+		s.InvalidatePooledGroupCacheAll()
+	} else {
+		s.InvalidatePooledGroupCacheForUser(createdBy)
+	}
 	s.groupsLogger().Info("group created",
 		"group_id", group.ID,
 		"slug", group.Slug,
@@ -838,6 +843,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 	s.enqueueGroupChangeLoss(ctx, lossUsers)
 
 	s.publishConduitAuthzChanged(conduitAuthzMatch{})
+	s.InvalidatePooledGroupCacheAll()
 	s.groupsLogger().Info("group deleted",
 		"group_id", group.ID,
 		"slug", group.Slug)
@@ -1101,6 +1107,11 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
+	if member.MemberType == store.GroupMemberTypeUser {
+		s.InvalidatePooledGroupCacheForUser(member.MemberID)
+	} else {
+		s.InvalidatePooledGroupCacheAll()
+	}
 	s.groupsLogger().Info("group member added",
 		"group_id", groupID,
 		"member_type", member.MemberType,
@@ -1484,8 +1495,10 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 
 	if memberType == store.GroupMemberTypeUser {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: memberID})
+		s.InvalidatePooledGroupCacheForUser(memberID)
 	} else {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{})
+		s.InvalidatePooledGroupCacheAll()
 	}
 	s.groupsLogger().Info("group member removed",
 		"group_id", group.ID,

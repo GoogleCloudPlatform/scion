@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -80,6 +81,41 @@ func (s *UsageLedgerStore) SumUsageScopeCounterTokens(ctx context.Context, scope
 			usagescopecounterdaily.ScopeIDEQ(counterScopeID),
 			usagescopecounterdaily.DayUtcGTE(fromUTC),
 			usagescopecounterdaily.DayUtcLT(toUTC),
+		).
+		All(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+
+	var total int64
+	for _, r := range rows {
+		if r.TokensSummable > 0 {
+			total = saturatingAddInt64(total, r.TokensSummable)
+		}
+	}
+	return total, nil
+}
+
+// SumUsageGroupRollupTokens implements store.UsageBudgetStore.SumUsageGroupRollupTokens.
+// Scans at most 62 daily rows (31 days x 2 origins: "ingest" and "seed") for a
+// calendar month window and sums tokens_summable with int64 saturation so
+// SQLite and Postgres behave identically.
+func (s *UsageLedgerStore) SumUsageGroupRollupTokens(ctx context.Context, groupID, projectScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error) {
+	if groupID == "" {
+		return 0, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
+	}
+	fromUTC := utcDayStart(fromDayUTC)
+	toUTC := utcDayStart(toDayUTC)
+	if !toUTC.After(fromUTC) {
+		return 0, nil
+	}
+
+	rows, err := s.client.UsageGroupRollupDaily.Query().
+		Where(
+			usagegrouprollupdaily.GroupIDEQ(groupID),
+			usagegrouprollupdaily.ProjectScopeIDEQ(projectScopeID),
+			usagegrouprollupdaily.DayUtcGTE(fromUTC),
+			usagegrouprollupdaily.DayUtcLT(toUTC),
 		).
 		All(ctx)
 	if err != nil {
@@ -274,6 +310,20 @@ WHERE id IN (
 	SELECT id FROM usage_budget_state
 	WHERE window_end_utc < ?
 	ORDER BY window_end_utc ASC
+	LIMIT ?
+)`
+	return s.execUsageRetentionDeleteBatch(ctx, query, []any{cutoff.UTC(), batchSize}, batchSize)
+}
+
+// SweepUsageGroupRollupsDailyBatch implements store.UsageRetentionStore.SweepUsageGroupRollupsDailyBatch.
+// Deletes up to batchSize usage_group_rollups_daily rows with day_utc < cutoff.
+func (s *UsageLedgerStore) SweepUsageGroupRollupsDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	const query = `
+DELETE FROM usage_group_rollups_daily
+WHERE id IN (
+	SELECT id FROM usage_group_rollups_daily
+	WHERE day_utc < ?
+	ORDER BY day_utc ASC
 	LIMIT ?
 )`
 	return s.execUsageRetentionDeleteBatch(ctx, query, []any{cutoff.UTC(), batchSize}, batchSize)

@@ -1068,6 +1068,8 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to add creator to project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
+		} else if err == nil {
+			s.InvalidatePooledGroupCacheForUser(project.CreatedBy)
 		}
 	}
 

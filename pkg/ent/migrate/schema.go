@@ -4811,6 +4811,44 @@ var (
 			},
 		},
 	}
+	// UsageGroupRollupsDailyColumns holds the columns for the "usage_group_rollups_daily" table.
+	UsageGroupRollupsDailyColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "day_utc", Type: field.TypeTime},
+		{Name: "group_id", Type: field.TypeString},
+		{Name: "project_scope_id", Type: field.TypeString, Default: ""},
+		{Name: "origin", Type: field.TypeString},
+		{Name: "tokens_summable", Type: field.TypeInt64, Default: 0},
+		{Name: "input", Type: field.TypeInt64, Default: 0},
+		{Name: "output", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write", Type: field.TypeInt64, Default: 0},
+		{Name: "calls", Type: field.TypeInt64, Default: 0},
+		{Name: "events", Type: field.TypeInt64, Default: 0},
+	}
+	// UsageGroupRollupsDailyTable holds the schema information for the "usage_group_rollups_daily" table.
+	UsageGroupRollupsDailyTable = &schema.Table{
+		Name:       "usage_group_rollups_daily",
+		Columns:    UsageGroupRollupsDailyColumns,
+		PrimaryKey: []*schema.Column{UsageGroupRollupsDailyColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_group_rollups_daily_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageGroupRollupsDailyColumns[1], UsageGroupRollupsDailyColumns[2], UsageGroupRollupsDailyColumns[3], UsageGroupRollupsDailyColumns[4]},
+			},
+			{
+				Name:    "usagegrouprollupdaily_group_id_project_scope_id_day_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupRollupsDailyColumns[2], UsageGroupRollupsDailyColumns[3], UsageGroupRollupsDailyColumns[1]},
+			},
+			{
+				Name:    "usagegrouprollupdaily_day_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupRollupsDailyColumns[1]},
+			},
+		},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -5414,6 +5452,7 @@ var (
 		TriggerSubjectClaimsTable,
 		UsageBudgetStateTable,
 		UsageEventsTable,
+		UsageGroupRollupsDailyTable,
 		UsageReservationsTable,
 		UsageRollupsDailyTable,
 		UsageRollupsHourlyTable,
@@ -5735,6 +5774,9 @@ func init() {
 	UsageEventsTable.ForeignKeys[0].RefTable = RunAttributionTable
 	UsageEventsTable.Annotation = &entsql.Annotation{
 		Table: "usage_events",
+	}
+	UsageGroupRollupsDailyTable.Annotation = &entsql.Annotation{
+		Table: "usage_group_rollups_daily",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsageRollupsDailyTable.Annotation = &entsql.Annotation{

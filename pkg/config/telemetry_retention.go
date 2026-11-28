@@ -33,6 +33,8 @@ const (
 	MinRetentionDailyRollupsDays      = 90
 	DefaultRetentionScopeCountersDays = 90
 	MinRetentionScopeCountersDays     = 65
+	DefaultRetentionGroupRollupsDays  = 365
+	MinRetentionGroupRollupsDays      = 90
 	DefaultRetentionBudgetStateDays   = 90
 	MinRetentionBudgetStateDays       = 1
 	DefaultRetentionMeterHealthDays   = 30
@@ -54,6 +56,7 @@ type ResolvedTelemetryRetention struct {
 	HourlyRollupsDays  int
 	DailyRollupsDays   int
 	ScopeCountersDays  int
+	GroupRollupsDays   int
 	BudgetStateDays    int
 	MeterHealthDays    int
 	RunAttributionDays int // derived: 0 if DailyRollupsDays == 0, else max(365, DailyRollupsDays)
@@ -68,6 +71,7 @@ func DefaultResolvedTelemetryRetention() ResolvedTelemetryRetention {
 		HourlyRollupsDays:  DefaultRetentionHourlyRollupsDays,
 		DailyRollupsDays:   DefaultRetentionDailyRollupsDays,
 		ScopeCountersDays:  DefaultRetentionScopeCountersDays,
+		GroupRollupsDays:   DefaultRetentionGroupRollupsDays,
 		BudgetStateDays:    DefaultRetentionBudgetStateDays,
 		MeterHealthDays:    DefaultRetentionMeterHealthDays,
 		RunAttributionDays: MinRetentionRunAttributionDays,
@@ -89,6 +93,7 @@ func ResolveTelemetryRetention(cfg *api.TelemetryRetentionConfig) ResolvedTeleme
 	out.HourlyRollupsDays = resolveRetentionDays(cfg.HourlyRollupsDays, DefaultRetentionHourlyRollupsDays, MinRetentionHourlyRollupsDays)
 	out.DailyRollupsDays = resolveRetentionDays(cfg.DailyRollupsDays, DefaultRetentionDailyRollupsDays, MinRetentionDailyRollupsDays)
 	out.ScopeCountersDays = resolveRetentionDays(cfg.ScopeCountersDays, DefaultRetentionScopeCountersDays, MinRetentionScopeCountersDays)
+	out.GroupRollupsDays = resolveRetentionDays(cfg.GroupRollupsDays, DefaultRetentionGroupRollupsDays, MinRetentionGroupRollupsDays)
 	out.BudgetStateDays = resolveRetentionDays(cfg.BudgetStateDays, DefaultRetentionBudgetStateDays, MinRetentionBudgetStateDays)
 	out.MeterHealthDays = resolveRetentionDays(cfg.MeterHealthDays, DefaultRetentionMeterHealthDays, MinRetentionMeterHealthDays)
 
@@ -149,6 +154,9 @@ func ValidateTelemetryRetention(cfg *api.TelemetryRetentionConfig) error {
 	if err := validateRetentionDaysField("scope_counters_days", cfg.ScopeCountersDays, MinRetentionScopeCountersDays); err != nil {
 		return err
 	}
+	if err := validateRetentionDaysField("group_rollups_days", cfg.GroupRollupsDays, MinRetentionGroupRollupsDays); err != nil {
+		return err
+	}
 	if err := validateRetentionDaysField("budget_state_days", cfg.BudgetStateDays, MinRetentionBudgetStateDays); err != nil {
 		return err
 	}
@@ -199,6 +207,7 @@ func ValidateV1TelemetryRetention(cfg *V1TelemetryRetentionConfig) error {
 		HourlyRollupsDays: cfg.HourlyRollupsDays,
 		DailyRollupsDays:  cfg.DailyRollupsDays,
 		ScopeCountersDays: cfg.ScopeCountersDays,
+		GroupRollupsDays:  cfg.GroupRollupsDays,
 		BudgetStateDays:   cfg.BudgetStateDays,
 		MeterHealthDays:   cfg.MeterHealthDays,
 		SweepInterval:     cfg.SweepInterval,

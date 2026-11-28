@@ -420,6 +420,13 @@ func countsAcrossSubjects(limitName string) bool {
 	return limitName == store.LimitMaxAgentsPerProject
 }
 
+// pooledGroupLimit reports whether limitName is a pooled user-group token
+// budget limit (Tokenomics P3.3, §4.4).
+func pooledGroupLimit(limitName string) bool {
+	return limitName == store.LimitLLMTokensPerGroupDay ||
+		limitName == store.LimitLLMTokensPerGroupMonth
+}
+
 // countActive is Reserve's count of active reservations: the scope-wide
 // total for a limit counted across subjects, through the grouped per-scope
 // count, else the subject's own count in the scope.
@@ -761,6 +768,9 @@ type tokenLimitEvalCache struct {
 
 	subjectLoaded   map[string]bool
 	subjectBindings map[string][]*store.EntitlementBinding
+
+	groupLoaded   map[string]bool
+	groupBindings map[string][]*store.EntitlementBinding
 }
 
 func newTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
@@ -768,6 +778,8 @@ func newTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
 		qs:              qs,
 		subjectLoaded:   make(map[string]bool),
 		subjectBindings: make(map[string][]*store.EntitlementBinding),
+		groupLoaded:     make(map[string]bool),
+		groupBindings:   make(map[string][]*store.EntitlementBinding),
 	}
 }
 
@@ -888,6 +900,78 @@ func (c *tokenLimitEvalCache) resolve(ctx context.Context, limitDefID string, de
 	var maxValue int64
 	bestAction := ""
 	for _, b := range matchingBindings {
+		if b.Value <= 0 {
+			return 0, store.TokenActionPauseNew, nil
+		}
+		act := store.EffectiveTokenAction(b.TokenAction)
+		if b.Value > maxValue {
+			maxValue = b.Value
+			bestAction = act
+		} else if b.Value == maxValue {
+			if tokenActionPermissivenessRank(act) > tokenActionPermissivenessRank(bestAction) {
+				bestAction = act
+			}
+		}
+	}
+	if bestAction == "" {
+		bestAction = store.TokenActionPauseNew
+	}
+	return maxValue, bestAction, nil
+}
+
+// ResolveEffectiveGroupTokenLimit resolves the effective pooled raw-token cap
+// and breach action for (limitDefID, groupID) at exact scope (scopeType,
+// scopeID). Unlike per-user resolution, system-scoped ("system", "") and
+// project-scoped ("project", projectID) pools are evaluated independently and
+// do not fall back to system_default or LimitDefinition.DefaultValue; a group
+// with no matching binding is unlimited (0, pause_new).
+func (qs *QuotaService) ResolveEffectiveGroupTokenLimit(ctx context.Context, limitDefID, groupID, scopeType, scopeID string) (cap int64, action string, err error) {
+	cache := newTokenLimitEvalCache(qs)
+	return cache.resolveGroupByID(ctx, limitDefID, groupID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) loadGroupBindings(ctx context.Context, groupID string) ([]*store.EntitlementBinding, error) {
+	if groupID == "" {
+		return nil, nil
+	}
+	if c.groupLoaded[groupID] {
+		return c.groupBindings[groupID], nil
+	}
+	groupBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("list group bindings: %w", err)
+	}
+	c.groupBindings[groupID] = groupBindings
+	c.groupLoaded[groupID] = true
+	return groupBindings, nil
+}
+
+func (c *tokenLimitEvalCache) resolveGroupForDef(ctx context.Context, def *store.LimitDefinition, groupID, scopeType, scopeID string) (int64, string, error) {
+	return c.resolveGroupByID(ctx, def.ID, groupID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) resolveGroupByID(ctx context.Context, limitDefID, groupID, scopeType, scopeID string) (int64, string, error) {
+	if groupID == "" {
+		return 0, store.TokenActionPauseNew, nil
+	}
+	groupBindings, err := c.loadGroupBindings(ctx, groupID)
+	if err != nil {
+		return 0, store.TokenActionPauseNew, err
+	}
+
+	var matching []*store.EntitlementBinding
+	for _, b := range groupBindings {
+		if b.LimitDefinitionID == limitDefID && b.ScopeType == scopeType && b.ScopeID == scopeID {
+			matching = append(matching, b)
+		}
+	}
+	if len(matching) == 0 {
+		return 0, store.TokenActionPauseNew, nil
+	}
+
+	var maxValue int64
+	bestAction := ""
+	for _, b := range matching {
 		if b.Value <= 0 {
 			return 0, store.TokenActionPauseNew, nil
 		}

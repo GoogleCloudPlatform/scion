@@ -348,6 +348,9 @@ type UsageBudgetState func(*sql.Selector)
 // UsageEvent is the predicate function for usageevent builders.
 type UsageEvent func(*sql.Selector)
 
+// UsageGroupRollupDaily is the predicate function for usagegrouprollupdaily builders.
+type UsageGroupRollupDaily func(*sql.Selector)
+
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)
 
