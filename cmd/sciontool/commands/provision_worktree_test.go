@@ -77,8 +77,8 @@ func setupProvisionCmd(t *testing.T, workspace, modeFlag, cloneURL string) {
 	// Kubernetes runtime mounts it (required in the shared modes). A test
 	// that wants another value sets the variable after this call.
 	t.Setenv(provisionStateDirEnv, testStateDir(t, workspace))
-	// Worktree mode sets GIT_CONFIG_* for its git commands; restore them.
-	for _, key := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
+	// Provisioning sets GIT_CONFIG_* and GIT_CONFIG_GLOBAL for its git commands; restore them.
+	for _, key := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
 		t.Setenv(key, "")
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
@@ -164,14 +164,14 @@ func TestRunProvision_WorktreeMode_FirstStartAddsWorktree(t *testing.T) {
 	if got := gitT(t, workspace, "branch", "--show-current"); got != "" {
 		t.Errorf("shared checkout branch = %q, want a detached HEAD", got)
 	}
-	// The git commands of this run list exactly the shared checkout and the
-	// agent's worktree as safe directories.
+	// The git commands of this run trust the project-storage workspace root
+	// and its subtree (including the agent's worktree), never "*".
 	want := map[string]string{
 		"GIT_CONFIG_COUNT":   "2",
 		"GIT_CONFIG_KEY_0":   "safe.directory",
 		"GIT_CONFIG_VALUE_0": workspace,
 		"GIT_CONFIG_KEY_1":   "safe.directory",
-		"GIT_CONFIG_VALUE_1": provision.WorktreePath(workspace, "agent-1"),
+		"GIT_CONFIG_VALUE_1": workspace + "/*",
 	}
 	for key, value := range want {
 		if got := os.Getenv(key); got != value {
@@ -192,19 +192,19 @@ func TestRunProvision_WorktreeMode_BranchWithSlash(t *testing.T) {
 	assertAgentWorktree(t, workspace, "agent-1", "feature/Login-Fix")
 }
 
-// The safe.directory entries name exactly the shared checkout and the
-// agent's worktree, after any GIT_CONFIG_* entries already set.
-func TestWorktreeSafeDirectoryEnv(t *testing.T) {
+// The safe.directory entries trust the project-storage workspace root and its
+// subtree, after any GIT_CONFIG_* entries already set, and never "*".
+func TestProvisionSafeDirectoryEnv(t *testing.T) {
 	env := func(vars map[string]string) func(string) string {
 		return func(key string) string { return vars[key] }
 	}
-	got := worktreeSafeDirectoryEnv(env(nil), "/workspace", "agent-1")
+	got := provisionSafeDirectoryEnv(env(nil), "/workspace")
 	want := map[string]string{
 		"GIT_CONFIG_COUNT":   "2",
 		"GIT_CONFIG_KEY_0":   "safe.directory",
 		"GIT_CONFIG_VALUE_0": "/workspace",
 		"GIT_CONFIG_KEY_1":   "safe.directory",
-		"GIT_CONFIG_VALUE_1": "/workspace/worktrees/agent-1",
+		"GIT_CONFIG_VALUE_1": "/workspace/*",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -215,10 +215,16 @@ func TestWorktreeSafeDirectoryEnv(t *testing.T) {
 		}
 	}
 
-	got = worktreeSafeDirectoryEnv(env(map[string]string{"GIT_CONFIG_COUNT": "1"}), "/workspace", "agent-1")
+	got = provisionSafeDirectoryEnv(env(map[string]string{"GIT_CONFIG_COUNT": "1"}), "/workspace")
 	if got["GIT_CONFIG_COUNT"] != "3" || got["GIT_CONFIG_VALUE_1"] != "/workspace" ||
-		got["GIT_CONFIG_VALUE_2"] != "/workspace/worktrees/agent-1" || got["GIT_CONFIG_KEY_0"] != "" {
+		got["GIT_CONFIG_VALUE_2"] != "/workspace/*" || got["GIT_CONFIG_KEY_0"] != "" {
 		t.Errorf("existing entries not kept: %v", got)
+	}
+
+	for _, bad := range []string{"", "/", "*", "relative"} {
+		if got := provisionSafeDirectoryEnv(env(nil), bad); len(got) != 0 {
+			t.Errorf("provisionSafeDirectoryEnv(%q) = %v, want empty", bad, got)
+		}
 	}
 }
 

@@ -1054,6 +1054,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Configure scoped git safe.directory entries in the agent's global
+	// ~/.gitconfig so git works in project-storage trees and worktrees owned
+	// by another UID (ptone/scion#6656). Runs before runGitCloneWorkspace so
+	// clone-time git commands also trust the workspace when it is owned by
+	// another UID.
+	if err := runConfigureGitSafeDirectories(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop, initEnvPolicy); err != nil {
+		log.Error("Failed to configure git safe.directory: %v", err)
+	}
+
 	// Clone git workspace BEFORE pre-start hooks so that provisioners
 	// (e.g. antigravity) see the populated workspace rather than an empty
 	// one.  The clone depends only on environment variables and agent
