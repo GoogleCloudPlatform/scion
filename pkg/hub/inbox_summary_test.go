@@ -140,7 +140,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	uatHubResp := decodeInboxSummary(t, uatHubRec)
 	assert.Equal(t, "no-store", uatHubRec.Header().Get("Cache-Control"))
 	assert.Equal(t, 0, uatHubResp.Total)
-	require.Len(t, uatHubResp.Categories, 6)
+	require.Len(t, uatHubResp.Categories, 7)
 	assert.Equal(t, InboxStateUnavailable, uatHubResp.Categories[InboxCategoryPendingSecrets].State)
 	assert.Equal(t, 0, uatHubResp.Categories[InboxCategoryPendingSecrets].Count)
 	assert.False(t, uatHubResp.Categories[InboxCategoryPendingSecrets].CountsTowardTotal, "unavailable category must not count toward total")
@@ -159,7 +159,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	assert.NotEmpty(t, sessResp.GeneratedAt)
 	assert.Equal(t, 1, sessResp.Total)
 	assert.False(t, sessResp.TotalCapped)
-	for _, key := range []string{InboxCategoryDecisions, InboxCategoryAgentSecrets, InboxCategoryWaiting, InboxCategoryReviews, InboxCategoryPendingSecrets, InboxCategoryChat} {
+	for _, key := range []string{InboxCategoryDecisions, InboxCategoryAgentSecrets, InboxCategoryAgentExecutions, InboxCategoryWaiting, InboxCategoryReviews, InboxCategoryPendingSecrets, InboxCategoryChat} {
 		assert.Contains(t, sessResp.Categories, key)
 	}
 	assert.Equal(t, InboxStateOK, sessResp.Categories[InboxCategoryPendingSecrets].State)
