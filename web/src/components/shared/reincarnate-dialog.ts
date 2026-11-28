@@ -87,7 +87,6 @@ export class ScionReincarnateDialog extends LitElement {
     }
 
     .option-card.disabled {
-      opacity: 0.65;
       background: var(--scion-bg-subtle);
     }
 

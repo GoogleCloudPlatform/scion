@@ -460,8 +460,11 @@ export class ScionPageAgentDetail extends LitElement {
       }
       .header-labels sl-tag::part(base) {
         max-width: min(20rem, 100%);
+        overflow: hidden;
       }
       .header-labels sl-tag::part(content) {
+        display: block;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
