@@ -446,6 +446,9 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 	trajCaptureOn := s.experimentEnabled(experiments.TokenomicsTrajectoryCapture)
 	settings := make(map[string]ResolvedProjectSetting, len(projectSettingKeys))
 	for _, key := range projectSettingKeys {
+		if key == projectSettingUsageUnmeasuredPolicy && !s.tokenBudgetsEnabled() {
+			continue
+		}
 		entry := ResolvedProjectSetting{
 			HubDefault: ResolvedHubDefaultUnknown,
 		}
@@ -492,12 +495,8 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 		settings[key] = entry
 	}
 
-	projSettings := projectSettingsFromAnnotations(project)
-	if !trajCaptureOn {
-		projSettings.TrajectoryCapture = ""
-	}
 	return &ResolvedProjectSettings{
-		Project:  projSettings,
+		Project:  s.projectSettingsForResponse(project),
 		Settings: settings,
 	}
 }

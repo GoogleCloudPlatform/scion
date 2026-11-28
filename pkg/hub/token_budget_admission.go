@@ -73,10 +73,12 @@ func (s *Server) resolveAdmissionBillingUserID(ctx context.Context, agent *store
 }
 
 // resolveAgentHarnessCoverage resolves the agent's harness config usage.yaml
-// live capability and maps it to the P2 measurement_status vocabulary.
+// live capability and maps it to the P2 measurement_status vocabulary
+// ("unknown" when usage.yaml is absent/unparsable, distinct from explicit
+// "unmeasured" / source: none).
 func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.Agent) (harnessConfig, coverageStatus string, capKind usageCapabilityKind) {
 	if agent == nil {
-		return "", MeasurementStatusUnmeasured, usageCapUnknown
+		return "", "unknown", usageCapUnknown
 	}
 	harnessConfig = strings.TrimSpace(agent.HarnessConfig)
 	if harnessConfig == "" && agent.AppliedConfig != nil {
@@ -92,8 +94,10 @@ func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.A
 		coverageStatus = MeasurementStatusPartial
 	case usageCapCallsOnly:
 		coverageStatus = MeasurementStatusCallsOnly
-	default:
+	case usageCapUnmeasured:
 		coverageStatus = MeasurementStatusUnmeasured
+	default:
+		coverageStatus = "unknown"
 	}
 	return harnessConfig, coverageStatus, capKind
 }
@@ -103,9 +107,14 @@ func (s *Server) resolveAgentHarnessCoverage(ctx context.Context, agent *store.A
 // restart, wake, scheduled/trigger launch, reincarnate).
 //
 // No-op when either tokenomics.token_budgets or tokenomics.usage_ledger is off.
+// Shell execution containers (isShellAgent) consume no LLM tokens and are
+// exempt from both budget_exhausted and budget_unmeasured (D8).
 // Never blocks stop, suspend, delete, or message delivery to running agents.
 func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Agent, project *store.Project) error {
 	if !s.tokenBudgetsEnabled() || agent == nil || agent.ProjectID == "" {
+		return nil
+	}
+	if isShellAgent(agent) {
 		return nil
 	}
 	eval := s.TokenBudgetEvaluator()
@@ -150,21 +159,18 @@ func (s *Server) checkTokenBudgetAdmission(ctx context.Context, agent *store.Age
 	}
 
 	// Check project usage.unmeasured_policy=deny: refuses unmeasured, unknown,
-	// and calls_only harnesses when an active non-zero token cap applies.
+	// and calls_only harnesses when an active non-zero token cap applies
+	// (reusing status.HasActiveCap from the evaluation pass above).
 	// A stale meter alone never blocks admission.
-	if project == nil && s.store != nil {
-		if p, perr := s.store.GetProject(ctx, agent.ProjectID); perr == nil {
-			project = p
-		}
-	}
-	if project != nil && project.Annotations[projectSettingUsageUnmeasuredPolicy] == UsageUnmeasuredPolicyDeny {
-		harnessConfig, coverageStatus, capKind := s.resolveAgentHarnessCoverage(ctx, agent)
-		if capKind == usageCapUnmeasured || capKind == usageCapUnknown || capKind == usageCapCallsOnly {
-			hasCap, capErr := eval.HasActiveTokenCap(ctx, agent.ProjectID, billingUserID)
-			if capErr != nil {
-				return capErr
+	if status != nil && status.HasActiveCap {
+		if project == nil && s.store != nil {
+			if p, perr := s.store.GetProject(ctx, agent.ProjectID); perr == nil {
+				project = p
 			}
-			if hasCap {
+		}
+		if project != nil && project.Annotations[projectSettingUsageUnmeasuredPolicy] == UsageUnmeasuredPolicyDeny {
+			harnessConfig, coverageStatus, capKind := s.resolveAgentHarnessCoverage(ctx, agent)
+			if capKind == usageCapUnmeasured || capKind == usageCapUnknown || capKind == usageCapCallsOnly {
 				return &TokenBudgetAdmissionError{
 					HTTPStatus: http.StatusForbidden,
 					Code:       api.LaunchCodeBudgetUnmeasured,

@@ -227,12 +227,8 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
-		out := projectSettingsFromAnnotations(project)
-		if !s.tokenBudgetsEnabled() {
-			out.UsageUnmeasuredPolicy = ""
-		}
+		out := s.projectSettingsForResponse(project)
 		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
-			out.TrajectoryCapture = ""
 			writeJSON(w, http.StatusOK, out)
 			return
 		}
@@ -411,15 +407,8 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		unlimitedSet := s.recordProjectUnlimitedLimits(ctx, project, stored, merged)
 		warnings := s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults)
 		warnings = append(warnings, s.projectUnlimitedBrokerWarnings(ctx, project.ID, unlimitedSet)...)
-		out := projectSettingsFromAnnotations(project)
-		if !s.tokenBudgetsEnabled() {
-			out.UsageUnmeasuredPolicy = ""
-		}
-		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
-			out.TrajectoryCapture = ""
-		}
 		resp := projectSettingsWithWarnings{
-			ProjectSettings: out,
+			ProjectSettings: s.projectSettingsForResponse(project),
 			Warnings:        warnings,
 		}
 		if s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
@@ -1069,6 +1058,21 @@ func serializedJSONFieldName(f reflect.StructField) string {
 		return name
 	}
 	return f.Name
+}
+
+// projectSettingsForResponse returns projectSettingsFromAnnotations(project)
+// with experiment-gated fields blanked when their experiment is disabled, so
+// GET /settings, PUT /settings, and GET /settings/resolved all stay
+// byte-for-byte unchanged while the experiment is off.
+func (s *Server) projectSettingsForResponse(project *store.Project) *hubclient.ProjectSettings {
+	settings := projectSettingsFromAnnotations(project)
+	if !s.tokenBudgetsEnabled() {
+		settings.UsageUnmeasuredPolicy = ""
+	}
+	if s == nil || !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+		settings.TrajectoryCapture = ""
+	}
+	return settings
 }
 
 // projectSettingsFromAnnotations reads project settings from the project's annotations map.

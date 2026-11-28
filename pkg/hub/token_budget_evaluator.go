@@ -68,6 +68,7 @@ type BudgetThresholdHook func(ctx context.Context, crossing BudgetThresholdCross
 // P3.2 admission gate).
 type BudgetExhaustionStatus struct {
 	Exhausted      bool
+	HasActiveCap   bool
 	LimitName      string
 	ScopeKind      string
 	ScopeID        string
@@ -527,7 +528,7 @@ func (e *TokenBudgetEvaluator) HasActiveTokenCap(ctx context.Context, projectID,
 	now := e.now()
 	dayStart, dayEnd := utcDayWindow(now)
 	monthStart, monthEnd := utcMonthWindow(now)
-	specs := applicableTokenBudgetSpecs(projectID, billingUserID, dayStart, dayEnd, monthStart, monthEnd)
+	specs := applicableTokenBudgetSpecs(projectID, billingUserID, nil, dayStart, dayEnd, monthStart, monthEnd)
 	evalCache := newTokenLimitEvalCache(e.quota)
 	for _, spec := range specs {
 		def, err := evalCache.lookupLimitDef(ctx, spec.limitName)
@@ -560,6 +561,18 @@ func (e *TokenBudgetEvaluator) HighestActiveBudgetNotice(ctx context.Context, pr
 		return nil
 	}
 	now := e.now()
+	dayStart, dayEnd := utcDayWindow(now)
+	monthStart, monthEnd := utcMonthWindow(now)
+	var groupIDs []string
+	if billingUserID != "" && e.pooledGroups != nil {
+		var err error
+		groupIDs, err = e.pooledGroups.ResolveForUser(ctx, billingUserID)
+		if err != nil {
+			e.logger.Warn("token budget notice: failed to resolve pooled groups",
+				"billing_user_id", billingUserID, "error", err)
+		}
+	}
+	specs := applicableTokenBudgetSpecs(projectID, billingUserID, groupIDs, dayStart, dayEnd, monthStart, monthEnd)
 
 	type scopeQuery struct {
 		scopeKind      string
@@ -569,31 +582,31 @@ func (e *TokenBudgetEvaluator) HighestActiveBudgetNotice(ctx context.Context, pr
 		bindingScope   string
 		bindingScopeID string
 	}
-	queries := []scopeQuery{
-		{
-			scopeKind:      store.UsageScopeKindProject,
-			scopeID:        projectID,
-			bindingScope:   store.QuotaScopeProject,
-			bindingScopeID: projectID,
-		},
+	type scopeDedupeKey struct {
+		scopeKind      string
+		scopeID        string
+		projectScopeID string
 	}
-	if billingUserID != "" {
-		queries = append(queries,
-			scopeQuery{
-				scopeKind:      store.UsageScopeKindUser,
-				scopeID:        billingUserID,
-				bindingSubject: billingUserID,
-				bindingScope:   store.QuotaScopeSystem,
-			},
-			scopeQuery{
-				scopeKind:      store.UsageScopeKindUserProject,
-				scopeID:        billingUserID,
-				projectScopeID: projectID,
-				bindingSubject: billingUserID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: projectID,
-			},
-		)
+	seenScopes := make(map[scopeDedupeKey]struct{}, len(specs))
+	queries := make([]scopeQuery, 0, len(specs))
+	for _, spec := range specs {
+		dk := scopeDedupeKey{
+			scopeKind:      spec.scopeKind,
+			scopeID:        spec.scopeID,
+			projectScopeID: spec.projectScopeID,
+		}
+		if _, dup := seenScopes[dk]; dup {
+			continue
+		}
+		seenScopes[dk] = struct{}{}
+		queries = append(queries, scopeQuery{
+			scopeKind:      spec.scopeKind,
+			scopeID:        spec.scopeID,
+			projectScopeID: spec.projectScopeID,
+			bindingSubject: spec.bindingSubject,
+			bindingScope:   spec.bindingScope,
+			bindingScopeID: spec.bindingScopeID,
+		})
 	}
 
 	var bestRow *store.UsageBudgetState
@@ -632,9 +645,18 @@ func (e *TokenBudgetEvaluator) HighestActiveBudgetNotice(ctx context.Context, pr
 	}
 	if def, err := e.store.GetLimitDefinition(ctx, bestRow.LimitDefinitionID); err == nil && def != nil {
 		bestNotice.LimitName = def.Name
-		if _, action, rerr := e.quota.ResolveEffectiveTokenLimit(
-			ctx, def.ID, bestQuery.bindingSubject, bestQuery.bindingScope, bestQuery.bindingScopeID,
-		); rerr == nil && action != "" {
+		var action string
+		var rerr error
+		if bestQuery.scopeKind == store.UsageScopeKindGroup {
+			_, action, rerr = e.quota.ResolveEffectiveGroupTokenLimit(
+				ctx, def.ID, bestQuery.scopeID, bestQuery.bindingScope, bestQuery.bindingScopeID,
+			)
+		} else {
+			_, action, rerr = e.quota.ResolveEffectiveTokenLimit(
+				ctx, def.ID, bestQuery.bindingSubject, bestQuery.bindingScope, bestQuery.bindingScopeID,
+			)
+		}
+		if rerr == nil && action != "" {
 			bestNotice.TokenAction = action
 		}
 	}
@@ -644,7 +666,7 @@ func (e *TokenBudgetEvaluator) HighestActiveBudgetNotice(ctx context.Context, pr
 	return bestNotice
 }
 
-func applicableTokenBudgetSpecs(projectID, billingUserID string, dayStart, dayEnd, monthStart, monthEnd time.Time) []budgetEvalSpec {
+func applicableTokenBudgetSpecs(projectID, billingUserID string, groupIDs []string, dayStart, dayEnd, monthStart, monthEnd time.Time) []budgetEvalSpec {
 	specs := []budgetEvalSpec{
 		{
 			limitName:      store.LimitLLMTokensPerProjectDay,
@@ -711,6 +733,55 @@ func applicableTokenBudgetSpecs(projectID, billingUserID string, dayStart, dayEn
 				projectScopeID: projectID,
 				counterScopeID: upCounterID,
 				bindingSubject: billingUserID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: projectID,
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			},
+		)
+	}
+	// Pooled user-group scopes (Tokenomics P3.3, §4.4): system-wide and
+	// project-scoped day/month pools for each charged/effective group.
+	for _, gid := range groupIDs {
+		if gid == "" {
+			continue
+		}
+		specs = append(specs,
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupDay,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: "",
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			},
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupMonth,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: "",
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			},
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupDay,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: projectID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: projectID,
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			},
+			budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupMonth,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: projectID,
 				bindingScope:   store.QuotaScopeProject,
 				bindingScopeID: projectID,
 				windowStartUTC: monthStart,
@@ -816,140 +887,25 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 
 	dayStart, dayEnd := utcDayWindow(now)
 	monthStart, monthEnd := utcMonthWindow(now)
-
-	specs := []budgetEvalSpec{
-		{
-			limitName:      store.LimitLLMTokensPerProjectDay,
-			scopeKind:      store.UsageScopeKindProject,
-			scopeID:        projectID,
-			counterScopeID: projectID,
-			bindingScope:   store.QuotaScopeProject,
-			bindingScopeID: projectID,
-			windowStartUTC: dayStart,
-			windowEndUTC:   dayEnd,
-		},
-		{
-			limitName:      store.LimitLLMTokensPerProjectMonth,
-			scopeKind:      store.UsageScopeKindProject,
-			scopeID:        projectID,
-			counterScopeID: projectID,
-			bindingScope:   store.QuotaScopeProject,
-			bindingScopeID: projectID,
-			windowStartUTC: monthStart,
-			windowEndUTC:   monthEnd,
-		},
-	}
-	if billingUserID != "" {
-		upCounterID := billingUserID + ":" + projectID
-		specs = append(specs,
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserDay,
-				scopeKind:      store.UsageScopeKindUser,
-				scopeID:        billingUserID,
-				counterScopeID: billingUserID,
-				bindingSubject: billingUserID,
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			},
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserMonth,
-				scopeKind:      store.UsageScopeKindUser,
-				scopeID:        billingUserID,
-				counterScopeID: billingUserID,
-				bindingSubject: billingUserID,
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			},
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserProjectDay,
-				scopeKind:      store.UsageScopeKindUserProject,
-				scopeID:        billingUserID,
-				projectScopeID: projectID,
-				counterScopeID: upCounterID,
-				bindingSubject: billingUserID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: projectID,
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			},
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserProjectMonth,
-				scopeKind:      store.UsageScopeKindUserProject,
-				scopeID:        billingUserID,
-				projectScopeID: projectID,
-				counterScopeID: upCounterID,
-				bindingSubject: billingUserID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: projectID,
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			},
-		)
-
-		// Include every active pooled group that billingUserID effectively
-		// belongs to so admission (B1) blocks on exhausted group pools without
-		// further wiring (§4.4).
-		if e.pooledGroups != nil {
-			groupIDs, err := e.pooledGroups.ResolveForUser(ctx, billingUserID)
-			if err != nil {
-				return nil, fmt.Errorf("resolve pooled groups for admission check: %w", err)
-			}
-			for _, gid := range groupIDs {
-				specs = append(specs,
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupDay,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: "",
-						bindingScope:   store.QuotaScopeSystem,
-						bindingScopeID: "",
-						windowStartUTC: dayStart,
-						windowEndUTC:   dayEnd,
-					},
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupMonth,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: "",
-						bindingScope:   store.QuotaScopeSystem,
-						bindingScopeID: "",
-						windowStartUTC: monthStart,
-						windowEndUTC:   monthEnd,
-					},
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupDay,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: projectID,
-						bindingScope:   store.QuotaScopeProject,
-						bindingScopeID: projectID,
-						windowStartUTC: dayStart,
-						windowEndUTC:   dayEnd,
-					},
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupMonth,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: projectID,
-						bindingScope:   store.QuotaScopeProject,
-						bindingScopeID: projectID,
-						windowStartUTC: monthStart,
-						windowEndUTC:   monthEnd,
-					},
-				)
-			}
+	var groupIDs []string
+	if billingUserID != "" && e.pooledGroups != nil {
+		var err error
+		groupIDs, err = e.pooledGroups.ResolveForUser(ctx, billingUserID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve pooled groups for admission check: %w", err)
 		}
 	}
+	specs := applicableTokenBudgetSpecs(projectID, billingUserID, groupIDs, dayStart, dayEnd, monthStart, monthEnd)
 
 	evalCache := newTokenLimitEvalCache(e.quota)
+	hasActiveCap := false
 	for _, spec := range specs {
 		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
 		if err != nil {
 			return nil, err
+		}
+		if st != nil {
+			hasActiveCap = true
 		}
 		if st == nil || st.State != store.UsageBudgetStateExhausted {
 			continue
@@ -962,6 +918,7 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 		}
 		return &BudgetExhaustionStatus{
 			Exhausted:      true,
+			HasActiveCap:   true,
 			LimitName:      spec.limitName,
 			ScopeKind:      spec.scopeKind,
 			ScopeID:        spec.scopeID,
@@ -974,7 +931,7 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 		}, nil
 	}
 
-	return &BudgetExhaustionStatus{Exhausted: false}, nil
+	return &BudgetExhaustionStatus{Exhausted: false, HasActiveCap: hasActiveCap}, nil
 }
 
 // evaluateSpec evaluates a single (limit, scope, window) tuple and persists

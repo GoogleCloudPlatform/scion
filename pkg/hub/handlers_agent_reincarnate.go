@@ -696,8 +696,13 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 	}
 	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1)
 	// before reserving capacity or claiming the reincarnation, so a refused
-	// reincarnation leaves the running agent untouched.
-	if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+	// reincarnation leaves the running agent untouched. Evaluated against the
+	// post-reincarnation AppliedConfig (fresh) so harness switches are checked
+	// against the target harness rather than the pre-reincarnation one.
+	nextAgent := *agent
+	nextAgent.AppliedConfig = fresh
+	nextAgent.HarnessConfig = ""
+	if err := s.checkTokenBudgetAdmission(ctx, &nextAgent, nil); err != nil {
 		if !writeTokenBudgetAdmissionError(w, err) {
 			writeErrorFromErr(w, err, "")
 		}

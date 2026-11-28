@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +32,25 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
+
+// stopRecordingDispatcher wraps mockDispatcher and records DispatchAgentStop
+// calls so tests can assert refused restarts and reincarnations never stop
+// the running agent (O1).
+type stopRecordingDispatcher struct {
+	*mockDispatcher
+	stopCalls atomic.Int32
+}
+
+func (d *stopRecordingDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	d.stopCalls.Add(1)
+	return d.mockDispatcher.DispatchAgentStop(ctx, agent)
+}
 
 func setTokenBudgetExperimentsForTest(t *testing.T, srv *Server, usageLedgerOn, tokenBudgetsOn, idleSuspendOn bool) {
 	t.Helper()
@@ -134,7 +149,7 @@ func TestTokenBudgetAdmission_ActionsOverridesAndExperimentGate(t *testing.T) {
 		assert.Equal(t, int64(1100), bErr.Details["consumed"])
 		assert.Equal(t, int64(1000), bErr.Details["max"])
 		assert.Equal(t, "2026-11-28T00:00:00Z", bErr.Details["windowEnd"])
-		assert.Equal(t, MeasurementStatusUnmeasured, bErr.Details["coverageStatus"])
+		assert.Equal(t, "unknown", bErr.Details["coverageStatus"])
 
 		// Active override_until > now -> allowed.
 		dayStart, _ := utcDayWindow(now)
@@ -250,7 +265,9 @@ func TestTokenBudgetAdmission_SubAgentAncestryAndPrincipalLess(t *testing.T) {
 func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
-	srv, s, disp, proj, brokerID := setupBudgetAdmissionServer(t, now)
+	srv, s, baseDisp, proj, brokerID := setupBudgetAdmissionServer(t, now)
+	disp := &stopRecordingDispatcher{mockDispatcher: baseDisp}
+	srv.SetDispatcher(disp)
 
 	// Exhaust project daily budget with suspend_and_pause.
 	createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
@@ -320,12 +337,13 @@ func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) 
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, "restart must be blocked: %s", rec.Body.String())
 	code, _, _ = decodeAPIErrorEnvelope(t, rec.Body.Bytes())
 	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
+	assert.Zero(t, disp.stopCalls.Load(), "refused restart must not dispatch stop")
 	gotRunning, err := s.GetAgent(ctx, runningAg.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), gotRunning.Phase, "refused restart must leave running agent untouched")
 
-	// 5. DM --wake to suspended agent -> 429 budget_exhausted; and queued auto-wake
-	//    preserves persisted message row when wake fails (no message loss).
+	// 5. DM --wake and wakeAgentForDM on suspended agent -> typed 429 budget_exhausted
+	//    without dispatching a start (matches existing wake refusal semantics).
 	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/"+suspendedAg.ID+"/message", map[string]any{
 		"message": "please wake up",
 		"wake":    true,
@@ -335,28 +353,11 @@ func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) 
 	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
 	assert.Empty(t, disp.startedAgents)
 
-	// Persist a pending message for the idle-suspended agent and run wakeAgentForDM:
-	// wake refuses with typed 429 budget_exhausted and the persisted message row stays intact.
-	pendingMsg := &store.Message{
-		ID:            uuid.NewString(),
-		ProjectID:     proj.ID,
-		Sender:        "user:tester",
-		SenderID:      "tester",
-		Recipient:     "agent:" + suspendedAg.Slug,
-		RecipientID:   suspendedAg.ID,
-		Msg:           "queued auto-wake work",
-		Type:          "instruction",
-		DispatchState: store.MessageDispatchPending,
-	}
-	require.NoError(t, s.CreateMessage(ctx, pendingMsg))
 	_, wakeErr := srv.wakeAgentForDM(ctx, suspendedAg)
 	require.NotNil(t, wakeErr)
 	assert.Equal(t, http.StatusTooManyRequests, wakeErr.HTTPStatus)
 	assert.Equal(t, api.LaunchCodeBudgetExhausted, wakeErr.Code)
-	storedMsgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: suspendedAg.ID}, store.ListOptions{Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, storedMsgs.Items, 1, "persisted message must not be lost when wake is refused by budget")
-	assert.Equal(t, pendingMsg.ID, storedMsgs.Items[0].ID)
+	assert.Empty(t, disp.startedAgents)
 
 	// 6. Scheduled / trigger headless create (createAgentHeadless) -> refused with TokenBudgetAdmissionError.
 	adminIdent := NewAuthenticatedUser(uuid.NewString(), "sched-admin@example.com", "Sched Admin", "admin", "api")
@@ -398,12 +399,16 @@ func TestTokenBudgetAdmission_AllLaunchEntryPointsAndNeverBlocked(t *testing.T) 
 	require.NoError(t, s.UpdateProject(ctx, proj))
 	brk, err := s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
-	brk.Capabilities = &store.BrokerCapabilities{Reprovision: true}
+	brk.Capabilities = &store.BrokerCapabilities{
+		Reprovision:                  true,
+		ReprovisionResetHomeRuntimes: []string{"docker"},
+	}
 	require.NoError(t, s.UpdateRuntimeBroker(ctx, brk))
 	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/"+runningAg.ID+"/reincarnate", map[string]any{})
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, "reincarnate must be blocked: %s", rec.Body.String())
 	code, _, _ = decodeAPIErrorEnvelope(t, rec.Body.Bytes())
 	assert.Equal(t, api.LaunchCodeBudgetExhausted, code)
+	assert.Zero(t, disp.stopCalls.Load(), "refused reincarnate must not dispatch stop")
 	gotRunning, err = s.GetAgent(ctx, runningAg.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), gotRunning.Phase)
@@ -594,8 +599,13 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 	})
 	createHC("hc-unknown", nil)
 
-	// Project settings API gating when experiment is off vs on.
+	// Project settings API gating when experiment is off vs on (including /settings/resolved, R1).
 	setTokenBudgetExperimentsForTest(t, srv, true, false, true)
+	recOffBefore := doBootstrapRequest(t, srv, http.MethodGet, "/api/v1/projects/"+proj.ID+"/settings/resolved", nil)
+	require.Equal(t, http.StatusOK, recOffBefore.Code)
+	assert.NotContains(t, recOffBefore.Body.String(), projectSettingUsageUnmeasuredPolicy)
+	assert.NotContains(t, recOffBefore.Body.String(), "usageUnmeasuredPolicy")
+
 	rec := doBootstrapRequest(t, srv, http.MethodPut, "/api/v1/projects/"+proj.ID+"/settings", map[string]any{
 		"usageUnmeasuredPolicy": "deny",
 	})
@@ -622,10 +632,17 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 	proj, err := s.GetProject(ctx, proj.ID)
 	require.NoError(t, err)
 
+	agentWithHC := func(hc string) *store.Agent {
+		return &store.Agent{
+			ID:            uuid.NewString(),
+			ProjectID:     proj.ID,
+			AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: hc},
+		}
+	}
+
 	// With deny policy but NO active non-zero token cap -> unmeasured harnesses are ALLOWED.
 	for _, hc := range []string{"hc-unmeasured", "hc-unknown", "hc-calls-only"} {
-		ag := &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, HarnessConfig: hc}
-		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, ag, proj), "without active cap, %s must be allowed", hc)
+		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC(hc), proj), "without active cap, %s must be allowed", hc)
 	}
 
 	// Add an active non-zero project token cap.
@@ -638,12 +655,11 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 		wantCoverage string
 	}{
 		{"hc-unmeasured", MeasurementStatusUnmeasured},
-		{"hc-unknown", MeasurementStatusUnmeasured},
+		{"hc-unknown", "unknown"},
 		{"hc-calls-only", MeasurementStatusCallsOnly},
 	} {
-		ag := &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, HarnessConfig: tc.hc}
 		var bErr *TokenBudgetAdmissionError
-		require.ErrorAs(t, srv.checkTokenBudgetAdmission(ctx, ag, proj), &bErr, "hc=%s must be refused", tc.hc)
+		require.ErrorAs(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC(tc.hc), proj), &bErr, "hc=%s must be refused", tc.hc)
 		assert.Equal(t, http.StatusForbidden, bErr.HTTPStatus)
 		assert.Equal(t, api.LaunchCodeBudgetUnmeasured, bErr.Code)
 		assert.Equal(t, UsageUnmeasuredPolicyDeny, bErr.Details["policy"])
@@ -653,9 +669,13 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 
 	// Measured and partial harnesses are ALLOWED under deny + active cap.
 	for _, hc := range []string{"hc-measured", "hc-partial"} {
-		ag := &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, HarnessConfig: hc}
-		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, ag, proj), "hc=%s must be allowed", hc)
+		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC(hc), proj), "hc=%s must be allowed", hc)
 	}
+
+	// D8: Shell execution containers consume no LLM tokens and are exempt from
+	// BOTH budget_unmeasured (under deny + active cap) AND budget_exhausted.
+	shellAg := agentWithHC(config.ShellHarnessConfigName)
+	require.NoError(t, srv.checkTokenBudgetAdmission(ctx, shellAg, proj), "shell agent must be exempt from budget_unmeasured")
 
 	// Stale meter alone on a measured harness NEVER blocks admission.
 	staleAg := &store.Agent{
@@ -663,7 +683,7 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 		Slug:          "stale-meter-ag",
 		Name:          "stale-meter-ag",
 		ProjectID:     proj.ID,
-		HarnessConfig: "hc-measured",
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "hc-measured"},
 		Phase:         string(state.PhaseSuspended),
 	}
 	require.NoError(t, s.CreateAgent(ctx, staleAg))
@@ -688,13 +708,171 @@ func TestTokenBudgetAdmission_UnmeasuredPolicy(t *testing.T) {
 	proj, err = s.GetProject(ctx, proj.ID)
 	require.NoError(t, err)
 	for _, hc := range []string{"hc-unmeasured", "hc-unknown", "hc-calls-only"} {
-		ag := &store.Agent{ID: uuid.NewString(), ProjectID: proj.ID, HarnessConfig: hc}
-		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, ag, proj), "under allow policy, %s must be allowed", hc)
+		require.NoError(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC(hc), proj), "under allow policy, %s must be allowed", hc)
 	}
 
-	// When experiment is off, GET omits usageUnmeasuredPolicy.
+	// Restore deny annotation so the experiment-off check below verifies a stored
+	// non-default value is completely hidden when tokenomics.token_budgets is off.
+	rec = doBootstrapRequest(t, srv, http.MethodPut, "/api/v1/projects/"+proj.ID+"/settings", map[string]any{
+		"usageUnmeasuredPolicy": "deny",
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	proj, err = s.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+
+	// Also verify D8 shell exemption when the project budget is exhausted:
+	// shell agent is still admitted while an LLM agent is refused 429.
+	ingestTestTokens(t, s, proj.ID, nil, now, 12000, false)
+	require.NoError(t, srv.checkTokenBudgetAdmission(ctx, shellAg, proj), "shell agent must be exempt from budget_exhausted")
+	var exhaustedErr *TokenBudgetAdmissionError
+	require.ErrorAs(t, srv.checkTokenBudgetAdmission(ctx, agentWithHC("hc-measured"), proj), &exhaustedErr)
+	assert.Equal(t, api.LaunchCodeBudgetExhausted, exhaustedErr.Code)
+
+	// When experiment is off with stored policy annotation, BOTH GET /settings
+	// and GET /settings/resolved omit usageUnmeasuredPolicy / scion.io/usage-unmeasured-policy
+	// and match the pre-change experiment-off body (R1).
 	setTokenBudgetExperimentsForTest(t, srv, true, false, true)
 	rec = doBootstrapRequest(t, srv, http.MethodGet, "/api/v1/projects/"+proj.ID+"/settings", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "usageUnmeasuredPolicy")
+
+	recOffAfter := doBootstrapRequest(t, srv, http.MethodGet, "/api/v1/projects/"+proj.ID+"/settings/resolved", nil)
+	require.Equal(t, http.StatusOK, recOffAfter.Code)
+	assert.NotContains(t, recOffAfter.Body.String(), projectSettingUsageUnmeasuredPolicy)
+	assert.NotContains(t, recOffAfter.Body.String(), "usageUnmeasuredPolicy")
+	assert.JSONEq(t, recOffBefore.Body.String(), recOffAfter.Body.String(),
+		"experiment-off /settings/resolved must be identical even when annotation is stored")
+}
+
+func TestTokenBudgetAdmission_ReincarnateHarnessSwitch(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	srv, s, baseDisp, proj, brokerID := setupBudgetAdmissionServer(t, now)
+	disp := &stopRecordingDispatcher{mockDispatcher: baseDisp}
+	srv.SetDispatcher(disp)
+
+	// Enable tokenomics + reincarnate_harness_switch.
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.TokenomicsUsageLedger,
+			experiments.TokenomicsTokenBudgets,
+			experiments.ReincarnateHarnessSwitch:
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+
+	// Configure project for reincarnation + usage.unmeasured_policy=deny + active token cap.
+	if proj.Labels == nil {
+		proj.Labels = map[string]string{}
+	}
+	proj.Labels[store.LabelWorkspaceMode] = store.WorkspaceModeShared
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingUsageUnmeasuredPolicy] = UsageUnmeasuredPolicyDeny
+	require.NoError(t, s.UpdateProject(ctx, proj))
+
+	brk, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	brk.Capabilities = &store.BrokerCapabilities{
+		Reprovision:                  true,
+		ReprovisionResetHomeRuntimes: []string{"docker"},
+	}
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, brk))
+
+	createTokenLimitBinding(t, s, store.LimitLLMTokensPerProjectDay,
+		store.EntitlementSubjectSystemDefault, "", store.QuotaScopeProject, proj.ID, 10000, store.TokenActionPauseNew)
+
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hc-measured",
+		Slug:    "hc-measured",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: proj.ID,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "claude",
+			Usage: &api.HarnessUsageCapabilities{
+				Live: api.HarnessUsageLiveCapabilities{
+					Source:                  api.UsageLiveSourceNative,
+					TokenTypes:              []string{"input", "output", "cache_read"},
+					NotApplicableTokenTypes: []string{"cache_write"},
+				},
+			},
+		},
+	}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hc-unmeasured",
+		Slug:    "hc-unmeasured",
+		Harness: "hermes",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: proj.ID,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "hermes",
+			Usage: &api.HarnessUsageCapabilities{
+				Live: api.HarnessUsageLiveCapabilities{
+					Source: api.UsageLiveSourceNone,
+				},
+			},
+		},
+	}))
+
+	// Case (b): measured -> unmeasured under deny + active cap:
+	// refused at handler with 403 budget_unmeasured; running agent stays running and is never stopped.
+	measuredAg := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "switch-to-unmeasured",
+		Name:            "switch-to-unmeasured",
+		ProjectID:       proj.ID,
+		RuntimeBrokerID: brokerID,
+		Runtime:         "docker",
+		Phase:           string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "hc-measured",
+			Workspace:     "/tmp/shared-ws",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, measuredAg))
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/"+measuredAg.ID+"/reincarnate", map[string]any{
+		"harnessConfig": "hc-unmeasured",
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, "switching measured -> unmeasured must be refused 403: %s", rec.Body.String())
+	code, _, details := decodeAPIErrorEnvelope(t, rec.Body.Bytes())
+	assert.Equal(t, api.LaunchCodeBudgetUnmeasured, code)
+	assert.Equal(t, "hc-unmeasured", details["harnessConfig"])
+	assert.Zero(t, disp.stopCalls.Load(), "refused harness-switch reincarnate must not stop running agent")
+	gotMeasured, err := s.GetAgent(ctx, measuredAg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotMeasured.Phase)
+
+	// Case (a): unmeasured -> measured under deny + active cap:
+	// must be ADMITTED (not refused with 403 budget_unmeasured).
+	unmeasuredAg := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "switch-to-measured",
+		Name:            "switch-to-measured",
+		ProjectID:       proj.ID,
+		RuntimeBrokerID: brokerID,
+		Runtime:         "docker",
+		Phase:           string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "hc-unmeasured",
+			Workspace:     "/tmp/shared-ws",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, unmeasuredAg))
+
+	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/"+unmeasuredAg.ID+"/reincarnate", map[string]any{
+		"harnessConfig": "hc-measured",
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, "switching unmeasured -> measured must be admitted: %s", rec.Body.String())
 }

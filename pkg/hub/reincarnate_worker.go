@@ -1020,7 +1020,12 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	}
 	beforeStart := agentStartEchoFields(agent)
 	if err := s.checkTokenBudgetAdmission(startCtx, agent, nil); err != nil {
-		failAfterProvision(store.AgentReincarnationStateStarting, "start blocked by token budget: "+err.Error())
+		var budgetErr *TokenBudgetAdmissionError
+		if errors.As(err, &budgetErr) {
+			failAfterProvision(store.AgentReincarnationStateStarting, "start blocked by token budget: "+err.Error())
+		} else {
+			failAfterProvision(store.AgentReincarnationStateStarting, "token budget check failed: "+err.Error())
+		}
 		return
 	}
 	if err := dispatcher.DispatchAgentStart(startCtx, agent, preamble, false); err != nil {

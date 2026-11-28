@@ -448,6 +448,10 @@ type StartOpts struct {
 	// with an active launch; the launch's end writes the outcome, settles
 	// the claim and keeps or releases the reservation.
 	OnLaunchAccepted func(ctx context.Context, agent *store.Agent)
+	// BudgetChecked skips the redundant checkTokenBudgetAdmission pass inside
+	// startAgentCore when the caller (e.g. handleAgentLifecycle start/restart)
+	// already ran it immediately beforehand.
+	BudgetChecked bool
 	// AfterStart, when set, runs after a successful dispatch while the claim
 	// is still held, in place of the default status write (phase from the
 	// broker response, or running; its container status; exit fields
@@ -508,12 +512,14 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		return err
 	}
 	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
-	if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
-		opts.Dispatch.rollback(ctx)
-		if opts.Existing != nil {
-			opts.Existing.finish(startReleased)
+	if !opts.BudgetChecked {
+		if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+			opts.Dispatch.rollback(ctx)
+			if opts.Existing != nil {
+				opts.Existing.finish(startReleased)
+			}
+			return err
 		}
-		return err
 	}
 	// Refuse to launch an agent whose create-time HomeFiles (e.g. a trigger's
 	// .scion/trigger-event.json) have not yet been delivered by its create
