@@ -471,6 +471,28 @@ func TestIdleSuspend_FreshRereadSkipsChangedState(t *testing.T) {
 			wantSuspend: false,
 		},
 		{
+			name: "recent delivery within grace skips before probes",
+			mutate: func(t *testing.T, s store.Store, id string, now time.Time) {
+				db := s.(*entadapter.CompositeStore).DB()
+				_, err := db.ExecContext(context.Background(),
+					"UPDATE agents SET last_delivery_at = ? WHERE id = ?",
+					now.Add(-5*time.Minute).UTC(), id)
+				require.NoError(t, err)
+			},
+			wantSuspend: false,
+		},
+		{
+			name: "stale delivery after activity_since past grace suspends",
+			mutate: func(t *testing.T, s store.Store, id string, now time.Time) {
+				db := s.(*entadapter.CompositeStore).DB()
+				_, err := db.ExecContext(context.Background(),
+					"UPDATE agents SET last_delivery_at = ? WHERE id = ?",
+					now.Add(-18*time.Minute).UTC(), id)
+				require.NoError(t, err)
+			},
+			wantSuspend: true,
+		},
+		{
 			name:        "unchanged candidate suspends",
 			mutate:      func(_ *testing.T, _ store.Store, _ string, _ time.Time) {},
 			wantSuspend: true,
@@ -1253,6 +1275,110 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			assert.False(t, after.HasActiveIdleSuspendClaim(time.Now()))
 		})
 	}
+}
+
+// TestIdleSuspend_DeliveryGraceWindow verifies the full sweep and claim path
+// when last_delivery_at >= activity_since: deliveries older than
+// IdleSuspendAfter no longer pin the agent alive forever, while deliveries
+// within IdleSuspendAfter (or arriving right before ClaimIdleSuspend) still
+// prevent suspension.
+func TestIdleSuspend_DeliveryGraceWindow(t *testing.T) {
+	t.Run("sweep suspends stale delivery and skips recent delivery", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s := testServer(t)
+		disp := &runIntentDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-25 * time.Minute)
+		staleAgent := newIdleCandidateBrokerAgent(t, s, "stale-delivery-sweep", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		recentAgent := newIdleCandidateBrokerAgent(t, s, "recent-delivery-sweep", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(ctx, "UPDATE agents SET last_delivery_at = ? WHERE id = ?", now.Add(-20*time.Minute), staleAgent.ID)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE agents SET last_delivery_at = ? WHERE id = ?", now.Add(-5*time.Minute), recentAgent.ID)
+		require.NoError(t, err)
+
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+
+		assert.Equal(t, int32(1), disp.stops.Load(), "only the agent whose delivery is past the grace window should be stopped")
+
+		gotStale, err := s.GetAgent(ctx, staleAgent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), gotStale.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), gotStale.SuspendReason)
+
+		gotRecent, err := s.GetAgent(ctx, recentAgent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), gotRecent.Phase)
+		assert.Empty(t, gotRecent.SuspendReason)
+	})
+
+	t.Run("fresh MarkAgentDelivery after GetAgent still blocks ClaimIdleSuspend", func(t *testing.T) {
+		ctx := context.Background()
+		srv, rawStore, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *afterWorkerReadStore {
+			return &afterWorkerReadStore{Store: inner, fault: f}
+		})
+		disp := &runIntentDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-25 * time.Minute)
+		snapshot := newIdleCandidateBrokerAgent(t, rawStore, "delivery-race-guard", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		db := rawStore.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(ctx, "UPDATE agents SET last_delivery_at = ? WHERE id = ?", now.Add(-20*time.Minute), snapshot.ID)
+		require.NoError(t, err)
+
+		wrapped.targetID = snapshot.ID
+		wrapped.afterRead = func() {
+			_, claimActive, markErr := rawStore.MarkAgentDelivery(ctx, snapshot.ID)
+			require.NoError(t, markErr)
+			require.False(t, claimActive)
+		}
+		fault.Arm()
+
+		srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
+
+		assert.Zero(t, disp.stops.Load(), "fresh delivery before claim must abort before DispatchAgentStop")
+		got, err := rawStore.GetAgent(ctx, snapshot.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Empty(t, got.SuspendReason)
+	})
+
+	t.Run("activity round-trip advancing activity_since after GetAgent still blocks ClaimIdleSuspend", func(t *testing.T) {
+		ctx := context.Background()
+		srv, rawStore, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *afterWorkerReadStore {
+			return &afterWorkerReadStore{Store: inner, fault: f}
+		})
+		disp := &runIntentDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-25 * time.Minute)
+		snapshot := newIdleCandidateBrokerAgent(t, rawStore, "activity-roundtrip-guard", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		db := rawStore.(*entadapter.CompositeStore).DB()
+
+		wrapped.targetID = snapshot.ID
+		wrapped.afterRead = func() {
+			_, execErr := db.ExecContext(ctx, "UPDATE agents SET activity_since = ? WHERE id = ?", pastGrace.Add(time.Minute), snapshot.ID)
+			require.NoError(t, execErr)
+		}
+		fault.Arm()
+
+		srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
+
+		assert.Zero(t, disp.stops.Load(), "activity_since change before claim must abort before DispatchAgentStop")
+		got, err := rawStore.GetAgent(ctx, snapshot.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Empty(t, got.SuspendReason)
+	})
 }
 
 func TestIdleSuspend_RetainedActivityDisplayAndSuspendedOnlyNotification(t *testing.T) {

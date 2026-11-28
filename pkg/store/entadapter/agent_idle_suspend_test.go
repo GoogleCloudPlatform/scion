@@ -1241,7 +1241,7 @@ func TestAgentStore_ClaimIdleSuspend_PreconditionPredicates(t *testing.T) {
 				require.NoError(t, err)
 			},
 			wantPredicate: "delivery_since_activity",
-			wantKeys:      []string{"last_delivery_at", "row_activity_since", "store_now"},
+			wantKeys:      []string{"last_delivery_at", "row_activity_since", "idle_suspend_after", "store_now"},
 		},
 	}
 
@@ -1253,4 +1253,114 @@ func TestAgentStore_ClaimIdleSuspend_PreconditionPredicates(t *testing.T) {
 			assertPredicate(t, err, tc.wantPredicate, tc.wantKeys...)
 		})
 	}
+}
+
+func TestAgentStore_IdleSuspend_DeliveryGraceWindow(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	after := 15 * time.Minute
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	cutoff := now.Add(-after)
+	heartbeatRecency := now.Add(-2 * time.Minute)
+	liveWorkCutoff := now.Add(-store.LiveWorkFreshness)
+
+	makeRow := func(slug string, activitySince time.Time, lastDeliveryAt *time.Time) (*store.Agent, store.IdleSuspendCondition) {
+		a := makeAgent(projectID, slug)
+		a.Phase = string(state.PhaseRunning)
+		a.Activity = string(state.ActivityIdle)
+		a.RunID = "run-dg-" + slug
+		a.LastSeen = now.Add(-15 * time.Second)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		upd := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+			SetRunIntent(string(store.RunIntentRunning)).
+			SetRunIntentAt(now.Add(-3 * time.Hour)).
+			SetActivitySince(activitySince)
+		if lastDeliveryAt != nil {
+			upd = upd.SetLastDeliveryAt(*lastDeliveryAt)
+		}
+		_, err := upd.Save(ctx)
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got, store.IdleSuspendCondition{
+			RunID:            got.RunID,
+			Activity:         got.Activity,
+			ActivitySince:    *got.ActivitySince,
+			IdleSuspendAfter: after,
+			HeartbeatRecency: 2 * time.Minute,
+			ClaimTTL:         30 * time.Second,
+		}
+	}
+
+	assertDeliveryRejected := func(t *testing.T, err error) {
+		t.Helper()
+		require.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+		var preErr *store.IdleSuspendPreconditionError
+		require.True(t, errors.As(err, &preErr))
+		assert.Equal(t, "delivery_since_activity", preErr.Predicate)
+	}
+
+	// Regression: deliveries >= activity_since that are older than IdleSuspendAfter
+	// (both near-simultaneous race and hours-later broadcast) must be selected and claimable.
+	nearRaceSince := now.Add(-25 * time.Minute)
+	nearRaceDelivery := nearRaceSince.Add(500 * time.Millisecond)
+	nearRaceAgent, nearRaceCond := makeRow("stale-near-race", nearRaceSince, &nearRaceDelivery)
+
+	laterSince := now.Add(-2 * time.Hour)
+	laterDelivery := now.Add(-30 * time.Minute)
+	laterAgent, laterCond := makeRow("stale-later-delivery", laterSince, &laterDelivery)
+
+	// Guard preservation: deliveries within IdleSuspendAfter (and at the exact cutoff)
+	// must be excluded from candidate listing and rejected by ClaimIdleSuspend.
+	recentDelivery := now.Add(-5 * time.Minute)
+	recentAgent, recentCond := makeRow("recent-delivery", nearRaceSince, &recentDelivery)
+
+	atCutoffDelivery := cutoff
+	atCutoffAgent, atCutoffCond := makeRow("at-cutoff-delivery", nearRaceSince, &atCutoffDelivery)
+
+	cands, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0, false)
+	require.NoError(t, err)
+	candIDs := map[string]bool{}
+	for _, c := range cands {
+		candIDs[c.ID] = true
+	}
+	assert.True(t, candIDs[nearRaceAgent.ID], "stale near-simultaneous delivery must be selected")
+	assert.True(t, candIDs[laterAgent.ID], "stale later delivery must be selected")
+	assert.False(t, candIDs[recentAgent.ID], "recent delivery within grace must be excluded")
+	assert.False(t, candIDs[atCutoffAgent.ID], "delivery at exact cutoff must be excluded")
+
+	// ClaimIdleSuspend agrees with ListIdleSuspendCandidates on every row.
+	_, _, cu1, err := s.ClaimIdleSuspend(ctx, nearRaceAgent.ID, nearRaceCond)
+	require.NoError(t, err)
+	assert.False(t, cu1.IsZero())
+
+	_, _, cu2, err := s.ClaimIdleSuspend(ctx, laterAgent.ID, laterCond)
+	require.NoError(t, err)
+	assert.False(t, cu2.IsZero())
+
+	_, _, _, err = s.ClaimIdleSuspend(ctx, recentAgent.ID, recentCond)
+	assertDeliveryRejected(t, err)
+
+	// At exact cutoff, store-clock now advances slightly past the test's now, so
+	// check checkIdleSuspendRow directly at the exact boundary timestamp as well.
+	atCutoffEnt, err := s.client.Agent.Get(ctx, uuid.MustParse(atCutoffAgent.ID))
+	require.NoError(t, err)
+	assertDeliveryRejected(t, checkIdleSuspendRow(atCutoffEnt, atCutoffCond, now))
+
+	t.Run("IdleSuspendAfter<=0 preserves unbounded delivery_since_activity rejection", func(t *testing.T) {
+		a, cond := makeRow("zero-after", nearRaceSince, &nearRaceDelivery)
+		cond.IdleSuspendAfter = 0
+		_, _, _, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+		assertDeliveryRejected(t, err)
+	})
+
+	t.Run("fresh MarkAgentDelivery blocks ClaimIdleSuspend even after earlier stale delivery", func(t *testing.T) {
+		a, cond := makeRow("fresh-mark", nearRaceSince, &nearRaceDelivery)
+		_, claimActive, err := s.MarkAgentDelivery(ctx, a.ID)
+		require.NoError(t, err)
+		assert.False(t, claimActive)
+
+		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
+		assertDeliveryRejected(t, err)
+	})
 }
