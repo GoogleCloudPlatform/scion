@@ -982,25 +982,23 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 		})
 	}
 
-	// status_only_default lacks project:read (so /api/v1/projects/{id}/env* stays 403),
-	// and also lacks project:secret:read on /api/v1/env?scope=project&scopeId={id}.
+	// status_only_default lacks project:read, so both nested and flat
+	// project-scoped /env read routes refuse with 403.
 	t.Run("status_only_default", func(t *testing.T) {
 		tok := srv.generateRecordedAgentToken(t, agent.ID, project.ID, nil, nil)
 		for _, projRoute := range []string{
 			"/api/v1/projects/" + project.ID + "/env",
 			"/api/v1/projects/" + project.ID + "/env/PLAIN_KEY",
 			"/api/v1/projects/" + project.ID + "/env/SECRET_ONLY_KEY",
+			"/api/v1/env?scope=project&scopeId=" + project.ID,
+			"/api/v1/env/PLAIN_KEY?scope=project&scopeId=" + project.ID,
+			"/api/v1/env/SECRET_ONLY_KEY?scope=project&scopeId=" + project.ID,
 		} {
 			rec := doRequestWithAgentToken(t, srv, http.MethodGet, projRoute, nil, tok)
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("%s: expected 403 without %s, got %d: %s", projRoute, ScopeProjectRead, rec.Code, rec.Body.String())
 			}
 		}
-		assertRestrictedList(t, tok, "/api/v1/env?scope=project&scopeId="+project.ID)
-		assertRestrictedFilteredList(t, tok)
-		assertRestrictedGetByKey(t, tok, func(key string) string {
-			return "/api/v1/env/" + key + "?scope=project&scopeId=" + project.ID
-		})
 	})
 
 	// Control: full-role agent (holding project:secret:read) and project owner user
