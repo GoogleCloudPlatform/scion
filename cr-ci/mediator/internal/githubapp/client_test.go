@@ -264,6 +264,20 @@ func TestDo_RateLimitClassification(t *testing.T) {
 			body:            `{"message":"You have exceeded a secondary rate limit."}`,
 			wantRateLimited: true,
 			wantTransient:   true,
+			wantRetryAfter:  now.Add(time.Minute),
+		},
+		{
+			name:   "403 secondary rate limit with remaining > 0 ignores primary reset",
+			status: http.StatusForbidden,
+			headers: map[string]string{
+				"X-RateLimit-Limit":     "5000",
+				"X-RateLimit-Remaining": "4000",
+				"X-RateLimit-Reset":     strconv.FormatInt(now.Add(55*time.Minute).Unix(), 10),
+			},
+			body:            `{"message":"You have exceeded a secondary rate limit."}`,
+			wantRateLimited: true,
+			wantTransient:   true,
+			wantRetryAfter:  now.Add(time.Minute),
 		},
 		{
 			name:   "403 permission denied is not rate limited",
@@ -474,5 +488,60 @@ func TestBreaker_SkipsCallsUntilReset(t *testing.T) {
 	}
 	if got := gh.Calls(jobsPath); got != callsBefore+1 {
 		t.Errorf("after reset calls = %d, want %d", got, callsBefore+1)
+	}
+}
+
+func TestBreaker_SecondaryWithoutRetryAfterReopensAfterOneMinute(t *testing.T) {
+	c, gh, ck := newTestClient(t, ScopeRepo)
+	gh.AddRun(fakes.GitHubRun{
+		ID: 8, Repo: repo.String(), HeadRepo: repo.String(), Event: "push", Status: "queued",
+		Jobs: []fakes.GitHubJob{{ID: 80, Status: "queued", Labels: []string{"cr-ci"}}},
+	})
+	ctx := context.Background()
+
+	gh.RateLimitMode = fakes.Secondary403NoRetryAfter
+	gh.RateLimitAfter = 1
+
+	// First call succeeds (1 counted call).
+	if _, err := c.ListJobs(ctx, repo, 8); err != nil {
+		t.Fatalf("initial ListJobs: %v", err)
+	}
+	// Mutate so the next ListJobs is not a 304; triggers secondary 403 (Remaining=4000, Reset=now+55m, no Retry-After).
+	gh.SetJob(8, fakes.GitHubJob{ID: 80, Status: "in_progress", Labels: []string{"cr-ci"}})
+	triggerAt := ck.now()
+	_, err := c.ListJobs(ctx, repo, 8)
+	if !IsRateLimited(err) {
+		t.Fatalf("second ListJobs err = %v, want rate limited", err)
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %T, want *APIError", err)
+	}
+	wantUntil := triggerAt.Add(time.Minute)
+	if !ae.RetryAfter.Equal(wantUntil) {
+		t.Fatalf("RetryAfter = %v (delta %v), want %v (60s, not 55m primary Reset)", ae.RetryAfter, ae.RetryAfter.Sub(triggerAt), wantUntil)
+	}
+
+	jobsPath := "/repos/" + repo.String() + "/actions/runs/8/jobs"
+	callsAfterTrip := gh.Calls(jobsPath)
+
+	// Lift fake limit; at +30s the local breaker is still open (no HTTP call).
+	gh.ResetRateLimit()
+	ck.add(30 * time.Second)
+	if _, err := c.ListJobs(ctx, repo, 8); !IsRateLimited(err) || !IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("at +30s err = %v, want synthetic 429 from breaker", err)
+	}
+	if got := gh.Calls(jobsPath); got != callsAfterTrip {
+		t.Fatalf("at +30s calls = %d, want %d", got, callsAfterTrip)
+	}
+
+	// At +61s (long before the 55m primary Reset), the breaker reopens to real HTTP calls.
+	ck.add(31 * time.Second)
+	jobs, err := c.ListJobs(ctx, repo, 8)
+	if err != nil || len(jobs) != 1 || jobs[0].Status != "in_progress" {
+		t.Fatalf("at +61s ListJobs = %+v %v", jobs, err)
+	}
+	if got := gh.Calls(jobsPath); got != callsAfterTrip+1 {
+		t.Errorf("at +61s calls = %d, want %d", got, callsAfterTrip+1)
 	}
 }

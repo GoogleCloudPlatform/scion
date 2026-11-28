@@ -1048,3 +1048,50 @@ func TestGuard_CompletedClearsUnverified(t *testing.T) {
 		t.Errorf("reconcile called GetRun %d times for cleared runner, want 0", h.gh.RunGets-getsBefore)
 	}
 }
+
+func TestHijackKill_ReachesDeleteRunnerWhileBreakerOpen(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		name := "with runner record"
+		if restart {
+			name = "after restart (no runner record)"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{})
+			h.addSameRepoRun(10)
+			h.queued(100, 10)
+			// Cache fork run 12 via reconcile discovery so the hijack verdict does not need GetRun.
+			h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"})
+			h.reconcile()
+
+			if restart {
+				h = newHarness(t, harnessOpts{reuseFrom: h})
+				// Populate runMeta cache for run 12 on the restarted server.
+				h.reconcile()
+			}
+
+			// Trip the local rate-limit breaker via a 429 on an unrelated queued webhook,
+			// then lift the fake's rate limit so only the client-side breaker is open.
+			h.gh.AddRun(fakes.GitHubRun{ID: 99, Repo: testRepo, HeadRepo: testRepo, Event: "push", Status: "queued"})
+			h.gh.RateLimitMode = fakes.Secondary429
+			h.gh.RateLimitRetryAfter = 5 * time.Minute
+			h.gh.RateLimitAfter = 1
+			if code, _ := h.queued(990, 99); code != http.StatusServiceUnavailable {
+				t.Fatalf("breaker-trip webhook: status = %d, want 503", code)
+			}
+			h.gh.ResetRateLimit()
+
+			// While the breaker is open, a hijack kill must still reach DeleteRunner and Terminate.
+			code, out := h.webhook(inProgress(120, 12, testRepo, "cr-job-100"))
+			if code != http.StatusOK || !strings.Contains(out, "killed") {
+				t.Fatalf("hijack kill with open breaker: %d %q, want 200 killed", code, out)
+			}
+			if len(h.gh.Deleted) != 1 {
+				t.Errorf("Deleted = %v, want 1 (DeleteRunner must bypass open breaker)", h.gh.Deleted)
+			}
+			if len(h.cr.CancelCalls) != 1 {
+				t.Errorf("CancelCalls = %v, want 1", h.cr.CancelCalls)
+			}
+			h.wantLog(logging.EventKillHijacked)
+		})
+	}
+}

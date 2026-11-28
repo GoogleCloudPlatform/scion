@@ -234,29 +234,45 @@ func (s *Server) stopRunner(repo githubapp.Repo, name string, requireIdle bool) 
 	}
 	var errs []error
 	if repo != (githubapp.Repo{}) {
-		rn, err := s.findRunner(ctx, repo, name)
-		switch {
-		case err != nil:
-			errs = append(errs, err)
-		case rn == nil:
-			res.registrationDeleted = true
-		case requireIdle && rn.Busy:
-			res.busy = true
-			return res, nil
-		default:
-			err := s.o.GitHub.DeleteRunner(ctx, repo, rn.ID)
+		if !requireIdle && rec != nil && rec.runnerID != 0 {
+			err := s.o.GitHub.DeleteRunner(ctx, repo, rec.runnerID)
 			switch {
 			case err == nil:
 				res.registrationDeleted = true
 			case githubapp.IsStatus(err, http.StatusUnprocessableEntity):
-				// Busy: it picked up a job meanwhile.
-				if requireIdle {
-					res.busy = true
-					return res, nil
-				}
 				res.registrationErr = err.Error()
 			default:
 				errs = append(errs, err)
+			}
+		} else {
+			lookupCtx := ctx
+			if !requireIdle {
+				lookupCtx = githubapp.WithBypassBreaker(ctx)
+			}
+			rn, err := s.findRunner(lookupCtx, repo, name)
+			switch {
+			case err != nil:
+				errs = append(errs, err)
+			case rn == nil:
+				res.registrationDeleted = true
+			case requireIdle && rn.Busy:
+				res.busy = true
+				return res, nil
+			default:
+				err := s.o.GitHub.DeleteRunner(ctx, repo, rn.ID)
+				switch {
+				case err == nil:
+					res.registrationDeleted = true
+				case githubapp.IsStatus(err, http.StatusUnprocessableEntity):
+					// Busy: it picked up a job meanwhile.
+					if requireIdle {
+						res.busy = true
+						return res, nil
+					}
+					res.registrationErr = err.Error()
+				default:
+					errs = append(errs, err)
+				}
 			}
 		}
 	}

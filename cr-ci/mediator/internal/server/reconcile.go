@@ -121,9 +121,9 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 	// list no repo at all (a sustained GitHub outage) must turn /reconcile red.
 	// (Other errors already make it red.)
 	if listed == 0 && len(s.o.TargetRepos) > 0 && len(res.Errors) == 0 {
-		msg := "GitHub server errors on every repo; nothing was discovered"
+		msg := "transient GitHub errors (5xx or rate limit) on every repo; nothing was discovered"
 		res.Errors = append(res.Errors, "all_skipped: "+msg)
-		s.log().Error("reconcile skipped every repo after GitHub server errors", "event", logging.EventReconcileAllSkipped,
+		s.log().Error("reconcile skipped every repo after transient GitHub errors", "event", logging.EventReconcileAllSkipped,
 			"repos", len(s.o.TargetRepos), "skipped", len(res.Skipped))
 	}
 
@@ -163,21 +163,6 @@ func (s *Server) reconcileLocked(ctx context.Context) ReconcileResult {
 			switch {
 			case errors.Is(err, errDeferred):
 				res.ChecksDeferred++
-				if now.Sub(u.since) > s.o.TaskTimeout+s.o.ReapAfter {
-					if execs, lerr := s.execsIn(ctx, gv); lerr == nil {
-						live, _ := s.live(execs)
-						hasLive := false
-						for _, e := range live {
-							if e.RunnerName == name {
-								hasLive = true
-								break
-							}
-						}
-						if !hasLive {
-							delete(s.unverified, name)
-						}
-					}
-				}
 			case err != nil:
 				addErr("runner_check_unverified "+name, err)
 			case out == "killed":

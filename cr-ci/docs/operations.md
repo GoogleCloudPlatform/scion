@@ -417,7 +417,7 @@ logged (a unit test enforces this).
 | `reconcile` | INFO | Reconcile summary (`claims_expired`, `runners_reaped`, `executions_reaped`, `hijacks_killed`, `checks_deferred`, `backfilled`, `left_queued`, `errors`, `skipped`, `budget_stopped`, `rate_limit_remaining`). Any error makes `/reconcile` answer 500; skipped items do not |
 | `reconcile_overlap` | INFO | A `/reconcile` tick arrived while the previous pass was still running and was skipped (`200 {"overlap":true}`) rather than stacked |
 | `reconcile_skip` | WARNING | A reconcile step hit a transient GitHub error (5xx or rate limit) or stopped at the rate-limit budget reserve (`stage`); that item is skipped and retried next pass, the rest of the pass goes on and `/reconcile` still answers 200 (listed under `skipped`). Only the same `stage` across many passes needs a look |
-| `reconcile_all_skipped` | ERROR | Every repo's runs lists got a GitHub 5xx: the pass discovered nothing, and `/reconcile` answers 500 (Cloud Scheduler shows the job failing). A sustained GitHub outage; jobs are not backfilled until it ends. **Alert on this.** |
+| `reconcile_all_skipped` | ERROR | Every repo's runs lists got a transient GitHub error (5xx or rate limit): the pass discovered nothing, and `/reconcile` answers 500 (Cloud Scheduler shows the job failing). A sustained GitHub outage or rate-limit blackout; jobs are not backfilled until it ends. **Alert on this.** |
 | `reconcile_denied` | WARNING | `/reconcile` called without a valid scheduler ID token |
 | `runner_reaped` / `execution_reaped` | WARNING | Stale registration deleted / execution past the task timeout cancelled |
 | `error` | ERROR | A GitHub, Cloud Run or Secret Manager call failed (`stage`, `error`) |

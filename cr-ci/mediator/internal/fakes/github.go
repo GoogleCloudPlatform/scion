@@ -57,6 +57,10 @@ type RateLimitMode int
 const (
 	Primary403 RateLimitMode = iota
 	Secondary429
+	// Secondary403NoRetryAfter returns HTTP 403 with a secondary-rate-limit
+	// body, X-RateLimit-Remaining > 0, X-RateLimit-Reset = Now()+55m, and no
+	// Retry-After header.
+	Secondary403NoRetryAfter
 )
 
 // GitHub is a fake GitHub REST API.
@@ -447,6 +451,16 @@ func (g *GitHub) tokenOnly(h http.HandlerFunc) http.HandlerFunc {
 		g.rlMu.Unlock()
 		if limited {
 			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limit))
+			if mode == Secondary403NoRetryAfter {
+				rem := limit - 1000
+				if rem <= 0 {
+					rem = 4000
+				}
+				w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(rem))
+				w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(g.Now().Add(55*time.Minute).Unix(), 10))
+				writeJSON(w, http.StatusForbidden, map[string]string{"message": "You have exceeded a secondary rate limit."})
+				return
+			}
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
 			if mode == Secondary429 {

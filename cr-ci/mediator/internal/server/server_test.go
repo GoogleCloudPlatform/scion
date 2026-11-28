@@ -1159,43 +1159,54 @@ func TestReconcileRefusesDisallowedEvents(t *testing.T) {
 }
 
 func TestReconcile_StopsOnRateLimit(t *testing.T) {
-	h := newHarness(t, harnessOpts{})
-	for i := int64(1); i <= 250; i++ {
-		h.gh.AddRun(fakes.GitHubRun{
-			ID: i, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
-			CreatedAt: h.clock.Now().Add(time.Duration(i) * time.Second),
-			Jobs:      []fakes.GitHubJob{{ID: i * 10, Status: "queued", Labels: []string{"ubuntu-latest"}}},
-		})
-	}
-	// 2 ListRuns calls + 10 ListJobs calls = 12 counted calls before 403 rate limit.
-	h.gh.RateLimitMode = fakes.Primary403
-	h.gh.RateLimitAfter = 12
+	for _, tc := range []struct {
+		name string
+		mode fakes.RateLimitMode
+	}{
+		{"primary 403", fakes.Primary403},
+		{"secondary 403 body-only", fakes.Secondary403NoRetryAfter},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{})
+			for i := int64(1); i <= 250; i++ {
+				h.gh.AddRun(fakes.GitHubRun{
+					ID: i, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued",
+					CreatedAt: h.clock.Now().Add(time.Duration(i) * time.Second),
+					Jobs:      []fakes.GitHubJob{{ID: i * 10, Status: "queued", Labels: []string{"ubuntu-latest"}}},
+				})
+			}
+			// 2 ListRuns calls + 10 ListJobs calls = 12 counted calls before rate limit.
+			h.gh.RateLimitMode = tc.mode
+			h.gh.RateLimitAfter = 12
 
-	code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now()))
-	if code != http.StatusOK {
-		t.Fatalf("reconcile status = %d, want 200; res=%+v", code, res)
-	}
-	if len(res.Errors) != 0 {
-		t.Errorf("Errors = %v, want empty", res.Errors)
-	}
-	foundRL := false
-	for _, s := range res.Skipped {
-		if strings.Contains(strings.ToLower(s), "rate limit") {
-			foundRL = true
-			break
-		}
-	}
-	if !foundRL {
-		t.Errorf("Skipped = %v, want mention of rate limit", res.Skipped)
-	}
-	jobsPrefix := "/repos/" + testRepo + "/actions/runs/"
-	totalCalls := h.gh.Calls(jobsPrefix)
-	// Subtract any non-jobs calls under /actions/runs/ (none here: ListRuns path is /actions/runs without trailing slash).
-	if totalCalls > 11 {
-		t.Errorf("ListJobs calls = %d, want <= 11", totalCalls)
-	}
-	if totalCalls == 0 {
-		t.Errorf("ListJobs calls = 0, want > 0")
+			code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now()))
+			if code != http.StatusOK {
+				t.Fatalf("reconcile status = %d, want 200; res=%+v", code, res)
+			}
+			if len(res.Errors) != 0 {
+				t.Errorf("Errors = %v, want empty", res.Errors)
+			}
+			// Exactly 1 list_jobs skipped entry proves discover() broke out of the loop
+			// on the first rate limit rather than iterating through the remaining ~239
+			// runs and collecting synthetic breaker-open skips.
+			listJobsSkipped := 0
+			for _, s := range res.Skipped {
+				if strings.HasPrefix(s, "list_jobs ") && strings.Contains(strings.ToLower(s), "rate limit") {
+					listJobsSkipped++
+				}
+			}
+			if listJobsSkipped != 1 {
+				t.Errorf("list_jobs rate-limit skips = %d (Skipped=%v), want exactly 1", listJobsSkipped, res.Skipped)
+			}
+			jobsPrefix := "/repos/" + testRepo + "/actions/runs/"
+			totalCalls := h.gh.Calls(jobsPrefix)
+			if totalCalls > 11 {
+				t.Errorf("ListJobs calls = %d, want <= 11", totalCalls)
+			}
+			if totalCalls == 0 {
+				t.Errorf("ListJobs calls = 0, want > 0")
+			}
+		})
 	}
 }
 
@@ -1276,7 +1287,11 @@ func TestReconcile_SingleFlight(t *testing.T) {
 		code, _ := h.reconcileWith(tok)
 		done <- code
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(fakes.GateBackstop):
+		t.Fatal("first /reconcile did not reach ListRuns")
+	}
 
 	code2, body2, _ := h.post("/reconcile", map[string]string{"Authorization": "Bearer " + tok}, nil)
 	if code2 != http.StatusOK || !strings.Contains(body2, `"overlap":true`) {
@@ -1285,8 +1300,13 @@ func TestReconcile_SingleFlight(t *testing.T) {
 	h.wantLog(logging.EventReconcileOverlap)
 
 	close(release)
-	if code1 := <-done; code1 != http.StatusOK {
-		t.Errorf("first /reconcile = %d, want 200", code1)
+	select {
+	case code1 := <-done:
+		if code1 != http.StatusOK {
+			t.Errorf("first /reconcile = %d, want 200", code1)
+		}
+	case <-time.After(fakes.GateBackstop):
+		t.Fatal("first /reconcile did not finish after release")
 	}
 }
 

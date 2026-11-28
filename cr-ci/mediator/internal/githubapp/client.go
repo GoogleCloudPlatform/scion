@@ -21,15 +21,30 @@ import (
 const DefaultBaseURL = "https://api.github.com"
 
 const (
-	apiVersion      = "2022-11-28"
-	perPage         = 100
-	maxPages        = 50
-	maxBodySize     = 10 << 20
-	errBodySize     = 300
-	maxETagBodySize = 1 << 20
-	maxETagEntries  = 4000
-	etagTTL         = 30 * time.Minute
+	apiVersion                 = "2022-11-28"
+	perPage                    = 100
+	maxPages                   = 50
+	maxBodySize                = 10 << 20
+	errBodySize                = 300
+	maxETagBodySize            = 1 << 20
+	maxETagEntries             = 4000
+	etagTTL                    = 30 * time.Minute
+	secondaryRateLimitFallback = time.Minute
 )
+
+type bypassBreakerKey struct{}
+
+// WithBypassBreaker returns a context that bypasses the client's local
+// rate-limit breaker (used by hijack-kill cleanup so runner deletion is never
+// skipped while the breaker is open).
+func WithBypassBreaker(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bypassBreakerKey{}, true)
+}
+
+func bypassesBreaker(ctx context.Context) bool {
+	v, _ := ctx.Value(bypassBreakerKey{}).(bool)
+	return v
+}
 
 // Scope selects the runner endpoints: repository-level or organization-level.
 type Scope string
@@ -326,7 +341,7 @@ func (c *Client) onUnauthorized(id int64) {
 }
 
 func (c *Client) apiOpt(ctx context.Context, r Repo, method, path string, body, out any, bypassBreaker bool) error {
-	if !bypassBreaker {
+	if !bypassBreaker && !bypassesBreaker(ctx) {
 		if err := c.checkBreaker(r, method, path); err != nil {
 			return err
 		}
@@ -598,12 +613,18 @@ func (c *Client) parseAPIError(method, path string, resp *http.Response, now tim
 					ae.RetryAfter = t
 				}
 			}
-			if ae.RetryAfter.IsZero() {
+			if ae.RetryAfter.IsZero() && remZero {
 				if resetStr := strings.TrimSpace(resp.Header.Get("X-RateLimit-Reset")); resetStr != "" {
 					if epoch, err := strconv.ParseInt(resetStr, 10, 64); err == nil && epoch > 0 {
 						ae.RetryAfter = time.Unix(epoch, 0)
 					}
 				}
+			}
+			if ae.RetryAfter.IsZero() && !remZero {
+				// GitHub REST guidance for secondary rate limits without Retry-After:
+				// wait at least one minute rather than falling back to the primary
+				// X-RateLimit-Reset window (which can be up to ~60 minutes away).
+				ae.RetryAfter = now.Add(secondaryRateLimitFallback)
 			}
 		}
 	}
