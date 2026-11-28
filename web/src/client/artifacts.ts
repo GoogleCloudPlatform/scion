@@ -23,6 +23,7 @@
 import { apiFetch, extractApiError } from './api.js';
 import { wakeOfferFromErrorBody } from './wake-offer.js';
 import type { WakeOffer } from './wake-offer.js';
+import { withDownloadParam } from '../utils/download-url.js';
 
 export { ARTIFACTS_FLAG, ATTACHMENT_ARTIFACTS_FLAG } from './artifacts-flag.js';
 
@@ -469,7 +470,7 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
  * ignored (ptone/scion#8958).
  */
 export function artifactDownloadUrl(id: string, seq: number, path: string): string {
-  return `${artifactFileUrl(id, seq, path)}?download=1`;
+  return withDownloadParam(artifactFileUrl(id, seq, path));
 }
 
 /** The zip of every file of version seq (ptone/scion#7106). */

@@ -81,6 +81,23 @@ func TestServeMessageAttachment(t *testing.T) {
 		if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("missing nosniff header")
 		}
+		if got := rec.Header().Get("Content-Disposition"); got != "inline; filename=note.txt" {
+			t.Errorf("Content-Disposition = %q, want %q", got, "inline; filename=note.txt")
+		}
+	})
+
+	t.Run("honors ?download=1 for forced attachment", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/test?download=1", nil)
+		rec := httptest.NewRecorder()
+		if got := svc.ServeMessageAttachment(rec, req, attID, msgID); got != ServeWritten {
+			t.Fatalf("ServeMessageAttachment = %v, want ServeWritten", got)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Content-Disposition"); got != "attachment; filename=note.txt" {
+			t.Errorf("Content-Disposition = %q, want %q", got, "attachment; filename=note.txt")
+		}
 	})
 
 	t.Run("wrong messageID returns ServeNotFound without writing", func(t *testing.T) {

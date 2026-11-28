@@ -7081,9 +7081,12 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// through, the sandbox keeps it off the hub's origin.
 	setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 
-	// Content-Disposition: inline for images, attachment for everything else.
+	// Content-Disposition: inline for images unless ?download=1/true is set,
+	// attachment for everything else (ptone/scion#9913).
 	disposition := "attachment"
-	if IsImageMime(mimeType) {
+	dl := r.URL.Query().Get("download")
+	forceDownload := dl == "1" || dl == "true"
+	if IsImageMime(mimeType) && !forceDownload {
 		disposition = "inline"
 	}
 	// R2: Escape backslash and double-quote in the filename to prevent

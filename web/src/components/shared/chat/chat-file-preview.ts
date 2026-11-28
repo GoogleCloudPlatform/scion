@@ -39,6 +39,7 @@ import { apiFetch, extractApiError } from '../../../client/api.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import {
   buildAttachmentApiUrl,
+  buildAttachmentDownloadUrl,
   buildFileApiUrl,
   buildGcsObjectApiUrl,
   buildCloudConsoleUrl,
@@ -227,16 +228,32 @@ const IDLE_STATE: LoadState = {
 };
 
 /**
- * The URL used to fetch/download a target's raw bytes (no `?view=` /
- * `?format=` suffix). Throws for an unsafe target — see
+ * The base API URL used to fetch a target's raw bytes (no `?view=` /
+ * `?format=` / `?download=` suffix). Throws for an unsafe target — see
  * `buildAttachmentApiUrl`/`buildFileApiUrl`/`buildGcsObjectApiUrl` — so every
  * caller must be prepared for that, not just the ones already inside a
  * try/catch.
  */
+function apiUrlFor(target: PreviewTarget): string {
+  if (target.kind === 'artifact')
+    throw new Error('apiUrlFor: artifact targets load their own URLs');
+  if (target.kind === 'attachment') return buildAttachmentApiUrl(target.id);
+  if (target.kind === 'gcs')
+    return buildGcsObjectApiUrl(target.messageId, target.bucket, target.object);
+  return buildFileApiUrl(target.projectId, target.location);
+}
+
+/**
+ * The forced-attachment download URL for a target's Download button.
+ * Attachment targets carry `?download=1` so the hub responds with
+ * `Content-Disposition: attachment` (including on cross-origin object-storage
+ * redirects, ptone/scion#9913); gcs and workspace/shared-dir routes already
+ * send `Content-Disposition: attachment` by default.
+ */
 function downloadUrlFor(target: PreviewTarget): string {
   if (target.kind === 'artifact')
     throw new Error('downloadUrlFor: artifact targets load their own URLs');
-  if (target.kind === 'attachment') return buildAttachmentApiUrl(target.id);
+  if (target.kind === 'attachment') return buildAttachmentDownloadUrl(target.id);
   if (target.kind === 'gcs')
     return buildGcsObjectApiUrl(target.messageId, target.bucket, target.object);
   return buildFileApiUrl(target.projectId, target.location);
@@ -473,7 +490,7 @@ export class ScionChatFilePreview extends LitElement {
     // either.
     let baseUrl: string;
     try {
-      baseUrl = downloadUrlFor(target);
+      baseUrl = apiUrlFor(target);
     } catch {
       this.loadState = {
         status: 'error',
