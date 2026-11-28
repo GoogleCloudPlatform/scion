@@ -26,7 +26,34 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
+
+// fuseStartCmdExecSuffix is the exact suffix emitted by pkg/runtime/common.go
+// (buildCommonRunArgs) when FUSE mounts wrap the tmux start command.
+const fuseStartCmdExecSuffix = `exec sh -c "$SCION_START_CMD"`
+
+// resolveShellStartCmdArgs resolves a FUSE start wrapper's "$SCION_START_CMD"
+// reference from PID 1's own environment before sup.Run launches the child
+// with WorkloadIsolation enabled (where all SCION_* variables, including
+// SCION_START_CMD, are stripped from the child environment).
+//
+// Passing the value as positional argv ($1) via `exec sh -c "$1" sh <cmd>`
+// avoids shell-quoting issues, keeps supervisor.stripScionControlEnv's
+// empty-allowlist invariant intact across all env builders, works identically
+// with old and new runtime wrappers (no version skew), and leaves non-FUSE,
+// Kubernetes, and Cloud Run argv untouched.
+func resolveShellStartCmdArgs(childArgs []string, getenv func(string) string) []string {
+	if getenv == nil || len(childArgs) != 3 || childArgs[0] != "sh" || childArgs[1] != "-c" {
+		return childArgs
+	}
+	if !strings.HasSuffix(childArgs[2], fuseStartCmdExecSuffix) {
+		return childArgs
+	}
+	startCmd := getenv("SCION_START_CMD")
+	rewritten := strings.TrimSuffix(childArgs[2], fuseStartCmdExecSuffix) + `exec sh -c "$1"`
+	return []string{"sh", "-c", rewritten, "sh", startCmd}
+}
 
 // beforeSupervisorRunForTest, when non-nil, fires synchronously in runInit
 // immediately before sup.Run is launched so tests can inspect filesystem state
@@ -79,6 +106,10 @@ func removeEnvFileNoFollow(agentHome string) error {
 // persistent home) or planted symlink is never overwritten or followed.
 func seedShellCLIContext(agentHome string, uid, gid int, getenv func(string) string) error {
 	if getenv == nil {
+		return nil
+	}
+	if mode := strings.TrimSpace(getenv(transportauth.EnvTransportMode)); transportauth.IsProxyMode(mode) {
+		log.Debug("Skipping plain-endpoint CLI context seed in proxy transport mode %q", mode)
 		return nil
 	}
 	rawEndpoint := strings.TrimSpace(getenv("SCION_HUB_ENDPOINT"))

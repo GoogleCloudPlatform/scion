@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -284,6 +285,22 @@ func TestSeedShellCLIContext(t *testing.T) {
 			t.Fatalf("expected no context.yaml when endpoint unset, err=%v", err)
 		}
 	})
+
+	for _, mode := range []string{"iap", "cloudrun_invoker"} {
+		t.Run("skips in proxy transport mode "+mode, func(t *testing.T) {
+			home := t.TempDir()
+			env := map[string]string{
+				"SCION_HUB_ENDPOINT":           "https://hub.example.com",
+				transportauth.EnvTransportMode: mode,
+			}
+			if err := seedShellCLIContext(home, 0, 0, func(k string) string { return env[k] }); err != nil {
+				t.Fatalf("seedShellCLIContext(%s): %v", mode, err)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".scion", "context.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("expected no context.yaml in proxy mode %s, stat err=%v", mode, err)
+			}
+		})
+	}
 
 	t.Run("never overwrites an existing context.yaml (byte-identical)", func(t *testing.T) {
 		home := t.TempDir()
@@ -592,5 +609,117 @@ func TestRunInit_NonShellKeepsEnvFileAndScionEnv(t *testing.T) {
 	}
 	if !strings.Contains(string(childEnvBytes), "SCION_AGENT_ID=agent-llm-1") {
 		t.Error("non-shell child did not inherit SCION_AGENT_ID")
+	}
+}
+
+func TestResolveShellStartCmdArgs(t *testing.T) {
+	getenv := func(k string) string {
+		if k == "SCION_START_CMD" {
+			return `tmux new-session -d -s scion 'sh -c "while :; do bash -l; done"'`
+		}
+		return ""
+	}
+
+	t.Run("rewrites FUSE wrapper to pass SCION_START_CMD via $1", func(t *testing.T) {
+		in := []string{"sh", "-c", `mkdir -p /mnt && gcsfuse b /mnt && exec sh -c "$SCION_START_CMD"`}
+		got := resolveShellStartCmdArgs(in, getenv)
+		want := []string{
+			"sh", "-c",
+			`mkdir -p /mnt && gcsfuse b /mnt && exec sh -c "$1"`,
+			"sh",
+			`tmux new-session -d -s scion 'sh -c "while :; do bash -l; done"'`,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("len = %d, want %d: %q", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("arg[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("leaves non-FUSE / K8s / Cloud Run inline argv untouched", func(t *testing.T) {
+		for _, in := range [][]string{
+			{"sh", "-c", "tmux new-session -d -s scion"},
+			{"sh", "-c", `true && exec sh -c "$SCION_START_CMD"`, "sh", "extra"},
+			{"bash", "-c", `true && exec sh -c "$SCION_START_CMD"`},
+			{"tmux", "new-session"},
+		} {
+			got := resolveShellStartCmdArgs(in, getenv)
+			if len(got) != len(in) {
+				t.Errorf("unexpected rewrite for %q -> %q", in, got)
+			}
+		}
+	})
+}
+
+// TestRunInit_ShellIsolation_FUSEStartWrapper verifies Review 2 R1
+// (ptone/scion#9743): an isolated shell launch whose child argv is the FUSE
+// wrapper shape `sh -c 'true && exec sh -c "$SCION_START_CMD"'` with
+// SCION_START_CMD set in PID 1's environment runs the command AND the
+// environment inside the started command contains no SCION_* variable
+// (including no SCION_START_CMD).
+func TestRunInit_ShellIsolation_FUSEStartWrapper(t *testing.T) {
+	agentHome := t.TempDir()
+	setupRunInitAsRootlessScion(t, agentHome)
+	t.Cleanup(hub.SetTokenHome(agentHome))
+	_ = captureSciontoolLog(t)
+
+	origExitCodePath := harnessExitCodePath
+	harnessExitCodePath = filepath.Join(t.TempDir(), "no-harness-exit-code")
+	t.Cleanup(func() { harnessExitCodePath = origExitCodePath })
+	origTrigger := limitsTriggerPath
+	limitsTriggerPath = filepath.Join(t.TempDir(), "limits-exceeded")
+	t.Cleanup(func() { limitsTriggerPath = origTrigger })
+
+	outDir := t.TempDir()
+	markerFile := filepath.Join(outDir, "started.marker")
+	envOut := filepath.Join(outDir, "fuse-child-env.txt")
+
+	// Include single quotes and && in SCION_START_CMD to mirror tmux start
+	// commands and verify quoting safety through positional $1.
+	startCmd := `printf '%s\n' 'TMUX_WOULD_START' > '` + markerFile + `' && env > '` + envOut + `' && sleep 0.2`
+
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+	t.Setenv("SCION_AGENT_ID", "agent-fuse-1")
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_START_CMD", startCmd)
+	t.Setenv("USER_CUSTOM_VAR", "keep-this")
+
+	fuseArgs := []string{"sh", "-c", `true && exec sh -c "$SCION_START_CMD"`}
+	code := RunInit(fuseArgs, InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
+	if code != 0 {
+		t.Fatalf("RunInit(FUSE wrapper) = %d, want 0", code)
+	}
+
+	markerBytes, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("SCION_START_CMD did not execute under FUSE wrapper: %v", err)
+	}
+	if strings.TrimSpace(string(markerBytes)) != "TMUX_WOULD_START" {
+		t.Fatalf("marker = %q, want TMUX_WOULD_START", string(markerBytes))
+	}
+
+	envBytes, err := os.ReadFile(envOut)
+	if err != nil {
+		t.Fatalf("read started command env: %v", err)
+	}
+	sawUserVar := false
+	for _, line := range strings.Split(string(envBytes), "\n") {
+		if line == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(line, "=")
+		if strings.HasPrefix(k, "SCION_") {
+			t.Errorf("started command under FUSE wrapper inherited SCION_* variable %s", k)
+		}
+		if k == "USER_CUSTOM_VAR" && v == "keep-this" {
+			sawUserVar = true
+		}
+	}
+	if !sawUserVar {
+		t.Error("started command under FUSE wrapper lost non-SCION USER_CUSTOM_VAR")
 	}
 }

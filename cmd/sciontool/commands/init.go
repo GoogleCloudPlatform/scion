@@ -1204,7 +1204,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// ~/.scion/context.yaml if absent so `scion hub auth login` / `scion login`
 		// discovers the Hub with zero flags. Both run before sup.Run.
 		if err := removeEnvFileNoFollow(agentHome); err != nil {
-			log.Warn("Failed to remove stale scion-env file (interactive zsh sessions may re-source SCION_* control variables from ~/.scion/scion-env): %v", err)
+			log.Error("Failed to remove stale scion-env file (interactive zsh sessions may re-source SCION_* control variables from ~/.scion/scion-env): %v", err)
 		}
 		if err := seedShellCLIContext(agentHome, targetUID, targetGID, os.Getenv); err != nil {
 			log.Error("Failed to seed CLI context: %v", err)
@@ -1402,11 +1402,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// differently keeps a step-line summation from silently double-counting
 	// it.
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
+	supChildArgs := childArgs
+	if shellIsolation {
+		supChildArgs = resolveShellStartCmdArgs(childArgs, os.Getenv)
+	}
 	if beforeSupervisorRunForTest != nil {
 		beforeSupervisorRunForTest(config)
 	}
 	go func() {
-		code, err := sup.Run(ctx, childArgs)
+		code, err := sup.Run(ctx, supChildArgs)
 		exitChan <- struct {
 			code int
 			err  error
