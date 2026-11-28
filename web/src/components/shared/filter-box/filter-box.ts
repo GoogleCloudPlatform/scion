@@ -47,7 +47,6 @@ export interface FilterCommitDetail {
   serverQ: string;
 }
 
-const COMMIT_DEBOUNCE_MS = 300;
 const REMOTE_SUGGEST_DEBOUNCE_MS = 250;
 const MAX_VISIBLE_SUGGESTIONS = 12;
 const EMPTY_QUERY: Query = { mode: 'text', text: '' };
@@ -131,7 +130,7 @@ export class ScionFilterBox extends LitElement {
 
   private lastValidQuery: Query = EMPTY_QUERY;
   private lastEmittedValue = '';
-  private commitTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastCommittedValue = '';
   private remoteTimer: ReturnType<typeof setTimeout> | null = null;
   private remoteAbort: AbortController | null = null;
   private remoteGen = 0;
@@ -467,32 +466,33 @@ export class ScionFilterBox extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener('keydown', this.boundGlobalKeydown);
+    this.lastEmittedValue = this.value;
+    this.lastCommittedValue = this.value;
     this.syncExternalValue();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this.boundGlobalKeydown);
-    if (this.commitTimer !== null) {
-      clearTimeout(this.commitTimer);
-      this.commitTimer = null;
-    }
     this.cancelRemoteSuggestions();
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('value') && this.value !== this.lastEmittedValue) {
-      if (this.commitTimer !== null) {
-        clearTimeout(this.commitTimer);
-        this.commitTimer = null;
-      }
       this.cancelRemoteSuggestions();
       this.open = false;
       this.activeIndex = -1;
       this.lastEmittedValue = this.value;
+      this.lastCommittedValue = this.value;
     }
     if (changed.has('value') || changed.has('view')) {
       this.syncExternalValue();
+    }
+  }
+
+  override updated(): void {
+    if (this.inputEl && this.inputEl.value !== this.value) {
+      this.inputEl.value = this.value;
     }
   }
 
@@ -548,7 +548,7 @@ export class ScionFilterBox extends LitElement {
     >`;
   }
 
-  private evaluateAndEmit(raw: string, immediateCommit: boolean): void {
+  private evaluateAndEmit(raw: string, commit: boolean): void {
     this.lastEmittedValue = raw;
     const schema = this.schema;
     const parsed = parse(raw, knownKeysFor(schema));
@@ -578,37 +578,22 @@ export class ScionFilterBox extends LitElement {
       })
     );
 
-    // An invalid edit within the debounce window must NOT cancel a pending
-    // commit of the last valid query.
-    if (!valid) {
+    if (!commit || !valid) {
       return;
     }
 
-    if (this.commitTimer !== null) {
-      clearTimeout(this.commitTimer);
-      this.commitTimer = null;
-    }
-
-    const emitCommit = (): void => {
-      this.commitTimer = null;
-      this.dispatchEvent(
-        new CustomEvent<FilterCommitDetail>('filter-commit', {
-          detail: {
-            value: raw,
-            query: activeQuery,
-            serverQ: serverSubset(activeQuery, schema),
-          },
-          bubbles: true,
-          composed: true,
-        })
-      );
-    };
-
-    if (immediateCommit) {
-      emitCommit();
-    } else {
-      this.commitTimer = setTimeout(emitCommit, COMMIT_DEBOUNCE_MS);
-    }
+    this.lastCommittedValue = raw;
+    this.dispatchEvent(
+      new CustomEvent<FilterCommitDetail>('filter-commit', {
+        detail: {
+          value: raw,
+          query: activeQuery,
+          serverQ: serverSubset(activeQuery, schema),
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private cancelRemoteSuggestions(): void {
@@ -743,13 +728,17 @@ export class ScionFilterBox extends LitElement {
     this.open = this.suggestions.length > 0;
   }
 
-  private onBlur(): void {
-    // Allow mousedown on option to fire before closing.
-    setTimeout(() => {
-      this.open = false;
-      this.suppressExpectedValueError = false;
-      this.cancelRemoteSuggestions();
-    }, 120);
+  private onBlur(e: FocusEvent): void {
+    const nextTarget = e.relatedTarget;
+    this.open = false;
+    this.suppressExpectedValueError = false;
+    this.cancelRemoteSuggestions();
+    if (nextTarget instanceof Node && this.shadowRoot?.contains(nextTarget)) {
+      return;
+    }
+    if (this.value !== this.lastCommittedValue) {
+      this.evaluateAndEmit(this.value, true);
+    }
   }
 
   private onKeydown(e: KeyboardEvent): void {
@@ -823,7 +812,7 @@ export class ScionFilterBox extends LitElement {
       this.open = false;
       this.cancelRemoteSuggestions();
     }
-    this.evaluateAndEmit(nextValue, !s.continueSuggest);
+    this.evaluateAndEmit(nextValue, false);
 
     void this.updateComplete.then(() => {
       if (this.inputEl) {
@@ -860,7 +849,6 @@ export class ScionFilterBox extends LitElement {
           aria-activedescendant=${activeOptionId ?? nothing}
           aria-invalid=${shownError ? 'true' : 'false'}
           aria-label="Filter query"
-          .value=${this.value}
           placeholder=${this.placeholder}
           @input=${this.onInput}
           @focus=${this.onFocus}
@@ -873,6 +861,9 @@ export class ScionFilterBox extends LitElement {
                 type="button"
                 class="clear-btn"
                 aria-label="Clear filter"
+                @mousedown=${(e: MouseEvent) => {
+                  e.preventDefault();
+                }}
                 @click=${this.onClear}
               >
                 <sl-icon name="x-lg"></sl-icon>

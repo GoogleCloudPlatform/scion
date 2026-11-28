@@ -1084,22 +1084,7 @@ export class ScionFileBrowser extends LitElement {
   };
 
   private handleDialectFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
-    const { value, query, valid } = e.detail;
-    this.filterText = value;
-    this.activeQuery = query;
-    if (!valid) {
-      return;
-    }
-    this.backendError = false;
-    const textPart = extractFileQueryText(query);
-    if (!textPart) {
-      this.backendResults = [];
-      this.backendHasMore = false;
-      this.backendSearching = false;
-      this._committedBackendQuery = '';
-      this._backendResultsQuery = '';
-      this._cancelSearch();
-    }
+    this.filterText = e.detail.value;
   };
 
   private handleDialectFilterCommit = (e: CustomEvent<FilterCommitDetail>): void => {

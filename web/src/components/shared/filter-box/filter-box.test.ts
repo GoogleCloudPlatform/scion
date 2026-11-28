@@ -33,7 +33,7 @@ describe('<scion-filter-box>', () => {
     return el;
   }
 
-  it('emits filter-input immediately and filter-commit after debounce', async () => {
+  it('emits filter-input live without committing on debounce, and commits on Enter', async () => {
     vi.useFakeTimers();
     const el = await mount();
     const inputs: FilterInputDetail[] = [];
@@ -42,6 +42,7 @@ describe('<scion-filter-box>', () => {
     el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
 
     const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.focus();
     input.value = 'phase:running';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -51,9 +52,139 @@ describe('<scion-filter-box>', () => {
     expect(inputs[0].query.mode).toBe('structured');
     expect(commits).toHaveLength(0);
 
-    vi.advanceTimersByTime(300);
+    // Waiting past the old 300ms debounce must NOT commit while editing.
+    vi.advanceTimersByTime(1000);
+    expect(commits).toHaveLength(0);
+
+    // Pressing Enter commits immediately and keeps focus.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
     expect(commits).toHaveLength(1);
     expect(commits[0].serverQ).toBe('phase:running');
+    expect(el.shadowRoot?.activeElement).toBe(input);
+  });
+
+  it('commits dirty valid query on blur and skips blur commit when unchanged or invalid', async () => {
+    const el = await mount('phase:running');
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    // Focus and blur without editing -> no commit.
+    input.dispatchEvent(new FocusEvent('focus'));
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: document.body }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(0);
+
+    // Edit to a new valid value and blur -> commits once.
+    input.value = 'phase:stopped';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(commits).toHaveLength(0);
+
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: document.body }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(1);
+    expect(commits[0].value).toBe('phase:stopped');
+    expect(commits[0].serverQ).toBe('phase:stopped');
+
+    // Blurring again without further edits does not re-commit.
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: document.body }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(1);
+
+    // Edit to an invalid value and blur -> does NOT commit, keeps inline error.
+    input.value = 'phase:';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: document.body }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(1);
+    expect(el.shadowRoot?.querySelector('.feedback.error')?.textContent).toContain(
+      'expected value'
+    );
+  });
+
+  it('does not commit on blur when focus moves to the help button inside the filter box', async () => {
+    const el = await mount();
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    const helpBtn = el.shadowRoot?.querySelector('.help-btn') as HTMLElement;
+    input.value = 'phase:running';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: helpBtn }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(0);
+  });
+
+  it('commits immediately on explicit clear button click and keeps focus', async () => {
+    const el = await mount('phase:running');
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'phase:stopped';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const clearBtn = el.shadowRoot?.querySelector('.clear-btn') as HTMLButtonElement;
+    const mousedown = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    clearBtn.dispatchEvent(mousedown);
+    expect(mousedown.defaultPrevented).toBe(true);
+    clearBtn.click();
+    await el.updateComplete;
+
+    expect(el.value).toBe('');
+    expect(commits).toHaveLength(1);
+    expect(commits[0].value).toBe('');
+    expect(commits[0].serverQ).toBe('');
+    expect(el.shadowRoot?.activeElement).toBe(input);
+  });
+
+  it('accepting a value autocomplete suggestion keeps editing without premature commit', async () => {
+    const el = await mount();
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.focus();
+    input.value = 'phase:run';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const opt = el.shadowRoot?.querySelector('[role="option"]') as HTMLElement | null;
+    expect(opt).not.toBeNull();
+    opt!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+
+    expect(el.value).toBe('phase:running');
+    expect(commits).toHaveLength(0);
+    expect(el.shadowRoot?.activeElement).toBe(input);
+
+    // Explicit Enter afterwards commits the composed query.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(1);
+    expect(commits[0].serverQ).toBe('phase:running');
+  });
+
+  it('preserves cursor position when editing in the middle of the query', async () => {
+    const el = await mount('phase:running');
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.focus();
+    input.value = 'phxase:running';
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(3);
+    expect(input.selectionEnd).toBe(3);
   });
 
   it('keeps the last valid query applied when an invalid query is typed', async () => {
@@ -87,7 +218,6 @@ describe('<scion-filter-box>', () => {
   });
 
   it('shows a non-blocking warning for unknown keys while still emitting valid', async () => {
-    vi.useFakeTimers();
     const el = await mount();
     const commits: FilterCommitDetail[] = [];
     el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
@@ -101,7 +231,9 @@ describe('<scion-filter-box>', () => {
     expect(feedback?.classList.contains('warning')).toBe(true);
     expect(feedback?.textContent).toContain("Unknown key 'foo'");
 
-    vi.advanceTimersByTime(300);
+    expect(commits).toHaveLength(0);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
     expect(commits).toHaveLength(1);
     expect(commits[0].serverQ).toBe('foo:bar');
   });
@@ -148,8 +280,7 @@ describe('<scion-filter-box>', () => {
     expect(mark?.textContent).toBe('OR');
   });
 
-  it('does not cancel a pending debounced commit when a subsequent edit is invalid', async () => {
-    vi.useFakeTimers();
+  it('does not commit when a subsequent edit makes the query invalid', async () => {
     const el = await mount();
     const commits: FilterCommitDetail[] = [];
     el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
@@ -159,14 +290,14 @@ describe('<scion-filter-box>', () => {
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
 
-    vi.advanceTimersByTime(100);
     input.value = 'phase:running label:';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
 
-    vi.advanceTimersByTime(250);
-    expect(commits).toHaveLength(1);
-    expect(commits[0].serverQ).toBe('phase:running');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: document.body }));
+    await el.updateComplete;
+    expect(commits).toHaveLength(0);
   });
 
   it('renders full schema-generated help popover including client-only badge', async () => {
@@ -223,8 +354,7 @@ describe('<scion-filter-box>', () => {
     expect(commits.map((c) => c.serverQ)).toEqual(['pe', 'lab']);
   });
 
-  it('cancels pending debounced commit when value is updated externally', async () => {
-    vi.useFakeTimers();
+  it('resets dirty state when value is updated externally so blur does not re-commit', async () => {
     const el = await mount();
     const commits: FilterCommitDetail[] = [];
     el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
@@ -234,11 +364,12 @@ describe('<scion-filter-box>', () => {
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
 
-    // Simulate a chip click updating `.value` before the 300 ms debounce fires.
+    // Simulate a chip click updating `.value` externally.
     el.value = 'phase:running foo';
     await el.updateComplete;
 
-    vi.advanceTimersByTime(500);
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: document.body }));
+    await el.updateComplete;
     expect(commits).toHaveLength(0);
   });
 
