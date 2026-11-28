@@ -821,10 +821,10 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 			return nil, "", fmt.Errorf("get usage budget state: %w", err)
 		}
 
-		// Always resolve the effective cap FRESH (uncached, strict) AFTER reading the
+		// Always resolve the effective cap FRESH (uncached) AFTER reading the
 		// row on every CAS attempt that may create or update usage_budget_state
 		// (applies uniformly to project, user, user_project, and group scopes).
-		freshCache := newStrictTokenLimitEvalCache(e.quota)
+		freshCache := newTokenLimitEvalCache(e.quota)
 		var capVal int64
 		var action string
 		if spec.scopeKind == store.UsageScopeKindGroup {

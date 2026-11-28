@@ -786,9 +786,9 @@ func newTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
 
 // newStrictTokenLimitEvalCache constructs a fresh cache that propagates
 // binding-load and group-membership lookup errors instead of swallowing them.
-// Used by all budget-state writer and lowering paths (reevaluateSpec,
-// OverrideBudgetState, evaluateSpec fresh resolve) so a transient store error
-// can never be mistaken for an unlimited (cap 0) limit.
+// Used by budget-state lowering paths (reevaluateSpec, OverrideBudgetState) so
+// a transient store error can never be mistaken for an unlimited (cap 0) limit;
+// evaluateSpec intentionally stays non-strict on the monotonic raise path.
 func newStrictTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
 	c := newTokenLimitEvalCache(qs)
 	c.strict = true
@@ -846,7 +846,7 @@ func (c *tokenLimitEvalCache) loadSubjectBindings(ctx context.Context, subjectID
 
 	groupMemberships, err := c.qs.store.GetUserGroups(ctx, subjectID)
 	if err != nil {
-		if c.strict {
+		if c.strict && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
 			return nil, fmt.Errorf("get user groups: %w", err)
 		}
 		if c.qs.logger != nil {
