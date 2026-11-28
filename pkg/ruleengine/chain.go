@@ -317,6 +317,7 @@ type ChainRun struct {
 
 	state          chainRunState
 	nextPos        int
+	through        int
 	tokenSeq       uint64
 	pending        *PendingStep
 	pendingOutcome StepOutcome
@@ -708,6 +709,14 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	out, detail := r.engine.evaluateInlineElement(inlineDomain, spec, caps, stepInput)
 
 	r.mu.Lock()
+	// RV3-1: if the run was terminated concurrently (e.g. stale-token
+	// invalid_completion via EvaluatePending/EvaluateGroup) while this inline
+	// evaluation ran unlocked, keep it terminal: do NOT invoke policy, do NOT
+	// record the inline outcome, and do NOT advance nextPos or overwrite Done.
+	if r.state != chainStateEvaluating {
+		r.mu.Unlock()
+		return nil, nil, true, nil
+	}
 	ctrl := r.policy(cloneStepOutcomeWithJudgment(out, detail, caps.CopyDetail))
 	// Engine-owned terminality (§3.2): budget and canceled always end the run.
 	if out.Class == StepClassBudget || out.Class == StepClassCanceled {
@@ -1397,7 +1406,7 @@ func (r *ChainRun) Result() (ChainResult, ChainTrace) {
 	}
 
 	res := ChainResult{
-		Through:    len(r.steps),
+		Through:    r.through,
 		Stopped:    r.stopped,
 		Verdict:    r.verdict,
 		Deciding:   r.cloneStepOutcomeLocked(r.deciding),
@@ -1470,20 +1479,28 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 	if r.state == chainStateDone {
 		return
 	}
-	// O-1: if a legitimate completion outcome was already recorded (before
-	// Resume), record it first so terminal outcomes are never suppressed by
-	// a subsequent replay rejection (§3.7 item 7).
-	if r.state == chainStatePendingCompleted {
+	wasPending := r.state == chainStatePending
+	wasPendingCompleted := r.state == chainStatePendingCompleted
+	// O-1 & O3-1: if a legitimate completion outcome was already recorded (before
+	// Resume), record it first and advance nextPos so the completed index is
+	// never left in both Steps and Unexecuted (§3.7 item 7).
+	if wasPendingCompleted {
 		r.recordStepLocked(r.pendingOutcome, Control{Stop: true}, r.pendingDetail, r.pendingCopier)
+		if r.nextPos < len(r.elements) {
+			r.nextPos++
+		}
+		r.pending = nil
 		r.pendingOutcome = StepOutcome{}
 		r.pendingDetail = nil
 		r.pendingCopier = nil
 	}
 	// N-a: record the invalid completion against the currently pending step's
 	// index when one is active (so a stale token from step 1 replayed during
-	// step 2 fails step 2 rather than duplicating step 1).
+	// step 2 fails step 2 rather than duplicating step 1). When the pending
+	// step was already completed (O3-1) or the run is Evaluating/Ready, record
+	// against the replayed token without double-counting Through.
 	target := p
-	if r.pending != nil {
+	if wasPending && r.pending != nil {
 		target = r.pending
 		r.pending.consumed = true
 	}
@@ -1496,8 +1513,8 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 		Domain:  DomainIO,
 		Err:     err,
 	}
-	r.recordStepLocked(out, Control{Stop: true}, nil, nil)
-	if r.state == chainStatePending && r.nextPos < len(r.elements) {
+	r.recordStepOutcomeLocked(out, Control{Stop: true}, nil, nil, wasPending)
+	if wasPending && r.nextPos < len(r.elements) {
 		r.nextPos++
 	}
 	r.pending = nil
@@ -1505,6 +1522,13 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 }
 
 func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any, copier func(any) any) {
+	r.recordStepOutcomeLocked(out, ctrl, detail, copier, true)
+}
+
+func (r *ChainRun) recordStepOutcomeLocked(out StepOutcome, ctrl Control, detail any, copier func(any) any, countThrough bool) {
+	if countThrough {
+		r.through++
+	}
 	if out.Kind == KindJudgment && out.Class == StepClassPass {
 		r.judgments[out.Index] = storedJudgment{
 			judgment: Judgment{
