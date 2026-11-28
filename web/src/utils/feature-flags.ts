@@ -130,15 +130,17 @@ export function isFeatureEnabled(name: string): boolean {
     }
   }
 
-  // 3. Check localStorage override (dev convenience)
-  if (typeof localStorage !== 'undefined') {
-    try {
+  // 3. Check localStorage override (dev convenience). Wrap even the `typeof`
+  // check in try/catch because sandboxed documents throw SecurityError when
+  // reading the `window.localStorage` getter.
+  try {
+    if (typeof localStorage !== 'undefined') {
       const stored = localStorage.getItem(`scion:feature:${name}`);
       if (stored === 'true') return true;
       if (stored === 'false') return false;
-    } catch {
-      // localStorage not available (e.g. SSR)
     }
+  } catch {
+    // localStorage not available (e.g. SSR or sandboxed iframe)
   }
 
   // 4. Default: on for flags in DEFAULT_ON_FLAGS, off otherwise
@@ -153,8 +155,8 @@ export function isFeatureEnabled(name: string): boolean {
  */
 function warnIfShadowed(name: string): void {
   if (shadowLogged.has(name)) return;
-  if (typeof localStorage === 'undefined') return;
   try {
+    if (typeof localStorage === 'undefined') return;
     const stored = localStorage.getItem(`scion:feature:${name}`);
     if (stored !== 'true' && stored !== 'false') return;
   } catch {
