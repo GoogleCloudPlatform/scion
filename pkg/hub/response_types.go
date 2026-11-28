@@ -80,7 +80,7 @@ type AgentWithCapabilities struct {
 	// the single-agent GET only.
 	IdleSuspendAt *time.Time `json:"idleSuspendAt,omitempty"`
 	// LastReincarnatedAt is when the agent's most recent reincarnation
-	// completed (nil if never). Set on the single-agent GET only.
+	// completed (nil if never). Set on single-agent GET and full-view list responses.
 	LastReincarnatedAt *time.Time `json:"lastReincarnatedAt,omitempty"`
 	// TrajectoryCapture reports the effective Track 2 capture policy for the
 	// agent's project and whether the Hub opt-out lock enforces it. Set on the

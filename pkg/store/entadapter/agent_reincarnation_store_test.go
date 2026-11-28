@@ -674,4 +674,17 @@ func TestLatestCompletedAgentReincarnationAt(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.True(t, got.Equal(t2), "expected %v, got %v", t2, got)
+
+	// Batched query returns only agents with completed reincarnations and picks the newest per agent.
+	empty, err := s.LatestCompletedAgentReincarnationsAt(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	batch, err := s.LatestCompletedAgentReincarnationsAt(ctx, []string{"agent-1", "agent-other", "agent-none"})
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	assert.True(t, batch["agent-1"].Equal(t2))
+	assert.True(t, batch["agent-other"].Equal(otherCompleted))
+	_, hasNone := batch["agent-none"]
+	assert.False(t, hasNone)
 }

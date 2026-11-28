@@ -792,12 +792,13 @@ type AgentInfo struct {
 	Launch *AgentLaunch `json:"launch,omitempty"`
 
 	// Runtime configuration
-	Image      string            `json:"image,omitempty"`
-	Generation int               `json:"generation,omitempty"` // Reincarnation generation (starts at 1; 0 when unknown)
-	Detached   bool              `json:"detached,omitempty"`
-	Runtime    string            `json:"runtime,omitempty"`
-	Profile    string            `json:"profile,omitempty"`
-	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	Generation         int               `json:"generation,omitempty"`         // Reincarnation generation (starts at 1; 0 when unknown)
+	LastReincarnatedAt *time.Time        `json:"lastReincarnatedAt,omitempty"` // Most recent completed reincarnation timestamp (Hub agents only)
+	Detached           bool              `json:"detached,omitempty"`
+	Runtime            string            `json:"runtime,omitempty"`
+	Profile            string            `json:"profile,omitempty"`
+	Kubernetes         *AgentK8sMetadata `json:"kubernetes,omitempty"`
 	// VanishedPodReport marks an entry a Kubernetes runtime List() reports
 	// for an agent pod already removed by a preemption or eviction, rather
 	// than for a pod that still exists (see runtime.IsVanishedPodReport).

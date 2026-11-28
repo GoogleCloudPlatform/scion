@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -210,9 +211,37 @@ func legacyAgentListView(query url.Values) string {
 // adds resolvedHarness and harnessCapabilities (populateAgentListCapabilities)
 // and inc.authority adds each item's authority state (setAgentListAuthority);
 // the compact view never does either.
+func (s *Server) setAgentListLastReincarnatedAt(ctx context.Context, agents []AgentWithCapabilities) {
+	if s == nil || s.store == nil || len(agents) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(agents))
+	for i := range agents {
+		if agents[i].ID != "" {
+			ids = append(ids, agents[i].ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	latest, err := s.store.LatestCompletedAgentReincarnationsAt(ctx, ids)
+	if err != nil {
+		slog.WarnContext(ctx, "agent list: reading latest completed reincarnations failed; omitting lastReincarnatedAt",
+			"error", err)
+		return
+	}
+	for i := range agents {
+		if ts, ok := latest[agents[i].ID]; ok {
+			t := ts.UTC()
+			agents[i].LastReincarnatedAt = &t
+		}
+	}
+}
+
 func (s *Server) writeAgentList(ctx context.Context, w http.ResponseWriter, view string, inc agentListIncludes, resp ListAgentsResponse) {
 	memo := s.setAgentListBadges(ctx, resp.Agents)
 	if view != agentListViewCompact {
+		s.setAgentListLastReincarnatedAt(ctx, resp.Agents)
 		if inc.capabilities {
 			s.populateAgentListCapabilities(ctx, resp.Agents, memo)
 		}

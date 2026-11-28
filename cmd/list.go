@@ -676,6 +676,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		ContainerStatus:     a.ContainerStatus,
 		Image:               a.Image,
 		Generation:          a.Generation,
+		LastReincarnatedAt:  a.LastReincarnatedAt,
 		Detached:            a.Detached,
 		Runtime:             a.Runtime,
 		RuntimeBrokerID:     a.RuntimeBrokerID,

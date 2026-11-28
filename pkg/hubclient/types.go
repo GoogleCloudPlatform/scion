@@ -24,45 +24,46 @@ import (
 
 // Agent represents an agent from the Hub API.
 type Agent struct {
-	ID                string            `json:"id"`          // Hub UUID (database primary key)
-	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per project)
-	ContainerID       string            `json:"containerId"` // Runtime container ID (ephemeral)
-	Name              string            `json:"name"`
-	Template          string            `json:"template,omitempty"`
-	HarnessConfig     string            `json:"harnessConfig,omitempty"`
-	HarnessAuth       string            `json:"harnessAuth,omitempty"`
-	ProjectID         string            `json:"projectId,omitempty"`
-	Project           string            `json:"project,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
-	Annotations       map[string]string `json:"annotations,omitempty"`
-	Phase             string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
-	Activity          string            `json:"activity,omitempty"` // Runtime activity (working, thinking, executing, waiting_for_input, completed)
-	Status            string            `json:"status"`             // Legacy/fallback status field
-	ConnectionState   string            `json:"connectionState,omitempty"`
-	ContainerStatus   string            `json:"containerStatus,omitempty"`
-	RuntimeState      string            `json:"runtimeState,omitempty"`
-	Image             string            `json:"image,omitempty"`
-	Generation        int               `json:"generation,omitempty"`
-	Detached          bool              `json:"detached,omitempty"`
-	Runtime           string            `json:"runtime,omitempty"`
-	RuntimeBrokerID   string            `json:"runtimeBrokerId,omitempty"`
-	RuntimeBrokerName string            `json:"runtimeBrokerName,omitempty"`
-	RuntimeBrokerType string            `json:"runtimeBrokerType,omitempty"`
-	WebPTYEnabled     bool              `json:"webPtyEnabled,omitempty"`
-	TaskSummary       string            `json:"taskSummary,omitempty"`
-	AppliedConfig     *AgentConfig      `json:"appliedConfig,omitempty"`
-	DirectConnect     *DirectConnect    `json:"directConnect,omitempty"`
-	Kubernetes        *KubernetesInfo   `json:"kubernetes,omitempty"`
-	Created           time.Time         `json:"created"`
-	Updated           time.Time         `json:"updated"`
-	StartedAt         time.Time         `json:"startedAt,omitempty"`
-	LastSeen          time.Time         `json:"lastSeen,omitempty"`
-	LastActivityEvent time.Time         `json:"lastActivityEvent,omitempty"`
-	ActivitySince     *time.Time        `json:"activitySince,omitempty"`
-	IdleSuspendAt     *time.Time        `json:"idleSuspendAt,omitempty"`
-	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
-	CreatedBy         string            `json:"createdBy,omitempty"`
-	OwnerID           string            `json:"ownerId,omitempty"`
+	ID                 string            `json:"id"`          // Hub UUID (database primary key)
+	Slug               string            `json:"slug"`        // URL-safe slug identifier (unique per project)
+	ContainerID        string            `json:"containerId"` // Runtime container ID (ephemeral)
+	Name               string            `json:"name"`
+	Template           string            `json:"template,omitempty"`
+	HarnessConfig      string            `json:"harnessConfig,omitempty"`
+	HarnessAuth        string            `json:"harnessAuth,omitempty"`
+	ProjectID          string            `json:"projectId,omitempty"`
+	Project            string            `json:"project,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
+	Annotations        map[string]string `json:"annotations,omitempty"`
+	Phase              string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
+	Activity           string            `json:"activity,omitempty"` // Runtime activity (working, thinking, executing, waiting_for_input, completed)
+	Status             string            `json:"status"`             // Legacy/fallback status field
+	ConnectionState    string            `json:"connectionState,omitempty"`
+	ContainerStatus    string            `json:"containerStatus,omitempty"`
+	RuntimeState       string            `json:"runtimeState,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	Generation         int               `json:"generation,omitempty"`
+	Detached           bool              `json:"detached,omitempty"`
+	Runtime            string            `json:"runtime,omitempty"`
+	RuntimeBrokerID    string            `json:"runtimeBrokerId,omitempty"`
+	RuntimeBrokerName  string            `json:"runtimeBrokerName,omitempty"`
+	RuntimeBrokerType  string            `json:"runtimeBrokerType,omitempty"`
+	WebPTYEnabled      bool              `json:"webPtyEnabled,omitempty"`
+	TaskSummary        string            `json:"taskSummary,omitempty"`
+	AppliedConfig      *AgentConfig      `json:"appliedConfig,omitempty"`
+	DirectConnect      *DirectConnect    `json:"directConnect,omitempty"`
+	Kubernetes         *KubernetesInfo   `json:"kubernetes,omitempty"`
+	Created            time.Time         `json:"created"`
+	Updated            time.Time         `json:"updated"`
+	StartedAt          time.Time         `json:"startedAt,omitempty"`
+	LastSeen           time.Time         `json:"lastSeen,omitempty"`
+	LastActivityEvent  time.Time         `json:"lastActivityEvent,omitempty"`
+	ActivitySince      *time.Time        `json:"activitySince,omitempty"`
+	IdleSuspendAt      *time.Time        `json:"idleSuspendAt,omitempty"`
+	LastReincarnatedAt *time.Time        `json:"lastReincarnatedAt,omitempty"`
+	DeletedAt          time.Time         `json:"deletedAt,omitempty"`
+	CreatedBy          string            `json:"createdBy,omitempty"`
+	OwnerID            string            `json:"ownerId,omitempty"`
 	// Ancestry is the ordered chain of ancestor principal IDs (users and/or
 	// agents) recorded at creation time, used for transitive relationship
 	// queries such as `scion list --ancestors` (ptone/scion#2146).

@@ -432,3 +432,34 @@ func (s *AgentReincarnationStore) LatestCompletedAgentReincarnationAt(ctx contex
 	t := row.CompletedAt.UTC()
 	return &t, nil
 }
+
+// LatestCompletedAgentReincarnationsAt returns a map from agentID to the
+// newest CompletedAt among "completed" reincarnation rows for each agentID
+// in agentIDs that has one.
+func (s *AgentReincarnationStore) LatestCompletedAgentReincarnationsAt(ctx context.Context, agentIDs []string) (map[string]time.Time, error) {
+	out := make(map[string]time.Time)
+	if len(agentIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.client.AgentReincarnation.Query().
+		Where(
+			agentreincarnation.AgentIDIn(agentIDs...),
+			agentreincarnation.StateEQ(agentreincarnation.StateCompleted),
+			agentreincarnation.CompletedAtNotNil(),
+		).
+		Select(agentreincarnation.FieldAgentID, agentreincarnation.FieldCompletedAt).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, r := range rows {
+		if r.CompletedAt == nil {
+			continue
+		}
+		ts := r.CompletedAt.UTC()
+		if prev, ok := out[r.AgentID]; !ok || ts.After(prev) {
+			out[r.AgentID] = ts
+		}
+	}
+	return out, nil
+}
