@@ -1160,13 +1160,10 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 				Class:        StepClassCanceled,
 				Reason:       celengine.ReasonCanceled,
 				Elapsed:      0,
-				GroupElapsed: elapsed,
+				GroupElapsed: 0,
 				GroupID:      groupID,
 				Domain:       DomainIO,
 				Err:          &FailedError{Reason: celengine.ReasonCanceled, Cause: memberCtxErr},
-			}
-			if i == 0 {
-				out.Elapsed = elapsed
 			}
 			m.run.completePending(m, out, nil, nil)
 			continue

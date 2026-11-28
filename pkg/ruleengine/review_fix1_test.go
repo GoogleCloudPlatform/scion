@@ -166,8 +166,11 @@ func TestReviewFix1_R2_GroupInlineCancelPerMember(t *testing.T) {
 		before := d.calls.Load()
 		inl1, cancel1 := context.WithCancel(context.Background())
 		defer cancel1()
-		r1, p1 := oneElemRun(t, eng, ruleengine.ChainDomains{Inline: ruleengine.Domain{Ctx: inl1}, IO: io}, c, "gk", ruleengine.Input{AdmittedInputKey: "k"})
-		r2, p2 := oneElemRun(t, eng, ruleengine.ChainDomains{Inline: ruleengine.Domain{Ctx: context.Background()}, IO: io}, c, "gk", ruleengine.Input{AdmittedInputKey: "k"})
+		inlTr1 := ruleengine.NewBudgetTracker(250 * time.Millisecond)
+		ioTr := ruleengine.NewBudgetTracker(time.Second)
+		ioDom := ruleengine.Domain{Ctx: ioCtx, Budget: ruleengine.Budget{Tracker: ioTr}}
+		r1, p1 := oneElemRun(t, eng, ruleengine.ChainDomains{Inline: ruleengine.Domain{Ctx: inl1, Budget: ruleengine.Budget{Tracker: inlTr1}}, IO: ioDom}, c, "gk", ruleengine.Input{AdmittedInputKey: "k"})
+		r2, p2 := oneElemRun(t, eng, ruleengine.ChainDomains{Inline: ruleengine.Domain{Ctx: context.Background()}, IO: ioDom}, c, "gk", ruleengine.Input{AdmittedInputKey: "k"})
 		go func() { time.Sleep(25 * time.Millisecond); cancel1() }()
 		if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
 			t.Fatal(err)
@@ -184,6 +187,12 @@ func TestReviewFix1_R2_GroupInlineCancelPerMember(t *testing.T) {
 		}
 		if res1.Deciding.Class != ruleengine.StepClassCanceled {
 			t.Fatalf("run 1 (Inline canceled) got %q, want canceled", res1.Deciding.Class)
+		}
+		if inlTr1.Spent() != 0 || res1.Steps[0].Elapsed != 0 {
+			t.Fatalf("canceled member was charged: inlineSpent=%s stepElapsed=%s", inlTr1.Spent(), res1.Steps[0].Elapsed)
+		}
+		if ioTr.Spent() != res2.Steps[0].GroupElapsed {
+			t.Fatalf("shared IO tracker spent=%s, want single group elapsed %s", ioTr.Spent(), res2.Steps[0].GroupElapsed)
 		}
 	})
 
