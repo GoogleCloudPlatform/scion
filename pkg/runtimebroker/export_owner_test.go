@@ -17,6 +17,8 @@ package runtimebroker
 import (
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 func TestParseExportOwner(t *testing.T) {
@@ -80,6 +82,8 @@ func TestOwnerMismatchWarning(t *testing.T) {
 				"1000:1000",
 				"2000:1000",
 				"server.project_storage.nfs.uid/gid",
+				api.ExportOwnerMarkerName,
+				"correct or remove",
 			},
 		},
 		{
@@ -93,6 +97,8 @@ func TestOwnerMismatchWarning(t *testing.T) {
 				"1000:2000",
 				"1000:1000",
 				"server.project_storage.nfs.uid/gid",
+				api.ExportOwnerMarkerName,
+				"correct or remove",
 			},
 		},
 	} {
@@ -102,6 +108,9 @@ func TestOwnerMismatchWarning(t *testing.T) {
 				if !strings.Contains(got, sub) {
 					t.Errorf("ownerMismatchWarning = %q, want substring %q", got, sub)
 				}
+			}
+			if strings.Contains(got, "broker runtime uid/gid") {
+				t.Errorf("ownerMismatchWarning = %q, must not mention non-existent 'broker runtime uid/gid' setting", got)
 			}
 		})
 	}

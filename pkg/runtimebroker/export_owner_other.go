@@ -24,8 +24,8 @@ import (
 )
 
 // readOrCreateExportOwner is unsupported on non-Unix platforms.
-func readOrCreateExportOwner(dir string, uid, gid int) (int, int, error) {
-	return 0, 0, fmt.Errorf("project storage owner marker: %w on this platform", errors.ErrUnsupported)
+func readOrCreateExportOwner(dir string, uid, gid int) (int, int, bool, error) {
+	return 0, 0, false, fmt.Errorf("project storage owner marker: %w on this platform", errors.ErrUnsupported)
 }
 
 // effectiveAgentOwnerIDs reports no numeric uid/gid on non-Unix platforms.

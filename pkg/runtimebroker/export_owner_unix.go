@@ -36,15 +36,15 @@ import (
 // race-free across brokers sharing the export: a temp file is hard-linked to
 // the marker name so one broker wins and all others read the winner's ids. A
 // malformed marker is an error and is never overwritten.
-func readOrCreateExportOwner(dir string, uid, gid int) (int, int, error) {
+func readOrCreateExportOwner(dir string, uid, gid int) (int, int, bool, error) {
 	marker := filepath.Join(dir, api.ExportOwnerMarkerName)
 	ownerUID, ownerGID, err := readExportOwnerMarker(marker)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return ownerUID, ownerGID, err
+		return ownerUID, ownerGID, false, err
 	}
 	tmp, err := os.CreateTemp(dir, api.ExportOwnerMarkerName+".tmp-*")
 	if err != nil {
-		return 0, 0, fmt.Errorf("create export owner marker in %s: %w", dir, err)
+		return 0, 0, false, fmt.Errorf("create export owner marker in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
@@ -56,17 +56,19 @@ func readOrCreateExportOwner(dir string, uid, gid int) (int, int, error) {
 		werr = cerr
 	}
 	if werr != nil {
-		return 0, 0, fmt.Errorf("write export owner marker %s: %w", tmpName, werr)
+		return 0, 0, false, fmt.Errorf("write export owner marker %s: %w", tmpName, werr)
 	}
 	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return 0, 0, fmt.Errorf("chmod export owner marker %s: %w", tmpName, err)
+		return 0, 0, false, fmt.Errorf("chmod export owner marker %s: %w", tmpName, err)
 	}
 	// Link fails with EEXIST when another broker created the marker first;
 	// either way the marker now exists and is read back.
-	if err := os.Link(tmpName, marker); err != nil && !errors.Is(err, fs.ErrExist) {
-		return 0, 0, fmt.Errorf("create export owner marker %s: %w", marker, err)
+	linkErr := os.Link(tmpName, marker)
+	if linkErr != nil && !errors.Is(linkErr, fs.ErrExist) {
+		return 0, 0, false, fmt.Errorf("create export owner marker %s: %w", marker, linkErr)
 	}
-	return readExportOwnerMarker(marker)
+	ownerUID, ownerGID, err = readExportOwnerMarker(marker)
+	return ownerUID, ownerGID, linkErr == nil && err == nil, err
 }
 
 // effectiveAgentOwnerIDs returns the effective uid and gid agents started by

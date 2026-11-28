@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // exportOwnerMarkerMaxBytes bounds how much of the owner marker file is read.
@@ -31,8 +33,13 @@ const exportOwnerMarkerMaxBytes = 64
 // check value when this broker's effective agent uid/gid differs from the
 // canonical owner recorded beside .scion-export-id. Its leading word
 // ("warning") is what the heartbeat carries (api.NormalizeBrokerHealthReport);
-// the rest names only the uid:gid pairs and configuration fields, never paths.
+// the rest names only the uid:gid pairs, marker filename, and configuration
+// fields, never host paths.
 const shareHealthOwnerMismatch = "warning: owner_mismatch"
+
+// ownerMismatchRemediation is the path-free remediation included in the
+// /healthz project_storage warning and mismatch WARN log.
+const ownerMismatchRemediation = "align server.project_storage.nfs.uid/gid across brokers sharing this store, or if the recorded owner is wrong, correct or remove " + api.ExportOwnerMarkerName + " in the project storage sub-path root"
 
 // exportOwnerReadTimeout bounds how long checkShareHealth waits for the owner
 // marker read/create on a shared mount.
@@ -86,34 +93,35 @@ func ownerMismatchWarning(agentUID, agentGID, recordedUID, recordedGID int) stri
 		return ""
 	}
 	return fmt.Sprintf(
-		"%s (agent uid:gid %d:%d differs from recorded project storage owner %d:%d; align server.project_storage.nfs.uid/gid or the broker runtime uid/gid across brokers sharing this store)",
-		shareHealthOwnerMismatch, agentUID, agentGID, recordedUID, recordedGID,
+		"%s (agent uid:gid %d:%d differs from recorded project storage owner %d:%d; %s)",
+		shareHealthOwnerMismatch, agentUID, agentGID, recordedUID, recordedGID, ownerMismatchRemediation,
 	)
 }
 
 // readOrCreateExportOwnerWithContext bounds readOrCreateExportOwner by ctx and
 // exportOwnerReadTimeout so a stalled shared mount cannot hang the health loop.
-func readOrCreateExportOwnerWithContext(ctx context.Context, dir string, uid, gid int) (ownerUID, ownerGID int, err error) {
+func readOrCreateExportOwnerWithContext(ctx context.Context, dir string, uid, gid int) (ownerUID, ownerGID int, created bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	type result struct {
 		uid, gid int
+		created  bool
 		err      error
 	}
 	done := make(chan result, 1)
 	go func() {
-		u, g, rerr := readOrCreateExportOwner(dir, uid, gid)
-		done <- result{uid: u, gid: g, err: rerr}
+		u, g, c, rerr := readOrCreateExportOwner(dir, uid, gid)
+		done <- result{uid: u, gid: g, created: c, err: rerr}
 	}()
 	timer := time.NewTimer(exportOwnerReadTimeout)
 	defer timer.Stop()
 	select {
 	case r := <-done:
-		return r.uid, r.gid, r.err
+		return r.uid, r.gid, r.created, r.err
 	case <-ctx.Done():
-		return 0, 0, ctx.Err()
+		return 0, 0, false, ctx.Err()
 	case <-timer.C:
-		return 0, 0, context.DeadlineExceeded
+		return 0, 0, false, context.DeadlineExceeded
 	}
 }

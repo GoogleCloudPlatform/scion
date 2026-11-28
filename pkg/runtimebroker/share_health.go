@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -81,6 +83,7 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 
 	c := &s.shareHealth
 	var ownerWarning string
+	var ownerCreated bool
 	var ownerErr error
 	var agentUID, agentGID, recordedUID, recordedGID int
 	if err == nil {
@@ -94,7 +97,7 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 			agentUID, agentGID, hasAgentIDs = effectiveAgentOwnerIDs(s.RuntimeName(), layout)
 		}
 		if hasAgentIDs {
-			recordedUID, recordedGID, ownerErr = readOrCreateExportOwnerWithContext(ctx, path, agentUID, agentGID)
+			recordedUID, recordedGID, ownerCreated, ownerErr = readOrCreateExportOwnerWithContext(ctx, path, agentUID, agentGID)
 			if ctx.Err() != nil {
 				return
 			}
@@ -129,6 +132,11 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 	}
 
 	if err == nil {
+		if ownerErr == nil && ownerCreated {
+			slog.Info("Recorded canonical project storage owner marker",
+				"path", filepath.Join(path, api.ExportOwnerMarkerName),
+				"uid", recordedUID, "gid", recordedGID)
+		}
 		switch {
 		case ownerErr != nil && !errors.Is(ownerErr, errors.ErrUnsupported) && !prevOwnerErrLogged:
 			slog.Warn("Could not read or record project storage canonical owner marker; skipping ownership alignment check",
@@ -137,7 +145,7 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 			slog.Warn("Broker effective agent uid/gid differs from recorded project storage owner",
 				"agent_uid", agentUID, "agent_gid", agentGID,
 				"recorded_uid", recordedUID, "recorded_gid", recordedGID,
-				"remedy", "align server.project_storage.nfs.uid/gid or the broker runtime uid/gid across brokers sharing this store")
+				"remedy", ownerMismatchRemediation)
 		case ownerWarning == "" && prevOwnerWarning != "":
 			slog.Info("Broker effective agent uid/gid matches recorded project storage owner again")
 		}

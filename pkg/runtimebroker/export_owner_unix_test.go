@@ -35,15 +35,17 @@ import (
 func TestReadOrCreateExportOwner_CreatesOnceThenReads(t *testing.T) {
 	dir := t.TempDir()
 
-	uid, gid, err := readOrCreateExportOwner(dir, 1000, 2000)
+	uid, gid, created, err := readOrCreateExportOwner(dir, 1000, 2000)
 	require.NoError(t, err)
+	require.True(t, created)
 	require.Equal(t, 1000, uid)
 	require.Equal(t, 2000, gid)
 	require.FileExists(t, filepath.Join(dir, api.ExportOwnerMarkerName))
 
 	// A second broker with different ids reads the existing canonical owner.
-	uid2, gid2, err := readOrCreateExportOwner(dir, 3000, 4000)
+	uid2, gid2, created2, err := readOrCreateExportOwner(dir, 3000, 4000)
 	require.NoError(t, err)
+	require.False(t, created2)
 	require.Equal(t, 1000, uid2)
 	require.Equal(t, 2000, gid2)
 }
@@ -53,6 +55,7 @@ func TestReadOrCreateExportOwner_ConcurrentCreatorsAgree(t *testing.T) {
 	const workers = 16
 	uids := make([]int, workers)
 	gids := make([]int, workers)
+	created := make([]bool, workers)
 	errs := make([]error, workers)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -61,17 +64,22 @@ func TestReadOrCreateExportOwner_ConcurrentCreatorsAgree(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			uids[i], gids[i], errs[i] = readOrCreateExportOwner(dir, 1000+i, 2000+i)
+			uids[i], gids[i], created[i], errs[i] = readOrCreateExportOwner(dir, 1000+i, 2000+i)
 		}(i)
 	}
 	close(start)
 	wg.Wait()
 
+	createdCount := 0
 	for i := 0; i < workers; i++ {
 		require.NoError(t, errs[i])
 		require.Equal(t, uids[0], uids[i], "all concurrent creators must observe the winning uid")
 		require.Equal(t, gids[0], gids[i], "all concurrent creators must observe the winning gid")
+		if created[i] {
+			createdCount++
+		}
 	}
+	require.Equal(t, 1, createdCount, "exactly one concurrent creator must report creating the marker")
 }
 
 func TestReadOrCreateExportOwner_InvalidMarkerIsNotOverwritten(t *testing.T) {
@@ -79,8 +87,9 @@ func TestReadOrCreateExportOwner_InvalidMarkerIsNotOverwritten(t *testing.T) {
 	marker := filepath.Join(dir, api.ExportOwnerMarkerName)
 	require.NoError(t, os.WriteFile(marker, []byte("not-a-uid-gid\n"), 0o644))
 
-	_, _, err := readOrCreateExportOwner(dir, 1000, 1000)
+	_, _, created, err := readOrCreateExportOwner(dir, 1000, 1000)
 	require.Error(t, err)
+	require.False(t, created)
 
 	got, readErr := os.ReadFile(marker)
 	require.NoError(t, readErr)
@@ -89,8 +98,9 @@ func TestReadOrCreateExportOwner_InvalidMarkerIsNotOverwritten(t *testing.T) {
 
 func TestReadOrCreateExportOwner_MissingDirIsNotCreated(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
-	_, _, err := readOrCreateExportOwner(dir, 1000, 1000)
+	_, _, created, err := readOrCreateExportOwner(dir, 1000, 1000)
 	require.Error(t, err)
+	require.False(t, created)
 	require.NoDirExists(t, dir)
 }
 
@@ -126,6 +136,30 @@ func TestEffectiveAgentOwnerIDs(t *testing.T) {
 func TestShareHealth_OwnerCheck(t *testing.T) {
 	ctx := context.Background()
 
+	t.Run("missing marker is created on first check with INFO log and reports healthy", func(t *testing.T) {
+		logs := captureDefaultLog(t)
+		f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
+		marker := filepath.Join(f.hostBase, "projects", api.ExportOwnerMarkerName)
+		require.NoFileExists(t, marker)
+		f.srv.shareHealth.agentOwnerIDs = func() (int, int, bool) { return 1000, 1000, true }
+
+		f.srv.checkShareHealth(ctx)
+		info := f.srv.GetHealthInfo(ctx)
+		require.Equal(t, "healthy", info.Checks[shareHealthCheck])
+		require.Equal(t, "healthy", info.Status)
+
+		raw, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "1000:1000\n", string(raw))
+
+		// Creation logs INFO (in addition to share visible INFO); a second check
+		// does not re-create or log creation again.
+		infoAfterFirst := logs.count(slog.LevelInfo)
+		require.GreaterOrEqual(t, infoAfterFirst, 2)
+		f.srv.checkShareHealth(ctx)
+		require.Equal(t, infoAfterFirst, logs.count(slog.LevelInfo))
+	})
+
 	t.Run("match reports healthy with no warning", func(t *testing.T) {
 		f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
 		marker := filepath.Join(f.hostBase, "projects", api.ExportOwnerMarkerName)
@@ -156,6 +190,8 @@ func TestShareHealth_OwnerCheck(t *testing.T) {
 		require.True(t, strings.HasPrefix(got, shareHealthOwnerMismatch+" ("), "got %q", got)
 		require.Contains(t, got, "1000:1000")
 		require.Contains(t, got, "2000:1000")
+		require.Contains(t, got, api.ExportOwnerMarkerName)
+		require.NotContains(t, got, "broker runtime uid/gid")
 		assertNoPathValues(t, f, got)
 		require.Equal(t, "healthy", info.Status)
 		require.Equal(t, 1, logs.count(slog.LevelWarn))
@@ -168,6 +204,17 @@ func TestShareHealth_OwnerCheck(t *testing.T) {
 		w := httptest.NewRecorder()
 		f.srv.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 		require.Equal(t, http.StatusOK, w.Code)
+
+		// Following the remediation (removing the stale marker) and re-checking
+		// clears the warning and records the aligned owner.
+		require.NoError(t, os.Remove(marker))
+		f.srv.checkShareHealth(ctx)
+		info = f.srv.GetHealthInfo(ctx)
+		require.Equal(t, "healthy", info.Checks[shareHealthCheck])
+		require.Equal(t, "healthy", info.Status)
+		raw, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "1000:1000\n", string(raw))
 	})
 
 	t.Run("gid mismatch reports warning naming both ids", func(t *testing.T) {
@@ -194,6 +241,20 @@ func TestShareHealth_OwnerCheck(t *testing.T) {
 			f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
 			marker := filepath.Join(f.hostBase, "projects", api.ExportOwnerMarkerName)
 			require.NoError(t, os.WriteFile(marker, []byte("corrupt\n"), 0o644))
+			f.srv.shareHealth.agentOwnerIDs = func() (int, int, bool) { return 1000, 1000, true }
+
+			f.srv.checkShareHealth(ctx)
+			info := f.srv.GetHealthInfo(ctx)
+			require.Equal(t, "healthy", info.Checks[shareHealthCheck])
+			require.Equal(t, "healthy", info.Status)
+		})
+
+		t.Run("unreadable marker", func(t *testing.T) {
+			f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
+			marker := filepath.Join(f.hostBase, "projects", api.ExportOwnerMarkerName)
+			// A directory at the marker path causes readExportOwnerMarker to fail
+			// with an I/O error regardless of process UID.
+			require.NoError(t, os.Mkdir(marker, 0o755))
 			f.srv.shareHealth.agentOwnerIDs = func() (int, int, bool) { return 1000, 1000, true }
 
 			f.srv.checkShareHealth(ctx)
