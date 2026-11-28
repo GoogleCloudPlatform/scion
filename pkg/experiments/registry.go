@@ -657,6 +657,13 @@ const Triggers = "hub.triggers"
 // exposes the flag for UI presentation.
 const MessagePolicies = "hub.message_policies"
 
+// MessagePolicyChains gates ordered rule chains (steps[]) on project message
+// policies (SP1/P1). Server layer: while off, authoring, conversion, and step
+// edits return 400 experiment_disabled and existing chain-native policies
+// evaluate as failed/chain_disabled through their configured on_failed
+// handling; disable and delete stay allowed.
+const MessagePolicyChains = "hub.message_policy_chains"
+
 // EffectivePermissions gates the admin effective-permissions viewer
 // (ptone/scion#8439): GET|HEAD /api/v1/admin/effective-permissions (404 while
 // off) and the Effective permissions tab in the admin Users Roles dialog
@@ -1467,6 +1474,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8047",
 		Owner:       "system-one",
 		ReviewBy:    "2027-02-15",
+	},
+	{
+		Name:        MessagePolicyChains,
+		Title:       "Message policy rule chains",
+		Description: "Enables ordered rule chains (steps[]) on project message policies (P1 partial: enforce mode, agent_to_user and agent_to_conversation surfaces, CEL steps only). While off, authoring, conversion, and step edits return 400 experiment_disabled and existing chain-native policies evaluate as failed/chain_disabled through their configured on_failed handling; disable and delete stay allowed.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8047",
+		Owner:       "system-one",
+		ReviewBy:    "2027-03-01",
 	},
 	{
 		Name:        TemplateConfigValidation,

@@ -2773,6 +2773,7 @@ var (
 		{Name: "violation_rule", Type: field.TypeString, Size: 2147483647},
 		{Name: "system_one_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "system_one_refs", Type: field.TypeJSON, Nullable: true},
+		{Name: "chain", Type: field.TypeJSON, Nullable: true},
 		{Name: "on_uncertain", Type: field.TypeString, Size: 16, Default: ""},
 		{Name: "on_failed", Type: field.TypeEnum, Enums: []string{"admit", "reject"}},
 		{Name: "on_failed_reasons", Type: field.TypeJSON, Nullable: true},
@@ -2821,6 +2822,7 @@ var (
 		{Name: "reason", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "cel_error_reason", Type: field.TypeString, Size: 64, Default: ""},
 		{Name: "evaluation", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "chain", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "elapsed_ms", Type: field.TypeInt64, Default: 0},
 		{Name: "created_at", Type: field.TypeTime},
 	}
@@ -2833,17 +2835,17 @@ var (
 			{
 				Name:    "messagepolicydecision_project_id_policy_id_created_at_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagePolicyDecisionsColumns[1], MessagePolicyDecisionsColumns[2], MessagePolicyDecisionsColumns[18], MessagePolicyDecisionsColumns[0]},
+				Columns: []*schema.Column{MessagePolicyDecisionsColumns[1], MessagePolicyDecisionsColumns[2], MessagePolicyDecisionsColumns[19], MessagePolicyDecisionsColumns[0]},
 			},
 			{
 				Name:    "messagepolicydecision_project_id_created_at_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagePolicyDecisionsColumns[1], MessagePolicyDecisionsColumns[18], MessagePolicyDecisionsColumns[0]},
+				Columns: []*schema.Column{MessagePolicyDecisionsColumns[1], MessagePolicyDecisionsColumns[19], MessagePolicyDecisionsColumns[0]},
 			},
 			{
 				Name:    "messagepolicydecision_created_at_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagePolicyDecisionsColumns[18], MessagePolicyDecisionsColumns[0]},
+				Columns: []*schema.Column{MessagePolicyDecisionsColumns[19], MessagePolicyDecisionsColumns[0]},
 			},
 		},
 	}

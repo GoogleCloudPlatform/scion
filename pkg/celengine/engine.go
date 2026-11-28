@@ -26,6 +26,7 @@ import (
 	"cel.dev/cel-go/cel"
 	"cel.dev/cel-go/common"
 	celast "cel.dev/cel-go/common/ast"
+	"cel.dev/cel-go/common/operators"
 	"cel.dev/cel-go/common/types"
 	"cel.dev/cel-go/ext"
 	"cel.dev/cel-go/interpreter"
@@ -633,6 +634,81 @@ func (p Program) ReferencesIdent(names ...string) (bool, error) {
 		return true, walkErr
 	}
 	return found, nil
+}
+
+// MapKeyAccesses inspects p's checked AST for all references to the top-level
+// map identifier rootName (e.g. "chain"). It returns sorted unique literal
+// string keys accessed via rootName.key, has(rootName.key), rootName["key"],
+// or "key" in rootName. If rootName is accessed with a non-literal key (e.g.
+// rootName[x] or x in rootName) or used directly as a value (e.g. size(chain),
+// chain == {}), dynamic is true. It is conservative: a missing checked AST or
+// empty rootName returns an error.
+func (p Program) MapKeyAccesses(rootName string) ([]string, bool, error) {
+	if p.checked == nil {
+		return nil, true, errors.New("celengine: program has no checked AST")
+	}
+	if rootName == "" {
+		return nil, true, errors.New("celengine: empty root identifier name")
+	}
+	rep := p.checked.NativeRep()
+	if rep == nil || rep.Expr() == nil {
+		return nil, true, errors.New("celengine: program has empty checked AST")
+	}
+	keySet := make(map[string]struct{})
+	dynamic := false
+	celast.MatchDescendants(celast.NavigateAST(rep), func(n celast.NavigableExpr) bool {
+		if n.Kind() != celast.IdentKind || n.AsIdent() != rootName {
+			return false
+		}
+		parent, hasParent := n.Parent()
+		if !hasParent {
+			dynamic = true
+			return false
+		}
+		switch parent.Kind() {
+		case celast.SelectKind:
+			sel := parent.AsSelect()
+			if sel.Operand() != nil && sel.Operand().ID() == n.ID() {
+				if field := sel.FieldName(); field != "" {
+					keySet[field] = struct{}{}
+					return false
+				}
+			}
+			dynamic = true
+		case celast.CallKind:
+			call := parent.AsCall()
+			args := call.Args()
+			switch call.FunctionName() {
+			case operators.Index:
+				if len(args) == 2 && args[0].ID() == n.ID() && args[1].Kind() == celast.LiteralKind {
+					if s, ok := args[1].AsLiteral().Value().(string); ok {
+						keySet[s] = struct{}{}
+						return false
+					}
+				}
+				dynamic = true
+			case operators.In, operators.OldIn:
+				if len(args) == 2 && args[1].ID() == n.ID() && args[0].Kind() == celast.LiteralKind {
+					if s, ok := args[0].AsLiteral().Value().(string); ok {
+						keySet[s] = struct{}{}
+						return false
+					}
+				}
+				dynamic = true
+			default:
+				dynamic = true
+			}
+		default:
+			dynamic = true
+		}
+		return false
+	})
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys, dynamic, nil
 }
 
 // nowFunc is the clock used to measure Program.Eval elapsed wall-clock time;

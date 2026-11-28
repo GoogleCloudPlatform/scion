@@ -779,6 +779,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.GitHubTriggers:                  testAdminPolicyDeny,
 	experiments.Triggers:                        testAdminPolicyDeny,
 	experiments.MessagePolicies:                 testAdminPolicyDeny,
+	experiments.MessagePolicyChains:             testAdminPolicyDeny,
 	experiments.EffectivePermissions:            testAdminPolicyDeny,
 	experiments.AdminManagedBrokers:             testAdminPolicyDeny,
 	experiments.CustomDefaultUserRole:           testAdminPolicyDeny,

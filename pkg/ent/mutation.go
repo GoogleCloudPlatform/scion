@@ -79359,6 +79359,7 @@ type MessagePolicyMutation struct {
 	system_one_rule       *string
 	system_one_refs       *[]string
 	appendsystem_one_refs []string
+	chain                 **store.MessagePolicyChain
 	on_uncertain          *string
 	on_failed             *messagepolicy.OnFailed
 	on_failed_reasons     *map[string]string
@@ -79833,6 +79834,55 @@ func (m *MessagePolicyMutation) ResetSystemOneRefs() {
 	delete(m.clearedFields, messagepolicy.FieldSystemOneRefs)
 }
 
+// SetChain sets the "chain" field.
+func (m *MessagePolicyMutation) SetChain(spc *store.MessagePolicyChain) {
+	m.chain = &spc
+}
+
+// Chain returns the value of the "chain" field in the mutation.
+func (m *MessagePolicyMutation) Chain() (r *store.MessagePolicyChain, exists bool) {
+	v := m.chain
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChain returns the old "chain" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldChain(ctx context.Context) (v *store.MessagePolicyChain, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChain is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChain requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChain: %w", err)
+	}
+	return oldValue.Chain, nil
+}
+
+// ClearChain clears the value of the "chain" field.
+func (m *MessagePolicyMutation) ClearChain() {
+	m.chain = nil
+	m.clearedFields[messagepolicy.FieldChain] = struct{}{}
+}
+
+// ChainCleared returns if the "chain" field was cleared in this mutation.
+func (m *MessagePolicyMutation) ChainCleared() bool {
+	_, ok := m.clearedFields[messagepolicy.FieldChain]
+	return ok
+}
+
+// ResetChain resets all changes to the "chain" field.
+func (m *MessagePolicyMutation) ResetChain() {
+	m.chain = nil
+	delete(m.clearedFields, messagepolicy.FieldChain)
+}
+
 // SetOnUncertain sets the "on_uncertain" field.
 func (m *MessagePolicyMutation) SetOnUncertain(s string) {
 	m.on_uncertain = &s
@@ -80260,7 +80310,7 @@ func (m *MessagePolicyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessagePolicyMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.project_id != nil {
 		fields = append(fields, messagepolicy.FieldProjectID)
 	}
@@ -80287,6 +80337,9 @@ func (m *MessagePolicyMutation) Fields() []string {
 	}
 	if m.system_one_refs != nil {
 		fields = append(fields, messagepolicy.FieldSystemOneRefs)
+	}
+	if m.chain != nil {
+		fields = append(fields, messagepolicy.FieldChain)
 	}
 	if m.on_uncertain != nil {
 		fields = append(fields, messagepolicy.FieldOnUncertain)
@@ -80344,6 +80397,8 @@ func (m *MessagePolicyMutation) Field(name string) (ent.Value, bool) {
 		return m.SystemOneRule()
 	case messagepolicy.FieldSystemOneRefs:
 		return m.SystemOneRefs()
+	case messagepolicy.FieldChain:
+		return m.Chain()
 	case messagepolicy.FieldOnUncertain:
 		return m.OnUncertain()
 	case messagepolicy.FieldOnFailed:
@@ -80391,6 +80446,8 @@ func (m *MessagePolicyMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldSystemOneRule(ctx)
 	case messagepolicy.FieldSystemOneRefs:
 		return m.OldSystemOneRefs(ctx)
+	case messagepolicy.FieldChain:
+		return m.OldChain(ctx)
 	case messagepolicy.FieldOnUncertain:
 		return m.OldOnUncertain(ctx)
 	case messagepolicy.FieldOnFailed:
@@ -80482,6 +80539,13 @@ func (m *MessagePolicyMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSystemOneRefs(v)
+		return nil
+	case messagepolicy.FieldChain:
+		v, ok := value.(*store.MessagePolicyChain)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChain(v)
 		return nil
 	case messagepolicy.FieldOnUncertain:
 		v, ok := value.(string)
@@ -80601,6 +80665,9 @@ func (m *MessagePolicyMutation) ClearedFields() []string {
 	if m.FieldCleared(messagepolicy.FieldSystemOneRefs) {
 		fields = append(fields, messagepolicy.FieldSystemOneRefs)
 	}
+	if m.FieldCleared(messagepolicy.FieldChain) {
+		fields = append(fields, messagepolicy.FieldChain)
+	}
 	if m.FieldCleared(messagepolicy.FieldOnFailedReasons) {
 		fields = append(fields, messagepolicy.FieldOnFailedReasons)
 	}
@@ -80620,6 +80687,9 @@ func (m *MessagePolicyMutation) ClearField(name string) error {
 	switch name {
 	case messagepolicy.FieldSystemOneRefs:
 		m.ClearSystemOneRefs()
+		return nil
+	case messagepolicy.FieldChain:
+		m.ClearChain()
 		return nil
 	case messagepolicy.FieldOnFailedReasons:
 		m.ClearOnFailedReasons()
@@ -80658,6 +80728,9 @@ func (m *MessagePolicyMutation) ResetField(name string) error {
 		return nil
 	case messagepolicy.FieldSystemOneRefs:
 		m.ResetSystemOneRefs()
+		return nil
+	case messagepolicy.FieldChain:
+		m.ResetChain()
 		return nil
 	case messagepolicy.FieldOnUncertain:
 		m.ResetOnUncertain()
@@ -80764,6 +80837,7 @@ type MessagePolicyDecisionMutation struct {
 	reason             *string
 	cel_error_reason   *string
 	evaluation         *string
+	chain              *string
 	elapsed_ms         *int64
 	addelapsed_ms      *int64
 	created_at         *time.Time
@@ -81486,6 +81560,42 @@ func (m *MessagePolicyDecisionMutation) ResetEvaluation() {
 	m.evaluation = nil
 }
 
+// SetChain sets the "chain" field.
+func (m *MessagePolicyDecisionMutation) SetChain(s string) {
+	m.chain = &s
+}
+
+// Chain returns the value of the "chain" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Chain() (r string, exists bool) {
+	v := m.chain
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChain returns the old "chain" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldChain(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChain is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChain requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChain: %w", err)
+	}
+	return oldValue.Chain, nil
+}
+
+// ResetChain resets all changes to the "chain" field.
+func (m *MessagePolicyDecisionMutation) ResetChain() {
+	m.chain = nil
+}
+
 // SetElapsedMs sets the "elapsed_ms" field.
 func (m *MessagePolicyDecisionMutation) SetElapsedMs(i int64) {
 	m.elapsed_ms = &i
@@ -81612,7 +81722,7 @@ func (m *MessagePolicyDecisionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessagePolicyDecisionMutation) Fields() []string {
-	fields := make([]string, 0, 18)
+	fields := make([]string, 0, 19)
 	if m.project_id != nil {
 		fields = append(fields, messagepolicydecision.FieldProjectID)
 	}
@@ -81661,6 +81771,9 @@ func (m *MessagePolicyDecisionMutation) Fields() []string {
 	if m.evaluation != nil {
 		fields = append(fields, messagepolicydecision.FieldEvaluation)
 	}
+	if m.chain != nil {
+		fields = append(fields, messagepolicydecision.FieldChain)
+	}
 	if m.elapsed_ms != nil {
 		fields = append(fields, messagepolicydecision.FieldElapsedMs)
 	}
@@ -81707,6 +81820,8 @@ func (m *MessagePolicyDecisionMutation) Field(name string) (ent.Value, bool) {
 		return m.CelErrorReason()
 	case messagepolicydecision.FieldEvaluation:
 		return m.Evaluation()
+	case messagepolicydecision.FieldChain:
+		return m.Chain()
 	case messagepolicydecision.FieldElapsedMs:
 		return m.ElapsedMs()
 	case messagepolicydecision.FieldCreatedAt:
@@ -81752,6 +81867,8 @@ func (m *MessagePolicyDecisionMutation) OldField(ctx context.Context, name strin
 		return m.OldCelErrorReason(ctx)
 	case messagepolicydecision.FieldEvaluation:
 		return m.OldEvaluation(ctx)
+	case messagepolicydecision.FieldChain:
+		return m.OldChain(ctx)
 	case messagepolicydecision.FieldElapsedMs:
 		return m.OldElapsedMs(ctx)
 	case messagepolicydecision.FieldCreatedAt:
@@ -81876,6 +81993,13 @@ func (m *MessagePolicyDecisionMutation) SetField(name string, value ent.Value) e
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetEvaluation(v)
+		return nil
+	case messagepolicydecision.FieldChain:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChain(v)
 		return nil
 	case messagepolicydecision.FieldElapsedMs:
 		v, ok := value.(int64)
@@ -82023,6 +82147,9 @@ func (m *MessagePolicyDecisionMutation) ResetField(name string) error {
 		return nil
 	case messagepolicydecision.FieldEvaluation:
 		m.ResetEvaluation()
+		return nil
+	case messagepolicydecision.FieldChain:
+		m.ResetChain()
 		return nil
 	case messagepolicydecision.FieldElapsedMs:
 		m.ResetElapsedMs()

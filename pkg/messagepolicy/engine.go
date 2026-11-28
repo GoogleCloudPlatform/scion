@@ -78,6 +78,16 @@ func (e *Evaluator) CompileViolation(ctx context.Context, expr string) error {
 	return err
 }
 
+// CompileChainStep validates and compiles a CEL step expression against the
+// message_policy_chain v2 CEL environment without populating the runtime LRU
+// cache.
+func (e *Evaluator) CompileChainStep(ctx context.Context, expr string) (ruleengine.Compiled, error) {
+	if strings.TrimSpace(expr) == "" {
+		return ruleengine.Compiled{}, errors.New("messagepolicy: step expr must not be empty")
+	}
+	return e.engine.Compile(ctx, ruleengine.DialectCEL, expr, ruleengine.KindFilter, ChainStepEnvironmentRef())
+}
+
 // CompileSystemOne validates and compiles a System One judgments rule JSON
 // against the message_policy v1 ContentEnvironment via ruleengine.Engine.
 func (e *Evaluator) CompileSystemOne(ctx context.Context, rawRule string) (ruleengine.Compiled, error) {
@@ -299,11 +309,20 @@ func (e *Evaluator) Invalidate(policyID string, revision int64) {
 	e.InvalidateScope(ScopeForPolicy(policyID, revision))
 }
 
-// InvalidateScope removes cached compiled program bindings for scope, ensuring
+// InvalidateScope removes cached compiled program bindings for scope across
+// the v1 (message_policy) CEL environment and, when registered on the CEL
+// dialect, the v2 (message_policy_chain) CEL environment, ensuring
 // scope.Consumer is ConsumerName ("message_policy").
 func (e *Evaluator) InvalidateScope(scope celengine.CacheScope) {
 	scope.Consumer = ConsumerName
 	e.engine.Invalidate(ruleengine.DialectCEL, EnvironmentName, scope)
+	if d, err := e.engine.DialectFor(ConsumerName, ruleengine.DialectCEL); err == nil {
+		if cd, isCEL := d.(*ruleengine.CELDialect); isCEL {
+			if _, hasChainEnv := cd.CELEngine(ChainEnvironmentName); hasChainEnv {
+				e.engine.Invalidate(ruleengine.DialectCEL, ChainEnvironmentName, scope)
+			}
+		}
+	}
 }
 
 // EvalOption configures per-evaluation bounds on EvaluateViolation / EvaluateExpr.

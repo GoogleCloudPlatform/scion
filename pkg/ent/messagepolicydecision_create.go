@@ -192,6 +192,20 @@ func (_c *MessagePolicyDecisionCreate) SetNillableEvaluation(v *string) *Message
 	return _c
 }
 
+// SetChain sets the "chain" field.
+func (_c *MessagePolicyDecisionCreate) SetChain(v string) *MessagePolicyDecisionCreate {
+	_c.mutation.SetChain(v)
+	return _c
+}
+
+// SetNillableChain sets the "chain" field if the given value is not nil.
+func (_c *MessagePolicyDecisionCreate) SetNillableChain(v *string) *MessagePolicyDecisionCreate {
+	if v != nil {
+		_c.SetChain(*v)
+	}
+	return _c
+}
+
 // SetElapsedMs sets the "elapsed_ms" field.
 func (_c *MessagePolicyDecisionCreate) SetElapsedMs(v int64) *MessagePolicyDecisionCreate {
 	_c.mutation.SetElapsedMs(v)
@@ -300,6 +314,10 @@ func (_c *MessagePolicyDecisionCreate) defaults() {
 	if _, ok := _c.mutation.Evaluation(); !ok {
 		v := messagepolicydecision.DefaultEvaluation
 		_c.mutation.SetEvaluation(v)
+	}
+	if _, ok := _c.mutation.Chain(); !ok {
+		v := messagepolicydecision.DefaultChain
+		_c.mutation.SetChain(v)
 	}
 	if _, ok := _c.mutation.ElapsedMs(); !ok {
 		v := messagepolicydecision.DefaultElapsedMs
@@ -417,6 +435,9 @@ func (_c *MessagePolicyDecisionCreate) check() error {
 	if _, ok := _c.mutation.Evaluation(); !ok {
 		return &ValidationError{Name: "evaluation", err: errors.New(`ent: missing required field "MessagePolicyDecision.evaluation"`)}
 	}
+	if _, ok := _c.mutation.Chain(); !ok {
+		return &ValidationError{Name: "chain", err: errors.New(`ent: missing required field "MessagePolicyDecision.chain"`)}
+	}
 	if _, ok := _c.mutation.ElapsedMs(); !ok {
 		return &ValidationError{Name: "elapsed_ms", err: errors.New(`ent: missing required field "MessagePolicyDecision.elapsed_ms"`)}
 	}
@@ -527,6 +548,10 @@ func (_c *MessagePolicyDecisionCreate) createSpec() (*MessagePolicyDecision, *sq
 	if value, ok := _c.mutation.Evaluation(); ok {
 		_spec.SetField(messagepolicydecision.FieldEvaluation, field.TypeString, value)
 		_node.Evaluation = value
+	}
+	if value, ok := _c.mutation.Chain(); ok {
+		_spec.SetField(messagepolicydecision.FieldChain, field.TypeString, value)
+		_node.Chain = value
 	}
 	if value, ok := _c.mutation.ElapsedMs(); ok {
 		_spec.SetField(messagepolicydecision.FieldElapsedMs, field.TypeInt64, value)
@@ -652,6 +677,9 @@ func (u *MessagePolicyDecisionUpsertOne) UpdateNewValues() *MessagePolicyDecisio
 		}
 		if _, exists := u.create.mutation.Evaluation(); exists {
 			s.SetIgnore(messagepolicydecision.FieldEvaluation)
+		}
+		if _, exists := u.create.mutation.Chain(); exists {
+			s.SetIgnore(messagepolicydecision.FieldChain)
 		}
 		if _, exists := u.create.mutation.ElapsedMs(); exists {
 			s.SetIgnore(messagepolicydecision.FieldElapsedMs)
@@ -920,6 +948,9 @@ func (u *MessagePolicyDecisionUpsertBulk) UpdateNewValues() *MessagePolicyDecisi
 			}
 			if _, exists := b.mutation.Evaluation(); exists {
 				s.SetIgnore(messagepolicydecision.FieldEvaluation)
+			}
+			if _, exists := b.mutation.Chain(); exists {
+				s.SetIgnore(messagepolicydecision.FieldChain)
 			}
 			if _, exists := b.mutation.ElapsedMs(); exists {
 				s.SetIgnore(messagepolicydecision.FieldElapsedMs)

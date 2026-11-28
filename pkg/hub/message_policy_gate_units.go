@@ -378,7 +378,7 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 	for i := range activeEnforce {
 		if slices.Contains(activeEnforce[i].unitIdxs, 0) {
 			originMatched = true
-			if strings.TrimSpace(activeEnforce[i].policy.SystemOneRule) != "" {
+			if !activeEnforce[i].policy.HasChain() && strings.TrimSpace(activeEnforce[i].policy.SystemOneRule) != "" {
 				originHasS1 = true
 			}
 			if policyUsesUnmentionedAgentSlugs(&activeEnforce[i].policy) {
@@ -481,8 +481,8 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 			JudgmentFlags:  firstReject.classification.Judgments.Flags,
 			JudgmentLabels: firstReject.classification.Judgments.Labels,
 		}
-		reason := renderPolicyRejectReason(pol, tplData)
-		remediation := messagepolicy.RenderTemplate(pol.RejectRemediation, tplData)
+		reason := renderClassificationRejectReason(pol, firstReject.classification, tplData)
+		remediation := renderClassificationRejectRemediation(pol, firstReject.classification, tplData)
 
 		s.messageLog.Info("outbound message rejected by message policy",
 			"code", string(MessageDenialPolicyRejected),
@@ -580,6 +580,9 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 			continue
 		}
 		pol := &matches[i].policy
+		if pol.HasChain() {
+			continue
+		}
 		indep, err := ev.IsRecipientIndependentCached(ctx, pol.ID, pol.Revision, pol.ViolationRule, pol.SystemOneRule)
 		if err == nil && indep {
 			isIndependent[i] = true
@@ -597,7 +600,7 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 		var originPols []store.MessagePolicy
 		var originMatchIdxs []int
 		for i := range matches {
-			if slices.Contains(matches[i].unitIdxs, 0) && strings.TrimSpace(matches[i].policy.SystemOneRule) != "" {
+			if slices.Contains(matches[i].unitIdxs, 0) && !matches[i].policy.HasChain() && strings.TrimSpace(matches[i].policy.SystemOneRule) != "" {
 				originPols = append(originPols, matches[i].policy)
 				originMatchIdxs = append(originMatchIdxs, i)
 			}
@@ -620,7 +623,7 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 	var indepS1MatchIdxs []int
 	var indepFactsUnit *policyEvalUnit
 	for i := range matches {
-		if !isIndependent[i] || strings.TrimSpace(matches[i].policy.SystemOneRule) == "" {
+		if !isIndependent[i] || matches[i].policy.HasChain() || strings.TrimSpace(matches[i].policy.SystemOneRule) == "" {
 			continue
 		}
 		// Find first valid copy unit matched by this policy.
@@ -666,7 +669,7 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 		var depPols []store.MessagePolicy
 		var depMatchIdxs []int
 		for i := range matches {
-			if isIndependent[i] || strings.TrimSpace(matches[i].policy.SystemOneRule) == "" {
+			if isIndependent[i] || matches[i].policy.HasChain() || strings.TrimSpace(matches[i].policy.SystemOneRule) == "" {
 				continue
 			}
 			if slices.Contains(matches[i].unitIdxs, ui) {
@@ -689,7 +692,7 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 	rows := make([]unitPolicyEvalRow, 0, len(matches)*2)
 	for i := range matches {
 		pol := &matches[i].policy
-		polHasS1 := strings.TrimSpace(pol.SystemOneRule) != ""
+		polHasS1 := !pol.HasChain() && strings.TrimSpace(pol.SystemOneRule) != ""
 
 		// 3a. Origin unit row (if matched).
 		if slices.Contains(matches[i].unitIdxs, 0) {
@@ -698,6 +701,8 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 			var cls messagepolicy.Classification
 			var elapsed time.Duration
 			switch {
+			case pol.HasChain():
+				cls, elapsed = s.evaluateChainPolicyOnUnit(ctx, pol, mode, 0, u.snap, u, budget)
 			case !polHasS1 && bodyTruncated:
 				cls = messagepolicy.Classification{Class: messagepolicy.ClassFailed, Reason: messagepolicy.ReasonBodyTruncated}
 			case u.factsUnavailable || (u.unmentionedUnavailable && policyUsesUnmentionedAgentSlugs(pol)):
@@ -791,6 +796,8 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 			var cls messagepolicy.Classification
 			var elapsed time.Duration
 			switch {
+			case pol.HasChain():
+				cls, elapsed = s.evaluateChainPolicyOnUnit(ctx, pol, mode, ui, u.snap, u, budget)
 			case !polHasS1 && bodyTruncated:
 				cls = messagepolicy.Classification{Class: messagepolicy.ClassFailed, Reason: messagepolicy.ReasonBodyTruncated}
 			case u.factsUnavailable || (u.unmentionedUnavailable && policyUsesUnmentionedAgentSlugs(pol)):
@@ -809,6 +816,98 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 	}
 
 	return rows
+}
+
+func chainStepInputsFromStore(in []store.MessagePolicyStep) []messagepolicy.ChainStepInput {
+	out := make([]messagepolicy.ChainStepInput, len(in))
+	for i, st := range in {
+		out[i] = messagepolicy.ChainStepInput{
+			ID:          st.ID,
+			Role:        st.Role,
+			Dialect:     st.Dialect,
+			Expr:        st.Expr,
+			Reason:      st.Reason,
+			Remediation: st.Remediation,
+		}
+	}
+	return out
+}
+
+// evaluateChainPolicyOnUnit evaluates a persisted chain-native policy on one
+// unit under P1 runtime boundaries (D3 chain_disabled, D4 chain_unsupported).
+// It never executes the legacy sentinel columns.
+func (s *Server) evaluateChainPolicyOnUnit(
+	ctx context.Context,
+	pol *store.MessagePolicy,
+	mode string,
+	unitIdx int,
+	snap h2FactSnapshot,
+	u *policyEvalUnit,
+	budget *ruleengine.BudgetTracker,
+) (messagepolicy.Classification, time.Duration) {
+	// D3: hub.message_policy_chains off -> failed/chain_disabled via on_failed*.
+	if !s.experimentEnabled(experiments.MessagePolicyChains) {
+		return messagepolicy.Classification{
+			Class:  messagepolicy.ClassFailed,
+			Reason: messagepolicy.ReasonChainDisabled,
+		}, 0
+	}
+
+	// D4: P1 supports E1/E2 origin enforce CEL-only chains only. Any other path
+	// (shadow, copy unit, agent_dm, mention_delivery) or non-CEL chain shape
+	// returns failed/chain_unsupported via on_failed* without running the chain
+	// or the legacy sentinel.
+	if pol == nil || pol.Chain == nil ||
+		mode != store.MessagePolicyModeEnforce ||
+		unitIdx != 0 ||
+		!messagepolicy.IsP1ChainSurface(snap.surface) {
+		return messagepolicy.Classification{
+			Class:  messagepolicy.ClassFailed,
+			Reason: messagepolicy.ReasonChainUnsupported,
+		}, 0
+	}
+	steps := chainStepInputsFromStore(pol.Chain.Steps)
+	if !messagepolicy.IsP1ChainSupported(steps) {
+		return messagepolicy.Classification{
+			Class:  messagepolicy.ClassFailed,
+			Reason: messagepolicy.ReasonChainUnsupported,
+		}, 0
+	}
+
+	if len(snap.msgBody) > messagepolicy.MaxBodyBytes {
+		return messagepolicy.Classification{
+			Class:  messagepolicy.ClassFailed,
+			Reason: messagepolicy.ReasonBodyTruncated,
+		}, 0
+	}
+	if u == nil || u.factsUnavailable || !u.hasFacts {
+		return messagepolicy.Classification{
+			Class:  messagepolicy.ClassFailed,
+			Reason: messagepolicy.ReasonFactsUnavailable,
+		}, 0
+	}
+
+	ev := s.messagePolicyGate.evaluator
+	if ev == nil {
+		return messagepolicy.ClassifyError(&ruleengine.UnsupportedDialectError{
+			Dialect:  ruleengine.DialectCEL,
+			Consumer: messagepolicy.ConsumerName,
+			Reason:   ruleengine.ReasonConsumerNotRegistered,
+		}), 0
+	}
+
+	start := time.Now()
+	cls := ev.EvaluateChain(
+		ctx,
+		pol.ID,
+		pol.Revision,
+		steps,
+		pol.Chain.RejectReason,
+		pol.Chain.RejectRemediation,
+		u.facts,
+		messagepolicy.WithBudget(budget),
+	)
+	return cls, time.Since(start)
 }
 
 func (s *Server) finalizeEvalRow(
@@ -902,7 +1001,7 @@ func (s *Server) processMultiUnitShadowJob(ctx context.Context, job messagePolic
 		for i := range job.shadowMatches {
 			if slices.Contains(job.shadowMatches[i].unitIdxs, ui) {
 				unitMatched = true
-				if strings.TrimSpace(job.shadowMatches[i].policy.SystemOneRule) != "" {
+				if !job.shadowMatches[i].policy.HasChain() && strings.TrimSpace(job.shadowMatches[i].policy.SystemOneRule) != "" {
 					unitHasS1 = true
 				}
 				if policyUsesUnmentionedAgentSlugs(&job.shadowMatches[i].policy) {

@@ -98,6 +98,10 @@ func (MessagePolicyDecision) Fields() []ent.Field {
 			Default("").
 			Immutable().
 			Comment("Optional JSON projection of systemone.Evaluation (empty in M1; content-free)."),
+		field.Text("chain").
+			Default("").
+			Immutable().
+			Comment("Optional content-free JSON provenance of rule-chain evaluation (deciding step, through, engine_class, consumer_handling, step trace)."),
 		field.Int64("elapsed_ms").
 			Default(0).
 			NonNegative().

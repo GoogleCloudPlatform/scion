@@ -35,12 +35,47 @@ const (
 	EnvironmentName    = "message_policy"
 	EnvironmentVersion = 1
 
+	// ChainEnvironmentName and ChainEnvironmentVersion identify the v2 CEL
+	// environment for ordered rule-chain policies (SP1 §1.2, Amendment A1 §5).
+	// It omits the legacy top-level judgment_* names and exposes `chain` as
+	// map(string, dyn) keyed by earlier judgment step id.
+	ChainEnvironmentName    = "message_policy_chain"
+	ChainEnvironmentVersion = 2
+
 	// KindViolation is the boolean rule projection slot for violation_rule.
 	KindViolation ruleengine.Kind = "violation"
 
 	// KindJudgments is the multi-question System One projection slot for system_one_rule.
 	KindJudgments ruleengine.Kind = ruleengine.Kind(spec.KindJudgments)
 )
+
+// Ordered rule-chain step constants and bounds (SP1 §1.2).
+const (
+	ChainVersion          = 1
+	MaxChainSteps         = 8
+	MaxChainJudgmentSteps = 2
+	MaxChainBytes         = 64 * 1024
+
+	StepRoleGuard     = "guard"
+	StepRoleViolation = "violation"
+	StepRoleJudgment  = "judgment"
+
+	StepDialectCEL       = "cel"
+	StepDialectSystemOne = "system_one"
+
+	ChainSourceAuthored     = "authored"
+	ChainSourceLegacyMapped = "legacy_mapped"
+
+	// ChainLegacySentinelViolationRule is stored in the legacy violation_rule
+	// column of chain-native policies so older binaries fail closed (SP1 §1.7, D6).
+	ChainLegacySentinelViolationRule = "true"
+)
+
+// ChainLegacySentinelRejectReason returns the fail-closed reject_reason stored
+// in the legacy column of a chain-native policy for older binaries (SP1 §1.7, D6).
+func ChainLegacySentinelRejectReason(policyName string) string {
+	return "Policy " + policyName + " requires a newer Hub (rule chain); send blocked."
+}
 
 // Size and budget bounds (consumer design §§5.3, 5.4, 5.5; brief §1).
 const (
@@ -105,6 +140,9 @@ const (
 	ReasonUninitializedProgram   = "uninitialized_program"
 	ReasonInvalidCompiledProgram = "invalid_compiled_program"
 	ReasonUnsupportedDialect     = "unsupported_dialect"
+	ReasonChainDisabled          = "chain_disabled"
+	ReasonChainUnsupported       = "chain_unsupported"
+	ReasonSystemOneCapExceeded   = "system_one_cap_exceeded"
 )
 
 // Outbound message hook surfaces (consumer design §§5.2, 5.3).
@@ -159,6 +197,47 @@ func ViolationEnvironmentRef() ruleengine.EnvironmentRef {
 	return ruleengine.EnvironmentRef{
 		Consumer:     ConsumerName,
 		Name:         EnvironmentName,
+		MaxRuleBytes: MaxViolationRuleBytes,
+		ResultType:   celengine.Bool(),
+	}
+}
+
+// ChainEnv returns the message_policy_chain v2 CEL Environment declaration
+// (SP1 §1.2, Amendment A1 §5). Reserved legacy judgment_* names are excluded;
+// earlier judgment outputs are exposed under `chain` as map(string, dyn).
+func ChainEnv() celengine.Environment {
+	return celengine.Environment{
+		Name:    ChainEnvironmentName,
+		Version: ChainEnvironmentVersion,
+		Variables: []celengine.Variable{
+			{Name: "surface", Type: celengine.String()},
+			{Name: "sender", Type: celengine.Map(celengine.String(), celengine.String())},
+			{Name: "recipient", Type: celengine.Map(celengine.String(), celengine.String())},
+			{Name: "message", Type: celengine.Map(celengine.String(), celengine.Dyn())},
+			{Name: "mentioned_agent_ids", Type: celengine.List(celengine.String())},
+			{Name: "mentioned_user_ids", Type: celengine.List(celengine.String())},
+			{Name: "conversation", Type: celengine.Map(celengine.String(), celengine.Dyn())},
+			{Name: "chain", Type: celengine.Map(celengine.String(), celengine.Dyn())},
+		},
+		Extensions: []celengine.Extension{celengine.ExtensionStrings},
+		Macros:     celengine.MacrosStandard,
+	}
+}
+
+// NewChainCELEngine constructs the message_policy_chain v2 *celengine.Engine
+// with DefaultLimits and DefaultCacheConfig for registration on the Hub's
+// shared CELDialect.
+func NewChainCELEngine() (*celengine.Engine, error) {
+	return celengine.New(ChainEnv(), DefaultLimits(), celengine.DefaultCacheConfig())
+}
+
+// ChainStepEnvironmentRef returns the ruleengine.EnvironmentRef for compiling
+// boolean guard/violation step expressions against the message_policy_chain
+// v2 CEL environment.
+func ChainStepEnvironmentRef() ruleengine.EnvironmentRef {
+	return ruleengine.EnvironmentRef{
+		Consumer:     ConsumerName,
+		Name:         ChainEnvironmentName,
 		MaxRuleBytes: MaxViolationRuleBytes,
 		ResultType:   celengine.Bool(),
 	}

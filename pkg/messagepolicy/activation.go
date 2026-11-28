@@ -169,6 +169,45 @@ func NewActivation(f Facts) Activation {
 	return Activation{vars: vars}
 }
 
+// NewChainBaseActivation constructs a message_policy_chain v2 base CEL
+// Activation from f without the reserved legacy judgment_* variables
+// (Amendment A1 §5). The ChainRun Enricher supplies `chain.*` per step.
+func NewChainBaseActivation(f Facts) Activation {
+	truncBody, origBytes, wasTruncated := TruncateBodyUTF8(f.Message.Body, MaxBodyBytes)
+
+	vars := map[string]any{
+		"surface": f.Surface,
+		"sender": map[string]string{
+			"kind":       f.Sender.Kind,
+			"id":         f.Sender.ID,
+			"slug":       f.Sender.Slug,
+			"project_id": f.Sender.ProjectID,
+		},
+		"recipient": map[string]string{
+			"kind": f.Recipient.Kind,
+			"id":   f.Recipient.ID,
+			"slug": f.Recipient.Slug,
+		},
+		"message": map[string]any{
+			"type":             f.Message.Type,
+			"body":             truncBody,
+			"body_truncated":   wasTruncated,
+			"bytes":            int64(origBytes),
+			"has_choices":      f.Message.HasChoices,
+			"urgent":           f.Message.Urgent,
+			"attachment_count": int64(f.Message.AttachmentCount),
+		},
+		"mentioned_agent_ids": cloneStringsNonNil(f.MentionedAgentIDs),
+		"mentioned_user_ids":  cloneStringsNonNil(f.MentionedUserIDs),
+		"conversation": map[string]any{
+			"kind":                  f.Conversation.Kind,
+			"agent_participant_ids": cloneStringsNonNil(f.Conversation.AgentParticipantIDs),
+			"user_participant_ids":  cloneStringsNonNil(f.Conversation.UserParticipantIDs),
+		},
+	}
+	return Activation{vars: vars}
+}
+
 // Map returns the underlying CEL activation variable bindings.
 func (a Activation) Map() map[string]any {
 	if a.vars == nil {

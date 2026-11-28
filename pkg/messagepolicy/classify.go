@@ -57,6 +57,15 @@ type Classification struct {
 	// Judgments holds the typed flags/labels extracted from a successful
 	// System One evaluation for template substitution (consumer design §5.3).
 	Judgments Judgments
+
+	// ChainProvenance holds content-free rule-chain evaluation provenance when
+	// this classification came from a ChainRun (SP1 §1.5).
+	ChainProvenance *ChainDecisionProvenance
+
+	// DecidingReason and DecidingRemediation carry the deciding step's or
+	// chain's authored reason/remediation templates when a chain rejects.
+	DecidingReason      string
+	DecidingRemediation string
 }
 
 // ClassifyDecision classifies a ruleengine evaluation result or error.

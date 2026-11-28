@@ -41,6 +41,13 @@ func (s *Server) registerMessagePolicyRules() error {
 	if err := s.celDialect.RegisterEnvironment(celEng); err != nil {
 		return fmt.Errorf("register message_policy CEL environment: %w", err)
 	}
+	chainCELEng, err := messagepolicy.NewChainCELEngine()
+	if err != nil {
+		return fmt.Errorf("build message_policy_chain CEL environment: %w", err)
+	}
+	if err := s.celDialect.RegisterEnvironment(chainCELEng); err != nil {
+		return fmt.Errorf("register message_policy_chain CEL environment: %w", err)
+	}
 	if err := s.rules.AllowConsumerDialects(
 		messagepolicy.ConsumerName,
 		ruleengine.Grant(ruleengine.DialectCEL),

@@ -133,6 +133,9 @@ func entMessagePolicyToStore(row *ent.MessagePolicy) *store.MessagePolicy {
 	if len(row.SystemOneRefs) > 0 {
 		out.SystemOneRefs = slices.Clone(row.SystemOneRefs)
 	}
+	if row.Chain != nil {
+		out.Chain = row.Chain.Clone()
+	}
 	if len(row.OnFailedReasons) > 0 {
 		out.OnFailedReasons = cloneStringMap(row.OnFailedReasons)
 	}
@@ -147,6 +150,10 @@ func entMessagePolicyDecisionToStore(row *ent.MessagePolicyDecision) *store.Mess
 	var eval json.RawMessage
 	if row.Evaluation != "" {
 		eval = json.RawMessage(row.Evaluation)
+	}
+	var chain json.RawMessage
+	if row.Chain != "" {
+		chain = json.RawMessage(row.Chain)
 	}
 	return &store.MessagePolicyDecision{
 		ID:             row.ID.String(),
@@ -166,6 +173,7 @@ func entMessagePolicyDecisionToStore(row *ent.MessagePolicyDecision) *store.Mess
 		Reason:         row.Reason,
 		CELErrorReason: row.CelErrorReason,
 		Evaluation:     eval,
+		Chain:          chain,
 		ElapsedMs:      row.ElapsedMs,
 		CreatedAt:      row.CreatedAt.UTC(),
 	}
@@ -218,6 +226,21 @@ func validateMessagePolicyFields(policy *store.MessagePolicy) (string, error) {
 	}
 	if len(policy.RejectRemediation) > store.MaxMessagePolicyTemplateBytes {
 		return "", fmt.Errorf("%w: reject_remediation exceeds %d bytes", store.ErrInvalidInput, store.MaxMessagePolicyTemplateBytes)
+	}
+	if policy.Chain != nil {
+		if policy.Chain.Version != store.MessagePolicyChainVersion {
+			return "", fmt.Errorf("%w: unsupported chain version %d", store.ErrInvalidInput, policy.Chain.Version)
+		}
+		if len(policy.Chain.Steps) == 0 || len(policy.Chain.Steps) > store.MaxMessagePolicyChainSteps {
+			return "", fmt.Errorf("%w: chain steps count %d must be between 1 and %d", store.ErrInvalidInput, len(policy.Chain.Steps), store.MaxMessagePolicyChainSteps)
+		}
+		encoded, err := json.Marshal(policy.Chain)
+		if err != nil {
+			return "", fmt.Errorf("%w: invalid chain JSON: %w", store.ErrInvalidInput, err)
+		}
+		if len(encoded) > store.MaxMessagePolicyChainBytes {
+			return "", fmt.Errorf("%w: chain exceeds %d bytes", store.ErrInvalidInput, store.MaxMessagePolicyChainBytes)
+		}
 	}
 	return mode, nil
 }
@@ -287,6 +310,9 @@ func (s *MessagePolicyStore) CreateMessagePolicy(ctx context.Context, policy *st
 
 		if len(policy.SystemOneRefs) > 0 {
 			create.SetSystemOneRefs(slices.Clone(policy.SystemOneRefs))
+		}
+		if policy.Chain != nil {
+			create.SetChain(policy.Chain.Clone())
 		}
 		if len(policy.OnFailedReasons) > 0 {
 			create.SetOnFailedReasons(cloneStringMap(policy.OnFailedReasons))
@@ -538,6 +564,11 @@ func (s *MessagePolicyStore) UpdateMessagePolicy(ctx context.Context, policy *st
 		} else {
 			upd.ClearSystemOneRefs()
 		}
+		if candidate.Chain != nil {
+			upd.SetChain(candidate.Chain.Clone())
+		} else {
+			upd.ClearChain()
+		}
 		if len(candidate.OnFailedReasons) > 0 {
 			upd.SetOnFailedReasons(cloneStringMap(candidate.OnFailedReasons))
 		} else {
@@ -627,6 +658,9 @@ func (s *MessagePolicyStore) CreateMessagePolicyDecision(ctx context.Context, de
 	if len(decision.Evaluation) > 0 && !json.Valid(decision.Evaluation) {
 		return fmt.Errorf("%w: evaluation must be valid JSON", store.ErrInvalidInput)
 	}
+	if len(decision.Chain) > 0 && !json.Valid(decision.Chain) {
+		return fmt.Errorf("%w: chain must be valid JSON", store.ErrInvalidInput)
+	}
 
 	var uid uuid.UUID
 	if decision.ID != "" {
@@ -664,6 +698,7 @@ func (s *MessagePolicyStore) CreateMessagePolicyDecision(ctx context.Context, de
 		SetReason(decision.Reason).
 		SetCelErrorReason(decision.CELErrorReason).
 		SetEvaluation(string(decision.Evaluation)).
+		SetChain(string(decision.Chain)).
 		SetElapsedMs(decision.ElapsedMs).
 		SetCreatedAt(createdAt)
 

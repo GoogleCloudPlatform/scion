@@ -465,6 +465,16 @@ func SystemOneRefsNotNil() predicate.MessagePolicy {
 	return predicate.MessagePolicy(sql.FieldNotNull(FieldSystemOneRefs))
 }
 
+// ChainIsNil applies the IsNil predicate on the "chain" field.
+func ChainIsNil() predicate.MessagePolicy {
+	return predicate.MessagePolicy(sql.FieldIsNull(FieldChain))
+}
+
+// ChainNotNil applies the NotNil predicate on the "chain" field.
+func ChainNotNil() predicate.MessagePolicy {
+	return predicate.MessagePolicy(sql.FieldNotNull(FieldChain))
+}
+
 // OnUncertainEQ applies the EQ predicate on the "on_uncertain" field.
 func OnUncertainEQ(v string) predicate.MessagePolicy {
 	return predicate.MessagePolicy(sql.FieldEQ(FieldOnUncertain, v))
