@@ -98,9 +98,11 @@ without being wired up here.
 | --- | --- | --- |
 | `projectSet` | bool | Whether the project has an annotation for this setting. A stored `scion.io/default-thinking-level` outside 1-100 (for example a `0` saved by an older Hub) counts as unset, as in `GET /settings`: new agents get the hub default, and the next save of the project settings removes it. |
 | `projectValue` | string \| null | The annotation's raw value, or `null` when `projectSet` is false. Always a string — annotations are strings. For `scion.io/default-max-turns` and `scion.io/default-max-model-calls`, `"0"` is Unlimited (an explicit "no limit"), not a clear: a cleared count limit has no annotation. |
-| `lockedBy` | string \| null | Layer that locks this setting (`"hub"` when enforced by the hub operator, e.g. `telemetry.enforced`), or `null` when unlocked. |
-| `effective` | any \| null | Enforced effective value when `lockedBy` is non-null (e.g. `true` for hub-enforced telemetry), and `null` for all unlocked settings. |
-| `storedValue` | any \| null | Shadowed project value when `lockedBy` is non-null (e.g. `false` when the project had `telemetryEnabled: false` stored before enforcement), or `null` otherwise. |
+| `lockedBy` | string \| null | Layer that locks this setting (`"hub"` when enforced by the hub operator, e.g. `telemetry.enforced` or `telemetry.trajectory.allow_project_opt_out: false`), or `null` when unlocked. |
+| `effective` | any \| null | Enforced effective value when `lockedBy` is non-null (e.g. `true` for hub-enforced telemetry, or `"full"` for `scion.io/trajectory-capture` when project opt-outs are disallowed), and `null` for all unlocked settings. |
+| `storedValue` | any \| null | Shadowed project value when `lockedBy` is non-null (e.g. `false` when the project had `telemetryEnabled: false` stored before enforcement, or `"metadata_only"` / `"off"` for `scion.io/trajectory-capture`), or `null` otherwise. |
+
+When `tokenomics.trajectory_capture` is off, `settings["scion.io/trajectory-capture"]` reports `projectSet: false` and `projectValue: null`, and `project.trajectoryCapture` is omitted. Effective trajectory capture status (`trajectory_capture: {"policy", "enforced_by_hub"}`) is returned on `GET /api/v1/projects/{projectId}/settings` and single-agent `GET /api/v1/agents/{id}`, not as a top-level field on `/settings/resolved`.
 | `hubDefault` | string | Whether a hub-level default exists. See below. |
 
 ### `hubDefault` is tri-state

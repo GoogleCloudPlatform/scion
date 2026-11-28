@@ -54,6 +54,15 @@ type MaintenanceSettings struct {
 	MaintenanceMessage string `json:"maintenance_message,omitempty"`
 }
 
+// TelemetryTrajectorySettings holds Hub-level Track 2 trajectory capture
+// operational settings (DB-only; not in broker settings.yaml).
+type TelemetryTrajectorySettings struct {
+	// AllowProjectOptOut controls whether projects may lower
+	// telemetry.trajectory.capture to metadata_only or off.
+	// Nil (unset) defaults to true.
+	AllowProjectOptOut *bool `json:"allow_project_opt_out,omitempty"`
+}
+
 // TelemetrySettings holds the Layer-1 telemetry configuration.
 // It reuses the existing V1TelemetryConfig to preserve full fidelity.
 type TelemetrySettings struct {
@@ -61,6 +70,9 @@ type TelemetrySettings struct {
 	// Enforced makes telemetry mandatory for every agent this hub dispatches:
 	// project policy and requester on/off cannot disable it. Requires Enabled=true.
 	Enforced bool `json:"enforced,omitempty"`
+	// Trajectory holds Hub-level Track 2 trajectory capture policy settings
+	// (DB-only opsettings keys; not in broker settings.yaml).
+	Trajectory *TelemetryTrajectorySettings `json:"trajectory,omitempty"`
 }
 
 // Resolve validates the telemetry operational settings and returns the resolved

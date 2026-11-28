@@ -20,6 +20,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // AgentEffectiveConfigView carries the broker-reported effective run limits
@@ -78,6 +79,10 @@ type AgentWithCapabilities struct {
 	// for idle auto-suspend, or nil when ineligible/blocked/disabled. Set on
 	// the single-agent GET only.
 	IdleSuspendAt *time.Time `json:"idleSuspendAt,omitempty"`
+	// TrajectoryCapture reports the effective Track 2 capture policy for the
+	// agent's project and whether the Hub opt-out lock enforces it. Set on the
+	// single-agent GET only when experiment tokenomics.trajectory_capture is on.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Agent.
@@ -85,22 +90,23 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 	type AgentAlias store.Agent
 	return json.Marshal(&struct {
 		AgentAlias
-		Cap                 *Capabilities                    `json:"_capabilities,omitempty"`
-		Messageability      interface{}                      `json:"_messageability,omitempty"`
-		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
-		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
-		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
-		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
-		ModelSize           string                           `json:"modelSize,omitempty"`
-		Editability         *AgentEditability                `json:"editability,omitempty"`
-		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
-		EffectiveConfig     *AgentEffectiveConfigView        `json:"effectiveConfig,omitempty"`
-		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
-		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
-		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
-		Authority           *api.AgentAuthority              `json:"authority,omitempty"`
-		ActivitySince       *time.Time                       `json:"activitySince,omitempty"`
-		IdleSuspendAt       *time.Time                       `json:"idleSuspendAt,omitempty"`
+		Cap                 *Capabilities                                    `json:"_capabilities,omitempty"`
+		Messageability      interface{}                                      `json:"_messageability,omitempty"`
+		ResolvedHarness     string                                           `json:"resolvedHarness,omitempty"`
+		HarnessCapabilities *api.HarnessAdvancedCapabilities                 `json:"harnessCapabilities,omitempty"`
+		CloudLogging        bool                                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                                           `json:"modelSize,omitempty"`
+		Editability         *AgentEditability                                `json:"editability,omitempty"`
+		EffectiveNextRun    *store.AgentAppliedConfig                        `json:"effectiveNextRun,omitempty"`
+		EffectiveConfig     *AgentEffectiveConfigView                        `json:"effectiveConfig,omitempty"`
+		SSHHostKey          string                                           `json:"sshHostKey,omitempty"`
+		ResolvedTimezone    *string                                          `json:"resolvedTimezone,omitempty"`
+		TimezoneSource      *string                                          `json:"timezoneSource,omitempty"`
+		Authority           *api.AgentAuthority                              `json:"authority,omitempty"`
+		ActivitySince       *time.Time                                       `json:"activitySince,omitempty"`
+		IdleSuspendAt       *time.Time                                       `json:"idleSuspendAt,omitempty"`
+		TrajectoryCapture   *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -119,6 +125,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		Authority:           a.Authority,
 		ActivitySince:       a.ActivitySince,
 		IdleSuspendAt:       a.IdleSuspendAt,
+		TrajectoryCapture:   a.TrajectoryCapture,
 	})
 }
 
@@ -128,22 +135,23 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	type WrapperFields struct {
-		Cap                 *Capabilities                    `json:"_capabilities,omitempty"`
-		Messageability      *AgentMessageabilityDetail       `json:"_messageability,omitempty"`
-		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
-		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
-		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
-		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
-		ModelSize           string                           `json:"modelSize,omitempty"`
-		Editability         *AgentEditability                `json:"editability,omitempty"`
-		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
-		EffectiveConfig     *AgentEffectiveConfigView        `json:"effectiveConfig,omitempty"`
-		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
-		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
-		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
-		Authority           *api.AgentAuthority              `json:"authority,omitempty"`
-		ActivitySince       *time.Time                       `json:"activitySince,omitempty"`
-		IdleSuspendAt       *time.Time                       `json:"idleSuspendAt,omitempty"`
+		Cap                 *Capabilities                                    `json:"_capabilities,omitempty"`
+		Messageability      *AgentMessageabilityDetail                       `json:"_messageability,omitempty"`
+		ResolvedHarness     string                                           `json:"resolvedHarness,omitempty"`
+		HarnessCapabilities *api.HarnessAdvancedCapabilities                 `json:"harnessCapabilities,omitempty"`
+		CloudLogging        bool                                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                                           `json:"modelSize,omitempty"`
+		Editability         *AgentEditability                                `json:"editability,omitempty"`
+		EffectiveNextRun    *store.AgentAppliedConfig                        `json:"effectiveNextRun,omitempty"`
+		EffectiveConfig     *AgentEffectiveConfigView                        `json:"effectiveConfig,omitempty"`
+		SSHHostKey          string                                           `json:"sshHostKey,omitempty"`
+		ResolvedTimezone    *string                                          `json:"resolvedTimezone,omitempty"`
+		TimezoneSource      *string                                          `json:"timezoneSource,omitempty"`
+		Authority           *api.AgentAuthority                              `json:"authority,omitempty"`
+		ActivitySince       *time.Time                                       `json:"activitySince,omitempty"`
+		IdleSuspendAt       *time.Time                                       `json:"idleSuspendAt,omitempty"`
+		TrajectoryCapture   *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 	}
 	var wrapper WrapperFields
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -165,6 +173,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.Authority = wrapper.Authority
 	a.ActivitySince = wrapper.ActivitySince
 	a.IdleSuspendAt = wrapper.IdleSuspendAt
+	a.TrajectoryCapture = wrapper.TrajectoryCapture
 	return nil
 }
 

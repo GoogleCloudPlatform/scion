@@ -42,6 +42,7 @@ func mergeTestStoredSettings() map[string]string {
 		DefaultModel:           "model-a",
 		DefaultThinkingLevel:   &thinking,
 		TelemetryEnabled:       &yes,
+		TrajectoryCapture:      "metadata_only",
 		AutoExposePortsEnabled: &yes,
 		DefaultMaxTurns:        api.IntPtr(10),
 		DefaultMaxModelCalls:   api.IntPtr(20),
@@ -107,6 +108,10 @@ var putMergeFields = []putMergeField{
 		name: projectSettingsFieldTelemetryEnabled, setJSON: `false`, setWant: map[string]string{projectSettingTelemetryEnabled: "false"},
 		clearJSON: `null`, keys: []string{projectSettingTelemetryEnabled}, nullClears: true,
 		zeroJSON: `false`, zeroWant: map[string]string{projectSettingTelemetryEnabled: "false"},
+	},
+	{
+		name: projectSettingsFieldTrajectoryCapture, setJSON: `"off"`, setWant: map[string]string{projectSettingTrajectoryCapture: "off"},
+		clearJSON: `""`, keys: []string{projectSettingTrajectoryCapture},
 	},
 	{
 		name: projectSettingsFieldAutoExposePortsEnabled, setJSON: `false`, setWant: map[string]string{projectSettingAutoExposePortsEnabled: "false"},

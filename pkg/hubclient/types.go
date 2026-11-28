@@ -273,6 +273,7 @@ type ProjectSettings struct {
 	DefaultModel           string  `json:"defaultModel,omitempty"`
 	DefaultThinkingLevel   *int    `json:"defaultThinkingLevel,omitempty"`
 	TelemetryEnabled       *bool   `json:"telemetryEnabled,omitempty"`
+	TrajectoryCapture      string  `json:"trajectoryCapture,omitempty"`
 	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits

@@ -493,6 +493,20 @@ export function usageLedgerEnabled(): boolean {
 }
 
 /**
+ * Tokenomics Track 2 trajectory capture (tokenomics.trajectory_capture,
+ * ptone/scion#9250): shows trajectory capture policy controls in project
+ * settings and the Hub opt-out lock toggle in admin server configuration.
+ * Presentation only: the hub enforces the experiment on capture policy
+ * read/write endpoints and segment prepare/commit routes. Default OFF.
+ */
+export const TOKENOMICS_TRAJECTORY_CAPTURE_FLAG = 'tokenomics.trajectory_capture';
+
+/** Whether Tokenomics Track 2 trajectory capture UI surfaces are enabled in this session. */
+export function trajectoryCaptureEnabled(): boolean {
+  return isFeatureEnabled(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG);
+}
+
+/**
  * Triggers and webhook endpoints (hub.triggers, ptone/scion#8064):
  * gates the Project Triggers page (/projects/:id/triggers) and the Triggers
  * header button on Project Detail. Presentation only: the hub enforces

@@ -204,7 +204,7 @@ func init() {
 				"telemetry.retention.meter_health_days", "telemetry.retention.sweep_interval", "telemetry.retention.batch_size",
 				"telemetry.resource",
 			},
-			DBOnlyKeys:      []string{"telemetry.enforced"},
+			DBOnlyKeys:      []string{"telemetry.enforced", "telemetry.trajectory", "telemetry.trajectory.allow_project_opt_out"},
 			New:             func() any { return &TelemetrySettings{} },
 			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval", "telemetry.retention.sweep_interval"},
 		},
@@ -1136,13 +1136,24 @@ func buildTelemetrySchema(defs map[string]interface{}) map[string]interface{} {
 			cloned[k] = v
 		}
 		if props, ok := tc["properties"].(map[string]interface{}); ok {
-			clonedProps := make(map[string]interface{}, len(props)+1)
+			clonedProps := make(map[string]interface{}, len(props)+2)
 			for k, v := range props {
 				clonedProps[k] = v
 			}
 			clonedProps["enforced"] = map[string]interface{}{
 				"type":        "boolean",
 				"description": "Make telemetry mandatory for every agent this hub dispatches. Requires enabled=true.",
+			}
+			clonedProps["trajectory"] = map[string]interface{}{
+				"type":        "object",
+				"description": "Hub-level Track 2 trajectory capture policy settings.",
+				"properties": map[string]interface{}{
+					"allow_project_opt_out": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Allow projects to lower telemetry.trajectory.capture to metadata_only or off. Defaults to true.",
+					},
+				},
+				"additionalProperties": false,
 			}
 			cloned["properties"] = clonedProps
 		}

@@ -5205,6 +5205,13 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		resp.Authority = s.newAgentAuthorityReader(identity).authority(ctx, agent)
 	}
 
+	if s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) && agent.ProjectID != "" {
+		if project, err := s.store.GetProject(ctx, agent.ProjectID); err == nil && project != nil {
+			status := s.resolveTrajectoryCapturePolicy(ctx, project)
+			resp.TrajectoryCapture = &status
+		}
+	}
+
 	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 	if r.URL.Query().Get("view") == agentViewEdit && s.heldEditsEnabled() {
 		// The applied config with every pending key applied, as the

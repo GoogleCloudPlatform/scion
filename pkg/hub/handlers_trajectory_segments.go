@@ -113,14 +113,75 @@ func (s *Server) trajectoryUploadURLTTLDuration() time.Duration {
 	return telemetrycontract.DefaultTrajectoryUploadURLExpiry
 }
 
+// trajectoryAllowProjectOptOut reports whether projects are permitted to lower
+// telemetry.trajectory.capture below "full". Defaults to true when unset or
+// when experiment tokenomics.trajectory_capture is off. Single reader across
+// the Hub.
+func (s *Server) trajectoryAllowProjectOptOut() bool {
+	if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+		return true
+	}
+	s.mu.RLock()
+	allow := s.config.TrajectoryAllowProjectOptOut
+	s.mu.RUnlock()
+	if allow == nil {
+		return true
+	}
+	return *allow
+}
+
+// writeTrajectoryCaptureExperimentDisabled writes the 412 experiment_disabled
+// refusal when saving a trajectory capture policy setting while experiment
+// tokenomics.trajectory_capture is off.
+func writeTrajectoryCaptureExperimentDisabled(w http.ResponseWriter, field string) {
+	writeError(w, http.StatusPreconditionFailed, ErrCodeExperimentDisabled,
+		field+" is not enabled on this Hub (experiment "+experiments.TokenomicsTrajectoryCapture+" is off)",
+		map[string]interface{}{
+			"experiment": experiments.TokenomicsTrajectoryCapture,
+			"field":      field,
+		})
+}
+
+// resolveTrajectoryCapturePolicy resolves the effective Track 2 capture policy
+// for project along with whether it is enforced by the Hub opt-out lock.
+//
+// Precedence:
+//  1. When the Hub opt-out lock is active (telemetry.trajectory.allow_project_opt_out == false),
+//     the effective policy is always "full" with EnforcedByHub = true, regardless
+//     of any stored project setting.
+//  2. Otherwise, if the project has a valid stored projectSettingTrajectoryCapture
+//     annotation ("full", "metadata_only", or "off"), that policy is effective
+//     with EnforcedByHub = false.
+//  3. Otherwise (unset or invalid), the effective policy defaults to "full"
+//     with EnforcedByHub = false.
+func (s *Server) resolveTrajectoryCapturePolicy(_ context.Context, project *store.Project) telemetrycontract.TrajectoryCapturePolicyStatus {
+	if !s.trajectoryAllowProjectOptOut() {
+		return telemetrycontract.TrajectoryCapturePolicyStatus{
+			Policy:        telemetrycontract.TrajectoryCapturePolicyFull,
+			EnforcedByHub: true,
+		}
+	}
+	if project != nil && project.Annotations != nil {
+		if val := strings.TrimSpace(project.Annotations[projectSettingTrajectoryCapture]); telemetrycontract.IsValidTrajectoryCapturePolicy(val) {
+			return telemetrycontract.TrajectoryCapturePolicyStatus{
+				Policy:        val,
+				EnforcedByHub: false,
+			}
+		}
+	}
+	return telemetrycontract.TrajectoryCapturePolicyStatus{
+		Policy:        telemetrycontract.TrajectoryCapturePolicyFull,
+		EnforcedByHub: false,
+	}
+}
+
 // effectiveTrajectoryCapturePolicy returns the effective Track 2 capture policy
-// for project ("full", "metadata_only", or "off"). In P5 wave 1 this defaults
-// to "full"; a later slice wires project settings and the Hub opt-out lock.
+// for project ("full", "metadata_only", or "off").
 func (s *Server) effectiveTrajectoryCapturePolicy(ctx context.Context, project *store.Project) string {
 	if s.trajectoryCapturePolicyOverride != nil {
 		return s.trajectoryCapturePolicyOverride(ctx, project)
 	}
-	return telemetrycontract.TrajectoryCapturePolicyFull
+	return s.resolveTrajectoryCapturePolicy(ctx, project).Policy
 }
 
 // isValidHexSHA256 reports whether s is a 64-character lowercase hex SHA-256 digest.

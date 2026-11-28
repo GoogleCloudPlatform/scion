@@ -78,16 +78,38 @@ const (
 	TrajectoryCapturePolicyOff          = "off"
 )
 
-// Machine-readable error codes returned by the trajectory segment endpoints.
+// IsValidTrajectoryCapturePolicy reports whether policy is a valid Track 2
+// trajectory capture policy value ("full", "metadata_only", or "off").
+func IsValidTrajectoryCapturePolicy(policy string) bool {
+	switch policy {
+	case TrajectoryCapturePolicyFull,
+		TrajectoryCapturePolicyMetadataOnly,
+		TrajectoryCapturePolicyOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// TrajectoryCapturePolicyStatus describes the effective Track 2 capture policy
+// for a project or agent and whether the Hub opt-out lock enforces it.
+type TrajectoryCapturePolicyStatus struct {
+	Policy        string `json:"policy"`
+	EnforcedByHub bool   `json:"enforced_by_hub"`
+}
+
+// Machine-readable error codes returned by the trajectory segment endpoints
+// and trajectory policy enforcement.
 const (
-	TrajectoryErrInvalidSegment      = "invalid_segment"
-	TrajectoryErrCaptureDisabled     = "capture_disabled"
-	TrajectoryErrCaptureMetadataOnly = "capture_metadata_only"
-	TrajectoryErrSegmentConflict     = "segment_conflict"
-	TrajectoryErrSegmentExpired      = "segment_expired"
-	TrajectoryErrSegmentTooLarge     = "segment_too_large"
-	TrajectoryErrRunCapExceeded      = "run_cap_exceeded"
-	TrajectoryErrVerificationFailed  = "segment_verification_failed"
+	TrajectoryErrInvalidSegment          = "invalid_segment"
+	TrajectoryErrCaptureDisabled         = "capture_disabled"
+	TrajectoryErrCaptureMetadataOnly     = "capture_metadata_only"
+	TrajectoryErrCaptureOptOutDisallowed = "capture_opt_out_disallowed"
+	TrajectoryErrSegmentConflict         = "segment_conflict"
+	TrajectoryErrSegmentExpired          = "segment_expired"
+	TrajectoryErrSegmentTooLarge         = "segment_too_large"
+	TrajectoryErrRunCapExceeded          = "run_cap_exceeded"
+	TrajectoryErrVerificationFailed      = "segment_verification_failed"
 )
 
 // TrajectorySegmentsPrepareAgentPath returns the agent-authenticated prepare

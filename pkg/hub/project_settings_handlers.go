@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // Annotation keys for project settings stored in project annotations.
@@ -47,6 +48,7 @@ const (
 	projectSettingDefaultModel           = "scion.io/default-model"
 	projectSettingDefaultThinkingLevel   = "scion.io/default-thinking-level"
 	projectSettingTelemetryEnabled       = "scion.io/telemetry-enabled"
+	projectSettingTrajectoryCapture      = "scion.io/trajectory-capture"
 	projectSettingAutoExposePortsEnabled = "scion.io/auto-expose-ports-enabled"
 	projectSettingActiveProfile          = "scion.io/active-profile"
 
@@ -145,6 +147,7 @@ var projectSettingKeys = []string{
 	projectSettingDefaultModel,
 	projectSettingDefaultThinkingLevel,
 	projectSettingTelemetryEnabled,
+	projectSettingTrajectoryCapture,
 	projectSettingAutoExposePortsEnabled,
 	projectSettingActiveProfile,
 
@@ -209,7 +212,17 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
-		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(project))
+		out := projectSettingsFromAnnotations(project)
+		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			out.TrajectoryCapture = ""
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
+		status := s.resolveTrajectoryCapturePolicy(ctx, project)
+		writeJSON(w, http.StatusOK, projectSettingsWithWarnings{
+			ProjectSettings:   out,
+			TrajectoryCapture: &status,
+		})
 
 	case http.MethodPut:
 		if userIdent, ok := identity.(UserIdentity); ok {
@@ -319,6 +332,27 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		if present[projectSettingsFieldTrajectoryCapture] {
+			if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+				writeTrajectoryCaptureExperimentDisabled(w, projectSettingsFieldTrajectoryCapture)
+				return
+			}
+			if merged.TrajectoryCapture != "" && !telemetrycontract.IsValidTrajectoryCapturePolicy(merged.TrajectoryCapture) {
+				BadRequest(w, "trajectoryCapture must be one of full, metadata_only, off")
+				return
+			}
+			alreadyStoredSame := stored != nil && stored.TrajectoryCapture == merged.TrajectoryCapture
+			if (merged.TrajectoryCapture == telemetrycontract.TrajectoryCapturePolicyMetadataOnly ||
+				merged.TrajectoryCapture == telemetrycontract.TrajectoryCapturePolicyOff) &&
+				!alreadyStoredSame &&
+				!s.trajectoryAllowProjectOptOut() {
+				writeError(w, http.StatusForbidden, telemetrycontract.TrajectoryErrCaptureOptOutDisallowed,
+					"trajectory capture opt-out is disallowed by Hub policy",
+					map[string]interface{}{"field": projectSettingsFieldTrajectoryCapture})
+				return
+			}
+		}
+
 		// changedProfileDefaults holds the per-profile entries this request
 		// adds or changes: the entries that were validated, and the only
 		// ones warned about after the save.
@@ -341,10 +375,18 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		unlimitedSet := s.recordProjectUnlimitedLimits(ctx, project, stored, merged)
 		warnings := s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults)
 		warnings = append(warnings, s.projectUnlimitedBrokerWarnings(ctx, project.ID, unlimitedSet)...)
-		writeJSON(w, http.StatusOK, projectSettingsWithWarnings{
-			ProjectSettings: projectSettingsFromAnnotations(project),
+		out := projectSettingsFromAnnotations(project)
+		resp := projectSettingsWithWarnings{
+			ProjectSettings: out,
 			Warnings:        warnings,
-		})
+		}
+		if s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			status := s.resolveTrajectoryCapturePolicy(ctx, project)
+			resp.TrajectoryCapture = &status
+		} else {
+			out.TrajectoryCapture = ""
+		}
+		writeJSON(w, http.StatusOK, resp)
 
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
@@ -806,6 +848,7 @@ const (
 	projectSettingsFieldMaxModelCalls            = "defaultMaxModelCalls"
 	projectSettingsFieldMaxDuration              = "defaultMaxDuration"
 	projectSettingsFieldTelemetryEnabled         = "telemetryEnabled"
+	projectSettingsFieldTrajectoryCapture        = "trajectoryCapture"
 	projectSettingsFieldAutoExposePortsEnabled   = "autoExposePortsEnabled"
 	projectSettingsFieldMaxAgentRole             = "maxAgentRole"
 	projectSettingsFieldDefaultAgentRole         = "defaultAgentRole"
@@ -1017,6 +1060,10 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 		}
 	}
 
+	if val := strings.TrimSpace(project.Annotations[projectSettingTrajectoryCapture]); telemetrycontract.IsValidTrajectoryCapturePolicy(val) {
+		settings.TrajectoryCapture = val
+	}
+
 	if val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]; ok {
 		if b, err := strconv.ParseBool(val); err == nil {
 			settings.AutoExposePortsEnabled = &b
@@ -1101,6 +1148,8 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	} else {
 		delete(project.Annotations, projectSettingTelemetryEnabled)
 	}
+
+	setOrDelete(project.Annotations, projectSettingTrajectoryCapture, settings.TrajectoryCapture)
 
 	if settings.AutoExposePortsEnabled != nil {
 		project.Annotations[projectSettingAutoExposePortsEnabled] = strconv.FormatBool(*settings.AutoExposePortsEnabled)

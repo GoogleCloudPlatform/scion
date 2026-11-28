@@ -104,8 +104,10 @@ import {
   ADMIN_MANAGED_BROKERS_FLAG,
   AGENT_LIMIT_CEILINGS_FLAG,
   TELEMETRY_ENFORCEMENT_FLAG,
+  TOKENOMICS_TRAJECTORY_CAPTURE_FLAG,
   agentLimitCeilingsEnabled,
   telemetryEnforcementEnabled,
+  trajectoryCaptureEnabled,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
@@ -363,9 +365,14 @@ interface V1TelemetryLocalConfig {
   console?: boolean;
 }
 
+interface V1TelemetryTrajectoryConfig {
+  allow_project_opt_out?: boolean;
+}
+
 interface V1TelemetryConfig {
   enabled?: boolean;
   enforced?: boolean;
+  trajectory?: V1TelemetryTrajectoryConfig;
   cloud?: V1TelemetryCloudConfig;
   hub?: V1TelemetryHubConfig;
   local?: V1TelemetryLocalConfig;
@@ -1291,6 +1298,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryEnforced = false;
   private loadedTelemetryEnforced = false;
   @state() private telemetryEnforcedWarning = '';
+  @state() private telemetryTrajectoryAllowProjectOptOut = true;
+  private loadedTelemetryTrajectoryAllowProjectOptOut = true;
   @state() private telemetryCloudEnabled: boolean | null = null;
   private loadedTelemetryCloudEnabled: boolean | null = null;
   @state() private telemetryCloudEndpoint = '';
@@ -2416,6 +2425,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.telemetryEnabled = tel?.enabled ?? null;
     this.telemetryEnforced = tel?.enforced === true;
     this.telemetryEnforcedWarning = data.telemetry_enforced_warning || '';
+    this.telemetryTrajectoryAllowProjectOptOut = tel?.trajectory?.allow_project_opt_out ?? true;
     this.telemetryCloudEnabled = tel?.cloud?.enabled ?? null;
     this.telemetryCloudEndpoint = tel?.cloud?.endpoint || '';
     this.telemetryCloudProtocol = tel?.cloud?.protocol || '';
@@ -2430,6 +2440,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // true so leaving the switch unchecked while enabling telemetry sends
     // enforced:false and clears the stray flag instead of silently arming it.
     this.loadedTelemetryEnforced = this.telemetryEnforced || Boolean(this.telemetryEnforcedWarning);
+    this.loadedTelemetryTrajectoryAllowProjectOptOut = this.telemetryTrajectoryAllowProjectOptOut;
     this.loadedTelemetryCloudEnabled = this.telemetryCloudEnabled;
     this.loadedTelemetryCloudCloudLogging = this.telemetryCloudCloudLogging;
     this.loadedTelemetryHubEnabled = this.telemetryHubEnabled;
@@ -3097,6 +3108,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         (Boolean(this.telemetryEnforcedWarning) && !this.telemetryEnforced)
       ) {
         telemetry.enforced = this.telemetryEnforced;
+      }
+      if (
+        trajectoryCaptureEnabled() &&
+        this.telemetryTrajectoryAllowProjectOptOut !==
+          this.loadedTelemetryTrajectoryAllowProjectOptOut
+      ) {
+        telemetry.trajectory = {
+          allow_project_opt_out: this.telemetryTrajectoryAllowProjectOptOut,
+        };
       }
       if (ok('telemetry.cloud.enabled')) {
         const cloud: Record<string, unknown> = {
@@ -4846,6 +4866,41 @@ export class ScionPageAdminServerConfig extends LitElement {
                               ${this.telemetryEnforcedWarning}
                             </sl-alert>`
                           : nothing}
+                      </div>`
+                    : nothing}
+                ${trajectoryCaptureEnabled()
+                  ? html`<div class="form-field full-width">
+                      <sl-switch
+                        data-testid="telemetry-trajectory-allow-opt-out-switch"
+                        ?checked=${this.telemetryTrajectoryAllowProjectOptOut}
+                        ?disabled=${this.settingsTier === 'file'}
+                        @sl-change=${(e: Event) => {
+                          this.telemetryTrajectoryAllowProjectOptOut = (
+                            e.target as HTMLInputElement
+                          ).checked;
+                        }}
+                      >
+                        Allow projects to opt out of trajectory capture
+                      </sl-switch>
+                      <span class="hint"
+                        >When turned off, all projects are locked to full trajectory capture and
+                        cannot lower their setting to metadata-only or off.</span
+                      >
+                    </div>`
+                  : !this.telemetryTrajectoryAllowProjectOptOut
+                    ? html`<div class="form-field full-width">
+                        <sl-alert
+                          variant="warning"
+                          open
+                          data-testid="telemetry-trajectory-opt-out-mismatch"
+                        >
+                          <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                          <code>telemetry.trajectory.allow_project_opt_out</code> is stored as
+                          <strong>false</strong>, but experiment
+                          <code>${TOKENOMICS_TRAJECTORY_CAPTURE_FLAG}</code> is off. Enable the
+                          experiment on <a href="/admin/experiments">Admin &gt; Experiments</a> to
+                          activate trajectory capture policy enforcement.
+                        </sl-alert>
                       </div>`
                     : nothing}
                 <div class="form-field full-width">

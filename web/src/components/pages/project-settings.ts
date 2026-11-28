@@ -89,6 +89,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
+  trajectoryCaptureEnabled,
 } from '../../utils/feature-flags.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
@@ -134,11 +135,18 @@ interface ProjectResourceSpec {
   disk?: string;
 }
 
+interface TrajectoryCapturePolicyStatus {
+  policy: 'full' | 'metadata_only' | 'off';
+  enforced_by_hub: boolean;
+}
+
 interface ProjectSettings {
   defaultTemplate?: string | undefined;
   defaultHarnessConfig?: string | undefined;
   defaultHarnessAuth?: string | undefined;
   telemetryEnabled?: boolean | null | undefined;
+  trajectoryCapture?: string | undefined;
+  trajectory_capture?: TrajectoryCapturePolicyStatus | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
   /** null clears (inherit), 0 is Unlimited, n >= 1 a limit. */
@@ -318,6 +326,12 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configTelemetryEnabled: boolean | null = null;
+
+  @state()
+  private configTrajectoryCapture = '';
+
+  @state()
+  private trajectoryCaptureStatus: TrajectoryCapturePolicyStatus | null = null;
 
   @state()
   private configAutoExposePortsEnabled: boolean | null = null;
@@ -1520,6 +1534,7 @@ export class ScionPageProjectSettings extends LitElement {
         // as GET /settings, so the PUT path is unchanged.
         this.settings = resolved.project || {};
         this.resolvedSettings = resolved.settings || {};
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture ?? null;
 
         // Extract telemetry hub default from the resolved response, replacing
         // the separate /api/v1/settings/public fetch.
@@ -1548,6 +1563,7 @@ export class ScionPageProjectSettings extends LitElement {
           this.settings = (await fallbackResponse.json()) as ProjectSettings;
         }
         this.resolvedSettings = {};
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture ?? null;
         // Also try loading telemetry default from public settings
         void this.loadHubTelemetryDefaultFallback();
       } else {
@@ -1564,6 +1580,10 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
       this.configDefaultHarnessAuth = this.settings.defaultHarnessAuth || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
+      this.configTrajectoryCapture = this.settings.trajectoryCapture || '';
+      if (!this.trajectoryCaptureStatus && this.settings.trajectory_capture) {
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture;
+      }
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
       this.configDefaultMaxTurns = countLimitOrNull(this.settings.defaultMaxTurns);
       this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
@@ -1618,6 +1638,23 @@ export class ScionPageProjectSettings extends LitElement {
     if (!this.isTelemetryLockedByHub()) return false;
     const entry = this.resolvedSettings?.['scion.io/telemetry-enabled'];
     return entry?.storedValue === false || this.configTelemetryEnabled === false;
+  }
+
+  /** Whether the Hub opt-out lock forces trajectory capture to full. */
+  private isTrajectoryCaptureLockedByHub(): boolean {
+    return (
+      this.trajectoryCaptureStatus?.enforced_by_hub === true ||
+      this.resolvedSettings?.['scion.io/trajectory-capture']?.lockedBy === 'hub'
+    );
+  }
+
+  /** Whether a stored project trajectory capture opt-out is overridden by Hub policy. */
+  private isTrajectoryCaptureShadowedOptOut(): boolean {
+    if (!this.isTrajectoryCaptureLockedByHub()) return false;
+    const entry = this.resolvedSettings?.['scion.io/trajectory-capture'];
+    const stored =
+      typeof entry?.storedValue === 'string' ? entry.storedValue : this.configTrajectoryCapture;
+    return stored === 'metadata_only' || stored === 'off';
   }
 
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
@@ -2646,6 +2683,9 @@ export class ScionPageProjectSettings extends LitElement {
       if (!this.isTelemetryLockedByHub()) {
         body.telemetryEnabled = this.configTelemetryEnabled;
       }
+      if (trajectoryCaptureEnabled() && !this.isTrajectoryCaptureLockedByHub()) {
+        body.trajectoryCapture = this.configTrajectoryCapture || '';
+      }
       if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
         body.defaultMaxTurns = this.configDefaultMaxTurns;
       }
@@ -3448,6 +3488,38 @@ export class ScionPageProjectSettings extends LitElement {
                       server-level setting.</span
                     >`}
               </div>
+
+              ${trajectoryCaptureEnabled()
+                ? html`<div class="config-field" data-testid="project-trajectory-capture-field">
+                    <label>Trajectory Capture</label>
+                    <sl-select
+                      data-testid="project-trajectory-capture-select"
+                      value=${this.isTrajectoryCaptureLockedByHub()
+                        ? 'full'
+                        : this.configTrajectoryCapture || 'full'}
+                      help-text=${this.isTrajectoryCaptureLockedByHub()
+                        ? this.isTrajectoryCaptureShadowedOptOut()
+                          ? 'Enforced by Hub policy. Stored project opt-out is overridden.'
+                          : 'Enforced by Hub policy'
+                        : nothing}
+                      ?disabled=${!canEdit || this.isTrajectoryCaptureLockedByHub()}
+                      @sl-change=${(e: Event) => {
+                        if (this.isTrajectoryCaptureLockedByHub()) return;
+                        this.configTrajectoryCapture = (e.target as HTMLSelectElement).value;
+                      }}
+                    >
+                      <sl-option value="full">Full (default)</sl-option>
+                      <sl-option value="metadata_only">Metadata only</sl-option>
+                      <sl-option value="off">Off</sl-option>
+                    </sl-select>
+                    ${this.isTrajectoryCaptureLockedByHub()
+                      ? nothing
+                      : html`<span class="field-help"
+                          >Controls raw harness trajectory capture for agents in this project.
+                          Defaults to Full.</span
+                        >`}
+                  </div>`
+                : nothing}
 
               <div
                 class="config-field ${this.isHubDefault('scion.io/auto-expose-ports-enabled')
