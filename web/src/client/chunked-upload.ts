@@ -854,6 +854,13 @@ export interface ChatAttachmentUploadOptions {
   chunkBytes?: number;
   /** Maximum concurrent chunked sessions for multi-file sends (defaults to 2, §3.2). */
   concurrency?: number;
+  /**
+   * Legacy per-file limit (bytes) used to decide whether a batch that receives
+   * `409 artifact_attachments_required` can fall back to the legacy multipart
+   * endpoint (`POST /api/v1/chat/attachments`). Defaults to 10 MiB, capped at
+   * 100 MiB (the legacy multipart ceiling).
+   */
+  legacyMaxFileSize?: number;
   /** Called with aggregate bytes sent across all files and total bytes. */
   onProgress?: (sent: number, total: number) => void;
   /** AbortSignal for user cancellation (sends best-effort `DELETE` per active session). */
@@ -863,12 +870,70 @@ export interface ChatAttachmentUploadOptions {
 const CHAT_ATTACHMENTS_URL = '/api/v1/chat/attachments';
 const CHAT_ATTACHMENT_UPLOADS_URL = '/api/v1/chat/attachments/uploads';
 
+/** Default per-file limit for legacy multipart chat fallback (10 MiB). */
+const DEFAULT_LEGACY_CHAT_MAX_FILE_SIZE = 10 * 1024 * 1024;
+/** Hard ceiling for legacy multipart chat fallback (100 MiB). */
+const MAX_LEGACY_CHAT_FALLBACK_FILE_SIZE = 100 * 1024 * 1024;
+
 /** Error codes that abort the whole chat batch rather than a single file. */
 const FATAL_CHAT_UPLOAD_CODES = new Set([
   'experiment_disabled',
   'artifact_attachments_required',
   'large_uploads_unsupported_storage',
 ]);
+
+async function postLegacyChatAttachments(
+  files: File[],
+  projectId: string | undefined,
+  total: number,
+  onProgress?: (sent: number, total: number) => void,
+  signal?: AbortSignal
+): Promise<{ status: number; response: Response; result?: ChatAttachmentUploadResult }> {
+  const formData = new FormData();
+  if (projectId !== undefined) {
+    formData.append('project_id', projectId);
+  }
+  for (const file of files) {
+    formData.append('files', file);
+  }
+
+  let res: Response;
+  try {
+    res = await apiFetch(CHAT_ATTACHMENTS_URL, {
+      method: 'POST',
+      body: formData,
+      ...(signal ? { signal } : {}),
+    });
+  } catch (err) {
+    if (isAbortError(err, signal)) throw new UploadCancelledError();
+    throw err;
+  }
+
+  if (res.status === 413) {
+    return { status: 413, response: res };
+  }
+
+  const data = (await res.json().catch(() => ({}))) as {
+    attachments?: UploadedChatAttachment[];
+    failures?: ChatAttachmentFailure[];
+    error?: { code?: string; message?: string };
+    message?: string;
+  };
+  const attachments = data.attachments ?? [];
+  const failures = data.failures ?? [];
+  if (res.ok) {
+    onProgress?.(total, total);
+    return { status: res.status, response: res, result: { attachments, failures } };
+  }
+  if (failures.length > 0) {
+    return { status: res.status, response: res, result: { attachments, failures } };
+  }
+  throw new UploadHttpError(
+    data.error?.message || data.message || `Upload failed: HTTP ${res.status}`,
+    res.status,
+    data.error?.code ?? ''
+  );
+}
 
 /**
  * Upload chat attachments when `hub.large_uploads` is enabled (§3.2, §3.14, §7 P2).
@@ -878,6 +943,12 @@ const FATAL_CHAT_UPLOAD_CODES = new Set([
  * session per file against `/api/v1/chat/attachments/uploads` with concurrency 2.
  * A proxy `413` on the single request halves the chunk size (floor 1 MiB) and
  * falls back to chunked sessions.
+ *
+ * If chunked upload start returns `409 artifact_attachments_required` (i.e.
+ * `hub.large_uploads` is on while `hub.attachment_artifacts` is off) and every
+ * file fits within the legacy per-file limit, falls back to the legacy
+ * multipart request so multi-file batches over `chunkBytes` (e.g. 3 × 5 MiB)
+ * continue to succeed.
  */
 export async function uploadChatAttachments(
   files: File[],
@@ -891,6 +962,7 @@ export async function uploadChatAttachments(
   const concurrency = positiveInt(options.concurrency, 2);
   const total = files.reduce((sum, f) => sum + f.size, 0);
   let initialChunkBytes: number | undefined;
+  let singleRequestRejected413 = false;
 
   const projectFieldOverhead =
     options.projectId !== undefined ? 256 + utf8.encode(options.projectId).length : 0;
@@ -900,54 +972,22 @@ export async function uploadChatAttachments(
     threshold > projectFieldOverhead &&
     fitsSingleMultipartRequest(singleRequestEntries, threshold - projectFieldOverhead)
   ) {
-    const formData = new FormData();
-    if (options.projectId !== undefined) {
-      formData.append('project_id', options.projectId);
+    const single = await postLegacyChatAttachments(
+      files,
+      options.projectId,
+      total,
+      onProgress,
+      signal
+    );
+    if (single.result) {
+      return single.result;
     }
-    for (const file of files) {
-      formData.append('files', file);
-    }
-
-    let res: Response;
-    try {
-      res = await apiFetch(CHAT_ATTACHMENTS_URL, {
-        method: 'POST',
-        body: formData,
-        ...(signal ? { signal } : {}),
-      });
-    } catch (err) {
-      if (isAbortError(err, signal)) throw new UploadCancelledError();
-      throw err;
-    }
-
-    if (res.status === 413) {
-      const err = await toUploadError(res);
-      if (err.code !== 'declared_size_exceeded') {
-        initialChunkBytes = Math.max(config.minChunkBytes, Math.floor(threshold / 2));
-      } else {
-        throw err;
-      }
+    const err = await toUploadError(single.response);
+    if (err.code !== 'declared_size_exceeded') {
+      singleRequestRejected413 = true;
+      initialChunkBytes = Math.max(config.minChunkBytes, Math.floor(threshold / 2));
     } else {
-      const data = (await res.json().catch(() => ({}))) as {
-        attachments?: UploadedChatAttachment[];
-        failures?: ChatAttachmentFailure[];
-        error?: { code?: string; message?: string };
-        message?: string;
-      };
-      const attachments = data.attachments ?? [];
-      const failures = data.failures ?? [];
-      if (res.ok) {
-        onProgress?.(total, total);
-        return { attachments, failures };
-      }
-      if (failures.length > 0) {
-        return { attachments, failures };
-      }
-      throw new UploadHttpError(
-        data.error?.message || data.message || `Upload failed: HTTP ${res.status}`,
-        res.status,
-        data.error?.code ?? ''
-      );
+      throw err;
     }
   }
 
@@ -1022,6 +1062,29 @@ export async function uploadChatAttachments(
     throw new UploadCancelledError();
   }
   if (batchState.fatalError !== null) {
+    if (
+      !singleRequestRejected413 &&
+      batchState.fatalError instanceof UploadHttpError &&
+      batchState.fatalError.code === 'artifact_attachments_required'
+    ) {
+      const legacyMax = Math.min(
+        positiveInt(options.legacyMaxFileSize, DEFAULT_LEGACY_CHAT_MAX_FILE_SIZE),
+        MAX_LEGACY_CHAT_FALLBACK_FILE_SIZE
+      );
+      if (files.every((f) => f.size <= legacyMax)) {
+        const fallback = await postLegacyChatAttachments(
+          files,
+          options.projectId,
+          total,
+          onProgress,
+          signal
+        );
+        if (fallback.result) {
+          return fallback.result;
+        }
+        throw await toUploadError(fallback.response);
+      }
+    }
     throw batchState.fatalError;
   }
 

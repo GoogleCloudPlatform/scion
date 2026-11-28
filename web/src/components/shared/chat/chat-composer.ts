@@ -2053,11 +2053,37 @@ export class ScionChatComposer extends LitElement {
       this.uploading = true;
       this.uploadPercent = 0;
       try {
-        const { uploadChatAttachments } = await import('../../../client/chunked-upload.js');
+        const [{ uploadChatAttachments }, { getUploadLimits, formatUploadSize }] =
+          await Promise.all([
+            import('../../../client/chunked-upload.js'),
+            import('../../../client/upload-limits.js'),
+          ]);
+        const limits = await getUploadLimits();
         if (switchedAway()) return;
 
-        const result = await uploadChatAttachments(files, {
+        // Pre-send check against the hub's effective chat attachment limit
+        // (the chunked / artifact limit, not the 100 MiB legacy clamp).
+        const failures: UploadFailure[] = [];
+        const accepted: File[] = [];
+        for (const file of files) {
+          if (file.size > limits.maxAttachmentSize) {
+            failures.push({
+              name: file.name,
+              error: `exceeds the maximum size of ${formatUploadSize(limits.maxAttachmentSize)}`,
+            });
+          } else {
+            accepted.push(file);
+          }
+        }
+
+        if (accepted.length === 0) {
+          this.uploadFailures = failures;
+          return;
+        }
+
+        const result = await uploadChatAttachments(accepted, {
           ...(!this.isDirectMessage() ? { projectId: this.projectId } : {}),
+          legacyMaxFileSize: limits.maxAttachmentSize,
           onProgress: (sent, total) => {
             if (switchedAway()) return;
             this.uploadPercent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 100;
@@ -2066,7 +2092,7 @@ export class ScionChatComposer extends LitElement {
         });
         if (switchedAway()) return;
 
-        this.uploadFailures = result.failures;
+        this.uploadFailures = [...failures, ...result.failures];
         if (result.attachments.length > 0) {
           this.pendingFiles = [...this.pendingFiles, ...result.attachments];
         }

@@ -925,10 +925,10 @@ describe('chunked-upload', () => {
       );
     };
 
-    // 409 artifact_attachments_required → throws UploadHttpError with clear message
+    // 409 artifact_attachments_required with a file over the legacy limit → throws UploadHttpError without falling back
     stubStartError(409, 'artifact_attachments_required');
     await expect(
-      uploadChatAttachments([makeFile(20, 'big.bin')], { chunkBytes: 10 })
+      uploadChatAttachments([makeFile(20, 'big.bin')], { chunkBytes: 10, legacyMaxFileSize: 15 })
     ).rejects.toMatchObject({
       name: 'UploadHttpError',
       code: 'artifact_attachments_required',
@@ -1030,5 +1030,113 @@ describe('chunked-upload', () => {
     expect(mixed.failures).toEqual([
       { name: 'bad.exe', error: 'Executable files are not allowed' },
     ]);
+  });
+
+  it('uploadChatAttachments falls back to legacy multipart on 409 artifact_attachments_required for 3 × 5 MiB and errors when a file exceeds the legacy limit', async () => {
+    const fiveMiB = 5 * 1024 * 1024;
+    const elevenMiB = 11 * 1024 * 1024;
+    const sizedFile = (bytes: number, name: string): File => {
+      const f = new File(['x'], name, { type: 'application/octet-stream' });
+      Object.defineProperty(f, 'size', { value: bytes });
+      return f;
+    };
+
+    // Case 1: 3 × 5 MiB (= 15 MiB > 8 MiB chunkBytes) with artifacts off → falls back to legacy POST /api/v1/chat/attachments
+    const calls1: Array<{ method: string; path: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        calls1.push({ method, path: url.pathname });
+        if (url.pathname === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+          return Promise.resolve(
+            json(
+              {
+                error: {
+                  code: 'artifact_attachments_required',
+                  message: 'Large chat attachments require hub.attachment_artifacts',
+                },
+              },
+              409
+            )
+          );
+        }
+        if (url.pathname === '/api/v1/chat/attachments' && method === 'POST') {
+          return Promise.resolve(
+            json(
+              {
+                attachments: [
+                  {
+                    id: 'a1',
+                    name: 'f1.bin',
+                    mime: 'application/octet-stream',
+                    size: fiveMiB,
+                    url: '/u/a1',
+                  },
+                  {
+                    id: 'a2',
+                    name: 'f2.bin',
+                    mime: 'application/octet-stream',
+                    size: fiveMiB,
+                    url: '/u/a2',
+                  },
+                  {
+                    id: 'a3',
+                    name: 'f3.bin',
+                    mime: 'application/octet-stream',
+                    size: fiveMiB,
+                    url: '/u/a3',
+                  },
+                ],
+                failures: [],
+              },
+              201
+            )
+          );
+        }
+        return Promise.resolve(new Response('unexpected', { status: 500 }));
+      })
+    );
+
+    const res = await uploadChatAttachments(
+      [sizedFile(fiveMiB, 'f1.bin'), sizedFile(fiveMiB, 'f2.bin'), sizedFile(fiveMiB, 'f3.bin')],
+      { projectId: 'proj-1' }
+    );
+    expect(res.failures).toEqual([]);
+    expect(res.attachments.map((a) => a.id)).toEqual(['a1', 'a2', 'a3']);
+    expect(calls1.some((c) => c.path === '/api/v1/chat/attachments/uploads')).toBe(true);
+    expect(calls1.filter((c) => c.path === '/api/v1/chat/attachments')).toHaveLength(1);
+
+    // Case 2: 1 × 11 MiB (exceeds 10 MiB legacy limit) → does NOT call legacy endpoint, rejects with clear error
+    const calls2: Array<{ method: string; path: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        calls2.push({ method, path: url.pathname });
+        return Promise.resolve(
+          json(
+            {
+              error: {
+                code: 'artifact_attachments_required',
+                message: 'Large chat attachments require hub.attachment_artifacts',
+              },
+            },
+            409
+          )
+        );
+      })
+    );
+
+    await expect(
+      uploadChatAttachments([sizedFile(elevenMiB, 'too-big.bin')], { projectId: 'proj-1' })
+    ).rejects.toMatchObject({
+      name: 'UploadHttpError',
+      code: 'artifact_attachments_required',
+      message: 'Large chat attachments require hub.attachment_artifacts',
+    });
+    expect(calls2.filter((c) => c.path === '/api/v1/chat/attachments')).toHaveLength(0);
   });
 });
