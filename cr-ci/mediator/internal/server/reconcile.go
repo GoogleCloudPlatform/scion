@@ -185,10 +185,20 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 		}
 	}
 
+	rateLimitRemaining := -1
+	for _, repo := range s.o.TargetRepos {
+		if rl, ok := s.o.GitHub.RateLimit(repo); ok {
+			if rateLimitRemaining < 0 || rl.Remaining < rateLimitRemaining {
+				rateLimitRemaining = rl.Remaining
+			}
+		}
+	}
+
 	s.log().Info("reconcile finished", "event", logging.EventReconcile,
 		"claims_expired", res.ClaimsExpired, "runners_reaped", res.RunnersReaped, "executions_reaped", res.ExecutionsReaped,
 		"hijacks_killed", res.HijacksKilled, "backfilled", res.Backfilled, "left_queued", res.LeftQueued,
-		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors), "skipped", len(res.Skipped))
+		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors), "skipped", len(res.Skipped),
+		"rate_limit_remaining", rateLimitRemaining)
 	return res
 }
 

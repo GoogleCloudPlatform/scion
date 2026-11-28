@@ -67,6 +67,7 @@ type GitHub interface {
 	ListRunners(ctx context.Context, r githubapp.Repo) ([]githubapp.Runner, error)
 	GenerateJITConfig(ctx context.Context, r githubapp.Repo, req githubapp.JITRequest) (int64, string, error)
 	DeleteRunner(ctx context.Context, r githubapp.Repo, runnerID int64) error
+	RateLimit(r githubapp.Repo) (githubapp.RateLimit, bool)
 }
 
 // Launcher starts, stops and counts runner executions.
