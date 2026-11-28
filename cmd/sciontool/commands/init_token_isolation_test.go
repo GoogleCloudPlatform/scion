@@ -29,6 +29,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 func newIsolatedResetHarness(t *testing.T, mode hub.TokenStoreMode, alsoAccept ...string) (*resetHarness, string) {
@@ -492,69 +494,215 @@ func TestRunInit_NonShell_PreservesHomeTokenFile(t *testing.T) {
 }
 
 func TestRunInit_ShellIsolation_TransportTokenHandoffAbsentBeforeSupervisorRun(t *testing.T) {
+	t.Run("stale persistent-home transport token without env is unlinked and NOT adopted", func(t *testing.T) {
+		home := t.TempDir()
+		t.Cleanup(hub.SetTokenHome(home))
+		t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+		origSetup := runSetupHostUser
+		origBeforeSup := beforeSupervisorRunForTest
+		runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+		t.Cleanup(func() {
+			runSetupHostUser = origSetup
+			beforeSupervisorRunForTest = origBeforeSup
+		})
+
+		handoffTransport := hub.HandoffTransportTokenFilePath()
+		if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(handoffTransport, []byte("stale-persistent-transport"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		staleTransportTmp := hub.HandoffTransportTokenTmpFilePath()
+		if err := os.WriteFile(staleTransportTmp, []byte("stale-transport-tmp"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_HARNESS", "shell")
+		t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+		t.Setenv("SCION_HUB_ENDPOINT", "")
+		t.Setenv("SCION_HUB_URL", "")
+		t.Setenv("SCION_AGENT_ID", "")
+		t.Setenv(transportauth.EnvTransportToken, "")
+		t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+		var observed bool
+		var transportHandoffExisted bool
+		var transportTmpExisted bool
+		var memTransportTok string
+		beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+			observed = true
+			_, err := os.Lstat(handoffTransport)
+			transportHandoffExisted = !os.IsNotExist(err)
+			_, tmpErr := os.Lstat(staleTransportTmp)
+			transportTmpExisted = !os.IsNotExist(tmpErr)
+			memTransportTok, _ = hub.ReadTransportTokenFileGuarded("")
+		}
+
+		code := RunInit([]string{"true"}, InitRunOptions{
+			DisableReExec:               true,
+			DisableTermSignalForwarding: true,
+			DisablePortForwarding:       true,
+		})
+		if code != 0 {
+			t.Fatalf("RunInit exited %d, want 0", code)
+		}
+		if !observed {
+			t.Fatal("beforeSupervisorRunForTest was not called")
+		}
+		if transportHandoffExisted {
+			t.Fatal("handoff transport-token still existed at sup.Run")
+		}
+		if transportTmpExisted {
+			t.Fatal("stale transport-token.tmp still existed at sup.Run")
+		}
+		if memTransportTok != "" {
+			t.Fatalf("stale persistent-home transport token was adopted into memory: %q", memTransportTok)
+		}
+	})
+
+	t.Run("memory mode with SCION_TRANSPORT_TOKEN purges env via re-exec and adopts into memory", func(t *testing.T) {
+		home := t.TempDir()
+		t.Cleanup(hub.SetTokenHome(home))
+		t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+		origSetup := runSetupHostUser
+		origBeforeSup := beforeSupervisorRunForTest
+		origReExec := reExecWithCleanEnv
+		runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+		t.Cleanup(func() {
+			runSetupHostUser = origSetup
+			beforeSupervisorRunForTest = origBeforeSup
+			reExecWithCleanEnv = origReExec
+		})
+
+		reExecCalled := false
+		envVarAtReExec := "UNSET"
+		reExecWithCleanEnv = func() error {
+			reExecCalled = true
+			envVarAtReExec = os.Getenv(transportauth.EnvTransportToken)
+			hub.ResetTokenStore()
+			return nil
+		}
+
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_HARNESS", "shell")
+		t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+		t.Setenv("SCION_HUB_ENDPOINT", "")
+		t.Setenv("SCION_HUB_URL", "")
+		t.Setenv("SCION_AGENT_ID", "")
+		t.Setenv(transportauth.EnvTransportToken, "bootstrap-iap-tok")
+		t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+		var observed bool
+		var transportHandoffExisted bool
+		var envVarAtRun string
+		var memTransportTok string
+		beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+			observed = true
+			_, err := os.Lstat(hub.HandoffTransportTokenFilePath())
+			transportHandoffExisted = !os.IsNotExist(err)
+			envVarAtRun = os.Getenv(transportauth.EnvTransportToken)
+			memTransportTok, _ = hub.ReadTransportTokenFileGuarded("")
+		}
+
+		code := RunInit([]string{"true"}, InitRunOptions{
+			DisableTermSignalForwarding: true,
+			DisablePortForwarding:       true,
+		})
+		if code != 0 {
+			t.Fatalf("RunInit exited %d, want 0", code)
+		}
+		if !reExecCalled {
+			t.Fatal("expected reExecWithCleanEnv to purge SCION_TRANSPORT_TOKEN from /proc/1/environ in memory mode")
+		}
+		if envVarAtReExec != "" {
+			t.Fatalf("SCION_TRANSPORT_TOKEN was still set at re-exec: %q", envVarAtReExec)
+		}
+		if !observed {
+			t.Fatal("beforeSupervisorRunForTest was not called")
+		}
+		if envVarAtRun != "" {
+			t.Fatalf("SCION_TRANSPORT_TOKEN still set at sup.Run: %q", envVarAtRun)
+		}
+		if transportHandoffExisted {
+			t.Fatal("handoff transport-token still existed at sup.Run")
+		}
+		if memTransportTok != "bootstrap-iap-tok" {
+			t.Fatalf("in-memory transport token = %q, want %q", memTransportTok, "bootstrap-iap-tok")
+		}
+	})
+}
+
+func TestRunInit_ShellIsolation_StagedHubTokenSurvivesReExecInMemoryMode(t *testing.T) {
 	home := t.TempDir()
 	t.Cleanup(hub.SetTokenHome(home))
 	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
 
 	origSetup := runSetupHostUser
 	origBeforeSup := beforeSupervisorRunForTest
+	origReExec := reExecWithCleanEnv
 	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
 	t.Cleanup(func() {
 		runSetupHostUser = origSetup
 		beforeSupervisorRunForTest = origBeforeSup
+		reExecWithCleanEnv = origReExec
 	})
 
-	handoffTransport := hub.HandoffTransportTokenFilePath()
-	if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
-		t.Fatal(err)
+	// Simulate a real syscall.Exec by wiping all package-level token-store
+	// state (including any in-memory token) when reExecWithCleanEnv fires.
+	reExecCalled := false
+	reExecWithCleanEnv = func() error {
+		reExecCalled = true
+		hub.ResetTokenStore()
+		return nil
 	}
-	if err := os.WriteFile(handoffTransport, []byte("pre-sup-transport-tok"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	staleTransportTmp := hub.HandoffTransportTokenTmpFilePath()
-	if err := os.WriteFile(staleTransportTmp, []byte("stale-transport-tmp"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+
+	encoded := stagedBlob(t, "staged-cloudrun-hub-tok")
 
 	t.Setenv("HOME", home)
 	t.Setenv("SCION_HARNESS", "shell")
 	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv(stagedsecrets.EnvVar, encoded)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
 	t.Setenv("SCION_AGENT_ID", "")
 
 	var observed bool
-	var transportHandoffExisted bool
-	var transportTmpExisted bool
-	var memTransportTok string
+	var tokenAtRun string
+	var handoffExistsAtRun bool
+	var modeAtRun hub.TokenStoreMode
 	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
 		observed = true
-		_, err := os.Lstat(handoffTransport)
-		transportHandoffExisted = !os.IsNotExist(err)
-		_, tmpErr := os.Lstat(staleTransportTmp)
-		transportTmpExisted = !os.IsNotExist(tmpErr)
-		memTransportTok, _ = hub.ReadTransportTokenFileGuarded("")
+		tokenAtRun = hub.ReadTokenFile()
+		_, lerr := os.Lstat(hub.HandoffTokenFilePath())
+		handoffExistsAtRun = !os.IsNotExist(lerr)
+		modeAtRun = hub.CurrentTokenStoreMode()
 	}
 
 	code := RunInit([]string{"true"}, InitRunOptions{
-		DisableReExec:               true,
 		DisableTermSignalForwarding: true,
 		DisablePortForwarding:       true,
 	})
 	if code != 0 {
 		t.Fatalf("RunInit exited %d, want 0", code)
 	}
+	if !reExecCalled {
+		t.Fatal("expected reExecWithCleanEnv to be called for SCION_STAGED_SECRETS")
+	}
 	if !observed {
 		t.Fatal("beforeSupervisorRunForTest was not called")
 	}
-	if transportHandoffExisted {
-		t.Fatal("handoff transport-token still existed at sup.Run")
+	if modeAtRun != hub.TokenStoreMemory {
+		t.Fatalf("mode at sup.Run = %v, want TokenStoreMemory", modeAtRun)
 	}
-	if transportTmpExisted {
-		t.Fatal("stale transport-token.tmp still existed at sup.Run")
+	if tokenAtRun != "staged-cloudrun-hub-tok" {
+		t.Fatalf("token at sup.Run = %q, want %q (staged hub token lost across re-exec!)", tokenAtRun, "staged-cloudrun-hub-tok")
 	}
-	if memTransportTok != "pre-sup-transport-tok" {
-		t.Fatalf("in-memory transport token = %q, want %q", memTransportTok, "pre-sup-transport-tok")
+	if handoffExistsAtRun {
+		t.Fatal("handoff token file still existed at sup.Run")
 	}
 }
 

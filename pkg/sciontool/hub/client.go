@@ -2402,7 +2402,8 @@ func WriteTransportTokenFile(token string, uid, gid int) error {
 		if err := ensureRuntimeTokenDir(path); err != nil {
 			return fmt.Errorf("failed to prepare runtime transport token directory: %w", err)
 		}
-		if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
+		// Force owner 0:0 inside the runtime store regardless of caller uid/gid.
+		if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, 0, 0); err != nil {
 			return fmt.Errorf("failed to write runtime transport token file: %w", err)
 		}
 		return nil
@@ -2652,6 +2653,7 @@ func WriteTransportRefreshStatus(st TransportRefreshStatus, uid, gid int) error 
 	path := TransportRefreshStatusPath()
 	if mode == TokenStoreRuntimeFile {
 		checkRuntimeStoreTestGuard(path, "WriteTransportRefreshStatus")
+		uid, gid = 0, 0
 	} else if testing.Testing() && !tokenHomeOverridden {
 		panic("scion/hub: WriteTransportRefreshStatus called during a test without SetTokenHome()")
 	}

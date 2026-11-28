@@ -206,3 +206,48 @@ func TestTakeHandoffTransportToken_SymlinkAndDirectory(t *testing.T) {
 		t.Fatalf("TakeHandoffTransportToken(dir) = %v, want ErrHandoffUnlinkFailed", err)
 	}
 }
+
+func TestNewTransportFileSource_RuntimeFileIgnoresUnenvFile(t *testing.T) {
+	home := t.TempDir()
+	base := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+	runtimePath := filepath.Join(base, "run-scion", TokenFile)
+	if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err != nil {
+		t.Fatalf("ConfigureIsolatedTokenStore: %v", err)
+	}
+	// Even if a runtime transport file exists on disk, newTransportFileSource
+	// must NOT invent a transport source when neither env var is set.
+	if err := WriteTransportTokenFile(makeTestTransportJWT(t, time.Now().Add(time.Hour)), 0, 0); err != nil {
+		t.Fatalf("WriteTransportTokenFile: %v", err)
+	}
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+	if src := newTransportFileSource(); src != nil {
+		t.Fatalf("newTransportFileSource() = %v, want nil when no transport env vars are set", src)
+	}
+}
+
+func TestWriteTransportTokenFile_RuntimeFileForcesOwnerZero(t *testing.T) {
+	home := t.TempDir()
+	base := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+	runtimePath := filepath.Join(base, "run-scion", TokenFile)
+	if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err != nil {
+		t.Fatalf("ConfigureIsolatedTokenStore: %v", err)
+	}
+	if err := WriteTransportTokenFile("transport-owner-zero", 65534, 65534); err != nil {
+		t.Fatalf("WriteTransportTokenFile with non-zero uid in RuntimeFile mode failed: %v", err)
+	}
+	info, err := os.Stat(TransportTokenFilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		t.Fatalf("runtime transport token uid = %d, want %d", st.Uid, os.Geteuid())
+	}
+}

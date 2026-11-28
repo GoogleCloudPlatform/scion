@@ -133,13 +133,10 @@ func newTransportFileSource() *transportauth.FileSource {
 		return src
 	}
 	if mode == TokenStoreRuntimeFile {
-		runtimePath := TransportTokenFilePath()
 		if envTok == "" && path == "" {
-			if _, err := ReadTransportTokenFileGuarded(runtimePath); err != nil {
-				return nil
-			}
+			return nil
 		}
-		src := transportauth.NewFileSource(runtimePath, ReadTransportTokenFileGuarded)
+		src := transportauth.NewFileSource(TransportTokenFilePath(), ReadTransportTokenFileGuarded)
 		src.SetBootstrap(envTok)
 		return src
 	}

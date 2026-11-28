@@ -116,24 +116,15 @@ func configureShellTokenStoreMode(targetUID int, rootless bool) hub.TokenStoreMo
 	return hub.TokenStoreMemory
 }
 
-// stageTransportTokenForShell stages the bootstrap SCION_TRANSPORT_TOKEN under
-// shell isolation: on root-init runtimes it writes directly to the root-only
-// runtime path (/run/scion/transport-token, 0600 root:root) and clears the env
-// var so re-exec purges /proc/1/environ; in memory mode it never writes to
-// $HOME and leaves the env var for post-re-exec memory ingestion.
-func stageTransportTokenForShell(targetUID int, rootless bool) bool {
-	mode := configureShellTokenStoreMode(targetUID, rootless)
-	if mode != hub.TokenStoreRuntimeFile {
-		return false
-	}
-	return stageTransportToken(0, 0)
-}
-
 // setupShellIsolatedTokenStore configures the isolated runtime token store
 // (root-only /run/scion/scion-token on root-init runtimes, or memory-only on
 // rootless/shared-UID runtimes or unwritable /run), takes and unconditionally
 // unlinks the broker handoff files (~/.scion/scion-token and
 // ~/.scion/transport-token), and removes any stale .tmp files.
+//
+// This runs AFTER the environ-purge re-exec so no in-memory state is lost
+// across syscall.Exec and any bootstrap SCION_TRANSPORT_TOKEN has already been
+// staged to the handoff path and purged from /proc/1/environ.
 //
 // It returns a non-nil error only when a handoff file or stale temp file
 // cannot be unlinked (fail-closed: init must refuse to start the workload).
@@ -167,17 +158,13 @@ func setupShellIsolatedTokenStore(targetUID int, rootless bool) error {
 		return fmt.Errorf("cannot remove stale handoff token temp file: %w", err)
 	}
 
-	// Transport token take-and-store (IAP / Cloud Run invoker): apply the same
-	// no-follow take + unconditional unlink to ~/.scion/transport-token and
-	// persist only to /run/scion/transport-token (0600 root:root) or memory.
-	if hub.CurrentTokenStoreMode() == hub.TokenStoreMemory {
-		if envTok := os.Getenv(transportauth.EnvTransportToken); envTok != "" {
-			_, _ = hub.SeedTransportTokenFile(envTok, 0, 0)
-			_ = os.Unsetenv(transportauth.EnvTransportToken)
-			_ = os.Unsetenv(transportauth.EnvTransportTokenExpiry)
-		}
-	}
-
+	// Transport token take-and-store (IAP / Cloud Run invoker): always take
+	// and unconditionally unlink ~/.scion/transport-token so no stale or
+	// workload-visible file remains. Seed it into the runtime store ONLY when
+	// this start had a hub-provided transport credential staged pre-exec
+	// (signalled by SCION_TRANSPORT_TOKEN_FILE surviving the re-exec); a stale
+	// file on a persistent home with no transport env is unlinked and discarded.
+	hasStagedTransport := os.Getenv(transportauth.EnvTransportTokenFile) != ""
 	tTok, tErr := hub.TakeHandoffTransportToken()
 	if tErr != nil {
 		if errors.Is(tErr, fs.ErrNotExist) {
@@ -187,7 +174,7 @@ func setupShellIsolatedTokenStore(targetUID int, rootless bool) error {
 		} else {
 			log.Warn("Ignored and removed invalid handoff transport token entry: %v", tErr)
 		}
-	} else if tTok != "" {
+	} else if hasStagedTransport && tTok != "" {
 		if _, werr := hub.SeedTransportTokenFile(tTok, 0, 0); werr != nil {
 			if hub.CurrentTokenStoreMode() == hub.TokenStoreRuntimeFile {
 				log.Warn("Failed to write runtime transport token file (%v); falling back to in-memory token store", werr)
@@ -201,6 +188,13 @@ func setupShellIsolatedTokenStore(targetUID int, rootless bool) error {
 				return fmt.Errorf("store isolated transport token: %w", werr)
 			}
 		}
+		if rtPath := hub.TransportTokenFilePath(); rtPath != "" {
+			_ = os.Setenv(transportauth.EnvTransportTokenFile, rtPath)
+		} else {
+			_ = os.Unsetenv(transportauth.EnvTransportTokenFile)
+		}
+	} else if !hasStagedTransport && tTok != "" {
+		log.Info("Discarded stale handoff transport token file (no transport token provided for this start)")
 	}
 
 	if err := hub.RemoveStaleHandoffTransportTmpFile(); err != nil {

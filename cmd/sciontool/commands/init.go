@@ -558,12 +558,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the refresh loop keeps current; the env value is only valid for about
 	// an hour. When staged secrets are also present, the single re-exec
 	// below restarts init with the cleaned environment for both.
-	var transportCleared bool
+	stageTransportUID, stageTransportGID := targetUID, targetGID
 	if shellIsolation {
-		transportCleared = stageTransportTokenForShell(targetUID, rootless)
-	} else {
-		transportCleared = stageTransportToken(targetUID, targetGID)
+		stageTransportUID, stageTransportGID = 0, 0
 	}
+	transportCleared := stageTransportToken(stageTransportUID, stageTransportGID)
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file secrets into this single base64 blob
