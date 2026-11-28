@@ -147,8 +147,7 @@ func TestBuildExecContainerMOTD_ProxyTransportLine(t *testing.T) {
 		t.Run("proxy_mode_"+mode, func(t *testing.T) {
 			for _, persistent := range []string{"true", "false"} {
 				got := buildExecContainerMOTD(baseEnv(mode, persistent))
-				assert.Contains(t, got, "transport auth")
-				assert.Contains(t, got, "your own credentials")
+				assert.Contains(t, got, "Hub requires transport auth: log in with your own credentials first.")
 				// Combined with P3's 3-line login block, worst case (persistent=false)
 				// must stay within the 20-line one-screen budget (17 + 3 = 20).
 				assert.LessOrEqual(t, strings.Count(got, "\n"), 17,

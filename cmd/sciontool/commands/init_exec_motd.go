@@ -115,7 +115,7 @@ func buildExecContainerMOTD(getenv func(string) string) string {
 
 	var transportLine string
 	if transportauth.IsProxyMode(strings.TrimSpace(getenv(transportauth.EnvTransportMode))) {
-		transportLine = "Hub requires transport auth with your own credentials first.\n"
+		transportLine = "Hub requires transport auth: log in with your own credentials first.\n"
 	}
 
 	return fmt.Sprintf(`======================================================================
