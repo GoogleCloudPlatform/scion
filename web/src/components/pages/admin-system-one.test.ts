@@ -762,4 +762,67 @@ describe('scion-page-admin-system-one', () => {
     expect(text).toContain('gemini-named');
     expect(text).toContain('gemini-adc');
   });
+
+  it('scopes decorative 2.5rem icon styling to direct empty/error-state icons, not button prefix icons', async () => {
+    setFeatureFlag(SYSTEM_ONE_FLAG, true);
+    apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/system-one/adapters') {
+        return Promise.resolve(json({ adapters: SAMPLE_ADAPTERS }));
+      }
+      if (path === '/api/v1/admin/system-one/instances') {
+        return Promise.resolve(json({ instances: [], totalCount: 0 }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    const el = await mount();
+    const emptyState = el.shadowRoot?.querySelector('.empty-state');
+    expect(emptyState).not.toBeNull();
+
+    const decorativeIcon = emptyState?.querySelector(':scope > sl-icon');
+    const buttonPrefixIcon = emptyState?.querySelector('sl-button sl-icon[slot="prefix"]');
+    expect(decorativeIcon?.getAttribute('name')).toBe('robot');
+    expect(buttonPrefixIcon?.getAttribute('name')).toBe('plus-lg');
+
+    // Verify stylesheet selectors: decorative rule uses child combinator so nested button icons do not match.
+    const cssText = (
+      Array.isArray(mod.ScionPageAdminSystemOne.styles)
+        ? mod.ScionPageAdminSystemOne.styles
+        : [mod.ScionPageAdminSystemOne.styles]
+    )
+      .map((s) => s.cssText)
+      .join('\n');
+    expect(cssText).toContain('.empty-state > sl-icon');
+    expect(cssText).toContain('.error-state > sl-icon');
+    expect(cssText).not.toMatch(/\.empty-state\s+sl-icon\b/);
+    expect(cssText).not.toMatch(/\.error-state\s+sl-icon\b/);
+
+    expect(decorativeIcon?.matches('.empty-state > sl-icon')).toBe(true);
+    expect(buttonPrefixIcon?.matches('.empty-state > sl-icon')).toBe(false);
+
+    // Verify computed styles in shadow root: decorative icon keeps 2.5rem (40px) while button prefix icon does not.
+    const decorativeStyle = window.getComputedStyle(decorativeIcon!);
+    const buttonIconStyle = window.getComputedStyle(buttonPrefixIcon!);
+    expect(decorativeStyle.fontSize).toBe('40px');
+    expect(decorativeStyle.opacity).toBe('0.6');
+    expect(buttonIconStyle.fontSize).not.toBe('40px');
+    expect(buttonIconStyle.opacity).not.toBe('0.6');
+
+    // Error state decorative icon keeps the 2.5rem (40px) rule too.
+    el.remove();
+    apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/system-one/adapters') {
+        return Promise.resolve(json({ adapters: SAMPLE_ADAPTERS }));
+      }
+      if (path === '/api/v1/admin/system-one/instances') {
+        return Promise.resolve(json({ error: { message: 'backend unavailable' } }, 500));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+    const errEl = await mount();
+    const errorIcon = errEl.shadowRoot?.querySelector('.error-state > sl-icon');
+    expect(errorIcon?.getAttribute('name')).toBe('exclamation-triangle');
+    expect(errorIcon?.matches('.error-state > sl-icon')).toBe(true);
+    expect(window.getComputedStyle(errorIcon!).fontSize).toBe('40px');
+  });
 });
