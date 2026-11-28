@@ -744,6 +744,9 @@ export class ScionPageAgentDetail extends LitElement {
         color: var(--scion-text-secondary, #475569);
         font-size: 0.875rem;
       }
+      .reincarnate-meta {
+        margin-bottom: 1rem;
+      }
       .reincarnate-error {
         margin-bottom: 1rem;
       }
@@ -1630,21 +1633,27 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   /**
+   * Renders an absolute timestamp with a muted relative suffix, or a muted
+   * empty-state label when the timestamp is unset or Go's zero time.
+   */
+  private renderTimestampValue(ts: string | undefined, emptyLabel: string) {
+    if (ts && !this.isZeroDate(ts)) {
+      return html`${this.formatDate(ts)}<span
+          style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
+          >(${this.formatRelativeTime(ts)})</span
+        >`;
+    }
+    return html`<span style="color: var(--scion-text-muted, #64748b);">${emptyLabel}</span>`;
+  }
+
+  /**
    * The Container started row inside Status -> Current State.
    */
   private renderContainerStarted(agent: Agent) {
-    const hasStarted = Boolean(agent.startedAt && !this.isZeroDate(agent.startedAt));
     return html`
       <div class="info-item" data-testid="agent-container-started">
         <span class="info-label">Container started</span>
-        <span class="info-value">
-          ${hasStarted
-            ? html`${this.formatDate(agent.startedAt!)}<span
-                  style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
-                  >(${this.formatRelativeTime(agent.startedAt!)})</span
-                >`
-            : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
-        </span>
+        <span class="info-value">${this.renderTimestampValue(agent.startedAt, '—')}</span>
       </div>
     `;
   }
@@ -3393,6 +3402,12 @@ export class ScionPageAgentDetail extends LitElement {
           Stop this agent and provision it again from its current settings and template. Use this to
           apply configuration changes.
         </p>
+        <div class="info-item reincarnate-meta" data-testid="agent-last-reincarnated">
+          <span class="info-label">Last reincarnated</span>
+          <span class="info-value"
+            >${this.renderTimestampValue(agent.lastReincarnatedAt, 'Never')}</span
+          >
+        </div>
         ${this.reincarnateError
           ? html`<sl-alert variant="danger" open class="reincarnate-error">
               <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>

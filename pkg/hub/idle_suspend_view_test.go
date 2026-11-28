@@ -305,3 +305,38 @@ func TestAgentWithCapabilities_JSON_ActivitySinceAndIdleSuspendAt(t *testing.T) 
 		assert.False(t, hasSA, "idleSuspendAt should be omitted when nil")
 	})
 }
+
+func TestAgentWithCapabilities_JSON_LastReincarnatedAt(t *testing.T) {
+	ts := time.Date(2026, 11, 28, 11, 30, 0, 0, time.UTC)
+
+	t.Run("round-trips lastReincarnatedAt when set", func(t *testing.T) {
+		in := AgentWithCapabilities{
+			Agent:              store.Agent{ID: "agent-1", Phase: string(state.PhaseRunning)},
+			LastReincarnatedAt: &ts,
+		}
+		raw, err := json.Marshal(in)
+		require.NoError(t, err)
+
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m))
+		assert.Equal(t, ts.Format(time.RFC3339), m["lastReincarnatedAt"])
+
+		var out AgentWithCapabilities
+		require.NoError(t, json.Unmarshal(raw, &out))
+		require.NotNil(t, out.LastReincarnatedAt)
+		assert.True(t, out.LastReincarnatedAt.Equal(ts))
+	})
+
+	t.Run("omits lastReincarnatedAt when nil", func(t *testing.T) {
+		in := AgentWithCapabilities{
+			Agent: store.Agent{ID: "agent-2", Phase: string(state.PhaseRunning)},
+		}
+		raw, err := json.Marshal(in)
+		require.NoError(t, err)
+
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m))
+		_, has := m["lastReincarnatedAt"]
+		assert.False(t, has, "lastReincarnatedAt should be omitted when nil")
+	})
+}

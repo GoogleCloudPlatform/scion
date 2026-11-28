@@ -1172,6 +1172,8 @@ export interface Agent {
   currentModelCalls?: number;
   startedAt?: string;
   connectionState?: string;
+  // Most recent completed reincarnation timestamp (single-agent GET only).
+  lastReincarnatedAt?: string;
 
   // Cloud Logging capability (from hub)
   cloudLogging?: boolean;

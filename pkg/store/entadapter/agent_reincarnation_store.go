@@ -407,3 +407,28 @@ func (s *AgentReincarnationStore) SetAgentReincarnationSourceCleanup(ctx context
 	}
 	return nil
 }
+
+// LatestCompletedAgentReincarnationAt returns CompletedAt of the agent's most
+// recent reincarnation in state "completed", or (nil, nil) when it has none.
+func (s *AgentReincarnationStore) LatestCompletedAgentReincarnationAt(ctx context.Context, agentID string) (*time.Time, error) {
+	row, err := s.client.AgentReincarnation.Query().
+		Where(
+			agentreincarnation.AgentIDEQ(agentID),
+			agentreincarnation.StateEQ(agentreincarnation.StateCompleted),
+			agentreincarnation.CompletedAtNotNil(),
+		).
+		Order(ent.Desc(agentreincarnation.FieldCompletedAt)).
+		Select(agentreincarnation.FieldCompletedAt).
+		First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, mapError(err)
+	}
+	if row.CompletedAt == nil {
+		return nil, nil
+	}
+	t := row.CompletedAt.UTC()
+	return &t, nil
+}

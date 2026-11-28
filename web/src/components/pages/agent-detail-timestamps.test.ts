@@ -205,6 +205,36 @@ describe('agent detail Status -> Current State timestamps and auto-suspend', () 
     expect(unsetRow?.textContent).toContain('—');
   });
 
+  it('renders Last reincarnated with absolute and relative time, or Never when unset/zero', async () => {
+    const el = await mountWithAgent(
+      baseAgent({
+        _capabilities: { actions: ['read', 'lifecycle'] },
+        lastReincarnatedAt: '2026-11-28T11:30:00Z',
+      })
+    );
+    const row = el.shadowRoot?.querySelector('[data-testid="agent-last-reincarnated"]');
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain('Last reincarnated');
+    expect(row?.textContent).toContain('30 minutes ago');
+
+    el.agent = baseAgent({
+      _capabilities: { actions: ['read', 'lifecycle'] },
+      lastReincarnatedAt: undefined,
+    });
+    await el.updateComplete;
+    const neverRow = el.shadowRoot?.querySelector('[data-testid="agent-last-reincarnated"]');
+    expect(neverRow?.textContent).toContain('Never');
+    expect(neverRow?.textContent).not.toContain('ago');
+
+    el.agent = baseAgent({
+      _capabilities: { actions: ['read', 'lifecycle'] },
+      lastReincarnatedAt: '0001-01-01T00:00:00Z',
+    });
+    await el.updateComplete;
+    const zeroRow = el.shadowRoot?.querySelector('[data-testid="agent-last-reincarnated"]');
+    expect(zeroRow?.textContent).toContain('Never');
+  });
+
   it('aligns Activity badge relative time to activitySince when present and falls back when absent', async () => {
     // activitySince = 11:55 (5m ago), lastActivityEvent = 11:59 (1m ago)
     const el = await mountWithAgent(baseAgent());
