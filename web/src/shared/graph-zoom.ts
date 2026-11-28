@@ -140,7 +140,12 @@ export function wheelZoomLogDelta(event: WheelZoomEvent, options?: WheelZoomOpti
   const baseSensitivity = event.ctrlKey
     ? (options?.pinchSensitivity ?? PINCH_ZOOM_SENSITIVITY)
     : (options?.wheelSensitivity ?? WHEEL_ZOOM_SENSITIVITY);
-  const divisor = event.altKey ? (options?.lowGearDivisor ?? LOW_GEAR_DIVISOR) : 1;
+  const rawDivisor = options?.lowGearDivisor;
+  const lowGearDivisor =
+    rawDivisor !== undefined && Number.isFinite(rawDivisor) && rawDivisor > 0
+      ? rawDivisor
+      : LOW_GEAR_DIVISOR;
+  const divisor = event.altKey ? lowGearDivisor : 1;
   const maxStep = options?.maxEventLogStep ?? MAX_EVENT_LOG_STEP;
 
   return clampSymmetric((-normalized * baseSensitivity) / divisor, maxStep);

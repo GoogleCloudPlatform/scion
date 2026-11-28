@@ -141,6 +141,33 @@ describe('wheelZoomLogDelta & wheelZoomFactor', () => {
     expect(lowGearScale).toBeCloseTo(Math.pow(2, 1 / LOW_GEAR_DIVISOR), 6);
   });
 
+  it('falls back to LOW_GEAR_DIVISOR when options.lowGearDivisor is zero, negative, or non-finite', () => {
+    const normalWheel = wheelZoomLogDelta({ deltaY: -100, altKey: false });
+    const defaultLowGear = normalWheel / LOW_GEAR_DIVISOR;
+
+    expect(wheelZoomLogDelta({ deltaY: -100, altKey: true }, { lowGearDivisor: 0 })).toBeCloseTo(
+      defaultLowGear,
+      10
+    );
+    expect(wheelZoomLogDelta({ deltaY: -100, altKey: true }, { lowGearDivisor: -2 })).toBeCloseTo(
+      defaultLowGear,
+      10
+    );
+    expect(wheelZoomLogDelta({ deltaY: -100, altKey: true }, { lowGearDivisor: NaN })).toBeCloseTo(
+      defaultLowGear,
+      10
+    );
+    expect(
+      wheelZoomLogDelta({ deltaY: -100, altKey: true }, { lowGearDivisor: Infinity })
+    ).toBeCloseTo(defaultLowGear, 10);
+
+    // Valid positive finite custom divisor is honored.
+    expect(wheelZoomLogDelta({ deltaY: -100, altKey: true }, { lowGearDivisor: 2 })).toBeCloseTo(
+      normalWheel / 2,
+      10
+    );
+  });
+
   it('clamps extreme positive and negative deltas per event to MAX_EVENT_LOG_STEP', () => {
     const hugeIn = wheelZoomLogDelta({ deltaY: -5000, deltaMode: DELTA_MODE_PIXEL });
     const hugeOut = wheelZoomLogDelta({ deltaY: 5000, deltaMode: DELTA_MODE_PIXEL });
