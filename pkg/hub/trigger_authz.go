@@ -67,8 +67,13 @@ const (
 // (returns nil). Agent identities lacking agentAuthoringFloorScope return an
 // error so HTTP handlers write 403 and fire-time authorization refuses the fire.
 func requireAgentAuthoringFloor(identity Identity) error {
+	// Guard with isNilIdentity before type-asserting so a typed-nil concrete
+	// identity (e.g. (*agentIdentityWrapper)(nil)) does not panic in HasScope.
+	if isNilIdentity(identity) {
+		return nil
+	}
 	agentIdent, ok := identity.(AgentIdentity)
-	if !ok || agentIdent == nil {
+	if !ok {
 		return nil
 	}
 	if !agentIdent.HasScope(agentAuthoringFloorScope) {

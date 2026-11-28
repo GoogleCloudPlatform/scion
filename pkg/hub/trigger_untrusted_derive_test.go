@@ -411,3 +411,9 @@ func TestTriggerUntrustedVarsDerive_PerPrincipalAuthoringRegression(t *testing.T
 		})
 	}
 }
+
+func TestRequireAgentAuthoringFloor_TypedNilIdentity(t *testing.T) {
+	var typedNil *agentIdentityWrapper
+	assert.NoError(t, requireAgentAuthoringFloor(nil))
+	assert.NoError(t, requireAgentAuthoringFloor(typedNil))
+}
