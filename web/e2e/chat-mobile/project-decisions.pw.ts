@@ -939,7 +939,7 @@ for (const theme of ['light', 'dark'] as const) {
       );
 
       // Answer the purged DM card inline and verify surface="decisions_page" + badge decrement.
-      const rotateBtn = purgedCard.locator('sl-button[data-choice="rotate"]');
+      const rotateBtn = purgedCard.locator('button[data-choice="rotate"]');
       await rotateBtn.scrollIntoViewIfNeeded();
       await rotateBtn.click();
 

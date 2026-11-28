@@ -542,10 +542,10 @@ describe('mobile touch on choice cards (ptone/scion#7839)', () => {
     );
 
     const plainEl = await messageEl(thread, 'p-plain');
-    const slBtn = cardOf(plainEl)!.shadowRoot.querySelector<HTMLElement>(
-      'sl-button[data-choice="yes"]'
+    const choiceBtn = cardOf(plainEl)!.shadowRoot.querySelector<HTMLElement>(
+      'button[data-choice="yes"]'
     )!;
-    slBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    choiceBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await thread.updateComplete;
     expect(hasOpenMenu(thread)).toBe(false);
 

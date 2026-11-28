@@ -152,7 +152,7 @@ describe('blocked before the click', () => {
 
   it('keeps the recommended choice outlined while disabled', async () => {
     const el = await mount(deniedAnswerability('mode_none', 'release-bot'));
-    expect(button(el, 'yes').hasAttribute('outline')).toBe(true);
+    expect(button(el, 'yes').getAttribute('data-look')).toBe('outline');
   });
 
   it('sends nothing on click or Enter', async () => {

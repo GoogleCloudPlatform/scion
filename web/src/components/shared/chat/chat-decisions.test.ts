@@ -131,12 +131,11 @@ describe('pending', () => {
     // Question markdown is rendered (inline code), not shown raw.
     expect(root(el).querySelector('.q code')?.textContent).toBe('v0.9');
     const yes = button(el, 'yes');
-    expect(yes.getAttribute('variant')).toBe('primary');
-    expect(yes.hasAttribute('outline')).toBe(true);
+    expect(yes.tagName).toBe('BUTTON');
+    expect(yes.getAttribute('data-look')).toBe('outline');
     expect(yes.textContent).toContain('(recommended)');
     const no = button(el, 'no');
-    expect(no.getAttribute('variant')).toBe('default');
-    expect(no.hasAttribute('outline')).toBe(false);
+    expect(no.getAttribute('data-look')).toBe('default');
     expect(no.hasAttribute('disabled')).toBe(false);
     expect(foot(el)).toBe('Awaiting your answer');
   });
@@ -216,7 +215,8 @@ describe('answering', () => {
     await el.updateComplete;
 
     // Submitting: the clicked button spins, the others are disabled.
-    expect(button(el, 'no').hasAttribute('loading')).toBe(true);
+    expect(button(el, 'no').hasAttribute('data-loading')).toBe(true);
+    expect(button(el, 'no').getAttribute('aria-busy')).toBe('true');
     expect(button(el, 'yes').hasAttribute('disabled')).toBe(true);
     expect(button(el, 'wait').hasAttribute('disabled')).toBe(true);
     expect(foot(el)).toBe('Sending…');
@@ -235,12 +235,11 @@ describe('answering', () => {
     await settle(el);
 
     const no = button(el, 'no');
-    expect(no.getAttribute('variant')).toBe('primary');
-    expect(no.hasAttribute('outline')).toBe(false);
+    expect(no.getAttribute('data-look')).toBe('filled');
     expect(no.querySelector('sl-icon[name="check-circle-fill"]')).not.toBeNull();
     expect(button(el, 'yes').hasAttribute('disabled')).toBe(true);
     // The recommended outline is a pending-only treatment.
-    expect(button(el, 'yes').hasAttribute('outline')).toBe(false);
+    expect(button(el, 'yes').getAttribute('data-look')).not.toBe('outline');
     expect(foot(el)).toMatch(/^Answered by you · \d{2}:\d{2}$/);
     expect(events).toEqual([
       {
@@ -275,7 +274,7 @@ describe('answering', () => {
 
     expect(showToast).toHaveBeenCalledWith('Already answered by Bob.', 'warning');
     expect(foot(el)).toMatch(/^Answered by Bob · /);
-    expect(button(el, 'yes').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'yes').getAttribute('data-look')).toBe('filled');
   });
 
   it('toasts the replacement on 409 replaced', async () => {
@@ -310,7 +309,7 @@ describe('answering', () => {
     await settle(el);
 
     expect(showToast).toHaveBeenCalledWith('something broke', 'danger');
-    expect(button(el, 'no').hasAttribute('loading')).toBe(false);
+    expect(button(el, 'no').hasAttribute('data-loading')).toBe(false);
     expect(button(el, 'no').hasAttribute('disabled')).toBe(false);
     expect(foot(el)).toBe('Awaiting your answer');
     expect(events).toHaveLength(0);
@@ -486,15 +485,13 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
       'interpreted'
     );
     const yes = button(el, 'yes');
-    expect(yes.getAttribute('variant')).toBe('primary');
-    expect(yes.hasAttribute('outline')).toBe(false);
+    expect(yes.getAttribute('data-look')).toBe('filled');
     expect(yes.hasAttribute('disabled')).toBe(false);
-    expect(yes.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe('robot');
+    expect(yes.querySelector('.sb-prefix sl-icon')?.getAttribute('name')).toBe('robot');
 
     // defaultChoiceId ("no") is NOT outlined on an interpreted card; all buttons stay enabled.
     const no = button(el, 'no');
-    expect(no.getAttribute('variant')).toBe('default');
-    expect(no.hasAttribute('outline')).toBe(false);
+    expect(no.getAttribute('data-look')).toBe('default');
     expect(no.hasAttribute('disabled')).toBe(false);
 
     expect(foot(el)).toMatch(
@@ -584,10 +581,13 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
     expect(bar.textContent?.replace(/\s+/g, ' ').trim()).toContain(
       'Change your answer from Yes to No? release-bot will be told.'
     );
-    expect(button(el, 'yes').hasAttribute('outline')).toBe(true);
+    expect(button(el, 'yes').getAttribute('data-look')).toBe('subtle');
     expect(button(el, 'yes').querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
-    expect(button(el, 'no').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'no').tagName).toBe('BUTTON');
+    expect((button(el, 'no') as HTMLButtonElement).type).toBe('button');
+    expect(button(el, 'no').getAttribute('data-look')).toBe('filled');
     expect(button(el, 'no').getAttribute('aria-pressed')).toBe('true');
+    expect(root(el).querySelector('sl-button[aria-pressed]')).toBeNull();
     expect(button(el, 'no').querySelector('sl-icon')?.getAttribute('name')).toBe('check-lg');
 
     // Cancel restores P2-1 without sending.
@@ -788,7 +788,7 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
     confirmBtn.click();
     await el.updateComplete;
 
-    expect(button(el, 'yes').hasAttribute('loading')).toBe(true);
+    expect(button(el, 'yes').hasAttribute('data-loading')).toBe(true);
     expect(button(el, 'yes').hasAttribute('data-readonly')).toBe(false);
 
     resolvePost(
@@ -811,7 +811,7 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
       })
     );
     await settle(el);
-    expect(button(el, 'yes').hasAttribute('loading')).toBe(false);
+    expect(button(el, 'yes').hasAttribute('data-loading')).toBe(false);
     expect(button(el, 'yes').hasAttribute('data-readonly')).toBe(true);
   });
 
@@ -1278,7 +1278,7 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     await settle(el);
     expect(showToast).toHaveBeenCalledWith('Already answered by Bob.', 'warning');
     expect(root(el).querySelector('.editor')).toBeNull();
-    expect(button(el, 'europe-west1').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'europe-west1').getAttribute('data-look')).toBe('filled');
     expect(foot(el)).toMatch(/^Answered by Bob · /);
   });
 
@@ -1930,8 +1930,7 @@ describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
     const buttons = root(el).querySelectorAll('[data-choice]');
     expect(buttons.length).toBe(1);
     const btn = button(el, 'approve');
-    expect(btn.getAttribute('variant')).toBe('primary');
-    expect(btn.hasAttribute('outline')).toBe(false);
+    expect(btn.getAttribute('data-look')).toBe('filled');
     expect(btn.hasAttribute('disabled')).toBe(false);
     expect(btn.textContent?.trim()).toBe('Approved');
     expect(foot(el)).toBe('Awaiting your answer');
@@ -1959,7 +1958,7 @@ describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
     await settle(el);
 
     expect(apiFetch).toHaveBeenCalledTimes(1);
-    expect(button(el, 'approve').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'approve').getAttribute('data-look')).toBe('filled');
     expect(button(el, 'approve').hasAttribute('data-readonly')).toBe(true);
     expect(foot(el)).toContain('Answered by you');
   });
@@ -1969,8 +1968,7 @@ describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
     await settle(el);
 
     const btn = button(el, 'approve');
-    expect(btn.getAttribute('variant')).toBe('primary');
-    expect(btn.hasAttribute('outline')).toBe(false);
+    expect(btn.getAttribute('data-look')).toBe('filled');
     const hintId = card(el).getAttribute('aria-describedby');
     expect(hintId).toBeTruthy();
     expect(root(el).getElementById(hintId!)?.textContent?.trim()).toBe('Press Enter to confirm.');
@@ -1994,7 +1992,7 @@ describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
     const el = await mount([singleChoiceView({ other: { label: 'Other' } })]);
     await settle(el);
 
-    expect(button(el, 'approve').getAttribute('variant')).toBe('default');
+    expect(button(el, 'approve').getAttribute('data-look')).toBe('default');
     expect(button(el, '$other')).toBeTruthy();
   });
 
@@ -2034,7 +2032,7 @@ describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
     await settle(el);
 
     const btn = button(el, 'approve');
-    expect(btn.getAttribute('variant')).toBe('default');
+    expect(btn.getAttribute('data-look')).toBe('default');
     expect(btn.hasAttribute('disabled')).toBe(true);
   });
 

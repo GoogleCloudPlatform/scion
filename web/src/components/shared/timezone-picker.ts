@@ -334,7 +334,10 @@ export class ScionTimezonePicker extends LitElement {
           type="text"
           autocomplete="off"
           role="combobox"
-          aria-expanded=${this.searchOpen ? 'true' : 'false'}
+          aria-expanded=${
+            // scion-a11y-ignore: pre-existing sl-input combobox; tracked in ptone/scion#9870
+            this.searchOpen ? 'true' : 'false'
+          }
           aria-controls="timezone-picker-listbox"
           aria-activedescendant=${this.activeDescendantIndex >= 0
             ? `timezone-picker-option-${this.activeDescendantIndex}`

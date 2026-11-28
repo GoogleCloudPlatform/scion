@@ -154,7 +154,7 @@ describe('single card buttons', () => {
       const el = await mount([view(over)]);
       const yes = choice(el, 'yes');
       expectMuted(yes);
-      expect(yes.hasAttribute('outline')).toBe(false);
+      expect(yes.getAttribute('data-look')).not.toBe('outline');
       expectUnmarked(choice(el, 'no'));
     });
   }
@@ -162,15 +162,15 @@ describe('single card buttons', () => {
   it('keeps the picked choice filled with its check when it is not the recommendation', async () => {
     const el = await mount([view({ status: 'decided', decision: answer('no') })]);
     const no = choice(el, 'no');
-    expect(no.getAttribute('variant')).toBe('primary');
+    expect(no.getAttribute('data-look')).toBe('filled');
     expect(no.querySelector('sl-icon[name="check-circle-fill"]')).not.toBeNull();
-    expect(choice(el, 'yes').getAttribute('variant')).toBe('default');
+    expect(choice(el, 'yes').getAttribute('data-look')).toBe('default');
   });
 
   it('marks a picked recommendation filled and muted-marked', async () => {
     const el = await mount([view({ status: 'decided', decision: answer('yes') })]);
     const yes = choice(el, 'yes');
-    expect(yes.getAttribute('variant')).toBe('primary');
+    expect(yes.getAttribute('data-look')).toBe('filled');
     expect(yes.querySelector('sl-icon[name="check-circle-fill"]')).not.toBeNull();
     expectMuted(yes);
   });
@@ -178,7 +178,7 @@ describe('single card buttons', () => {
   it('pending keeps the outline and no visible muted marker', async () => {
     const el = await mount([view()]);
     const yes = choice(el, 'yes');
-    expect(yes.hasAttribute('outline')).toBe(true);
+    expect(yes.getAttribute('data-look')).toBe('outline');
     expect(yes.querySelector('[data-rec-mark]')).toBeNull();
     expect(text(yes.querySelector('.sr-only'))).toBe('(recommended)');
   });

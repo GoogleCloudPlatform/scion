@@ -51,7 +51,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function createFetchHandler(
-  opts: { projectCaps: Capabilities; hubCaps?: Capabilities },
+  opts: {
+    projectCaps: Capabilities;
+    hubCaps?: Capabilities;
+    agents?: Array<Record<string, unknown>>;
+  },
   role: UserRole
 ) {
   return (url: string | URL | Request): Promise<Response> => {
@@ -66,7 +70,20 @@ function createFetchHandler(
       );
     }
     if (path.includes(`/api/v1/projects/${PROJECT_ID}/agents`)) {
-      return Promise.resolve(jsonResponse({ agents: [], _capabilities: { actions: [] } }));
+      const agents = opts.agents ?? [];
+      return Promise.resolve(
+        jsonResponse({
+          agents,
+          totalCount: agents.length,
+          complete: true,
+          stats: {
+            total: agents.length,
+            running: agents.filter((a) => a.phase === 'running').length,
+            agents: agents.map((a) => [a.id, a.phase]),
+          },
+          _capabilities: { actions: [] },
+        })
+      );
     }
     if (path.endsWith(`/api/v1/projects/${PROJECT_ID}`)) {
       return Promise.resolve(
@@ -83,7 +100,11 @@ function createFetchHandler(
 }
 
 async function createComponent(
-  opts: { projectCaps: Capabilities; hubCaps?: Capabilities },
+  opts: {
+    projectCaps: Capabilities;
+    hubCaps?: Capabilities;
+    agents?: Array<Record<string, unknown>>;
+  },
   role: UserRole = 'member'
 ): Promise<HTMLElement> {
   vi.stubGlobal('fetch', vi.fn(createFetchHandler(opts, role)));
@@ -201,5 +222,37 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
     const text = headerActionsText(element);
     expect(text).not.toContain('Create Template');
     expect(hasClone(element)).toBe(false);
+  });
+
+  it('renders the agents expand toggle as a native button with aria-expanded', async () => {
+    localStorage.removeItem('scion-agents-expanded');
+    element = await createComponent({
+      projectCaps: { actions: ['read'] },
+      agents: [
+        {
+          id: 'a-1',
+          name: 'agent-one',
+          slug: 'agent-one',
+          status: 'running',
+          phase: 'running',
+          projectId: PROJECT_ID,
+          created: '2026-11-28T00:00:00Z',
+          updated: '2026-11-28T00:00:00Z',
+        },
+      ],
+    });
+    const toggle = element.shadowRoot?.querySelector<HTMLButtonElement>('.agents-expand-toggle');
+    expect(toggle).not.toBeNull();
+    expect(toggle!.tagName).toBe('BUTTON');
+    expect(toggle!.type).toBe('button');
+    expect(toggle!.getAttribute('aria-label')).toBe('Expand agents');
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false');
+    expect(element.shadowRoot?.querySelector('sl-icon-button[aria-expanded]')).toBeNull();
+
+    toggle!.click();
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+
+    expect(toggle!.getAttribute('aria-label')).toBe('Collapse agents');
+    expect(toggle!.getAttribute('aria-expanded')).toBe('true');
   });
 });
