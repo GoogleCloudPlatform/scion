@@ -269,39 +269,9 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	}
 	query = withRecordedRuntimeQuery(ctx, query)
 
-	// Build the request body with structured message if available
-	reqBody := map[string]interface{}{
-		"interrupt": interrupt,
-	}
-	if projectID != "" {
-		reqBody["project_id"] = projectID
-	}
-	if structuredMsg != nil {
-		reqBody["structured_message"] = structuredMsg
-		// Phase 9b(i): promote DeliveryText to the top-level wire field.
-		if structuredMsg.DeliveryText != "" {
-			reqBody["delivery_text"] = structuredMsg.DeliveryText
-		}
-	} else {
-		reqBody["message"] = message
-	}
-	// #1820: carry the persisted hub message ID so the broker can report a
-	// buffered-delivery failure back against the right row.
-	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
-		reqBody["message_id"] = msgID
-	}
-	// ptone/scion#4596: the attachments the broker downloads and writes into
-	// the agent's home before delivering the text.
-	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
-		reqBody["attachments"] = wire
-		if days := dispatchRetentionFromContext(ctx); days > 0 {
-			reqBody["attachment_retention_days"] = days
-		}
-	}
-
-	body, err := json.Marshal(reqBody)
+	body, err := marshalBrokerMessageRequest(ctx, projectID, message, interrupt, structuredMsg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return err
 	}
 
 	_, err = c.doRequest(ctx, brokerID, "POST", path, query, body)

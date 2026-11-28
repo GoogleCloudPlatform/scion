@@ -25,7 +25,11 @@ import (
 	"sync"
 	"testing"
 
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // recordingMessageManager counts every delivery primitive the broker's
@@ -168,17 +172,15 @@ func TestSendMessage_PlainNormalInterruptUnaffected(t *testing.T) {
 	}
 }
 
-// TestSendMessage_HubShapedNearLimitDelivered pins that this Hub-only route
-// applies no byte cap of its own. The Hub accepts message bodies up to 2 MiB
-// on its public ingress and then forwards a rebuilt request in which the text
-// appears three times (structured_message.msg, the nested rendered
-// delivery_text, and the top-level delivery_text), so the forwarded body is
-// well over 2 MiB. It must be delivered, not refused with 413.
+// TestSendMessage_HubShapedNearLimitDelivered pins that the unauthenticated
+// sendMessage handler's own cap (maxBrokerSendMessageBodyBytes = 8 MiB)
+// admits multi-MiB bodies without rejecting them with 413. Signed requests
+// are additionally bounded at apiclient.MaxSignedRequestBodyBytes (2 MiB) by
+// the HMAC middleware; see TestSendMessage_HMACNearLimitDelivered below.
 func TestSendMessage_HubShapedNearLimitDelivered(t *testing.T) {
 	mgr := &recordingMessageManager{mockManager: &mockManager{}}
 	srv := newTestServerWithManager(t, mgr)
 
-	// Just under the Hub's 2 MiB public ingress limit.
 	text := strings.Repeat("x", 2<<20-4096)
 	delivery := "---BEGIN SCION MESSAGE---\n" + text + "\n---END SCION MESSAGE---"
 	reqBody := map[string]interface{}{
@@ -217,6 +219,143 @@ func TestSendMessage_HubShapedNearLimitDelivered(t *testing.T) {
 	}
 	if mgr.keys != 0 {
 		t.Fatalf("message path must never call SendKeys, got %d", mgr.keys)
+	}
+}
+
+// TestSendMessage_HMACNearLimitDelivered verifies that a single-copy near-1 MiB
+// Hub-shaped message (including markup-heavy '<', '>', '&' text encoded without
+// HTML escaping) passes both broker HMAC middlewares' 2 MiB signed-body cap and
+// is delivered intact while preserving sender/recipient lifecycle log attributes,
+// and confirms that a legacy 3x-duplicated near-1 MiB body is rejected with 413
+// by the HMAC cap (ptone/scion#9877).
+func TestSendMessage_HMACNearLimitDelivered(t *testing.T) {
+	const nearLimit = (1 << 20) - 4096
+	secret := []byte("test-hmac-secret-key-32-bytes!!!")
+
+	middlewares := map[string]func(http.Handler) http.Handler{
+		"single-key": func(next http.Handler) http.Handler {
+			return NewBrokerAuthMiddleware(BrokerAuthConfig{
+				Enabled:              true,
+				MaxClockSkew:         5 * time.Minute,
+				SecretKey:            secret,
+				AllowUnauthenticated: false,
+			}).Middleware(next)
+		},
+		"multi-key": func(next http.Handler) http.Handler {
+			m := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, false)
+			m.UpdateKeys([]secretKeyEntry{{hubName: "hub-a", secretKey: secret}})
+			return m.Middleware(next)
+		},
+	}
+
+	encodeNoEscape := func(t *testing.T, v any) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(v); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	}
+
+	for mwName, wrap := range middlewares {
+		t.Run(mwName, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				text string
+			}{
+				{"plain near 1 MiB", strings.Repeat("x", nearLimit)},
+				{"markup heavy near 1 MiB", strings.Repeat("<div>a&b</div>", nearLimit/len("<div>a&b</div>"))},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					mgr := &recordingMessageManager{mockManager: &mockManager{}}
+					srv := newTestServerWithManager(t, mgr)
+					var logBuf bytes.Buffer
+					srv.SetMessageLogger(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+
+					delivery := "---BEGIN SCION MESSAGE---\n" + tc.text + "\n---END SCION MESSAGE---"
+					raw := encodeNoEscape(t, map[string]interface{}{
+						"interrupt":  false,
+						"project_id": "proj-1",
+						"message_id": "msg-9877",
+						"structured_message": map[string]interface{}{
+							"version":   1,
+							"sender":    "user:alice",
+							"recipient": "agent:test-agent",
+							"type":      "instruction",
+						},
+						"delivery_text": delivery,
+					})
+					if int64(len(raw)) > apiclient.MaxSignedRequestBodyBytes {
+						t.Fatalf("single-copy body is %d bytes, exceeds %d", len(raw), apiclient.MaxSignedRequestBodyBytes)
+					}
+
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/message", bytes.NewReader(raw))
+					req.Header.Set("Content-Type", "application/json")
+					if err := (&apiclient.HMACAuth{BrokerID: "broker-1", SecretKey: secret}).ApplyAuth(req); err != nil {
+						t.Fatalf("ApplyAuth: %v", err)
+					}
+
+					w := httptest.NewRecorder()
+					wrap(srv.Handler()).ServeHTTP(w, req)
+					if w.Code != http.StatusOK {
+						t.Fatalf("status = %d, want 200; body: %.300s", w.Code, w.Body.String())
+					}
+
+					mgr.mu.Lock()
+					defer mgr.mu.Unlock()
+					if len(mgr.messages) != 1 || mgr.messages[0] != delivery {
+						t.Fatalf("delivered %d messages (len[0]=%d), want 1 message of %d bytes", len(mgr.messages), func() int {
+							if len(mgr.messages) > 0 {
+								return len(mgr.messages[0])
+							}
+							return 0
+						}(), len(delivery))
+					}
+					if !strings.Contains(logBuf.String(), `"sender":"user:alice"`) || !strings.Contains(logBuf.String(), `"recipient":"agent:test-agent"`) {
+						t.Errorf("broker message log lost sender/recipient metadata: %s", logBuf.String())
+					}
+					if !strings.Contains(logBuf.String(), `"`+logging.AttrLogKind+`":"`+logging.LogKindEvent+`"`) {
+						t.Errorf("broker message log missing log_kind=event: %s", logBuf.String())
+					}
+				})
+			}
+
+			t.Run("3x duplicated near 1 MiB rejected by HMAC cap", func(t *testing.T) {
+				mgr := &recordingMessageManager{mockManager: &mockManager{}}
+				srv := newTestServerWithManager(t, mgr)
+				text := strings.Repeat("x", nearLimit)
+				delivery := "---BEGIN SCION MESSAGE---\n" + text + "\n---END SCION MESSAGE---"
+				raw := encodeNoEscape(t, map[string]interface{}{
+					"interrupt":  false,
+					"project_id": "proj-1",
+					"structured_message": map[string]interface{}{
+						"version":       1,
+						"sender":        "user:alice",
+						"recipient":     "agent:test-agent",
+						"msg":           text,
+						"type":          "instruction",
+						"delivery_text": delivery,
+					},
+					"delivery_text": delivery,
+				})
+				if int64(len(raw)) <= apiclient.MaxSignedRequestBodyBytes {
+					t.Fatalf("3x body is %d bytes, want > %d", len(raw), apiclient.MaxSignedRequestBodyBytes)
+				}
+
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/message", bytes.NewReader(raw))
+				req.Header.Set("Content-Type", "application/json")
+				if err := (&apiclient.HMACAuth{BrokerID: "broker-1", SecretKey: secret}).ApplyAuth(req); err != nil {
+					t.Fatalf("ApplyAuth: %v", err)
+				}
+				w := httptest.NewRecorder()
+				wrap(srv.Handler()).ServeHTTP(w, req)
+				if w.Code != http.StatusRequestEntityTooLarge {
+					t.Fatalf("status = %d, want 413; body: %.300s", w.Code, w.Body.String())
+				}
+			})
+		})
 	}
 }
 
