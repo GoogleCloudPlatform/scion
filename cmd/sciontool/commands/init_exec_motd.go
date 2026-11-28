@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 const (
@@ -112,6 +113,11 @@ func buildExecContainerMOTD(getenv func(string) string) string {
 		persistenceLine = "Home persistence: unknown (check whether this runtime persists $HOME)."
 	}
 
+	var transportLine string
+	if transportauth.IsProxyMode(strings.TrimSpace(getenv(transportauth.EnvTransportMode))) {
+		transportLine = "Hub requires transport auth: log in first (e.g. gcloud auth application-default login).\n"
+	}
+
 	return fmt.Sprintf(`======================================================================
 %s
 ======================================================================
@@ -127,10 +133,10 @@ Log in to Scion (lets approved commands use the scion CLI as you):
 Register as your default execution container:
   scion exec-container set %s
 
-%s
+%s%s
 Detach with Ctrl-b d (typing exit starts a fresh shell).
 ======================================================================
-`, header, registerArg, persistenceLine)
+`, header, registerArg, transportLine, persistenceLine)
 }
 
 // writeExecContainerMOTD writes the execution-container MOTD and login-shell

@@ -21,6 +21,7 @@ package clicontextseed
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/hubname"
 	"gopkg.in/yaml.v3"
@@ -29,11 +30,18 @@ import (
 // Version matches config.CLIContextVersion (context.yaml v1).
 const Version = 1
 
-// Options configures the rendered context.yaml seed. P1 seeds Endpoint only;
-// future phases (such as proxy-auth transport seeding) can add fields here
-// without changing existing callers.
+// TransportOptions configures the optional hub transport-layer auth block
+// (matching config.HubTransportConfig: mode and audience). It holds no
+// credentials; PID 1's transport token is never written to context.yaml.
+type TransportOptions struct {
+	Mode     string `yaml:"mode,omitempty"`
+	Audience string `yaml:"audience,omitempty"`
+}
+
+// Options configures the rendered context.yaml seed.
 type Options struct {
-	Endpoint string
+	Endpoint  string
+	Transport *TransportOptions
 }
 
 type seedDocument struct {
@@ -43,7 +51,8 @@ type seedDocument struct {
 }
 
 type seedHubEntry struct {
-	Endpoint string `yaml:"endpoint"`
+	Endpoint  string            `yaml:"endpoint"`
+	Transport *TransportOptions `yaml:"transport,omitempty"`
 }
 
 // Render renders the context.yaml bytes for opts using
@@ -53,12 +62,26 @@ func Render(opts Options) ([]byte, error) {
 	if endpoint == "" {
 		return nil, errors.New("empty hub endpoint")
 	}
+	entry := &seedHubEntry{Endpoint: endpoint}
+	if opts.Transport != nil {
+		mode := strings.TrimSpace(opts.Transport.Mode)
+		audience := strings.TrimSpace(opts.Transport.Audience)
+		if mode != "" && mode != "iap" && mode != "cloudrun_invoker" {
+			return nil, fmt.Errorf("unsupported transport mode %q", mode)
+		}
+		if mode != "" || audience != "" {
+			entry.Transport = &TransportOptions{
+				Mode:     mode,
+				Audience: audience,
+			}
+		}
+	}
 	nick := hubname.DeriveHubName(endpoint)
 	doc := seedDocument{
 		Version:    Version,
 		CurrentHub: nick,
 		Hubs: map[string]*seedHubEntry{
-			nick: {Endpoint: endpoint},
+			nick: entry,
 		},
 	}
 	data, err := yaml.Marshal(&doc)

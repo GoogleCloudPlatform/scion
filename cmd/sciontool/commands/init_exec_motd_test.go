@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,6 +80,7 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 			"login block must appear above the registration line")
 		assert.Contains(t, got, "Home persistence: enabled")
 		assert.NotContains(t, got, "WARNING: $HOME is NOT persistent")
+		assert.NotContains(t, got, "transport auth")
 		assert.LessOrEqual(t, strings.Count(got, "\n"), 20, "MOTD must fit on one screen")
 
 		scriptData, err := os.ReadFile(scriptPath)
@@ -127,6 +129,40 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 		assert.NotContains(t, got, "ops\n")
 		assert.Contains(t, got, "scion exec-container set 'ops[31m;rm -rf /'")
 	})
+}
+
+func TestBuildExecContainerMOTD_ProxyTransportLine(t *testing.T) {
+	baseEnv := func(mode, persistent string) func(string) string {
+		env := map[string]string{
+			"SCION_HARNESS":                "shell",
+			"SCION_AGENT_NAME":             "ops-box",
+			"SCION_HOME_PERSISTENT":        persistent,
+			transportauth.EnvTransportMode: mode,
+		}
+		return func(k string) string { return env[k] }
+	}
+
+	for _, mode := range []string{"iap", "cloudrun_invoker"} {
+		t.Run("proxy_mode_"+mode, func(t *testing.T) {
+			for _, persistent := range []string{"true", "false"} {
+				got := buildExecContainerMOTD(baseEnv(mode, persistent))
+				assert.Contains(t, got, "transport auth")
+				assert.Contains(t, got, "gcloud auth application-default login")
+				// Combined with P3's 3-line login block, worst case (persistent=false)
+				// must stay within the 20-line one-screen budget (17 + 3 = 20).
+				assert.LessOrEqual(t, strings.Count(got, "\n"), 17,
+					"MOTD in proxy mode (persistent=%s) must leave 3 lines for P3 login block within 20-line budget", persistent)
+			}
+		})
+	}
+
+	for _, mode := range []string{"", "none", "unknown"} {
+		t.Run("non_proxy_mode_"+mode, func(t *testing.T) {
+			got := buildExecContainerMOTD(baseEnv(mode, "true"))
+			assert.NotContains(t, got, "transport auth")
+			assert.NotContains(t, got, "application-default login")
+		})
+	}
 }
 
 func TestExecContainerProfileScript_SilentInNonInteractiveShell(t *testing.T) {
