@@ -142,14 +142,15 @@ func (s *Server) healthInfo(_ context.Context, conns []*HubConnection) *HealthRe
 		}
 	}
 
-	// project_storage: ONE evaluation site for both conditions that report on
+	// project_storage: ONE evaluation site for the conditions that report on
 	// this key. Invalid project storage settings win the value
 	// ("unavailable": the broker refuses every agent start; the fields at
 	// fault are in the startup log and in each refusal). Otherwise the share
-	// check on a shared Layout sets it: healthy, or share not visible, whose
-	// value names configuration fields, never the path. The status degrades
-	// when either condition holds (the worse of the two); readiness is
-	// unaffected, and stop, delete and status keep working.
+	// check on a shared Layout sets it: share not visible ("unhealthy", which
+	// degrades status), owner uid/gid mismatch ("warning", which does not
+	// degrade status or block agent starts), or "healthy". All detail strings
+	// name configuration fields and numeric ids only, never host paths.
+	// Readiness is unaffected, and stop, delete and status keep working.
 	storageInvalid := s.storageInvalid()
 	shareValue, shareNotVisible, shareChecked := s.shareHealthValue()
 	switch {

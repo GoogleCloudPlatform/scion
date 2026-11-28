@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -39,15 +40,19 @@ const shareHealthNotVisible = "unhealthy: share_not_visible"
 // after the first check at start. A variable so tests can shorten it.
 var shareHealthInterval = DefaultNFSReconcileInterval
 
-// shareHealthState is the last result of the share-visibility check and
-// the loop that refreshes it.
+// shareHealthState is the last result of the share-visibility and owner
+// alignment checks and the loop that refreshes them.
 type shareHealthState struct {
 	once   sync.Once
 	cancel context.CancelFunc
 
-	mu      sync.Mutex
-	checked bool
-	err     error
+	mu             sync.Mutex
+	checked        bool
+	err            error
+	ownerWarning   string
+	ownerErrLogged bool
+	// agentOwnerIDs overrides effectiveAgentOwnerIDs in tests.
+	agentOwnerIDs func() (uid, gid int, ok bool)
 }
 
 // shareHealthPath is the directory whose visibility decides the check:
@@ -73,12 +78,45 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+
 	c := &s.shareHealth
+	var ownerWarning string
+	var ownerErr error
+	var agentUID, agentGID, recordedUID, recordedGID int
+	if err == nil {
+		c.mu.Lock()
+		ownerFn := c.agentOwnerIDs
+		c.mu.Unlock()
+		var hasAgentIDs bool
+		if ownerFn != nil {
+			agentUID, agentGID, hasAgentIDs = ownerFn()
+		} else {
+			agentUID, agentGID, hasAgentIDs = effectiveAgentOwnerIDs(s.RuntimeName(), layout)
+		}
+		if hasAgentIDs {
+			recordedUID, recordedGID, ownerErr = readOrCreateExportOwnerWithContext(ctx, path, agentUID, agentGID)
+			if ctx.Err() != nil {
+				return
+			}
+			if ownerErr == nil {
+				ownerWarning = ownerMismatchWarning(agentUID, agentGID, recordedUID, recordedGID)
+			}
+		}
+	}
+
 	c.mu.Lock()
 	wasVisible := c.checked && c.err == nil
 	wasNotVisible := c.checked && c.err != nil
-	c.checked, c.err = true, err
+	prevOwnerWarning := c.ownerWarning
+	prevOwnerErrLogged := c.ownerErrLogged
+	c.checked, c.err, c.ownerWarning = true, err, ownerWarning
+	if ownerErr != nil && !errors.Is(ownerErr, errors.ErrUnsupported) {
+		c.ownerErrLogged = true
+	} else if ownerErr == nil {
+		c.ownerErrLogged = false
+	}
 	c.mu.Unlock()
+
 	switch {
 	case err != nil && !wasNotVisible:
 		slog.Error("Project storage share is not visible on this broker; creates in shared-storage projects are refused until it is",
@@ -88,6 +126,21 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 		slog.Info("Project storage share is visible on this broker again", "path", path)
 	case err == nil && !wasVisible:
 		slog.Info("Project storage share is visible on this broker", "path", path)
+	}
+
+	if err == nil {
+		switch {
+		case ownerErr != nil && !errors.Is(ownerErr, errors.ErrUnsupported) && !prevOwnerErrLogged:
+			slog.Warn("Could not read or record project storage canonical owner marker; skipping ownership alignment check",
+				"path", path, "error", ownerErr)
+		case ownerWarning != "" && ownerWarning != prevOwnerWarning:
+			slog.Warn("Broker effective agent uid/gid differs from recorded project storage owner",
+				"agent_uid", agentUID, "agent_gid", agentGID,
+				"recorded_uid", recordedUID, "recorded_gid", recordedGID,
+				"remedy", "align server.project_storage.nfs.uid/gid or the broker runtime uid/gid across brokers sharing this store")
+		case ownerWarning == "" && prevOwnerWarning != "":
+			slog.Info("Broker effective agent uid/gid matches recorded project storage owner again")
+		}
 	}
 }
 
@@ -104,10 +157,13 @@ func (s *Server) shareHealthValue() (value string, notVisible, ok bool) {
 	if !c.checked {
 		return "", false, false
 	}
-	if c.err == nil {
-		return "healthy", false, true
+	if c.err != nil {
+		return shareHealthNotVisible + " (" + s.shareUnavailableText() + ")", true, true
 	}
-	return shareHealthNotVisible + " (" + s.shareUnavailableText() + ")", true, true
+	if c.ownerWarning != "" {
+		return c.ownerWarning, false, true
+	}
+	return "healthy", false, true
 }
 
 // startShareHealthLoop checks the share once now (after the NFS

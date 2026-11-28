@@ -47,6 +47,7 @@ const (
 	BrokerHealthUnhealthy   = "unhealthy"
 	BrokerHealthAvailable   = "available"
 	BrokerHealthUnavailable = "unavailable"
+	BrokerHealthWarning     = "warning"
 	BrokerHealthUnknown     = "unknown"
 )
 
@@ -70,6 +71,7 @@ var (
 		BrokerHealthUnhealthy:   true,
 		BrokerHealthAvailable:   true,
 		BrokerHealthUnavailable: true,
+		BrokerHealthWarning:     true,
 		BrokerHealthUnknown:     true,
 	}
 )
