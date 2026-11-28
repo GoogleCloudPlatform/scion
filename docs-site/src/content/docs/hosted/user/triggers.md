@@ -289,9 +289,7 @@ Templates are plain UTF-8 text with `${<path>}` (required—missing value refuse
 
 `template`, environment variables, secrets, and workspace settings can never be templated. Exceeding a slot's byte or charset bound **refuses** the fire (values are never truncated).
 
-<!-- 9776: verify -->
-- **Opt-in list (`--allow` / `untrustedVars`):** untrusted placeholders (`${event.payload.*}`, `${event.attributes.*}`, `${event.type}`, `${event.subject}`, `${event.occurred_at}`) are listed on the rule (`untrustedVars`, exact path or trailing `.*`) for both `dispatch_agent` and `message` actions; the Hub derives the list from the templates unless the author supplies a narrower one, and values arrive framed as data. In the CLI, `--allow` is an optional narrowing list (when omitted, the derived untrusted paths are printed and stored). If an explicit narrower list omits a placeholder used by a template, authoring is refused with `untrusted template variable "<path>" is not allowed in slot "<slot>"`.
-<!-- /9776: verify -->
+- **Untrusted variable list (`--allow` / `untrustedVars`):** `untrustedVars` (exact path or trailing `.*`) is optional on both `message` and `dispatch_agent` actions. When omitted, the Hub derives and stores the list of untrusted placeholders (`${event.payload.*}`, `${event.attributes.*}`, `${event.type}`, `${event.subject}`, `${event.occurred_at}`) from the templates automatically, and values arrive framed as data. When a list is supplied (including an explicit empty list `[]`), the Hub checks that every untrusted placeholder is covered (`[]` with untrusted placeholders is refused) and rejects uncovered paths with `untrusted template variable "<path>" is not allowed in slot "<slot>"`. In the CLI, `--allow` is an optional narrowing list, and `scion trigger create` / `update` print `Event values that will be inserted as data: …` per action. In the Web UI, the derived list is shown read-only, labelled **Event values inserted as data, not instructions:**.
 - **Dry-run preview:** test templates against any stored event without firing or creating resources:
 
   ```bash
@@ -360,7 +358,7 @@ Visibility into non-matching rule evaluations is tracked in `ptone/scion#9780`.
 When `hub.triggers` is enabled, each project displays a **Triggers** button in its header linking to `/projects/{id}/triggers` with four tabs:
 
 - **Endpoints** — create endpoints (shows the one-time signing secret and sender example in a result dialog; secrets are never kept in component state), edit settings/bindings, disable/enable, rotate secrets, and delete (listing rules that will pause).
-- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, and notify settings. Each rule row also offers a **Preview render** (eye) icon that calls `POST .../render` against the latest event received on the trigger's source with untrusted values highlighted.
+- **Rules** — create and edit single- or multi-action triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors (showing derived untrusted variables read-only as **Event values inserted as data, not instructions:**), limits, and notify settings. Each rule row also offers a **Preview render** (eye) icon that calls `POST .../render` against the latest event received on the trigger's source with untrusted values highlighted.
 - **Events** — browse received events filtered by endpoint, status, or time; inspect attributes, headers, `external_payload` (with download for overflow bodies), and resulting fires.
 - **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or time, linking to the event, created agent, or `waiting` deadline (`wait_until`).
 
