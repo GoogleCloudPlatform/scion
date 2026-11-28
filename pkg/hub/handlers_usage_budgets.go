@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -63,10 +64,13 @@ type UsageBudgetsResponse struct {
 // overrideBudgetRequest is the payload for:
 //   - POST /api/v1/projects/{id}/usage/budgets/{budgetId}:override
 //   - POST /api/v1/users/{id}/usage/budgets/{budgetId}:override
+//
+// OverrideUntil is decoded as json.RawMessage so the handler can distinguish
+// an omitted key (400 Bad Request) from an explicit JSON null (clear override).
 type overrideBudgetRequest struct {
-	OverrideUntil *time.Time `json:"override_until"`
-	StateVersion  *int64     `json:"state_version,omitempty"`
-	Reason        string     `json:"reason,omitempty"`
+	OverrideUntil json.RawMessage `json:"override_until"`
+	StateVersion  *int64          `json:"state_version,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
 }
 
 func (s *Server) tokenBudgetsEnabled() bool {
@@ -176,7 +180,7 @@ func (s *Server) handleProjectUsageBudgets(w http.ResponseWriter, r *http.Reques
 		},
 	}
 
-	entries, err := s.buildBudgetEntries(ctx, newTokenLimitEvalCache(s.quotaService), nil, specs, asOf, true)
+	entries, err := s.buildBudgetEntries(ctx, newTokenLimitEvalCache(s.quotaService), nil, nil, specs, asOf, true)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -306,7 +310,9 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 	evalCache := newTokenLimitEvalCache(s.quotaService)
 
 	// Load all open state rows for this user (both user and user_project scopes)
-	// in a single query so we avoid per-project point lookups.
+	// in a single query, and load all user_project counter sums for the active
+	// day and month windows in two grouped prefix queries so store calls stay
+	// O(1) regardless of how many projects exist on the Hub (R2).
 	openRows, err := s.store.ListOpenUsageBudgetStatesForUser(ctx, targetUserID, asOf)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -322,6 +328,39 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 			WindowStartUTC:    row.WindowStartUTC,
 		}
 		stateByKey[k] = row
+	}
+
+	userPrefix := targetUserID + ":"
+	monthUPConsumed, err := s.store.SumUsageScopeCounterTokensByPrefix(ctx, store.UsageScopeKindUserProject, userPrefix, monthStart, monthEnd)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	dayUPConsumed, err := s.store.SumUsageScopeCounterTokensByPrefix(ctx, store.UsageScopeKindUserProject, userPrefix, dayStart, dayEnd)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	type consumedLookupKey struct {
+		scopeKind      string
+		counterScopeID string
+		windowStartUTC time.Time
+	}
+	preloadedConsumed := make(map[consumedLookupKey]int64, len(monthUPConsumed)+len(dayUPConsumed))
+	for counterID, sum := range monthUPConsumed {
+		preloadedConsumed[consumedLookupKey{
+			scopeKind:      store.UsageScopeKindUserProject,
+			counterScopeID: counterID,
+			windowStartUTC: monthStart,
+		}] = sum
+	}
+	for counterID, sum := range dayUPConsumed {
+		preloadedConsumed[consumedLookupKey{
+			scopeKind:      store.UsageScopeKindUserProject,
+			counterScopeID: counterID,
+			windowStartUTC: dayStart,
+		}] = sum
 	}
 
 	entries := make([]UsageBudgetEntry, 0, 4)
@@ -354,7 +393,7 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 				windowEndUTC:   monthEnd,
 			},
 		}
-		userEntries, err := s.buildBudgetEntries(ctx, evalCache, stateByKey, userSpecs, asOf, true)
+		userEntries, err := s.buildBudgetEntries(ctx, evalCache, stateByKey, nil, userSpecs, asOf, true)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -362,7 +401,7 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 		entries = append(entries, userEntries...)
 	}
 
-	visibleProjects, err := s.listCandidateUserProjectsForCaller(ctx, caller, targetUserID, boundaryProjectID, evalCache, openRows)
+	visibleProjects, err := s.listCandidateUserProjectsForCaller(ctx, caller, targetUserID, boundaryProjectID, evalCache, openRows, monthUPConsumed)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -371,7 +410,7 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 	if len(visibleProjects) > 0 {
 		upSpecs := make([]budgetEvalSpec, 0, len(visibleProjects)*2)
 		for _, pid := range visibleProjects {
-			upCounterID := targetUserID + ":" + pid
+			upCounterID := userPrefix + pid
 			upSpecs = append(upSpecs,
 				budgetEvalSpec{
 					limitName:      store.LimitLLMTokensPerUserProjectDay,
@@ -401,7 +440,14 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 		}
 		// Only include user_project rows where a finite cap applies OR an active
 		// state row already exists (avoiding empty unlimited rows).
-		upEntries, err := s.buildBudgetEntries(ctx, evalCache, stateByKey, upSpecs, asOf, false)
+		preloadedFn := func(spec budgetEvalSpec) (int64, bool) {
+			return preloadedConsumed[consumedLookupKey{
+				scopeKind:      spec.scopeKind,
+				counterScopeID: spec.counterScopeID,
+				windowStartUTC: spec.windowStartUTC,
+			}], true
+		}
+		upEntries, err := s.buildBudgetEntries(ctx, evalCache, stateByKey, preloadedFn, upSpecs, asOf, false)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -417,13 +463,13 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 }
 
 // listCandidateUserProjectsForCaller returns the sorted project IDs for which
-// targetUserID may have an active user_project budget row or finite cap,
-// filtered to projects the caller is authorized to see.
+// targetUserID has an active user_project budget row, an explicit
+// project-scoped user_project binding, or (under a hub-wide user_project
+// default > 0) actual counter usage in the active month window — intersected
+// with projects the caller is authorized to see.
 //
-// Driven from targetUserID's open user_project state rows plus project-scoped
-// user_project bindings (avoiding ListProjects enumeration and per-project
-// state lookups). Falls back to paginated ListProjects only when a hub-wide
-// user_project default cap (> 0) applies to all projects.
+// Never enumerates all projects on the Hub via ListProjects, keeping query
+// count O(1) even on Hubs with thousands of projects (R2).
 func (s *Server) listCandidateUserProjectsForCaller(
 	ctx context.Context,
 	caller UserIdentity,
@@ -431,6 +477,7 @@ func (s *Server) listCandidateUserProjectsForCaller(
 	boundaryProjectID string,
 	evalCache *tokenLimitEvalCache,
 	openRows []*store.UsageBudgetState,
+	monthUPConsumed map[string]int64,
 ) ([]string, error) {
 	if boundaryProjectID != "" {
 		// Verify the caller can actually read the boundary project.
@@ -471,7 +518,7 @@ func (s *Server) listCandidateUserProjectsForCaller(
 	}
 
 	// Collect project-scoped bindings for llm_tokens_per_user_project_{day,month}
-	// and detect whether a hub-wide default (>0) applies across all projects.
+	// and detect whether a hub-wide default (>0) applies across projects.
 	upDefIDs := make(map[string]bool, 2)
 	hasHubWideUPDefault := false
 	for _, limitName := range []string{store.LimitLLMTokensPerUserProjectDay, store.LimitLLMTokensPerUserProjectMonth} {
@@ -515,35 +562,15 @@ func (s *Server) listCandidateUserProjectsForCaller(
 		}
 	}
 
-	// If a hub-wide user_project cap > 0 exists, paginate through all visible
-	// non-template projects so every applicable project is included (no silent
-	// 500-project truncation).
+	// Under a hub-wide user_project default (>0), include projects where
+	// targetUserID actually has counter usage in the active month window
+	// (discovered in one grouped prefix query, never scanning all hub projects).
 	if hasHubWideUPDefault {
-		isTemplate := false
-		filter := store.ProjectFilter{
-			IsTemplate: &isTemplate,
-		}
-		if !scopeResult.Scopes.IsAll() {
-			filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
-		}
-		if len(scopeResult.ExcludedProjectIDs) > 0 {
-			filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
-		}
-		cursor := ""
-		for {
-			res, listErr := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: 500, Cursor: cursor})
-			if listErr != nil {
-				return nil, listErr
+		prefix := targetUserID + ":"
+		for counterID := range monthUPConsumed {
+			if pid, ok := strings.CutPrefix(counterID, prefix); ok && pid != "" {
+				candidates[pid] = struct{}{}
 			}
-			for _, p := range res.Items {
-				if p.ID != "" {
-					candidates[p.ID] = struct{}{}
-				}
-			}
-			if res.NextCursor == "" {
-				break
-			}
-			cursor = res.NextCursor
 		}
 	}
 
@@ -585,6 +612,7 @@ func (s *Server) buildBudgetEntries(
 	ctx context.Context,
 	evalCache *tokenLimitEvalCache,
 	preloadedStates map[store.UsageBudgetStateKey]*store.UsageBudgetState,
+	preloadedConsumed func(spec budgetEvalSpec) (int64, bool),
 	specs []budgetEvalSpec,
 	asOf time.Time,
 	includeUnlimitedWithoutRow bool,
@@ -631,11 +659,25 @@ func (s *Server) buildBudgetEntries(
 			continue
 		}
 
-		consumed, err := s.store.SumUsageScopeCounterTokens(
-			ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
-		)
-		if err != nil {
-			return nil, err
+		var consumed int64
+		if preloadedConsumed != nil {
+			if c, ok := preloadedConsumed(spec); ok {
+				consumed = c
+			} else {
+				consumed, err = s.store.SumUsageScopeCounterTokens(
+					ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
+				)
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			consumed, err = s.store.SumUsageScopeCounterTokens(
+				ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
+			)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		var capPtr *int64
@@ -829,6 +871,21 @@ func (s *Server) executeUsageBudgetOverride(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	rawOverride := bytes.TrimSpace(req.OverrideUntil)
+	if len(rawOverride) == 0 {
+		BadRequest(w, "override_until is required (pass null to clear an active override)")
+		return
+	}
+	var overrideUntil *time.Time
+	if !bytes.Equal(rawOverride, []byte("null")) {
+		var parsed time.Time
+		if err := json.Unmarshal(rawOverride, &parsed); err != nil {
+			BadRequest(w, "invalid override_until timestamp: "+err.Error())
+			return
+		}
+		overrideUntil = &parsed
+	}
+
 	// Resolve expected state_version from If-Match header and/or body.
 	var hasIfMatch bool
 	var ifMatchVer int64
@@ -866,7 +923,7 @@ func (s *Server) executeUsageBudgetOverride(w http.ResponseWriter, r *http.Reque
 
 	ctx := r.Context()
 	eval := s.TokenBudgetEvaluator()
-	res, err := eval.OverrideBudgetState(ctx, row, req.OverrideUntil, expectedVersion)
+	res, err := eval.OverrideBudgetState(ctx, row, overrideUntil, expectedVersion)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrBudgetStateConflict):

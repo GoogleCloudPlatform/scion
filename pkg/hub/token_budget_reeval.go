@@ -18,7 +18,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
+
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -29,19 +32,154 @@ const (
 	// system-wide, group, or project-default limit change.
 	defaultReevalPageSize = 500
 
-	// defaultReevalTimeout bounds background/detached limit-change re-evaluation
-	// so it survives client HTTP disconnects without running unboundedly.
-	defaultReevalTimeout = 30 * time.Second
+	// defaultReevalTimeout bounds asynchronous detached limit-change
+	// re-evaluation so it survives client HTTP disconnects without running
+	// unboundedly (O1).
+	defaultReevalTimeout = 5 * time.Minute
 )
 
-// ReevalUnprocessed returns the cumulative count of open-window rows that could
-// not be processed during limit-change re-evaluation (e.g. due to timeout or
-// store errors).
+// OTelTokenBudgetMetrics exports operational counters for raw-token budget
+// evaluation and limit-change re-evaluation:
+//   - scion.hub.budget.eval_errors: total evaluation/re-evaluation errors.
+//   - scion.hub.budget.reeval_unprocessed: lower-bound count of open-window
+//     rows left unprocessed by limit-change re-evaluation due to timeout or
+//     store errors (an interruption at a page boundary or list error adds 1 as
+//     a lower bound because the exact remaining count is unknown).
+type OTelTokenBudgetMetrics struct {
+	evalErrors        metric.Int64Counter
+	reevalUnprocessed metric.Int64Counter
+}
+
+// NewOTelTokenBudgetMetrics constructs OTelTokenBudgetMetrics on mp.
+func NewOTelTokenBudgetMetrics(mp metric.MeterProvider) (*OTelTokenBudgetMetrics, error) {
+	if mp == nil {
+		return nil, errors.New("otel token budget metrics: nil MeterProvider")
+	}
+	meter := mp.Meter(instrumentationScope)
+	evalErrs, err := meter.Int64Counter(
+		"scion.hub.budget.eval_errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Total raw-token budget evaluation and re-evaluation errors"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	unproc, err := meter.Int64Counter(
+		"scion.hub.budget.reeval_unprocessed",
+		metric.WithUnit("{row}"),
+		metric.WithDescription("Lower-bound count of open-window budget state rows left unprocessed by limit-change re-evaluation"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &OTelTokenBudgetMetrics{
+		evalErrors:        evalErrs,
+		reevalUnprocessed: unproc,
+	}, nil
+}
+
+// SetTokenBudgetMetrics wires OTelTokenBudgetMetrics onto the server's
+// TokenBudgetEvaluator.
+func (s *Server) SetTokenBudgetMetrics(m *OTelTokenBudgetMetrics) {
+	if eval := s.TokenBudgetEvaluator(); eval != nil {
+		eval.metrics.Store(m)
+	}
+}
+
+func (e *TokenBudgetEvaluator) recordEvalError() {
+	if e == nil {
+		return
+	}
+	e.evalErrors.Add(1)
+	if m := e.metrics.Load(); m != nil && m.evalErrors != nil {
+		m.evalErrors.Add(context.Background(), 1)
+	}
+}
+
+func (e *TokenBudgetEvaluator) recordReevalUnprocessed(n int64) {
+	if e == nil || n <= 0 {
+		return
+	}
+	e.reevalUnprocessed.Add(n)
+	if m := e.metrics.Load(); m != nil && m.reevalUnprocessed != nil {
+		m.reevalUnprocessed.Add(context.Background(), n)
+	}
+}
+
+// ReevalUnprocessed returns the cumulative lower-bound count of open-window
+// rows that could not be processed during limit-change re-evaluation (e.g. due
+// to timeout or store errors). Note: a page-boundary timeout or list failure
+// adds 1 as a lower bound because the exact remaining count is unknown.
 func (e *TokenBudgetEvaluator) ReevalUnprocessed() int64 {
 	if e == nil {
 		return 0
 	}
 	return e.reevalUnprocessed.Load()
+}
+
+// WaitReeval blocks until all asynchronously scheduled limit-change
+// re-evaluation goroutines have finished (used by tests and graceful shutdown).
+func (e *TokenBudgetEvaluator) WaitReeval() {
+	if e == nil {
+		return
+	}
+	e.reevalWG.Wait()
+}
+
+// ScheduleReevaluateAfterEntitlementChange dispatches
+// ReevaluateAfterEntitlementChange asynchronously on a detached context so
+// admin HTTP writes return immediately without blocking on large re-evaluations.
+func (e *TokenBudgetEvaluator) ScheduleReevaluateAfterEntitlementChange(
+	ctx context.Context,
+	def *store.LimitDefinition,
+	binding *store.EntitlementBinding,
+) {
+	if !e.enabled() || def == nil || binding == nil || def.ResourceType != store.LimitResourceTypeLLMTokens {
+		return
+	}
+	defCopy := *def
+	bindingCopy := *binding
+	detached := context.WithoutCancel(ctx)
+	e.reevalWG.Add(1)
+	go func() {
+		defer e.reevalWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				e.recordEvalError()
+				e.recordReevalUnprocessed(1)
+				e.logger.Error("panic in async token budget entitlement re-evaluation",
+					"limit", defCopy.Name, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
+		e.ReevaluateAfterEntitlementChange(detached, &defCopy, &bindingCopy)
+	}()
+}
+
+// ScheduleReevaluateAfterLimitDefaultChange dispatches
+// ReevaluateAfterLimitDefaultChange asynchronously on a detached context so
+// admin HTTP writes return immediately without blocking on large re-evaluations.
+func (e *TokenBudgetEvaluator) ScheduleReevaluateAfterLimitDefaultChange(
+	ctx context.Context,
+	def *store.LimitDefinition,
+) {
+	if !e.enabled() || def == nil || def.ResourceType != store.LimitResourceTypeLLMTokens {
+		return
+	}
+	defCopy := *def
+	detached := context.WithoutCancel(ctx)
+	e.reevalWG.Add(1)
+	go func() {
+		defer e.reevalWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				e.recordEvalError()
+				e.recordReevalUnprocessed(1)
+				e.logger.Error("panic in async token budget limit-default re-evaluation",
+					"limit", defCopy.Name, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
+		e.ReevaluateAfterLimitDefaultChange(detached, &defCopy)
+	}()
 }
 
 func (e *TokenBudgetEvaluator) getReevalPageSize() int {
@@ -200,6 +338,8 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 		return nil, fmt.Errorf("%w: unsupported budget scope kind %q", store.ErrInvalidInput, row.ScopeKind)
 	}
 
+	// Structural fresh-cap rule: ResolveEffectiveTokenLimit constructs a fresh
+	// uncached tokenLimitEvalCache after row has already been read.
 	capVal, action, err := e.quota.ResolveEffectiveTokenLimit(
 		ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
 	)
@@ -241,6 +381,29 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 		return nil, err
 	}
 
+	// Fire threshold hook strictly after successful CAS on any upward transition
+	// (e.g., clearing an override early when consumption crossed warn/exhausted
+	// while the override was active). Downward transitions (setting an override)
+	// never fire the hook.
+	if budgetStateRank(swapped.State) > budgetStateRank(beforeCopy.State) &&
+		(swapped.State == store.UsageBudgetStateWarn || swapped.State == store.UsageBudgetStateExhausted) {
+		e.fireThresholdHook(ctx, BudgetThresholdCrossing{
+			LimitName:      def.Name,
+			LimitDefID:     def.ID,
+			ScopeKind:      swapped.ScopeKind,
+			ScopeID:        swapped.ScopeID,
+			ProjectScopeID: swapped.ProjectScopeID,
+			WindowStartUTC: swapped.WindowStartUTC,
+			WindowEndUTC:   swapped.WindowEndUTC,
+			PrevState:      beforeCopy.State,
+			NewState:       swapped.State,
+			Consumed:       swapped.ConsumedAtEval,
+			Cap:            swapped.CapAtEval,
+			TokenAction:    action,
+			StateVersion:   swapped.StateVersion,
+		})
+	}
+
 	return &OverrideBudgetResult{
 		Before:    &beforeCopy,
 		After:     swapped,
@@ -274,7 +437,6 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 		return
 	}
 
-	evalCache := newTokenLimitEvalCache(e.quota)
 	// Targeted single-scope re-evaluation for direct user or project bindings
 	// (including creating a state row when a newly added/lowered cap is already
 	// exceeded by current-window consumption).
@@ -293,8 +455,8 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(reevalCtx, evalCache, spec, def, now); err != nil {
-			e.reevalUnprocessed.Add(1)
+		if err := e.reevaluateSpec(reevalCtx, spec, def, now); err != nil {
+			e.recordReevalUnprocessed(1)
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -313,8 +475,8 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(reevalCtx, evalCache, spec, def, now); err != nil {
-			e.reevalUnprocessed.Add(1)
+		if err := e.reevaluateSpec(reevalCtx, spec, def, now); err != nil {
+			e.recordReevalUnprocessed(1)
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -336,8 +498,8 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(reevalCtx, evalCache, spec, def, now); err != nil {
-			e.reevalUnprocessed.Add(1)
+		if err := e.reevaluateSpec(reevalCtx, spec, def, now); err != nil {
+			e.recordReevalUnprocessed(1)
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -350,7 +512,7 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 	if binding.ScopeType == store.QuotaScopeProject && binding.ScopeID != "" {
 		projectFilter = binding.ScopeID
 	}
-	e.reevaluateOpenRowsForLimit(reevalCtx, evalCache, def, projectFilter, now)
+	e.reevaluateOpenRowsForLimit(reevalCtx, def, projectFilter, now)
 }
 
 // ReevaluateAfterLimitDefaultChange re-evaluates all existing open-window
@@ -365,12 +527,11 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterLimitDefaultChange(ctx context.Con
 	reevalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.getReevalTimeout())
 	defer cancel()
 
-	e.reevaluateOpenRowsForLimit(reevalCtx, newTokenLimitEvalCache(e.quota), def, "", e.now())
+	e.reevaluateOpenRowsForLimit(reevalCtx, def, "", e.now())
 }
 
 func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 	ctx context.Context,
-	evalCache *tokenLimitEvalCache,
 	def *store.LimitDefinition,
 	projectFilter string,
 	now time.Time,
@@ -381,8 +542,8 @@ func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 
 	for {
 		if err := ctx.Err(); err != nil {
-			e.evalErrors.Add(1)
-			e.reevalUnprocessed.Add(1)
+			e.recordEvalError()
+			e.recordReevalUnprocessed(1)
 			e.logger.Warn("token budget re-evaluation interrupted before completing all open rows",
 				"limit", def.Name,
 				"limit_id", def.ID,
@@ -395,8 +556,8 @@ func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 
 		rows, err := e.store.ListOpenUsageBudgetStatesByLimit(ctx, def.ID, now, projectFilter, afterID, pageSize)
 		if err != nil {
-			e.evalErrors.Add(1)
-			e.reevalUnprocessed.Add(1)
+			e.recordEvalError()
+			e.recordReevalUnprocessed(1)
 			e.logger.Warn("token budget re-evaluation failed to list open rows",
 				"limit", def.Name,
 				"limit_id", def.ID,
@@ -413,8 +574,8 @@ func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 		for i, row := range rows {
 			if err := ctx.Err(); err != nil {
 				remaining := int64(len(rows) - i)
-				e.evalErrors.Add(1)
-				e.reevalUnprocessed.Add(remaining)
+				e.recordEvalError()
+				e.recordReevalUnprocessed(remaining)
 				e.logger.Warn("token budget re-evaluation timed out with unprocessed rows in page",
 					"limit", def.Name,
 					"limit_id", def.ID,
@@ -428,8 +589,8 @@ func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 			if !ok {
 				continue
 			}
-			if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
-				e.reevalUnprocessed.Add(1)
+			if err := e.reevaluateSpec(ctx, spec, def, now); err != nil {
+				e.recordReevalUnprocessed(1)
 				e.recordReevalError(spec, err)
 			}
 			processed++
@@ -443,7 +604,7 @@ func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 }
 
 func (e *TokenBudgetEvaluator) recordReevalError(spec budgetEvalSpec, err error) {
-	e.evalErrors.Add(1)
+	e.recordEvalError()
 	e.logger.Warn("token budget re-evaluation failed",
 		"limit", spec.limitName,
 		"scope_kind", spec.scopeKind,
@@ -458,23 +619,15 @@ func (e *TokenBudgetEvaluator) recordReevalError(spec budgetEvalSpec, err error)
 // monotonic upward), reevaluateSpec is permitted to lower state (exhausted ->
 // warn|ok, warn -> ok) when a cap is raised or removed, and clears
 // thresholds_notified bits for thresholds no longer met.
+//
+// Obeys the structural fresh-cap writer rule: reads existing first and resolves
+// the effective (cap, action) FRESH (uncached) on every CAS attempt.
 func (e *TokenBudgetEvaluator) reevaluateSpec(
 	ctx context.Context,
-	evalCache *tokenLimitEvalCache,
 	spec budgetEvalSpec,
 	def *store.LimitDefinition,
 	now time.Time,
 ) error {
-	if evalCache == nil {
-		evalCache = newTokenLimitEvalCache(e.quota)
-	}
-	capVal, action, err := evalCache.resolveForDef(
-		ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-	)
-	if err != nil {
-		return fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
-	}
-
 	key := store.UsageBudgetStateKey{
 		LimitDefinitionID: def.ID,
 		ScopeKind:         spec.scopeKind,
@@ -484,16 +637,43 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 	}
 
 	for attempt := 0; attempt < maxBudgetEvalCASRetries; attempt++ {
-		consumed, err := e.store.SumUsageScopeCounterTokens(
-			ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
-		)
-		if err != nil {
-			return fmt.Errorf("sum scope counter tokens: %w", err)
-		}
-
 		existing, err := e.store.GetUsageBudgetState(ctx, key)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("get usage budget state: %w", err)
+		}
+
+		// Structural fresh-cap writer rule: resolve cap FRESH (uncached) AFTER
+		// reading existing on every CAS attempt so concurrent binding edits
+		// cannot write an outdated cap on retry (applies uniformly to project,
+		// user, user_project, and group scopes).
+		freshCache := newTokenLimitEvalCache(e.quota)
+		var capVal int64
+		var action string
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			capVal, action, err = freshCache.resolveGroupByID(
+				ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+			)
+		} else {
+			capVal, action, err = freshCache.resolveByID(
+				ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+		}
+
+		var consumed int64
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			consumed, err = e.store.SumUsageGroupRollupTokens(
+				ctx, spec.scopeID, spec.projectScopeID, spec.windowStartUTC, spec.windowEndUTC,
+			)
+		} else {
+			consumed, err = e.store.SumUsageScopeCounterTokens(
+				ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("sum scope counter tokens: %w", err)
 		}
 
 		if existing == nil {

@@ -14,6 +14,19 @@
 
 package hub
 
+// Structural invariant for all usage_budget_state writers (evaluateSpec,
+// reevaluateSpec, OverrideBudgetState):
+//
+//   Every budget-state writer MUST resolve the effective (cap, token_action)
+//   FRESH (uncached, via a fresh tokenLimitEvalCache) AFTER reading the
+//   usage_budget_state row, on EVERY CAS attempt that writes.
+//
+//   A per-call tokenLimitEvalCache may ONLY be used to decide to skip (when
+//   the cached effective cap <= 0 -> no write), never as the cap persisted
+//   into usage_budget_state. This guarantees that neither the create path nor
+//   the existing-row update path nor a CAS retry can write a stale cap after a
+//   concurrent entitlement/limit change commits.
+
 import (
 	"context"
 	"errors"
@@ -113,6 +126,8 @@ type TokenBudgetEvaluator struct {
 	reevalUnprocessed atomic.Int64
 	reevalPageSize    int
 	reevalTimeout     time.Duration
+	reevalWG          sync.WaitGroup
+	metrics           atomic.Pointer[OTelTokenBudgetMetrics]
 }
 
 // NewTokenBudgetEvaluator constructs a TokenBudgetEvaluator.
@@ -348,7 +363,7 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEventsWithNotice(ctx context.Cont
 	for _, spec := range specs {
 		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
 		if err != nil {
-			e.evalErrors.Add(1)
+			e.recordEvalError()
 			e.logger.Warn("token budget evaluation failed",
 				"limit", spec.limitName,
 				"scope_kind", spec.scopeKind,
@@ -768,6 +783,30 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		return nil, "", nil
 	}
 
+	// Per the structural fresh-cap writer rule, evalCache may ONLY be used to
+	// decide to skip (cached cap <= 0 -> no write). Every CAS attempt that
+	// actually writes resolves the cap fresh after reading the row (for both
+	// project/user/user_project and pooled group scopes).
+	if evalCache != nil {
+		var cachedCap int64
+		var cachedAction string
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			cachedCap, cachedAction, err = evalCache.resolveGroupForDef(
+				ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+			)
+		} else {
+			cachedCap, cachedAction, err = evalCache.resolveForDef(
+				ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+			)
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
+		}
+		if cachedCap <= 0 {
+			return nil, cachedAction, nil
+		}
+	}
+
 	key := store.UsageBudgetStateKey{
 		LimitDefinitionID: def.ID,
 		ScopeKind:         spec.scopeKind,
@@ -782,55 +821,23 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 			return nil, "", fmt.Errorf("get usage budget state: %w", err)
 		}
 
-		// Resolve the effective cap inside the CAS loop AFTER reading the row.
-		// Because limit-change re-evaluation can lower a row after a binding
-		// commit, resolving before the row read (or reusing a stale cache on
-		// retry or cap mismatch) could re-raise a freshly lowered row against
-		// the old cap.
+		// Always resolve the effective cap FRESH (uncached) AFTER reading the
+		// row on every CAS attempt that may create or update usage_budget_state
+		// (applies uniformly to project, user, user_project, and group scopes).
+		freshCache := newTokenLimitEvalCache(e.quota)
 		var capVal int64
 		var action string
-		if attempt == 0 {
-			if spec.scopeKind == store.UsageScopeKindGroup {
-				capVal, action, err = evalCache.resolveGroupForDef(
-					ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
-				)
-			} else {
-				capVal, action, err = evalCache.resolveForDef(
-					ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-				)
-			}
-			if err != nil {
-				return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
-			}
-			if existing != nil && capVal != existing.CapAtEval {
-				freshCache := newTokenLimitEvalCache(e.quota)
-				if spec.scopeKind == store.UsageScopeKindGroup {
-					capVal, action, err = freshCache.resolveGroupByID(
-						ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
-					)
-				} else {
-					capVal, action, err = freshCache.resolveByID(
-						ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-					)
-				}
-				if err != nil {
-					return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
-				}
-			}
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			capVal, action, err = freshCache.resolveGroupByID(
+				ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+			)
 		} else {
-			freshCache := newTokenLimitEvalCache(e.quota)
-			if spec.scopeKind == store.UsageScopeKindGroup {
-				capVal, action, err = freshCache.resolveGroupByID(
-					ctx, def.ID, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
-				)
-			} else {
-				capVal, action, err = freshCache.resolveByID(
-					ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-				)
-			}
-			if err != nil {
-				return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
-			}
+			capVal, action, err = freshCache.resolveByID(
+				ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+			)
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
 		}
 		// Cap <= 0 means unlimited for llm_tokens limits; no state row is created (D3).
 		if capVal <= 0 {

@@ -8187,6 +8187,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// no-op if it already ran.
 	_ = s.CleanupBackgroundResources(ctx)
 
+	// After the drain: wait for any in-flight async token-budget re-evaluations
+	// before closing the audit writer / store.
+	s.mu.RLock()
+	budgetEval := s.tokenBudgetEvaluator
+	s.mu.RUnlock()
+	if budgetEval != nil {
+		budgetEval.WaitReeval()
+	}
+
 	// After the drain: close the audit writer (bounded by its own drain
 	// timeout; idempotent).
 	_ = s.CloseAuditWriter(ctx)

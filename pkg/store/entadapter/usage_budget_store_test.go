@@ -519,6 +519,36 @@ func TestUsageBudgetStore_GetByIDAndListOpenByLimit(t *testing.T) {
 	userRows, err := cs.ListOpenUsageBudgetStatesForUser(ctx, "user-1", now)
 	require.NoError(t, err)
 	require.Len(t, userRows, 2)
+
+	// SumUsageScopeCounterTokensByPrefix groups counter sums for a user prefix in one query.
+	_, err = client.UsageScopeCounterDaily.Create().
+		SetScopeKind(store.UsageScopeKindUserProject).
+		SetScopeID("user-1:proj-a").
+		SetDayUtc(dayStart).
+		SetTokensSummable(300).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.UsageScopeCounterDaily.Create().
+		SetScopeKind(store.UsageScopeKindUserProject).
+		SetScopeID("user-1:proj-b").
+		SetDayUtc(dayStart).
+		SetTokensSummable(700).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.UsageScopeCounterDaily.Create().
+		SetScopeKind(store.UsageScopeKindUserProject).
+		SetScopeID("user-2:proj-a").
+		SetDayUtc(dayStart).
+		SetTokensSummable(999).
+		Save(ctx)
+	require.NoError(t, err)
+
+	grouped, err := cs.SumUsageScopeCounterTokensByPrefix(ctx, store.UsageScopeKindUserProject, "user-1:", dayStart, dayEnd)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int64{
+		"user-1:proj-a": 300,
+		"user-1:proj-b": 700,
+	}, grouped)
 }
 
 func TestQuotaStore_UpdateEntitlementBindingIfMatch(t *testing.T) {

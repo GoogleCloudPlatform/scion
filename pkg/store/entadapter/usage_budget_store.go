@@ -131,6 +131,42 @@ func (s *UsageLedgerStore) SumUsageGroupRollupTokens(ctx context.Context, groupI
 	return total, nil
 }
 
+// SumUsageScopeCounterTokensByPrefix implements store.UsageBudgetStore.SumUsageScopeCounterTokensByPrefix.
+// Queries all usage_scope_counters_daily rows matching (scopeKind, scopeIDPrefix%)
+// over [fromDayUTC, toDayUTC) in one query and returns per-scope saturating sums.
+func (s *UsageLedgerStore) SumUsageScopeCounterTokensByPrefix(ctx context.Context, scopeKind, scopeIDPrefix string, fromDayUTC, toDayUTC time.Time) (map[string]int64, error) {
+	if scopeKind == "" || scopeIDPrefix == "" {
+		return nil, fmt.Errorf("%w: scope_kind and scope_id prefix are required", store.ErrInvalidInput)
+	}
+	fromUTC := utcDayStart(fromDayUTC)
+	toUTC := utcDayStart(toDayUTC)
+	if !toUTC.After(fromUTC) {
+		return map[string]int64{}, nil
+	}
+
+	rows, err := s.client.UsageScopeCounterDaily.Query().
+		Where(
+			usagescopecounterdaily.ScopeKindEQ(scopeKind),
+			usagescopecounterdaily.ScopeIDHasPrefix(scopeIDPrefix),
+			usagescopecounterdaily.DayUtcGTE(fromUTC),
+			usagescopecounterdaily.DayUtcLT(toUTC),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	out := make(map[string]int64)
+	for _, r := range rows {
+		if r.TokensSummable > 0 {
+			out[r.ScopeID] = saturatingAddInt64(out[r.ScopeID], r.TokensSummable)
+		} else if _, exists := out[r.ScopeID]; !exists {
+			out[r.ScopeID] = 0
+		}
+	}
+	return out, nil
+}
+
 // GetUsageBudgetState implements store.UsageBudgetStore.GetUsageBudgetState.
 func (s *UsageLedgerStore) GetUsageBudgetState(ctx context.Context, key store.UsageBudgetStateKey) (*store.UsageBudgetState, error) {
 	ldUID, err := parseGetID(key.LimitDefinitionID)

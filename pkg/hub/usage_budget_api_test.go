@@ -23,12 +23,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -538,6 +541,11 @@ func TestUsageBudgets_OverrideAndEvaluatorInteraction(t *testing.T) {
 		"override_until": overrideUntil, "state_version": userState.StateVersion,
 	}, nil).Code)
 
+	// Missing override_until key -> 400 (O4: explicit null required to clear).
+	assert.Equal(t, http.StatusBadRequest, doUserJSONRequest(t, srv, http.MethodPost, projOverridePath, projAdmin, map[string]any{
+		"state_version": projState.StateVersion,
+	}, nil).Code)
+
 	// Missing CAS version -> 428.
 	assert.Equal(t, http.StatusPreconditionRequired, doUserJSONRequest(t, srv, http.MethodPost, projOverridePath, projAdmin, map[string]any{
 		"override_until": overrideUntil,
@@ -676,6 +684,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 		"value":       800,
 	}, nil)
 	require.Equal(t, http.StatusCreated, recCreate.Code, recCreate.Body.String())
+	eval.WaitReeval()
 	var binding store.EntitlementBinding
 	require.NoError(t, json.Unmarshal(recCreate.Body.Bytes(), &binding))
 
@@ -698,6 +707,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 		"value":       1500,
 	}, nil)
 	require.Equal(t, http.StatusOK, recRaiseWarn.Code, recRaiseWarn.Body.String())
+	eval.WaitReeval()
 
 	stWarn, err := s.GetUsageBudgetStateByID(ctx, st.ID)
 	require.NoError(t, err)
@@ -712,6 +722,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 		"value":       5000,
 	}, nil)
 	require.Equal(t, http.StatusOK, recRaiseOK.Code, recRaiseOK.Body.String())
+	eval.WaitReeval()
 
 	stOK, err := s.GetUsageBudgetStateByID(ctx, st.ID)
 	require.NoError(t, err)
@@ -726,6 +737,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 		"value":       900,
 	}, nil)
 	require.Equal(t, http.StatusOK, recLower.Code, recLower.Body.String())
+	eval.WaitReeval()
 
 	stExh2, err := s.GetUsageBudgetStateByID(ctx, st.ID)
 	require.NoError(t, err)
@@ -734,6 +746,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 	// 5. Delete binding (reverts to default 0 = unlimited) -> lowers exhausted -> ok.
 	recDel := doUserJSONRequest(t, srv, http.MethodDelete, "/api/v1/admin/entitlements/"+binding.ID, admin, nil, nil)
 	require.Equal(t, http.StatusNoContent, recDel.Code, recDel.Body.String())
+	eval.WaitReeval()
 
 	stAfterDel, err := s.GetUsageBudgetStateByID(ctx, st.ID)
 	require.NoError(t, err)
@@ -749,6 +762,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 		"defaultValue": 500,
 	}, nil)
 	require.Equal(t, http.StatusOK, recDefLower.Code, recDefLower.Body.String())
+	eval.WaitReeval()
 	stDefExh, err := s.GetUsageBudgetStateByID(ctx, st.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.UsageBudgetStateExhausted, stDefExh.State)
@@ -761,6 +775,7 @@ func TestUsageBudgets_LimitChangeReevaluation(t *testing.T) {
 		"defaultValue": 5000,
 	}, nil)
 	require.Equal(t, http.StatusOK, recDefRaise.Code, recDefRaise.Body.String())
+	eval.WaitReeval()
 	stDefOK, err := s.GetUsageBudgetStateByID(ctx, st.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.UsageBudgetStateOK, stDefOK.State)
@@ -1173,4 +1188,509 @@ func TestUsageBudgets_ExpiredOverrideDisplaysComputedState(t *testing.T) {
 				"expired override must surface computed exhausted state on read")
 		}
 	}
+}
+
+func TestUsageBudgets_OverrideClearFiresThresholdHook(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-ovr-hook")
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	eval := srv.TokenBudgetEvaluator()
+	eval.nowFn = func() time.Time { return now }
+
+	var hookMu sync.Mutex
+	var crossings []BudgetThresholdCrossing
+	eval.SetThresholdHook(func(_ context.Context, c BudgetThresholdCrossing) {
+		hookMu.Lock()
+		crossings = append(crossings, c)
+		hookMu.Unlock()
+	})
+
+	admin := &store.User{ID: uuid.NewString(), Email: "ovrh-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+
+	proj := &store.Project{ID: tid("ovrh-proj"), Name: "ovrh-proj", Slug: "ovrh-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, admin.ID, proj.ID, store.ProjectRoleOwner)
+	ag := &store.Agent{ID: tid("ovrh-ag"), Slug: "ovrh-ag", Name: "ovrh-ag", ProjectID: proj.ID, OwnerID: admin.ID, CreatedBy: admin.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-ovrh", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-ovrh", Generation: 1, HubID: "hub-bud-ovr-hook", ProjectID: proj.ID, AgentID: ag.ID, BillingUserID: &admin.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+
+	defProjDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defProjDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	// 1. Reach warn (600/1000).
+	ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-ovr-hook", "ev-ovrh-1", "run-ovrh", proj.ID, ag.ID, &admin.ID, now, 600)
+	dayStart, _ := utcDayWindow(now)
+	st, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	require.Equal(t, store.UsageBudgetStateWarn, st.State)
+
+	// Reset recorded crossings before testing override set/clear.
+	hookMu.Lock()
+	crossings = nil
+	hookMu.Unlock()
+
+	// 2. Set override on warn row -> moves warn -> ok, MUST fire 0 hooks.
+	overridePath := "/api/v1/projects/" + proj.ID + "/usage/budgets/" + st.ID + ":override"
+	recSet := doUserJSONRequest(t, srv, http.MethodPost, overridePath, admin, map[string]any{
+		"override_until": now.Add(4 * time.Hour),
+		"state_version":  st.StateVersion,
+	}, nil)
+	require.Equal(t, http.StatusOK, recSet.Code, recSet.Body.String())
+	var setEntry UsageBudgetEntry
+	require.NoError(t, json.Unmarshal(recSet.Body.Bytes(), &setEntry))
+	assert.Equal(t, store.UsageBudgetStateOK, setEntry.State)
+	hookMu.Lock()
+	assert.Empty(t, crossings, "setting an override (downward move) must fire no threshold hook")
+	hookMu.Unlock()
+
+	// 3. Ingest past 100% while override is active -> stays ok, 0 hooks.
+	ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-ovr-hook", "ev-ovrh-2", "run-ovrh", proj.ID, ag.ID, &admin.ID, now.Add(5*time.Minute), 600)
+	stMid, err := s.GetUsageBudgetStateByID(ctx, st.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateOK, stMid.State)
+	hookMu.Lock()
+	assert.Empty(t, crossings, "ingesting past 100% while override is active must fire no hook")
+	hookMu.Unlock()
+
+	// 4. Clear override early -> moves ok -> exhausted, MUST fire exactly 1 hook (ok -> exhausted).
+	recClear := doUserJSONRequest(t, srv, http.MethodPost, overridePath, admin, map[string]any{
+		"override_until": nil,
+		"state_version":  stMid.StateVersion,
+	}, nil)
+	require.Equal(t, http.StatusOK, recClear.Code, recClear.Body.String())
+	var clearedEntry UsageBudgetEntry
+	require.NoError(t, json.Unmarshal(recClear.Body.Bytes(), &clearedEntry))
+	assert.Equal(t, store.UsageBudgetStateExhausted, clearedEntry.State)
+
+	hookMu.Lock()
+	require.Len(t, crossings, 1, "clearing an override that raises state ok -> exhausted must fire exactly one crossing")
+	assert.Equal(t, store.UsageBudgetStateOK, crossings[0].PrevState)
+	assert.Equal(t, store.UsageBudgetStateExhausted, crossings[0].NewState)
+	assert.Equal(t, store.LimitLLMTokensPerProjectDay, crossings[0].LimitName)
+	hookMu.Unlock()
+}
+
+type budgetCountingStore struct {
+	store.Store
+	fault          *storeFaultSwitch
+	sumCalls       atomic.Int64
+	prefixSumCalls atomic.Int64
+	listProjCalls  atomic.Int64
+	getStateCalls  atomic.Int64
+}
+
+func (c *budgetCountingStore) SumUsageScopeCounterTokens(ctx context.Context, scopeKind, counterScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error) {
+	if c.fault.Active() {
+		c.sumCalls.Add(1)
+	}
+	return c.Store.SumUsageScopeCounterTokens(ctx, scopeKind, counterScopeID, fromDayUTC, toDayUTC)
+}
+
+func (c *budgetCountingStore) SumUsageScopeCounterTokensByPrefix(ctx context.Context, scopeKind, scopeIDPrefix string, fromDayUTC, toDayUTC time.Time) (map[string]int64, error) {
+	if c.fault.Active() {
+		c.prefixSumCalls.Add(1)
+	}
+	return c.Store.SumUsageScopeCounterTokensByPrefix(ctx, scopeKind, scopeIDPrefix, fromDayUTC, toDayUTC)
+}
+
+func (c *budgetCountingStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	if c.fault.Active() {
+		c.listProjCalls.Add(1)
+	}
+	return c.Store.ListProjects(ctx, filter, opts)
+}
+
+func (c *budgetCountingStore) GetUsageBudgetState(ctx context.Context, key store.UsageBudgetStateKey) (*store.UsageBudgetState, error) {
+	if c.fault.Active() {
+		c.getStateCalls.Add(1)
+	}
+	return c.Store.GetUsageBudgetState(ctx, key)
+}
+
+func TestUsageBudgets_R2_HubWideUserProjectDefaultConstantStoreCalls(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-r2-const")
+	counter, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *budgetCountingStore {
+		return &budgetCountingStore{Store: inner, fault: f}
+	})
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	admin := &store.User{ID: uuid.NewString(), Email: "r2c-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
+	target := &store.User{ID: uuid.NewString(), Email: "r2c-user@example.com", DisplayName: "Target", Role: "member", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+	require.NoError(t, s.CreateUser(ctx, target))
+	bindSystemRoleForUsageReadTest(t, s, target.ID, store.SystemRoleHubMember)
+
+	// Set a hub-wide user_project day default (> 0).
+	defUPDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserProjectDay)
+	require.NoError(t, err)
+	defUPDay.DefaultValue = 1000
+	_, err = s.UpdateLimitDefinition(ctx, defUPDay)
+	require.NoError(t, err)
+
+	// Create 55 projects; target user has usage in only 2 + explicit binding on 1 other.
+	projIDs := make([]string, 55)
+	for i := 0; i < 55; i++ {
+		p := &store.Project{
+			ID:   uuid.NewString(),
+			Name: "r2c-proj-" + uuid.NewString()[:8],
+			Slug: "r2c-proj-" + uuid.NewString()[:8],
+		}
+		require.NoError(t, s.CreateProject(ctx, p))
+		projIDs[i] = p.ID
+	}
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+	usedProjs := []string{projIDs[3], projIDs[41]}
+	for idx, pid := range usedProjs {
+		ag := &store.Agent{
+			ID: uuid.NewString(), Slug: "r2c-ag-" + string(rune('a'+idx)), Name: "r2c-ag",
+			ProjectID: pid, OwnerID: target.ID, CreatedBy: target.ID, Phase: string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		runID := "run-r2c-" + string(rune('a'+idx))
+		_, err = s.SetAgentRunID(ctx, ag.ID, runID, nil)
+		require.NoError(t, err)
+		_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID: runID, Generation: 1, HubID: "hub-bud-r2-const", ProjectID: pid, AgentID: ag.ID, BillingUserID: &target.ID, Harness: "claude",
+		})
+		require.NoError(t, err)
+		ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-r2-const", "ev-r2c-"+string(rune('a'+idx)), runID, pid, ag.ID, &target.ID, dbNow, 250)
+	}
+
+	boundProj := projIDs[20]
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defUPDay.ID,
+		SubjectType:       store.EntitlementSubjectUser,
+		SubjectID:         target.ID,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           boundProj,
+		Value:             2000,
+	})
+	require.NoError(t, err)
+
+	// Enable counting strictly for the GET request.
+	fault.Arm()
+	rec := doUserJSONRequest(t, srv, http.MethodGet, "/api/v1/users/"+target.ID+"/usage/budgets", admin, nil, nil)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp UsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	seenUPProjects := map[string]bool{}
+	for _, b := range resp.Budgets {
+		if b.ScopeKind == store.UsageScopeKindUserProject {
+			seenUPProjects[b.ProjectScopeID] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{
+		usedProjs[0]: true,
+		usedProjs[1]: true,
+		boundProj:    true,
+	}, seenUPProjects, "response must include only projects with usage or explicit bindings, not all 55 projects")
+
+	assert.Equal(t, int64(0), counter.listProjCalls.Load(), "must not enumerate all hub projects via ListProjects")
+	assert.Equal(t, int64(0), counter.getStateCalls.Load(), "must not issue per-project GetUsageBudgetState point queries")
+	assert.Equal(t, int64(2), counter.prefixSumCalls.Load(), "exactly 2 grouped prefix counter queries (day + month)")
+	assert.Equal(t, int64(2), counter.sumCalls.Load(), "only 2 user-scope counter sums (day + month), zero per-project sums")
+}
+
+// reevalCASConflictStore wraps store.Store to inject a one-shot CAS conflict
+// during reevaluateSpec after concurrently lowering the binding in the store.
+type reevalCASConflictStore struct {
+	store.Store
+	mu         sync.Mutex
+	fired      bool
+	onFirstCAS func()
+}
+
+func (r *reevalCASConflictStore) CompareAndSwapUsageBudgetState(ctx context.Context, expectedVersion int64, next *store.UsageBudgetState) (*store.UsageBudgetState, error) {
+	r.mu.Lock()
+	cb := r.onFirstCAS
+	shouldFire := cb != nil && !r.fired
+	if shouldFire {
+		r.fired = true
+	}
+	r.mu.Unlock()
+	if shouldFire {
+		cb()
+		return nil, store.ErrBudgetStateConflict
+	}
+	return r.Store.CompareAndSwapUsageBudgetState(ctx, expectedVersion, next)
+}
+
+func TestUsageBudgets_R3AndO3_FreshCapRuleAllWriters(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-bud-r3")
+	setTokenBudgetsExperimentsForTest(t, srv, true, true)
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	dayStart, dayEnd := utcDayWindow(now)
+
+	proj := &store.Project{ID: tid("r3-proj"), Name: "r3-proj", Slug: "r3-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{ID: tid("r3-ag"), Slug: "r3-ag", Name: "r3-ag", ProjectID: proj.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-r3", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-r3", Generation: 1, HubID: "hub-bud-r3", ProjectID: proj.ID, AgentID: ag.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+
+	defProjDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+
+	// Ingest 1200 tokens with no cap yet so no state row exists.
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag.ID,
+		Events: []*store.UsageEvent{{
+			HubID: "hub-bud-r3", EventID: "ev-r3-1", RunID: "run-r3", ProjectID: proj.ID, AgentID: ag.ID,
+			Harness: "claude", Model: "claude-sonnet-4-6", ModelSource: telemetrycontract.ModelSourceEvent,
+			UsageSource: store.UsageSourceNative, Status: telemetrycontract.StatusSuccess, Calls: 1,
+			Input: usageInt64p(1200), Output: usageInt64p(0), TokenStatus: telemetrycontract.TokenStatusReported,
+			EventTS: now, ReceivedAt: now, ProducerEpoch: "ep-1", ProducerSeq: 1,
+		}},
+	})
+	require.NoError(t, err)
+
+	// --- R3 guard: create path with stale warm evalCache ---
+	binding, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defProjDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	eval := srv.TokenBudgetEvaluator()
+	eval.nowFn = func() time.Time { return now }
+	var r3HookFired bool
+	eval.SetThresholdHook(func(_ context.Context, _ BudgetThresholdCrossing) {
+		r3HookFired = true
+	})
+
+	// Pre-warm evalCache with cap=1000, then delete the binding (now unlimited).
+	warmCache := newTokenLimitEvalCache(srv.quotaService)
+	cachedCap, _, err := warmCache.resolveForDef(ctx, defProjDay, "", store.QuotaScopeProject, proj.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), cachedCap)
+	require.NoError(t, s.DeleteEntitlementBinding(ctx, binding.ID))
+
+	spec := budgetEvalSpec{
+		limitName:      store.LimitLLMTokensPerProjectDay,
+		scopeKind:      store.UsageScopeKindProject,
+		scopeID:        proj.ID,
+		counterScopeID: proj.ID,
+		bindingScope:   store.QuotaScopeProject,
+		bindingScopeID: proj.ID,
+		windowStartUTC: dayStart,
+		windowEndUTC:   dayEnd,
+	}
+	res, _, err := eval.evaluateSpec(ctx, spec, warmCache)
+	require.NoError(t, err)
+	assert.Nil(t, res, "deleted cap must not create a state row even with a stale warm evalCache")
+	assert.False(t, r3HookFired, "no threshold hook may fire when cap was removed before create")
+	_, err = s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// --- O3 guard: reevaluateSpec CAS retry re-resolves cap fresh ---
+	b2, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defProjDay.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             5000,
+	})
+	require.NoError(t, err)
+	_, err = s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: defProjDay.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           proj.ID,
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    1200,
+		CapAtEval:         1000,
+		StateVersion:      1,
+	})
+	require.NoError(t, err)
+
+	conflictStore := &reevalCASConflictStore{Store: s}
+	conflictStore.onFirstCAS = func() {
+		// Before reevaluateSpec's retry, a second admin lowers cap from 5000 -> 800.
+		b2.Value = 800
+		_, uErr := s.UpdateEntitlementBinding(ctx, b2)
+		require.NoError(t, uErr)
+	}
+	localEval := NewTokenBudgetEvaluator(conflictStore, &QuotaService{store: conflictStore}, nil, func() bool { return true })
+	localEval.nowFn = func() time.Time { return now }
+
+	require.NoError(t, localEval.reevaluateSpec(ctx, spec, defProjDay, now))
+	finalRow, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defProjDay.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: proj.ID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateExhausted, finalRow.State, "retry must re-resolve fresh cap 800 and keep exhausted")
+	assert.Equal(t, int64(800), finalRow.CapAtEval)
+
+	// --- C1 pooled group writer guard: create path + existing-row path with stale warm evalCache ---
+	defGroupDay, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupDay)
+	require.NoError(t, err)
+	grp := &store.Group{
+		ID:        uuid.NewString(),
+		Name:      "r3-pooled-group",
+		Slug:      "r3-pooled-group-" + uuid.NewString()[:8],
+		GroupType: store.GroupTypeExplicit,
+	}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+
+	// Ingest 1200 tokens attributed to the pooled group rollup.
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag.ID,
+		Events: []*store.UsageEvent{{
+			HubID: "hub-bud-r3", EventID: "ev-r3-grp-1", RunID: "run-r3", ProjectID: proj.ID, AgentID: ag.ID,
+			Harness: "claude", Model: "claude-sonnet-4-6", ModelSource: telemetrycontract.ModelSourceEvent,
+			UsageSource: store.UsageSourceNative, Status: telemetrycontract.StatusSuccess, Calls: 1,
+			Input: usageInt64p(1200), Output: usageInt64p(0), TokenStatus: telemetrycontract.TokenStatusReported,
+			EventTS: now, ReceivedAt: now, ProducerEpoch: "ep-1", ProducerSeq: 2,
+			ChargedGroupIDs: []string{grp.ID},
+		}},
+	})
+	require.NoError(t, err)
+
+	grpBinding, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defGroupDay.ID,
+		SubjectType:       store.EntitlementSubjectGroup,
+		SubjectID:         grp.ID,
+		ScopeType:         store.QuotaScopeSystem,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	// Pre-warm evalCache with group cap=1000, then delete the binding (now unlimited).
+	grpWarmCache := newTokenLimitEvalCache(srv.quotaService)
+	cachedGrpCap, _, err := grpWarmCache.resolveGroupForDef(ctx, defGroupDay, grp.ID, store.QuotaScopeSystem, "")
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), cachedGrpCap)
+	require.NoError(t, s.DeleteEntitlementBinding(ctx, grpBinding.ID))
+
+	r3HookFired = false
+	grpSpec := budgetEvalSpec{
+		limitName:      store.LimitLLMTokensPerGroupDay,
+		scopeKind:      store.UsageScopeKindGroup,
+		scopeID:        grp.ID,
+		projectScopeID: "",
+		bindingScope:   store.QuotaScopeSystem,
+		bindingScopeID: "",
+		windowStartUTC: dayStart,
+		windowEndUTC:   dayEnd,
+	}
+	grpRes, _, err := eval.evaluateSpec(ctx, grpSpec, grpWarmCache)
+	require.NoError(t, err)
+	assert.Nil(t, grpRes, "deleted group cap must not create a state row even with a stale warm evalCache")
+	assert.False(t, r3HookFired, "no threshold hook may fire when group cap was removed before create")
+	_, err = s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: defGroupDay.ID, ScopeKind: store.UsageScopeKindGroup, ScopeID: grp.ID, WindowStartUTC: dayStart,
+	})
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Existing-row path for group scope: warm cache sees stale cap=1000 while DB was raised to 5000.
+	grpBinding2, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: defGroupDay.ID,
+		SubjectType:       store.EntitlementSubjectGroup,
+		SubjectID:         grp.ID,
+		ScopeType:         store.QuotaScopeSystem,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+	grpWarmCache2 := newTokenLimitEvalCache(srv.quotaService)
+	cachedGrpCap2, _, err := grpWarmCache2.resolveGroupForDef(ctx, defGroupDay, grp.ID, store.QuotaScopeSystem, "")
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), cachedGrpCap2)
+
+	// Raise cap to 5000 and seed an already-lowered ok row (matching re-eval outcome).
+	grpBinding2.Value = 5000
+	_, err = s.UpdateEntitlementBinding(ctx, grpBinding2)
+	require.NoError(t, err)
+	_, err = s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: defGroupDay.ID,
+		ScopeKind:         store.UsageScopeKindGroup,
+		ScopeID:           grp.ID,
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateOK,
+		ConsumedAtEval:    1200,
+		CapAtEval:         5000,
+		StateVersion:      1,
+	})
+	require.NoError(t, err)
+
+	r3HookFired = false
+	grpRes2, _, err := eval.evaluateSpec(ctx, grpSpec, grpWarmCache2)
+	require.NoError(t, err)
+	require.NotNil(t, grpRes2)
+	assert.Equal(t, store.UsageBudgetStateOK, grpRes2.State, "stale warm group cache must not re-raise ok row to exhausted after cap raise")
+	assert.Equal(t, int64(5000), grpRes2.CapAtEval)
+	assert.False(t, r3HookFired)
+}
+
+func TestTokenBudgetEvaluator_OTelMetrics(t *testing.T) {
+	ctx := context.Background()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(ctx) })
+
+	m, err := NewOTelTokenBudgetMetrics(mp)
+	require.NoError(t, err)
+
+	eval := NewTokenBudgetEvaluator(nil, nil, nil, func() bool { return true })
+	eval.metrics.Store(m)
+
+	eval.recordEvalError()
+	eval.recordReevalUnprocessed(3)
+
+	assert.Equal(t, int64(1), eval.EvalErrors())
+	assert.Equal(t, int64(3), eval.ReevalUnprocessed())
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+
+	counts := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, met := range sm.Metrics {
+			if sum, ok := met.Data.(metricdata.Sum[int64]); ok && len(sum.DataPoints) > 0 {
+				counts[met.Name] = sum.DataPoints[0].Value
+			}
+		}
+	}
+	assert.Equal(t, int64(1), counts["scion.hub.budget.eval_errors"])
+	assert.Equal(t, int64(3), counts["scion.hub.budget.reeval_unprocessed"])
 }

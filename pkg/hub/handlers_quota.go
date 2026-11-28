@@ -487,16 +487,16 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	if updated.ResourceType == store.LimitResourceTypeLLMTokens && updated.DefaultValue != prevDefaultValue {
-		if eval := s.TokenBudgetEvaluator(); eval != nil {
-			eval.ReevaluateAfterLimitDefaultChange(r.Context(), updated)
-		}
-	}
-
 	slog.Info("limit definition updated",
 		"limit_id", updated.ID, "name", updated.Name, "actor", user.Email())
 
 	writeJSON(w, http.StatusOK, updated)
+
+	if updated.ResourceType == store.LimitResourceTypeLLMTokens && updated.DefaultValue != prevDefaultValue {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ScheduleReevaluateAfterLimitDefaultChange(r.Context(), updated)
+		}
+	}
 }
 
 func (s *Server) deleteLimitDefinition(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
@@ -637,14 +637,14 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		}
 	}
 
-	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
-		if eval := s.TokenBudgetEvaluator(); eval != nil {
-			eval.ReevaluateAfterEntitlementChange(r.Context(), limitDef, created)
-		}
-	}
-
 	setEntitlementETag(w, created)
 	writeJSON(w, http.StatusCreated, created)
+
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ScheduleReevaluateAfterEntitlementChange(r.Context(), limitDef, created)
+		}
+	}
 }
 
 func (s *Server) getEntitlement(w http.ResponseWriter, r *http.Request, id string) {
@@ -863,14 +863,14 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 
-	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
-		if eval := s.TokenBudgetEvaluator(); eval != nil {
-			eval.ReevaluateAfterEntitlementChange(r.Context(), limitDef, updated)
-		}
-	}
-
 	setEntitlementETag(w, updated)
 	writeJSON(w, http.StatusOK, updated)
+
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			eval.ScheduleReevaluateAfterEntitlementChange(r.Context(), limitDef, updated)
+		}
+	}
 }
 
 func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
@@ -915,13 +915,13 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 
+	w.WriteHeader(http.StatusNoContent)
+
 	if limitDef != nil && existing != nil && limitDef.ResourceType == store.LimitResourceTypeLLMTokens {
 		if eval := s.TokenBudgetEvaluator(); eval != nil {
-			eval.ReevaluateAfterEntitlementChange(r.Context(), limitDef, existing)
+			eval.ScheduleReevaluateAfterEntitlementChange(r.Context(), limitDef, existing)
 		}
 	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // validatePooledGroupBindingShape enforces the required binding shape for

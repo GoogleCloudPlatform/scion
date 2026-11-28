@@ -182,6 +182,13 @@ type UsageBudgetStore interface {
 	// from the overlapping episodes (each event counted at most once).
 	QueryGroupMemberUsageBreakdown(ctx context.Context, groupID, projectScopeID string, episodes []*UsageGroupSeedEpisode, windowStartUTC, windowEndUTC time.Time) ([]UsageGroupMemberBreakdown, error)
 
+	// SumUsageScopeCounterTokensByPrefix returns a map of counterScopeID ->
+	// saturating SUM(tokens_summable) from usage_scope_counters_daily for
+	// scopeKind over [fromDayUTC, toDayUTC) whose scope_id starts with
+	// scopeIDPrefix (e.g. "<user_id>:" for ScopeKind == "user_project").
+	// Returns an empty map when no counter rows match.
+	SumUsageScopeCounterTokensByPrefix(ctx context.Context, scopeKind, scopeIDPrefix string, fromDayUTC, toDayUTC time.Time) (map[string]int64, error)
+
 	// GetUsageBudgetState returns the usage_budget_state row for key, or
 	// ErrNotFound if no row exists yet.
 	GetUsageBudgetState(ctx context.Context, key UsageBudgetStateKey) (*UsageBudgetState, error)
