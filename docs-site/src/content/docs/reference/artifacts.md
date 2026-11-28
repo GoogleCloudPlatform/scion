@@ -338,6 +338,8 @@ Each of them must be a user whose credential allows `artifact.manage` in the hom
 
 ### Owner deleted
 
+When a child agent is deleted (soft or hard), each live artifact it owns whose home is the child's project passes automatically to its nearest live, eligible ancestor agent in that project (clearing any colliding `--key` into `former_key`, and leaving cross-project artifacts alone); if no eligible ancestor exists, the artifact remains with the deleted agent and is marked orphaned on the next maintenance pass.
+
 Every 10 minutes the hub's maintenance pass checks the owners of live artifacts: an agent is live while it exists and is not soft-deleted, a user while it exists and is active. Where the owner is gone, the pass marks the artifact; where a marked artifact's owner is back (an agent restored from a soft delete, or a user made active again), it clears the mark. This covers every way an agent stops existing: a soft or hard delete, the purge of soft-deleted agents, and deleting its project. A marked artifact shows `ownerDeleted: true` in `GET`, list and `PATCH` responses. Nothing else changes: its expiry, grants, share links and readers stay as they were, and it is deleted only if someone deletes it (an admin of its home project can) or it expires. Marking and clearing are recorded in the artifact's history. If the hub cannot check owners, it changes nothing and tries again on the next pass.
 
 ## Artifacts in messages

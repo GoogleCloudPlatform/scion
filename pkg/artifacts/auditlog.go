@@ -40,25 +40,26 @@ import (
 // Log entry field keys. pkg/util/logging promotes the cheap ones to labels
 // under the same names; a test pins that the two agree.
 const (
-	logKeyArtifactID      = "artifact_id"
-	logKeyVersionSeq      = "version_seq"
-	logKeyProjectID       = "project_id"
-	logKeyRoute           = "route"
-	logKeyAction          = "action"
-	logKeyOutcome         = "outcome"
-	logKeyReason          = "reason"
-	logKeyPrincipalKind   = "principal_kind"
-	logKeyPrincipalID     = "principal_id"
-	logKeyAuthority       = "authority"
-	logKeySubjectKind     = "subject_kind"
-	logKeySubjectRef      = "subject_ref"
-	logKeyPermission      = "permission"
-	logKeyOwnerKind       = "owner_kind"
-	logKeyOrphaned        = "orphaned"
-	logKeyCount           = "count"
-	logKeyOwnersChecked   = "owners_checked"
-	logKeyOrphanedCount   = "orphaned_count"
-	logKeyUnorphanedCount = "unorphaned_count"
+	logKeyArtifactID       = "artifact_id"
+	logKeyVersionSeq       = "version_seq"
+	logKeyProjectID        = "project_id"
+	logKeyRoute            = "route"
+	logKeyAction           = "action"
+	logKeyOutcome          = "outcome"
+	logKeyReason           = "reason"
+	logKeyPrincipalKind    = "principal_kind"
+	logKeyPrincipalID      = "principal_id"
+	logKeyAuthority        = "authority"
+	logKeySubjectKind      = "subject_kind"
+	logKeySubjectRef       = "subject_ref"
+	logKeyPermission       = "permission"
+	logKeyOwnerKind        = "owner_kind"
+	logKeyOrphaned         = "orphaned"
+	logKeyCount            = "count"
+	logKeyOwnersChecked    = "owners_checked"
+	logKeyOrphanedCount    = "orphaned_count"
+	logKeyUnorphanedCount  = "unorphaned_count"
+	logKeyTransferredCount = "transferred_count"
 	// logKeyNotified is set on a grant entry whose request asked for
 	// notify (Ask for review): whether the subject was told.
 	logKeyNotified       = "notified"
@@ -173,6 +174,7 @@ const (
 	logReasonTargetIneligible   = "target_ineligible"
 	logReasonRateLimited        = "rate_limited"
 	logReasonUnavailable        = "unavailable"
+	logReasonMovedOutOfProject  = "moved_out_of_project"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event

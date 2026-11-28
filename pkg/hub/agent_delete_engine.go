@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -800,6 +801,16 @@ func (e *deletionEngine) run() deletionOutcome {
 	if out, ok := e.finish(); !ok {
 		return out
 	}
+
+	// Pass the deleted agent's live project artifacts to its nearest live
+	// eligible ancestor agent so parents can immediately request reviews and
+	// publish new versions without waiting for the maintenance pass
+	// (ptone/scion#9846).
+	e.tailStep("artifact succession", func() {
+		ctx, cancel := context.WithTimeout(e.base, artifactSuccessionTimeout)
+		defer cancel()
+		s.succeedAgentArtifacts(ctx, agent, artifacts.SuccessionTriggerAgentDelete)
+	})
 
 	// A hard delete that deletes the agent's files also removes the
 	// agent's storage the hub owns (its agents/<slug> directory on the
