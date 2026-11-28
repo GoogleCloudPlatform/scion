@@ -2275,6 +2275,7 @@ type MessageRequest struct {
 	Surface     string `json:"surface,omitempty"`
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
+	LegacyRef   string `json:"legacy_ref,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -2351,7 +2352,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// External chat references name conversations owned by chat
 	// integrations, which authenticate as brokers. Any other caller is
 	// refused before anything is looked up or written.
-	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
+	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "" || req.LegacyRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
 		logReferenceRefused(ctx, logging.RequestPath(r), "external chat reference from a caller that is not a chat integration", GetIdentityFromContext(ctx))
 		ValidationError(w, "surface and external_ref are set by chat integrations", nil)
 		return
@@ -2714,6 +2715,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	var phase11ConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
 		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
 			messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
@@ -2723,7 +2725,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		convResult, convErr := s.resolveBrokerInboundConversation(
 			ctx, s.messageLog, agent.ProjectID,
 			req.Surface, req.ExternalRef, req.ParentRef, "", agent.ID,
-			structuredMsg.Channel, structuredMsg.ThreadID,
+			structuredMsg.Channel, req.LegacyRef, structuredMsg.ThreadID,
 		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
@@ -2736,6 +2738,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 			return
 		} else {
+			phase11ConvResult = convResult
 			if structuredMsg.Metadata == nil {
 				structuredMsg.Metadata = make(map[string]string)
 			}
@@ -3197,6 +3200,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Surface:        conv.Surface,
 				DisplayName:    conv.DisplayName,
 			}
+		} else if phase11ConvResult != nil {
+			// Broker-authenticated Phase 11 resolution already resolved or created
+			// the project-scoped external thread conversation (new key or read-only
+			// legacy_ref/thread_id fallback); persist that conversation_id directly
+			// instead of falling through to Phase-5 derivation.
+			convResult = phase11ConvResult
+			storeMsg.ConversationID = phase11ConvResult.ConversationID
 		} else {
 			// B5 SECURITY: derive sender identity for the conversation key
 			// from the authenticated context, never from the message payload.

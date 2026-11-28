@@ -1513,6 +1513,7 @@ func TestMessageBrokerProxy_EnrichConversationDualPopulatesLegacyFields(t *testi
 		assert.Equal(t, "C0123ABC:1700000000.000100", got.Conversation.ExternalRef)
 		assert.Equal(t, "C0123ABC", got.Conversation.ParentRef)
 		assert.Equal(t, "#engineering", got.Conversation.DisplayName)
+		assert.Equal(t, "group", got.Conversation.Kind)
 		// Legacy fields must remain populated alongside Conversation (P4 dual-population).
 		assert.Equal(t, "slack", got.Channel)
 		assert.Equal(t, "C0123ABC:1700000000.000100", got.ThreadID)
@@ -1524,6 +1525,7 @@ func TestMessageBrokerProxy_EnrichConversationDualPopulatesLegacyFields(t *testi
 	assert.Equal(t, "C0123ABC:1700000000.000100", gotSpoofed.Conversation.ExternalRef)
 	assert.Equal(t, "C0123ABC", gotSpoofed.Conversation.ParentRef)
 	assert.Equal(t, "#engineering", gotSpoofed.Conversation.DisplayName)
+	assert.Equal(t, "group", gotSpoofed.Conversation.Kind)
 }
 
 func TestTranslateConversationForBroker(t *testing.T) {
@@ -1551,6 +1553,7 @@ func TestTranslateConversationForBroker(t *testing.T) {
 				ExternalRef: "C0123ABC:1700000000.000100",
 				ParentRef:   "C0123ABC",
 				DisplayName: "#engineering",
+				Kind:        "group",
 			},
 		},
 		{
@@ -1565,6 +1568,7 @@ func TestTranslateConversationForBroker(t *testing.T) {
 				Surface:     "discord",
 				ExternalRef: "777777777777777777",
 				ParentRef:   "200000000000000001",
+				Kind:        "group",
 			},
 		},
 		{
@@ -1579,6 +1583,7 @@ func TestTranslateConversationForBroker(t *testing.T) {
 				Surface:     "telegram",
 				ExternalRef: "-100123456:42",
 				ParentRef:   "-100123456",
+				Kind:        "group",
 			},
 		},
 		{
@@ -1593,6 +1598,7 @@ func TestTranslateConversationForBroker(t *testing.T) {
 				Surface:     "teams",
 				ExternalRef: "19:chan-1@thread.tacv2;messageid=100",
 				ParentRef:   "19:chan-1@thread.tacv2",
+				Kind:        "group",
 			},
 		},
 		{
@@ -1607,88 +1613,120 @@ func TestTranslateConversationForBroker(t *testing.T) {
 				Surface:     "gchat",
 				ExternalRef: "spaces/AAQAx/threads/t1",
 				ParentRef:   "spaces/AAQAx",
+				Kind:        "group",
 			},
 		},
 		{
-			name: "native surface omitted",
+			name: "native surface emits native with empty refs",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "native",
 				ExternalRef: "thread:proj-1:topic-1",
+				DisplayName: "Design Discussion",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface:     "native",
+				DisplayName: "Design Discussion",
+				Kind:        "group",
+			},
 		},
 		{
-			name: "empty surface omitted",
+			name: "empty surface emits native with empty refs",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "",
 				ExternalRef: "thread:proj-1:topic-1",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "group",
+			},
 		},
 		{
-			name: "direct DM on native surface omitted",
+			name: "direct DM on native surface emits native direct with empty refs",
 			conv: &store.Conversation{
 				Kind:        "direct",
 				Surface:     "native",
 				ExternalRef: "dm:agent:a1:user:u1",
+				DisplayName: "Direct Message",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface:     "native",
+				DisplayName: "Direct Message",
+				Kind:        "direct",
+			},
 		},
 		{
-			name: "direct kind omitted even on external surface",
+			name: "direct kind emits native direct even on external surface",
 			conv: &store.Conversation{
 				Kind:        "direct",
 				Surface:     "slack",
 				ExternalRef: "D0123ABC",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "direct",
+			},
 		},
 		{
-			name: "dm-prefixed ref omitted even if kind is group",
+			name: "dm-prefixed ref emits native with empty refs even if kind is group",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "slack",
 				ExternalRef: "dm:agent:a1:user:u1",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "group",
+			},
 		},
 		{
-			name: "empty external_ref omitted",
+			name: "empty external_ref emits native with empty refs",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "slack",
 				ExternalRef: "",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "group",
+			},
 		},
 		{
-			name: "malformed thread ref without project omitted",
+			name: "malformed thread ref without project emits native with empty refs",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "slack",
 				ExternalRef: "thread::C0123ABC",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "group",
+			},
 		},
 		{
-			name: "malformed thread ref without native id omitted",
+			name: "malformed thread ref without native id emits native with empty refs",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "slack",
 				ExternalRef: "thread:proj-1:",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "group",
+			},
 		},
 		{
-			name: "malformed thread ref wrapping dm key omitted",
+			name: "malformed thread ref wrapping dm key emits native with empty refs",
 			conv: &store.Conversation{
 				Kind:        "group",
 				Surface:     "slack",
 				ExternalRef: "thread:proj-1:dm:agent:a1:user:u1",
 			},
-			want: nil,
+			want: &messages.Conversation{
+				Surface: "native",
+				Kind:    "group",
+			},
 		},
 		{
 			name: "already surface-native ref on external surface passed through",
@@ -1702,6 +1740,7 @@ func TestTranslateConversationForBroker(t *testing.T) {
 				Surface:     "slack",
 				ExternalRef: "C0123ABC:1700000000.000100",
 				ParentRef:   "C0123ABC",
+				Kind:        "group",
 			},
 		},
 	}
@@ -1800,23 +1839,94 @@ func TestMessageBrokerProxy_EnrichConversation_RealOutboundAndDMRows(t *testing.
 	}
 	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, userID, dmMsg))
 
+	// 3. Real native thread row (surface="native", kind="group").
+	nativeConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ProjectID:   &projectID,
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:" + projectID + ":native-topic-1",
+		DisplayName: "Architecture",
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+	nativeMsg := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Sender:         "agent:coder",
+		SenderID:       agent.ID,
+		Recipient:      "user:alice",
+		RecipientID:    userID,
+		Msg:            "native thread reply",
+		Type:           messages.TypeInstruction,
+		Channel:        "web",
+		ConversationID: nativeConv.ID,
+	}
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, userID, nativeMsg))
+
+	// 4. Empty ConversationID with a pre-set Conversation must clear it (item 6).
+	emptyIDMsg := &messages.StructuredMessage{
+		Version:      messages.Version,
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		Sender:       "agent:coder",
+		Recipient:    "user:alice",
+		Msg:          "no conversation id",
+		Type:         messages.TypeInstruction,
+		Conversation: &messages.Conversation{Surface: "slack", ExternalRef: "C_STALE:1.0", Kind: "group"},
+	}
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, userID, emptyIDMsg))
+	// Caller's struct must not be mutated.
+	require.NotNil(t, emptyIDMsg.Conversation)
+
+	// 5. Missing/unknown ConversationID with a pre-set Conversation must clear it (item 6).
+	missingIDMsg := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "unknown conversation id",
+		Type:           messages.TypeInstruction,
+		ConversationID: "conv-does-not-exist",
+		Conversation:   &messages.Conversation{Surface: "discord", ExternalRef: "12345", Kind: "group"},
+	}
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, userID, missingIDMsg))
+	require.NotNil(t, missingIDMsg.Conversation)
+
 	capBus.mu.Lock()
 	defer capBus.mu.Unlock()
-	require.Len(t, capBus.published, len(threadCases)+1)
+	require.Len(t, capBus.published, len(threadCases)+4)
 
 	for i, tc := range threadCases {
 		got := capBus.published[i]
 		require.NotNil(t, got.Conversation, "channel %s must emit translated Conversation", tc.channel)
 		assert.Equal(t, tc.surface, got.Conversation.Surface)
 		assert.Equal(t, tc.threadID, got.Conversation.ExternalRef, "channel %s must strip thread:<proj>: prefix", tc.channel)
+		assert.Equal(t, "group", got.Conversation.Kind)
 		assert.Equal(t, tc.channel, got.Channel)
 		assert.Equal(t, tc.threadID, got.ThreadID)
 		assert.NotEmpty(t, got.ConversationID)
 	}
 
 	gotDM := capBus.published[len(threadCases)]
-	assert.Nil(t, gotDM.Conversation, "DM conversation must omit Conversation so plugins fall back to Channel/ThreadID")
+	require.NotNil(t, gotDM.Conversation, "DM conversation must emit native Conversation with kind=direct")
+	assert.Equal(t, "native", gotDM.Conversation.Surface)
+	assert.Equal(t, "direct", gotDM.Conversation.Kind)
+	assert.Empty(t, gotDM.Conversation.ExternalRef, "DM conversation must never emit hub key as ExternalRef")
+	assert.Empty(t, gotDM.Conversation.ParentRef)
 	assert.Equal(t, dmConvRes.ConversationID, gotDM.ConversationID)
 	assert.Equal(t, "discord", gotDM.Channel)
 	assert.Equal(t, dmRef, gotDM.ThreadID)
+
+	gotNative := capBus.published[len(threadCases)+1]
+	require.NotNil(t, gotNative.Conversation)
+	assert.Equal(t, "native", gotNative.Conversation.Surface)
+	assert.Equal(t, "group", gotNative.Conversation.Kind)
+	assert.Equal(t, "Architecture", gotNative.Conversation.DisplayName)
+	assert.Empty(t, gotNative.Conversation.ExternalRef)
+	assert.Empty(t, gotNative.Conversation.ParentRef)
+
+	gotEmptyID := capBus.published[len(threadCases)+2]
+	assert.Nil(t, gotEmptyID.Conversation, "empty ConversationID must clear pre-set Conversation")
+
+	gotMissingID := capBus.published[len(threadCases)+3]
+	assert.Nil(t, gotMissingID.Conversation, "failed lookup must clear pre-set Conversation")
 }

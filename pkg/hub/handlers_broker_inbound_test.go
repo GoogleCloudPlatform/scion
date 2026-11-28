@@ -2018,6 +2018,129 @@ func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
 		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
 			"container-scoped Slack channel row must not be reused for a new thread")
 	})
+
+	t.Run("legacy_ref_reuses_pre_p4_row_without_message_thread_id", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "legacy-ref-only")
+		ctx := context.Background()
+
+		legacyKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000222")
+		require.NoError(t, err)
+		seeded, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), legacyKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000222",
+			ParentRef:   "C0123ABC",
+			LegacyRef:   "1700000000.000222",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "follow-up via legacy_ref only",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, seeded.ConversationID, msgs.Items[0].ConversationID,
+			"legacy_ref must reuse pre-P4 conversation row even when message.thread_id is empty")
+
+		allConvs, err := s.ListConversations(ctx, store.ConversationFilter{Surface: "slack"}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Len(t, allConvs.Items, 1, "must not create a duplicate conversation row")
+	})
+
+	t.Run("legacy_ref_takes_precedence_over_message_thread_id", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "legacy-ref-precedence")
+		ctx := context.Background()
+
+		refKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000333")
+		require.NoError(t, err)
+		refConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), refKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		tidKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000444")
+		require.NoError(t, err)
+		_, err = messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), tidKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000333",
+			ParentRef:   "C0123ABC",
+			LegacyRef:   "1700000000.000333",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "1700000000.000444",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "legacy_ref wins over message.thread_id",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, refConv.ConversationID, msgs.Items[0].ConversationID,
+			"legacy_ref must take precedence over message.thread_id")
+	})
+
+	t.Run("legacy_ref_container_scoped_not_reused", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "legacy-ref-container")
+		ctx := context.Background()
+
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000888",
+			ParentRef:   "C0123ABC",
+			LegacyRef:   "C0123ABC",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "container-scoped legacy_ref must not reuse channel row",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
+			"container-scoped legacy_ref must not reuse channel-wide row")
+	})
 }
 
 type inboundTestCaptureBus struct {
@@ -2346,6 +2469,18 @@ func TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "C0123ABC", newConv.ParentRef)
 
+	msgsAfter2, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	var foundNewStored bool
+	for _, m := range msgsAfter2.Items {
+		if m.Msg == "broker agent-message creating new canonical thread" {
+			foundNewStored = true
+			assert.Equal(t, newConv.ID, m.ConversationID,
+				"stored message conversation_id must equal Phase-11 canonical conversation")
+		}
+	}
+	assert.True(t, foundNewStored, "expected stored message for new canonical thread request")
+
 	// 3. parent_ref without external_ref is rejected with 400 (matching contract §4).
 	reqBody3 := MessageRequest{
 		Surface:   "slack",
@@ -2372,4 +2507,68 @@ func TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback(t *testing.T) {
 	srv.mux.ServeHTTP(rec3, r3)
 	require.Equal(t, http.StatusBadRequest, rec3.Code, "body: %s", rec3.Body.String())
 	assert.Contains(t, rec3.Body.String(), "parent_ref requires external_ref")
+
+	// 4. Broker-authenticated POST /api/v1/agents/{id}/message with top-level
+	// legacy_ref and empty StructuredMessage.ThreadID reuses the seeded pre-P4
+	// row and stores the message with that conversation_id.
+	legacyRefKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000555")
+	require.NoError(t, err)
+	seededLegacyRef, err := messaging.ResolveOrCreateConversationByKey(
+		ctx, s, slog.Default(), legacyRefKey, "group", &project.ID,
+		messaging.WithSurface("slack"),
+	)
+	require.NoError(t, err)
+
+	reqBody4 := MessageRequest{
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000555",
+		ParentRef:   "C0123ABC",
+		LegacyRef:   "1700000000.000555",
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "broker agent-message hitting legacy_ref without thread_id",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	b4, err := json.Marshal(reqBody4)
+	require.NoError(t, err)
+	r4 := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(b4))
+	r4.Header.Set("Content-Type", "application/json")
+	r4 = r4.WithContext(contextWithBrokerIdentity(
+		contextWithIdentity(r4.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")),
+		NewBrokerIdentity("test-broker"),
+	))
+	rec4 := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec4, r4)
+	require.Equal(t, http.StatusOK, rec4.Code, "body: %s", rec4.Body.String())
+
+	callsAfter4 := dispatcher.getCalls()
+	require.Len(t, callsAfter4, 3)
+	assert.Equal(t, seededLegacyRef.ConversationID, callsAfter4[2].StructuredMessage.Metadata["conversation_id"],
+		"broker agent-message legacy_ref must reuse pre-P4 legacy row when thread_id is empty")
+
+	// Verify no duplicate canonical row was created under thread:<proj>:C0123ABC:1700000000.000555.
+	dupKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC:1700000000.000555")
+	require.NoError(t, err)
+	_, err = s.GetConversationByExternalRef(ctx, "slack", dupKey)
+	assert.ErrorIs(t, err, store.ErrNotFound, "legacy_ref reuse must not create a duplicate canonical conversation row")
+
+	// Verify the STORED message row carries the seeded pre-P4 conversation_id
+	// (not a Phase-5 fallback DM conversation).
+	storedMsgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	var foundLegacyStored bool
+	for _, m := range storedMsgs.Items {
+		if m.Msg == "broker agent-message hitting legacy_ref without thread_id" {
+			foundLegacyStored = true
+			assert.Equal(t, seededLegacyRef.ConversationID, m.ConversationID,
+				"stored message conversation_id must equal seeded pre-P4 row")
+		}
+	}
+	assert.True(t, foundLegacyStored, "expected stored message for legacy_ref agent-message request")
 }

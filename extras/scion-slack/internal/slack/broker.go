@@ -439,7 +439,9 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	var fallbackThreadTS string
 
 	convTarget := plugin.ResolveConversationTarget(msg)
-	if convTarget.ExternalRef != "" {
+	isUserDM := (convTarget.Kind == "direct" || (msg.Conversation == nil && strings.HasPrefix(convTarget.ExternalRef, "dm:"))) &&
+		strings.HasPrefix(msg.Recipient, "user:")
+	if convTarget.Kind != "direct" && convTarget.ExternalRef != "" {
 		parts := strings.SplitN(convTarget.ExternalRef, ":", 2)
 		switch {
 		case len(parts) == 2 && isSlackChannelID(parts[0]):
@@ -479,7 +481,7 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		channelIDs, threadTSs = b.resolveRecipientChannels(ctx, msg.Recipient, projectID, ccSlug)
 	}
 
-	if len(channelIDs) == 0 && projectID != "" && store != nil {
+	if len(channelIDs) == 0 && !isUserDM && projectID != "" && store != nil {
 		links, err := store.GetChannelLinksForProject(ctx, projectID)
 		if err != nil {
 			b.log.Warn("Failed to get channel links for broadcast", "project_id", projectID, "error", err)
@@ -765,8 +767,10 @@ func isSlackTimestamp(s string) bool {
 	return true
 }
 
-// slackInboundConversation derives the Phase 11 top-level conversation
-// addressing (surface, external_ref, parent_ref) for an inbound Slack message.
+// slackInboundConversation derives the Phase 11 / P5 top-level conversation
+// addressing (surface, external_ref, parent_ref, legacy_ref) for an inbound
+// Slack message. Surface is always set to "slack" when msg is non-nil, and
+// LegacyRef carries the exact pre-P4 message.thread_id value.
 func slackInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
 	if msg == nil {
 		return plugin.InboundConversation{}
@@ -776,26 +780,19 @@ func slackInboundConversation(msg *messages.StructuredMessage) plugin.InboundCon
 		channelID = msg.Metadata["slack_channel_id"]
 		threadTS = msg.Metadata["slack_thread_ts"]
 	}
+	conv := plugin.InboundConversation{
+		Surface:   "slack",
+		LegacyRef: msg.ThreadID,
+	}
 	if channelID != "" && threadTS != "" {
-		return plugin.InboundConversation{
-			Surface:     "slack",
-			ExternalRef: channelID + ":" + threadTS,
-			ParentRef:   channelID,
-		}
+		conv.ExternalRef = channelID + ":" + threadTS
+		conv.ParentRef = channelID
+	} else if channelID != "" {
+		conv.ExternalRef = channelID
+	} else if msg.ThreadID != "" {
+		conv.ExternalRef = msg.ThreadID
 	}
-	if channelID != "" {
-		return plugin.InboundConversation{
-			Surface:     "slack",
-			ExternalRef: channelID,
-		}
-	}
-	if msg.ThreadID != "" {
-		return plugin.InboundConversation{
-			Surface:     "slack",
-			ExternalRef: msg.ThreadID,
-		}
-	}
-	return plugin.InboundConversation{}
+	return conv
 }
 
 func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {

@@ -17,15 +17,22 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestDiscordBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
@@ -269,4 +276,183 @@ func TestDiscordBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	got := sentChannelIDs(f.transport)
 	require.Len(t, got, 2)
 	assert.Equal(t, "777777777777777777", got[0])
+}
+
+type discordHubConvStore struct {
+	store.Store
+	convs map[string]*store.Conversation
+}
+
+func (s *discordHubConvStore) GetConversation(_ context.Context, id string) (*store.Conversation, error) {
+	c, ok := s.convs[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return c, nil
+}
+
+type discordForwardingBus struct {
+	broker *DiscordBroker
+}
+
+func (f *discordForwardingBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	wire := grpcbroker.ProtoToStructuredMessage(grpcbroker.StructuredMessageToProto(msg))
+	return f.broker.Publish(ctx, topic, wire)
+}
+
+func (f *discordForwardingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, nil
+}
+
+func (f *discordForwardingBus) Close() error { return nil }
+
+// TestDiscordBroker_Publish_HubEnrichedDirectConversationNeverBroadcasts (C1)
+// drives DiscordBroker.Publish from REAL hub.MessageBrokerProxy enrichment
+// (with real store.Conversation rows and grpcbroker proto round-trip) to verify
+// that native/direct Conversations (empty ExternalRef, Kind:"direct") are
+// recipient-routed and never broadcast to project-linked channels.
+func TestDiscordBroker_Publish_HubEnrichedDirectConversationNeverBroadcasts(t *testing.T) {
+	ctx := context.Background()
+	projectID := dmTestProjectID
+
+	dmKey, dmKind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		SenderKind:    "agent",
+		SenderID:      dmTestAgentID,
+		RecipientKind: "user",
+		RecipientID:   dmTestUserID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "direct", dmKind)
+
+	a2aKey, a2aKind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		SenderKind:    "agent",
+		SenderID:      dmTestAgentID,
+		RecipientKind: "agent",
+		RecipientID:   "33333333-3333-4333-8333-333333333333",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "direct", a2aKind)
+
+	convStore := &discordHubConvStore{
+		convs: map[string]*store.Conversation{
+			"conv-dm-user": {
+				ID:          "conv-dm-user",
+				ProjectID:   &projectID,
+				Kind:        dmKind,
+				Surface:     "native",
+				ExternalRef: dmKey,
+				DisplayName: "Direct Message",
+			},
+			"conv-dm-a2a": {
+				ID:          "conv-dm-a2a",
+				ProjectID:   &projectID,
+				Kind:        a2aKind,
+				Surface:     "native",
+				ExternalRef: a2aKey,
+			},
+		},
+	}
+
+	t.Run("linked user without stored channel opens DM channel and never broadcasts", func(t *testing.T) {
+		f := newDMRouteFixture(t)
+		proxy := hub.NewMessageBrokerProxy(&discordForwardingBus{broker: f.broker}, convStore, nil, nil, slog.Default())
+
+		err := proxy.PublishUserMessage(ctx, projectID, dmTestUserID, &messages.StructuredMessage{
+			Version:        messages.Version,
+			Sender:         "agent:" + dmTestAgentSlug,
+			SenderID:       dmTestAgentID,
+			Recipient:      "user:" + dmTestEmail,
+			RecipientID:    dmTestUserID,
+			Msg:            "private dm without stored channel",
+			Type:           messages.TypeInstruction,
+			Channel:        "discord",
+			ThreadID:       dmKey,
+			ConversationID: "conv-dm-user",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{dmTestDiscordID}, f.dmCreateCalls(), "must open DM channel for linked user")
+		assert.Equal(t, []string{f.createID}, sentChannelIDs(f.transport), "must deliver to DM channel, never linked project channel")
+	})
+
+	t.Run("linked user with stored channel uses stored channel without opening DM", func(t *testing.T) {
+		f := newDMRouteFixture(t)
+		const storedCh = "500000000000000001"
+		require.NoError(t, f.store.SetConversationContext(ctx, &ConversationContext{
+			DiscordUserID: dmTestDiscordID,
+			ProjectID:     dmTestProjectID,
+			AgentSlug:     dmTestAgentSlug,
+			LastChannelID: storedCh,
+			LastMessageAt: time.Now(),
+		}))
+		proxy := hub.NewMessageBrokerProxy(&discordForwardingBus{broker: f.broker}, convStore, nil, nil, slog.Default())
+
+		err := proxy.PublishUserMessage(ctx, projectID, dmTestUserID, &messages.StructuredMessage{
+			Version:        messages.Version,
+			Sender:         "agent:" + dmTestAgentSlug,
+			SenderID:       dmTestAgentID,
+			Recipient:      "user:" + dmTestEmail,
+			RecipientID:    dmTestUserID,
+			Msg:            "private dm with stored channel",
+			Type:           messages.TypeInstruction,
+			Channel:        "discord",
+			ThreadID:       dmKey,
+			ConversationID: "conv-dm-user",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, f.dmCreateCalls())
+		assert.Equal(t, []string{storedCh}, sentChannelIDs(f.transport))
+	})
+
+	t.Run("unlinked user returns error and never broadcasts to project channel link", func(t *testing.T) {
+		f := newDMRouteFixture(t)
+		proxy := hub.NewMessageBrokerProxy(&discordForwardingBus{broker: f.broker}, convStore, nil, nil, slog.Default())
+
+		err := proxy.PublishUserMessage(ctx, projectID, "99999999-9999-4999-8999-999999999999", &messages.StructuredMessage{
+			Version:        messages.Version,
+			Sender:         "agent:" + dmTestAgentSlug,
+			SenderID:       dmTestAgentID,
+			Recipient:      "user:bob@example.com",
+			RecipientID:    "99999999-9999-4999-8999-999999999999",
+			Msg:            "private dm to unlinked user",
+			Type:           messages.TypeInstruction,
+			Channel:        "discord",
+			ThreadID:       dmKey,
+			ConversationID: "conv-dm-user",
+		})
+		require.Error(t, err)
+		assert.Empty(t, f.dmCreateCalls())
+		assert.Empty(t, sentChannelIDs(f.transport), "must never broadcast private DM to project channel links")
+	})
+
+	t.Run("agent-to-agent observer DM reaches only ShowAgentToAgent link", func(t *testing.T) {
+		f := newDMRouteFixture(t)
+		const observeCh = "210000000000000001"
+		require.NoError(t, f.store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID:        observeCh,
+			GuildID:          testGuildID,
+			ProjectID:        dmTestProjectID,
+			ProjectSlug:      dmTestProjectID,
+			LinkedBy:         "test",
+			LinkedAt:         time.Now(),
+			Active:           true,
+			ShowAgentToAgent: true,
+		}))
+		proxy := hub.NewMessageBrokerProxy(&discordForwardingBus{broker: f.broker}, convStore, nil, nil, slog.Default())
+
+		err := proxy.PublishMessage(ctx, projectID, &messages.StructuredMessage{
+			Version:        messages.Version,
+			Sender:         "agent:" + dmTestAgentSlug,
+			SenderID:       dmTestAgentID,
+			Recipient:      "agent:reviewer",
+			RecipientID:    "33333333-3333-4333-8333-333333333333",
+			Msg:            "agent-to-agent direct observer copy",
+			Type:           messages.TypeInstruction,
+			ObserverOnly:   true,
+			ConversationID: "conv-dm-a2a",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, f.dmCreateCalls())
+		assert.Equal(t, []string{observeCh}, sentChannelIDs(f.transport),
+			"observer copy must reach ShowAgentToAgent link and not non-observe link")
+	})
 }
