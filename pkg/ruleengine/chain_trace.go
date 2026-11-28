@@ -380,6 +380,17 @@ func EncodeChainTrace(trace ChainTrace, dialectCaps map[string]Capabilities, max
 	}
 
 	for i, el := range trace.Elements {
+		switch el.Class {
+		case StepClassPass, StepClassFail, StepClassUncertain, StepClassFailed, StepClassBudget, StepClassCanceled, StepClassSkipped:
+		default:
+			return "", fmt.Errorf("ruleengine: element %d has invalid class %q", el.Index, el.Class)
+		}
+		if el.Kind != "" && el.Kind != KindFilter && el.Kind != KindSubject && el.Kind != KindJudgment {
+			return "", fmt.Errorf("ruleengine: element %d has invalid kind %q", el.Index, el.Kind)
+		}
+		if el.Verdict != "" && (len(el.Verdict) > 128 || !isValidTraceID(el.Verdict)) {
+			return "", fmt.Errorf("ruleengine: element %d has invalid verdict token", el.Index)
+		}
 		if el.Domain != "" && el.Domain != DomainInline && el.Domain != DomainIO {
 			return "", fmt.Errorf("ruleengine: element %d has invalid domain %q", el.Index, el.Domain)
 		}

@@ -220,6 +220,10 @@ type ChainResult struct {
 // PendingStep represents a reached I/O chain element awaiting engine evaluation
 // via EvaluatePending or EvaluateGroup. It carries no deadline (bound is
 // computed at dispatch) and is guarded by a single-use, run-and-step-bound token.
+//
+// Lock discipline (RV2-1): PendingStep has no mutex of its own. The mutable
+// field consumed is guarded exclusively by p.run.mu, eliminating any possible
+// lock-order inversion between ChainRun and PendingStep.
 type PendingStep struct {
 	run                *ChainRun
 	elemPos            int
@@ -233,7 +237,7 @@ type PendingStep struct {
 	groupKey           string
 	tokenID            uint64
 
-	mu       sync.Mutex
+	// consumed is guarded by run.mu (see ChainRun.mu lock discipline).
 	consumed bool
 }
 
@@ -265,12 +269,22 @@ type chainRunState int
 
 const (
 	chainStateReady chainRunState = iota
+	chainStateEvaluating
 	chainStatePending
 	chainStatePendingCompleted
 	chainStateDone
 )
 
 // ChainRun is a resumable, single-run ordered rule-chain execution owned by Engine.
+//
+// A ChainRun is single-consumer: callers drive one step at a time (Next ->
+// optional EvaluatePending/EvaluateGroup -> Resume). Calling Next or Resume
+// concurrently while an evaluation or pending step is in progress returns an
+// error without modifying state or charging any budget (RV2-2).
+//
+// Lock discipline (RV2-1): mu is the sole mutex protecting both ChainRun state
+// and its active PendingStep.consumed flag. No code path ever acquires two
+// ChainRun.mu locks simultaneously.
 type ChainRun struct {
 	mu       sync.Mutex
 	engine   *Engine
@@ -339,7 +353,16 @@ func isValidIdentifier(s string) bool {
 // NewChainRun constructs an immutable, resumable ChainRun over c using domains d
 // (Amendment A1 §3–§5, v1 §3.1–§3.2). Construction fails closed on nil domain
 // contexts, element cap violations, invalid/colliding reserved names, un-admitted
-// dialects, or IO elements supplied in Source form (P14, P15, P18).
+// dialects, IO elements supplied in Source form (P14, P15, P18), KindJudgment
+// elements whose dialect declares no CopyDetail (R-3), non-increasing element
+// indexes (N-2), or base.Activation containing non-JSON-shaped / non-copyable
+// container types (O-b).
+//
+// base.Activation values must be JSON-shaped primitives, time.Time/time.Duration,
+// or standard map/slice container types (map[string]any, map[string]string,
+// map[string]bool, map[string]float64, map[string][]string, []any, []string,
+// []int, []bool, []float64, []byte) so the engine can capture an alias-free
+// immutable copy once at construction.
 func (e *Engine) NewChainRun(
 	d ChainDomains,
 	c Chain,
@@ -491,10 +514,15 @@ func (e *Engine) NewChainRun(
 		policy = DefaultANDPolicy
 	}
 
-	// O-5: defensive copy of base Activation once at construction, shared
-	// read-only across steps; Payload is kept immutable by contract.
+	// O-5 & O-b: defensive copy of base Activation once at construction, shared
+	// read-only across steps. Rejects non-copyable container/pointer/struct types
+	// so caller mutations can never alias into the run.
+	actCopy, err := deepCopyActivationMap(base.Activation)
+	if err != nil {
+		return nil, fmt.Errorf("ruleengine: base activation must be JSON-shaped: %w", err)
+	}
 	baseCopy := Input{
-		Activation:       deepCopyMap(base.Activation),
+		Activation:       actCopy,
 		Payload:          base.Payload,
 		AdmittedInputKey: base.AdmittedInputKey,
 	}
@@ -531,6 +559,10 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	if r.state == chainStateDone {
 		r.mu.Unlock()
 		return nil, nil, true, nil
+	}
+	if r.state == chainStateEvaluating {
+		r.mu.Unlock()
+		return nil, nil, false, errors.New("ruleengine: cannot call Next while an evaluation is already in progress")
 	}
 	if r.state == chainStatePending || r.state == chainStatePendingCompleted {
 		r.mu.Unlock()
@@ -641,8 +673,10 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 		return nil, p, false, nil
 	}
 
-	// Inline element: release run lock during evaluation, then record outcome.
+	// Inline element: mark evaluation in progress (RV2-2) before releasing
+	// r.mu so any concurrent Next/Resume returns an error without mutating state.
 	inlineDomain := r.domains.Inline
+	r.state = chainStateEvaluating
 	r.mu.Unlock()
 
 	out, detail := r.engine.evaluateInlineElement(inlineDomain, spec, caps, stepInput)
@@ -658,6 +692,8 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	done := ctrl.Stop || r.nextPos >= len(r.elements)
 	if done {
 		r.state = chainStateDone
+	} else {
+		r.state = chainStateReady
 	}
 	r.mu.Unlock()
 
@@ -1148,9 +1184,11 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	leaderOut.GroupElapsed = elapsed
 
 	// Step 5: Distribute outcome. R-2: any member whose own Inline ctx is done
-	// records canceled without affecting live members, which receive the shared
-	// outcome (Elapsed on leader, 0 on non-leaders, GroupElapsed on all, with
-	// independent concrete-type-preserving deep copies of Detail).
+	// records canceled (Elapsed: 0, GroupElapsed: 0, not charged) without
+	// affecting live members. O-a: attribute the charged Elapsed to the first
+	// live member (leader when live, or first live member when leader is
+	// canceled) so tracker spent == Σ StepOutcome.Elapsed across the group.
+	chargedAttributed := false
 	for i, m := range claimed {
 		if memberCtxErr := inlineCtxs[i].Err(); memberCtxErr != nil {
 			out := StepOutcome{
@@ -1170,7 +1208,10 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		}
 		out := cloneStepOutcome(leaderOut)
 		out.Index = m.index
-		if i > 0 {
+		if !chargedAttributed {
+			out.Elapsed = elapsed
+			chargedAttributed = true
+		} else {
 			out.Elapsed = 0
 		}
 		var detail any
@@ -1228,16 +1269,17 @@ func (r *ChainRun) Resume() (Control, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.state == chainStateEvaluating {
+		return Control{}, errors.New("ruleengine: cannot call Resume while an evaluation is in progress")
+	}
 	if r.state == chainStatePending {
 		// Terminal completion after expiry/cancel (§3.2 point 9, A1 D2): if a
 		// pending step was never evaluated and the run/IO context is already
 		// canceled, complete it terminally as canceled so no pending step is
-		// ever left uncompleted.
+		// ever left uncompleted. r.mu already guards p.consumed (RV2-1).
 		if ctxErr := firstCtxErr(r.domains.Inline.Ctx, r.domains.IO.Ctx); ctxErr != nil {
 			p := r.pending
-			p.mu.Lock()
 			p.consumed = true
-			p.mu.Unlock()
 			r.pendingOutcome = StepOutcome{
 				Index:   p.index,
 				Dialect: p.dialect,
@@ -1301,7 +1343,11 @@ func (r *ChainRun) Judgments() JudgmentView {
 	return &stepJudgmentView{judgments: jm, steps: steps}
 }
 
-// Result returns the ChainResult and ChainTrace for the run.
+// Result returns the ChainResult and structured in-memory ChainTrace for the
+// run. Note (O-d): ChainLimits.MaxTraceBytes is enforced at serialization time
+// when consumers pass the returned ChainTrace to EncodeChainTrace (which
+// validates all closed tokens and applies deterministic truncation); Result()
+// itself preserves the structured in-memory trace without byte truncation.
 func (r *ChainRun) Result() (ChainResult, ChainTrace) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1356,26 +1402,24 @@ func (r *ChainRun) Result() (ChainResult, ChainTrace) {
 }
 
 func (p *PendingStep) isLive() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.consumed || p.run == nil {
+	if p == nil || p.run == nil {
 		return false
 	}
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
-	return p.run.state == chainStatePending && p.run.pending == p
+	return !p.consumed && p.run.state == chainStatePending && p.run.pending == p
 }
 
 func (p *PendingStep) claimForCompletion() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p == nil || p.run == nil {
+		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("nil pending step")}
+	}
+	p.run.mu.Lock()
+	defer p.run.mu.Unlock()
 	if p.consumed {
 		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("completion token already used")}
 	}
-	p.run.mu.Lock()
-	valid := p.run.state == chainStatePending && p.run.pending == p
-	p.run.mu.Unlock()
-	if !valid {
+	if p.run.state != chainStatePending || p.run.pending != p {
 		return &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("pending step not active for run")}
 	}
 	p.consumed = true
@@ -1409,16 +1453,27 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 		r.pendingDetail = nil
 		r.pendingCopier = nil
 	}
+	// N-a: record the invalid completion against the currently pending step's
+	// index when one is active (so a stale token from step 1 replayed during
+	// step 2 fails step 2 rather than duplicating step 1).
+	target := p
+	if r.pending != nil {
+		target = r.pending
+		r.pending.consumed = true
+	}
 	out := StepOutcome{
-		Index:   p.index,
-		Dialect: p.dialect,
-		Kind:    p.kind,
+		Index:   target.index,
+		Dialect: target.dialect,
+		Kind:    target.kind,
 		Class:   StepClassFailed,
 		Reason:  ReasonInvalidCompletion,
 		Domain:  DomainIO,
 		Err:     err,
 	}
 	r.recordStepLocked(out, Control{Stop: true}, nil, nil)
+	if r.state == chainStatePending && r.nextPos < len(r.elements) {
+		r.nextPos++
+	}
 	r.pending = nil
 	r.state = chainStateDone
 }
@@ -1589,6 +1644,9 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
 
 // validateReservedAdditionType enforces Amendment A1 §5 D4 type conformance on
 // reserved judgment-carry additions.
+// 2a: replace hard-coded legacy messagepolicy reserved-name type checks with
+// consumer-declared validators (e.g. map[string]func(any) error) at the next
+// API touch with System One (O-c).
 func validateReservedAdditionType(name string, val any) error {
 	switch name {
 	case "judgment_flags":
@@ -1917,6 +1975,76 @@ func cascadeAllCanceledContext(primary context.Context, watchCtxs []context.Cont
 	}
 }
 
+func deepCopyActivationMap(m map[string]any) (map[string]any, error) {
+	if m == nil {
+		return nil, nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		cp, err := deepCopyActivationValue(v)
+		if err != nil {
+			return nil, fmt.Errorf("key %q: %w", k, err)
+		}
+		out[k] = cp
+	}
+	return out, nil
+}
+
+// deepCopyActivationValue copies JSON-shaped primitives, time.Time/time.Duration,
+// and standard map/slice containers, rejecting any non-copyable container,
+// pointer, or struct type so base.Activation never aliases caller state (O-b).
+func deepCopyActivationValue(v any) (any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	switch x := v.(type) {
+	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string, time.Time, time.Duration:
+		return x, nil
+	case map[string]any:
+		return deepCopyActivationMap(x)
+	case map[string]bool:
+		cp := make(map[string]bool, len(x))
+		maps.Copy(cp, x)
+		return cp, nil
+	case map[string]string:
+		cp := make(map[string]string, len(x))
+		maps.Copy(cp, x)
+		return cp, nil
+	case map[string]float64:
+		cp := make(map[string]float64, len(x))
+		maps.Copy(cp, x)
+		return cp, nil
+	case map[string][]string:
+		cp := make(map[string][]string, len(x))
+		for k, vals := range x {
+			cp[k] = slices.Clone(vals)
+		}
+		return cp, nil
+	case []any:
+		cp := make([]any, len(x))
+		for i, elem := range x {
+			ce, err := deepCopyActivationValue(elem)
+			if err != nil {
+				return nil, fmt.Errorf("index %d: %w", i, err)
+			}
+			cp[i] = ce
+		}
+		return cp, nil
+	case []string:
+		return slices.Clone(x), nil
+	case []int:
+		return slices.Clone(x), nil
+	case []bool:
+		return slices.Clone(x), nil
+	case []float64:
+		return slices.Clone(x), nil
+	case []byte:
+		return slices.Clone(x), nil
+	default:
+		return nil, fmt.Errorf("unsupported non-copyable activation value type %T", v)
+	}
+}
+
 func deepCopyMap(m map[string]any) map[string]any {
 	if m == nil {
 		return nil
@@ -1950,6 +2078,12 @@ func deepCopyValue(v any) any {
 	case map[string]float64:
 		cp := make(map[string]float64, len(x))
 		maps.Copy(cp, x)
+		return cp
+	case map[string][]string:
+		cp := make(map[string][]string, len(x))
+		for k, vals := range x {
+			cp[k] = slices.Clone(vals)
+		}
 		return cp
 	case []any:
 		cp := make([]any, len(x))
