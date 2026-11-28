@@ -651,10 +651,10 @@ func (s *Server) handleUploadChunk(
 	}
 
 	var (
-		headBuf    []byte
-		bodyReader io.Reader = io.LimitReader(r.Body, n+1)
-		tee        io.Reader
+		headBuf []byte
+		tee     io.Reader
 	)
+	bodyReader := io.LimitReader(r.Body, n+1)
 	if offset == 0 && scope.kind == store.UploadTargetChatAttachment {
 		// Classify the first <=512 bytes before staging anything (§3.5).
 		capLen := n
