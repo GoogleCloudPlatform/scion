@@ -24,9 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -4676,6 +4678,51 @@ func TestSystemOneAdapters_CapabilitiesAndNoIO(t *testing.T) {
 		var resp ListSystemOneAdaptersResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
+		// Verify raw JSON field allowlist on adapters and knownModels entries.
+		var rawResp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawResp))
+		assert.Equal(t, []string{"adapters"}, slices.Sorted(maps.Keys(rawResp)))
+		allowedAdapterKeys := map[string]bool{
+			"id":                   true,
+			"version":              true,
+			"displayName":          true,
+			"providerRetention":    true,
+			"defaultEndpoint":      true,
+			"modelRequired":        true,
+			"supportsModelListing": true,
+			"knownModels":          true,
+			"authModes":            true,
+			"allowedSecretNames":   true,
+			"defaultSecretName":    true,
+			"allowedSecretScopes":  true,
+			"defaultSecretScope":   true,
+		}
+		allowedKnownModelKeys := map[string]bool{
+			"id":          true,
+			"displayName": true,
+			"source":      true,
+		}
+		rawAdapters, ok := rawResp["adapters"].([]any)
+		require.True(t, ok)
+		for _, elem := range rawAdapters {
+			m, ok := elem.(map[string]any)
+			require.True(t, ok)
+			for k := range m {
+				assert.True(t, allowedAdapterKeys[k], "unexpected field %q on adapter capability DTO", k)
+			}
+			if kms, exists := m["knownModels"]; exists {
+				kmList, ok := kms.([]any)
+				require.True(t, ok)
+				for _, kmElem := range kmList {
+					kmMap, ok := kmElem.(map[string]any)
+					require.True(t, ok)
+					for k := range kmMap {
+						assert.True(t, allowedKnownModelKeys[k], "unexpected field %q on knownModels entry", k)
+					}
+				}
+			}
+		}
+
 		byID := make(map[string]SystemOneAdapterCapabilityDTO, len(resp.Adapters))
 		for _, a := range resp.Adapters {
 			byID[a.ID] = a
@@ -4688,6 +4735,13 @@ func TestSystemOneAdapters_CapabilitiesAndNoIO(t *testing.T) {
 		assert.Equal(t, geminidecisions.DefaultEndpoint, gem.DefaultEndpoint)
 		assert.True(t, gem.ModelRequired)
 		assert.False(t, gem.SupportsModelListing)
+		assert.Equal(t, []SystemOneKnownModelDTO{
+			{
+				ID:          geminidecisions.KnownModelGeminiDecision1,
+				DisplayName: "Gemini Decision 1",
+				Source:      systemoneprovider.ModelSourceProviderDoc,
+			},
+		}, gem.KnownModels)
 		assert.Equal(t, []string{"GEMINI_API_KEY", "GEMINI_TEAM_KEY"}, gem.AllowedSecretNames)
 		assert.Equal(t, "GEMINI_API_KEY", gem.DefaultSecretName)
 		assert.Equal(t, []string{"hub", "project", "project_or_hub"}, gem.AllowedSecretScopes)
@@ -4710,13 +4764,14 @@ func TestSystemOneAdapters_CapabilitiesAndNoIO(t *testing.T) {
 		assert.True(t, gemModes["google_access_token"].ScopesRequired)
 		assert.Equal(t, store.SystemOneAuthKindGoogleAccessToken, gemModes["google_access_token"].AuthKind)
 
-		// Verify typesafe capabilities (no SecretNamePolicy -> owned_api_key only).
+		// Verify typesafe capabilities (no SecretNamePolicy -> owned_api_key only; no static KnownModels).
 		ts, ok := byID[jevwire.AdapterNameTypeSafe]
 		require.True(t, ok, "typesafe adapter must be present")
 		assert.Equal(t, "TypeSafe", ts.DisplayName)
 		assert.Equal(t, jevwire.DefaultTypeSafeEndpoint, ts.DefaultEndpoint)
 		assert.True(t, ts.ModelRequired)
 		assert.True(t, ts.SupportsModelListing)
+		assert.Empty(t, ts.KnownModels)
 		assert.Empty(t, ts.AllowedSecretNames)
 		assert.Empty(t, ts.AllowedSecretScopes)
 		assert.Empty(t, ts.DefaultSecretScope)

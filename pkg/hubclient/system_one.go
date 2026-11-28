@@ -207,6 +207,14 @@ type SystemOneAdapterAuthMode struct {
 	ScopesRequired        bool   `json:"scopesRequired,omitempty"`
 }
 
+// SystemOneKnownModel describes one static, adapter-documented model advertised
+// on GET /api/v1/admin/system-one/adapters.
+type SystemOneKnownModel struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+	Source      string `json:"source"`
+}
+
 // SystemOneAdapterCapability is the non-secret capability metadata for a
 // registered System One provider adapter returned by
 // GET /api/v1/admin/system-one/adapters.
@@ -218,6 +226,7 @@ type SystemOneAdapterCapability struct {
 	DefaultEndpoint      string                     `json:"defaultEndpoint,omitempty"`
 	ModelRequired        bool                       `json:"modelRequired"`
 	SupportsModelListing bool                       `json:"supportsModelListing"`
+	KnownModels          []SystemOneKnownModel      `json:"knownModels,omitempty"`
 	AuthModes            []SystemOneAdapterAuthMode `json:"authModes"`
 	AllowedSecretNames   []string                   `json:"allowedSecretNames,omitempty"`
 	DefaultSecretName    string                     `json:"defaultSecretName,omitempty"`
