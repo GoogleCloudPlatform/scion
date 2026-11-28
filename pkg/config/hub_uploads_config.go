@@ -24,6 +24,18 @@ const (
 	// HubUploadsMaxWorkspaceFileSizeKey is the koanf path of
 	// server.hub.uploads.max_workspace_file_size.
 	HubUploadsMaxWorkspaceFileSizeKey = "server.hub.uploads.max_workspace_file_size"
+	// HubUploadsChunkBytesKey is the koanf path of server.hub.uploads.chunk_bytes.
+	HubUploadsChunkBytesKey = "server.hub.uploads.chunk_bytes"
+	// HubUploadsSessionIdleTTLKey is the koanf path of server.hub.uploads.session_idle_ttl.
+	HubUploadsSessionIdleTTLKey = "server.hub.uploads.session_idle_ttl"
+	// HubUploadsSessionMaxLifetimeKey is the koanf path of server.hub.uploads.session_max_lifetime.
+	HubUploadsSessionMaxLifetimeKey = "server.hub.uploads.session_max_lifetime"
+	// HubUploadsMaxSessionsPerUserKey is the koanf path of server.hub.uploads.max_sessions_per_user.
+	HubUploadsMaxSessionsPerUserKey = "server.hub.uploads.max_sessions_per_user"
+	// HubUploadsMaxPendingBytesPerUserKey is the koanf path of server.hub.uploads.max_pending_bytes_per_user.
+	HubUploadsMaxPendingBytesPerUserKey = "server.hub.uploads.max_pending_bytes_per_user"
+	// HubUploadsMaxPendingBytesHubKey is the koanf path of server.hub.uploads.max_pending_bytes_hub.
+	HubUploadsMaxPendingBytesHubKey = "server.hub.uploads.max_pending_bytes_hub"
 
 	// DefaultUploadMaxAttachmentSize is the per-file limit of a chat
 	// attachment (stored outside the artifact service) when
@@ -34,8 +46,14 @@ const (
 	// server.hub.uploads.max_workspace_file_size is unset.
 	DefaultUploadMaxWorkspaceFileSize int64 = 50 << 20
 	// MaxUploadFileSize is the largest per-file limit accepted for single-request
-	// multipart uploads (matching the 100 MiB workspace request body cap).
+	// multipart uploads and chat attachments (matching the 100 MiB workspace
+	// request body cap).
 	MaxUploadFileSize int64 = 100 << 20
+	// MaxLargeUploadFileSize is the largest per-file limit accepted for
+	// server.hub.uploads.max_workspace_file_size (1 GiB). Legacy single-request
+	// multipart workspace uploads remain clamped to MaxUploadFileSize (100 MiB);
+	// larger files use resumable chunked uploads.
+	MaxLargeUploadFileSize int64 = 1 << 30
 )
 
 // HubUploadsConfig holds web upload limits (settings server.hub.uploads).
@@ -48,6 +66,18 @@ type HubUploadsConfig struct {
 	// MaxWorkspaceFileSize is the per-file limit, in bytes, of an upload to
 	// a project workspace or shared directory.
 	MaxWorkspaceFileSize int64 `json:"maxWorkspaceFileSize,omitempty" yaml:"maxWorkspaceFileSize,omitempty" koanf:"maxWorkspaceFileSize"`
+	// ChunkBytes is the per-chunk size in bytes for resumable chunked uploads.
+	ChunkBytes int64 `json:"chunkBytes,omitempty" yaml:"chunkBytes,omitempty" koanf:"chunkBytes"`
+	// SessionIdleTTL is the Go duration string before an idle upload session expires.
+	SessionIdleTTL string `json:"sessionIdleTTL,omitempty" yaml:"sessionIdleTTL,omitempty" koanf:"sessionIdleTTL"`
+	// SessionMaxLifetime is the Go duration string for the hard upload session lifetime.
+	SessionMaxLifetime string `json:"sessionMaxLifetime,omitempty" yaml:"sessionMaxLifetime,omitempty" koanf:"sessionMaxLifetime"`
+	// MaxSessionsPerUser is the maximum concurrent open upload sessions per user.
+	MaxSessionsPerUser int `json:"maxSessionsPerUser,omitempty" yaml:"maxSessionsPerUser,omitempty" koanf:"maxSessionsPerUser"`
+	// MaxPendingBytesPerUser is the maximum sum of declared sizes for a user's active uploads.
+	MaxPendingBytesPerUser int64 `json:"maxPendingBytesPerUser,omitempty" yaml:"maxPendingBytesPerUser,omitempty" koanf:"maxPendingBytesPerUser"`
+	// MaxPendingBytesHub is the hub-wide sum of declared sizes for non-completed uploads.
+	MaxPendingBytesHub int64 `json:"maxPendingBytesHub,omitempty" yaml:"maxPendingBytesHub,omitempty" koanf:"maxPendingBytesHub"`
 }
 
 // IsZero reports whether no upload limit is configured.
@@ -70,20 +100,22 @@ func (c HubUploadsConfig) EffectiveMaxWorkspaceFileSize() int64 {
 }
 
 // Validate reports a value the hub refuses at startup: a negative value or a
-// per-file limit above MaxUploadFileSize.
+// per-file limit above its ceiling (MaxUploadFileSize for max_attachment_size,
+// MaxLargeUploadFileSize for max_workspace_file_size).
 func (c HubUploadsConfig) Validate() error {
 	for _, f := range []struct {
 		key string
 		v   int64
+		max int64
 	}{
-		{"max_attachment_size", c.MaxAttachmentSize},
-		{"max_workspace_file_size", c.MaxWorkspaceFileSize},
+		{"max_attachment_size", c.MaxAttachmentSize, MaxUploadFileSize},
+		{"max_workspace_file_size", c.MaxWorkspaceFileSize, MaxLargeUploadFileSize},
 	} {
 		if f.v < 0 {
 			return fmt.Errorf("invalid server.hub.uploads.%s %d: must not be negative", f.key, f.v)
 		}
-		if f.v > MaxUploadFileSize {
-			return fmt.Errorf("invalid server.hub.uploads.%s %d: must be at most %d", f.key, f.v, MaxUploadFileSize)
+		if f.v > f.max {
+			return fmt.Errorf("invalid server.hub.uploads.%s %d: must be at most %d", f.key, f.v, f.max)
 		}
 	}
 	return nil

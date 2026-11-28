@@ -163,6 +163,7 @@ type Layer1Snapshot struct {
 
 	// Uploads (uploads section: server.hub.uploads); zero fields mean default.
 	Uploads         config.HubUploadsConfig
+	UploadsSettings opsettings.UploadsSettings
 	UploadsInDB     bool
 	UploadsFromFile bool
 
@@ -1418,6 +1419,28 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	}
 	if k.Exists(config.HubUploadsMaxWorkspaceFileSizeKey) {
 		snap.Uploads.MaxWorkspaceFileSize = k.Int64(config.HubUploadsMaxWorkspaceFileSizeKey)
+	}
+	if k.Exists(config.HubUploadsChunkBytesKey) {
+		v := k.Int64(config.HubUploadsChunkBytesKey)
+		snap.UploadsSettings.ChunkBytes = &v
+	}
+	if k.Exists(config.HubUploadsSessionIdleTTLKey) {
+		snap.UploadsSettings.SessionIdleTTL = k.String(config.HubUploadsSessionIdleTTLKey)
+	}
+	if k.Exists(config.HubUploadsSessionMaxLifetimeKey) {
+		snap.UploadsSettings.SessionMaxLifetime = k.String(config.HubUploadsSessionMaxLifetimeKey)
+	}
+	if k.Exists(config.HubUploadsMaxSessionsPerUserKey) {
+		v := k.Int(config.HubUploadsMaxSessionsPerUserKey)
+		snap.UploadsSettings.MaxSessionsPerUser = &v
+	}
+	if k.Exists(config.HubUploadsMaxPendingBytesPerUserKey) {
+		v := k.Int64(config.HubUploadsMaxPendingBytesPerUserKey)
+		snap.UploadsSettings.MaxPendingBytesPerUser = &v
+	}
+	if k.Exists(config.HubUploadsMaxPendingBytesHubKey) {
+		v := k.Int64(config.HubUploadsMaxPendingBytesHubKey)
+		snap.UploadsSettings.MaxPendingBytesHub = &v
 	}
 
 	// Branding

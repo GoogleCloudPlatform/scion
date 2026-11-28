@@ -203,28 +203,3 @@ func ParseUploadsDoc(raw json.RawMessage) (UploadsConfig, error) {
 	}
 	return doc.Resolve()
 }
-
-// uploadsSchema builds the JSON schema for the unified "uploads" section by
-// starting from settings-v1.schema.json (server.hub.uploads: max_attachment_size,
-// max_workspace_file_size) and adding the DB-backed chunked-upload properties.
-func uploadsSchema(root map[string]interface{}) map[string]interface{} {
-	props := map[string]interface{}{}
-	if base := schemaObject(getSchemaProperty(root, "server", "hub", "uploads")); base != nil {
-		if baseProps, ok := base["properties"].(map[string]interface{}); ok {
-			for k, v := range baseProps {
-				props[k] = v
-			}
-		}
-	}
-	props["chunk_bytes"] = map[string]interface{}{"type": "integer", "minimum": UploadsMinChunkBytes, "maximum": UploadsMaxChunkBytes}
-	props["session_idle_ttl"] = map[string]interface{}{"type": "string"}
-	props["session_max_lifetime"] = map[string]interface{}{"type": "string"}
-	props["max_sessions_per_user"] = map[string]interface{}{"type": "integer", "minimum": UploadsMinMaxSessionsPerUser, "maximum": UploadsMaxMaxSessionsPerUser}
-	props["max_pending_bytes_per_user"] = map[string]interface{}{"type": "integer", "minimum": 1}
-	props["max_pending_bytes_hub"] = map[string]interface{}{"type": "integer", "minimum": 1}
-	return map[string]interface{}{
-		"type":                 "object",
-		"properties":           props,
-		"additionalProperties": false,
-	}
-}

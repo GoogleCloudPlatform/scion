@@ -255,6 +255,12 @@ func init() {
 			KoanfPaths: []string{
 				config.HubUploadsMaxAttachmentSizeKey,
 				config.HubUploadsMaxWorkspaceFileSizeKey,
+				config.HubUploadsChunkBytesKey,
+				config.HubUploadsSessionIdleTTLKey,
+				config.HubUploadsSessionMaxLifetimeKey,
+				config.HubUploadsMaxSessionsPerUserKey,
+				config.HubUploadsMaxPendingBytesPerUserKey,
+				config.HubUploadsMaxPendingBytesHubKey,
 			},
 			New: func() any { return &UploadsSettings{} },
 		},
@@ -642,9 +648,8 @@ func compileSchemas() {
 		"hub_observability": schemaObject(getSchemaProperty(root, "server", "hub", "observability")),
 		// branding is derived from settings-v1.schema.json (server.hub.branding).
 		BrandingSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "branding")),
-		// uploads merges settings-v1.schema.json (server.hub.uploads) with the
-		// resumable chunked-upload properties (ptone/scion#9619 & #8654).
-		UploadsSectionName: uploadsSchema(root),
+		// uploads is derived from settings-v1.schema.json (server.hub.uploads).
+		UploadsSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "uploads")),
 		"quotas":           schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":    schemaObject(getSchemaProperty(root, "agent_secrets")),
 		"broker_policy":    schemaObject(getSchemaProperty(root, "broker_policy")),

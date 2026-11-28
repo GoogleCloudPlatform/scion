@@ -3121,8 +3121,8 @@ type V1ServerHubChatSearchConfig struct {
 	MaxConcurrent *int `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty" koanf:"max_concurrent"`
 }
 
-// V1ServerHubUploadsConfig holds web upload limits (server.hub.uploads), in
-// bytes. Zero or unset means the default. Read at startup.
+// V1ServerHubUploadsConfig holds web upload limits and resumable chunked-upload
+// settings (server.hub.uploads). Zero or unset means the compiled default.
 type V1ServerHubUploadsConfig struct {
 	// MaxAttachmentSize is the per-file limit of a chat attachment stored by
 	// the hub's attachment store (default 10 MiB).
@@ -3130,6 +3130,18 @@ type V1ServerHubUploadsConfig struct {
 	// MaxWorkspaceFileSize is the per-file limit of a project workspace or
 	// shared directory upload (default 50 MiB).
 	MaxWorkspaceFileSize int64 `json:"max_workspace_file_size,omitempty" yaml:"max_workspace_file_size,omitempty" koanf:"max_workspace_file_size"`
+	// ChunkBytes is the maximum size of a single resumable upload chunk (1–16 MiB, default 8 MiB).
+	ChunkBytes *int64 `json:"chunk_bytes,omitempty" yaml:"chunk_bytes,omitempty" koanf:"chunk_bytes"`
+	// SessionIdleTTL is the idle expiration duration for upload sessions (5m–24h, default 1h).
+	SessionIdleTTL string `json:"session_idle_ttl,omitempty" yaml:"session_idle_ttl,omitempty" koanf:"session_idle_ttl"`
+	// SessionMaxLifetime is the hard lifetime cap for upload sessions (>= session_idle_ttl, <= 7d, default 24h).
+	SessionMaxLifetime string `json:"session_max_lifetime,omitempty" yaml:"session_max_lifetime,omitempty" koanf:"session_max_lifetime"`
+	// MaxSessionsPerUser caps concurrent active upload sessions per user (1–64, default 4).
+	MaxSessionsPerUser *int `json:"max_sessions_per_user,omitempty" yaml:"max_sessions_per_user,omitempty" koanf:"max_sessions_per_user"`
+	// MaxPendingBytesPerUser caps total declared bytes across a user's active sessions (default 2 GiB).
+	MaxPendingBytesPerUser *int64 `json:"max_pending_bytes_per_user,omitempty" yaml:"max_pending_bytes_per_user,omitempty" koanf:"max_pending_bytes_per_user"`
+	// MaxPendingBytesHub caps total declared bytes across all sessions holding staging on the hub (default 16 GiB).
+	MaxPendingBytesHub *int64 `json:"max_pending_bytes_hub,omitempty" yaml:"max_pending_bytes_hub,omitempty" koanf:"max_pending_bytes_hub"`
 }
 
 // V1CORSConfig holds CORS settings for server endpoints.
@@ -4899,10 +4911,25 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		if u := v1.Hub.Uploads; u != nil {
-			gc.Hub.Uploads = HubUploadsConfig{
+			up := HubUploadsConfig{
 				MaxAttachmentSize:    u.MaxAttachmentSize,
 				MaxWorkspaceFileSize: u.MaxWorkspaceFileSize,
+				SessionIdleTTL:       u.SessionIdleTTL,
+				SessionMaxLifetime:   u.SessionMaxLifetime,
 			}
+			if u.ChunkBytes != nil {
+				up.ChunkBytes = *u.ChunkBytes
+			}
+			if u.MaxSessionsPerUser != nil {
+				up.MaxSessionsPerUser = *u.MaxSessionsPerUser
+			}
+			if u.MaxPendingBytesPerUser != nil {
+				up.MaxPendingBytesPerUser = *u.MaxPendingBytesPerUser
+			}
+			if u.MaxPendingBytesHub != nil {
+				up.MaxPendingBytesHub = *u.MaxPendingBytesHub
+			}
+			gc.Hub.Uploads = up
 		}
 		if v1.Hub.GCPIAMCheckMode != "" {
 			gc.Hub.GCPIAMCheckMode = v1.Hub.GCPIAMCheckMode
@@ -5459,10 +5486,29 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1Hub.Chat = &V1ServerHubChatConfig{Search: cs}
 	}
 	if u := gc.Hub.Uploads; !u.IsZero() {
-		v1Hub.Uploads = &V1ServerHubUploadsConfig{
+		v1Up := &V1ServerHubUploadsConfig{
 			MaxAttachmentSize:    u.MaxAttachmentSize,
 			MaxWorkspaceFileSize: u.MaxWorkspaceFileSize,
+			SessionIdleTTL:       u.SessionIdleTTL,
+			SessionMaxLifetime:   u.SessionMaxLifetime,
 		}
+		if u.ChunkBytes > 0 {
+			v := u.ChunkBytes
+			v1Up.ChunkBytes = &v
+		}
+		if u.MaxSessionsPerUser > 0 {
+			v := u.MaxSessionsPerUser
+			v1Up.MaxSessionsPerUser = &v
+		}
+		if u.MaxPendingBytesPerUser > 0 {
+			v := u.MaxPendingBytesPerUser
+			v1Up.MaxPendingBytesPerUser = &v
+		}
+		if u.MaxPendingBytesHub > 0 {
+			v := u.MaxPendingBytesHub
+			v1Up.MaxPendingBytesHub = &v
+		}
+		v1Hub.Uploads = v1Up
 	}
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()

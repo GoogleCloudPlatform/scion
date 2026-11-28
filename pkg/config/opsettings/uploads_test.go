@@ -49,7 +49,7 @@ func TestUploads_Validate(t *testing.T) {
 		`{}`,
 		`{"max_attachment_size":0}`,
 		`{"max_attachment_size":20971520,"max_workspace_file_size":83886080}`,
-		`{"max_attachment_size":104857600,"max_workspace_file_size":104857600}`,
+		`{"max_attachment_size":104857600,"max_workspace_file_size":1073741824}`,
 		`{"max_attachment_size":20971520,"chunk_bytes":4194304,"max_sessions_per_user":8}`,
 	}
 	for _, doc := range valid {
@@ -65,7 +65,7 @@ func TestUploads_Validate(t *testing.T) {
 		`{"max_attachment_size":-1}`,
 		`{"max_workspace_file_size":-1}`,
 		`{"max_attachment_size":104857601}`,
-		`{"max_workspace_file_size":1073741824}`,
+		`{"max_workspace_file_size":1073741825}`,
 		`{"unknown_key":123}`,
 		`{"max_attachment_size":"big"}`,
 	}

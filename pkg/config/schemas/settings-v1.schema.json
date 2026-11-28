@@ -1597,9 +1597,45 @@
             "max_workspace_file_size": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 104857600,
-              "description": "Per-file limit of an upload to a project workspace or shared directory (default 52428800, 50 MiB; max 104857600, 100 MiB, matching the single-request body cap).",
+              "maximum": 1073741824,
+              "description": "Per-file limit of an upload to a project workspace or shared directory (default 52428800, 50 MiB; max 1073741824, 1 GiB). Legacy single-request multipart uploads remain clamped to 100 MiB; larger files use resumable chunked uploads.",
               "x-env-var": "SCION_SERVER_HUB_UPLOADS_MAXWORKSPACEFILESIZE",
+              "x-since": "1"
+            },
+            "chunk_bytes": {
+              "type": "integer",
+              "minimum": 1048576,
+              "maximum": 16777216,
+              "description": "Maximum size in bytes of a single resumable upload chunk (1 MiB to 16 MiB, default 8 MiB).",
+              "x-since": "1"
+            },
+            "session_idle_ttl": {
+              "type": "string",
+              "description": "Idle expiration duration for resumable upload sessions (5m to 24h, default 1h).",
+              "x-since": "1"
+            },
+            "session_max_lifetime": {
+              "type": "string",
+              "description": "Hard lifetime cap for resumable upload sessions (>= session_idle_ttl, <= 7d, default 24h).",
+              "x-since": "1"
+            },
+            "max_sessions_per_user": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "description": "Maximum concurrent active resumable upload sessions per user (1 to 64, default 4).",
+              "x-since": "1"
+            },
+            "max_pending_bytes_per_user": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum total declared bytes across a user's active resumable upload sessions (default 2 GiB).",
+              "x-since": "1"
+            },
+            "max_pending_bytes_hub": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum total declared bytes across all resumable upload sessions holding staging on the hub (>= max_pending_bytes_per_user, default 16 GiB).",
               "x-since": "1"
             }
           },
