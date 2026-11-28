@@ -527,6 +527,14 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			return
 		}
 
+		// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+		if err := s.checkTokenBudgetAdmission(ctx, agent, project); err != nil {
+			if !writeTokenBudgetAdmissionError(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+
 		// Dispatch to broker (creates and starts the agent)
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {

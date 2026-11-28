@@ -68,6 +68,7 @@ type BudgetThresholdHook func(ctx context.Context, crossing BudgetThresholdCross
 // P3.2 admission gate).
 type BudgetExhaustionStatus struct {
 	Exhausted      bool
+	HasActiveCap   bool
 	LimitName      string
 	ScopeKind      string
 	ScopeID        string
@@ -77,6 +78,19 @@ type BudgetExhaustionStatus struct {
 	WindowStartUTC time.Time
 	WindowEndUTC   time.Time
 	TokenAction    string
+}
+
+// BudgetNoticeStatus describes the highest-severity active warn/exhausted
+// budget state applicable to an agent, surfaced on usage ingest responses
+// (Tokenomics P3.2 B1).
+type BudgetNoticeStatus struct {
+	State       string
+	LimitName   string
+	ScopeKind   string
+	Consumed    int64
+	Cap         int64
+	WindowEnd   time.Time
+	TokenAction string
 }
 
 // TokenBudgetEvaluator evaluates raw-token consumption from
@@ -269,8 +283,15 @@ type budgetEvalSpec struct {
 // Errors are logged and counted via EvalErrors; evaluation never fails or
 // alters the ingest response (D4).
 func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inserted []*store.UsageEvent) {
+	_ = e.EvaluateIngestedEventsWithNotice(ctx, inserted)
+}
+
+// EvaluateIngestedEventsWithNotice runs EvaluateIngestedEvents and derives the
+// highest-severity active non-overridden warn/exhausted notice directly from
+// the states evaluated for this batch (zero extra DB queries).
+func (e *TokenBudgetEvaluator) EvaluateIngestedEventsWithNotice(ctx context.Context, inserted []*store.UsageEvent) *BudgetNoticeStatus {
 	if !e.enabled() || len(inserted) == 0 {
-		return
+		return nil
 	}
 	now := e.now()
 
@@ -310,136 +331,20 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 		}
 		dayStart, dayEnd := utcDayWindow(ev.EventTS)
 		monthStart, monthEnd := utcMonthWindow(ev.EventTS)
-
-		// Project scope always applies (including when billing_user_id is NULL).
-		addIfOpen(budgetEvalSpec{
-			limitName:      store.LimitLLMTokensPerProjectDay,
-			scopeKind:      store.UsageScopeKindProject,
-			scopeID:        ev.ProjectID,
-			counterScopeID: ev.ProjectID,
-			bindingScope:   store.QuotaScopeProject,
-			bindingScopeID: ev.ProjectID,
-			windowStartUTC: dayStart,
-			windowEndUTC:   dayEnd,
-		})
-		addIfOpen(budgetEvalSpec{
-			limitName:      store.LimitLLMTokensPerProjectMonth,
-			scopeKind:      store.UsageScopeKindProject,
-			scopeID:        ev.ProjectID,
-			counterScopeID: ev.ProjectID,
-			bindingScope:   store.QuotaScopeProject,
-			bindingScopeID: ev.ProjectID,
-			windowStartUTC: monthStart,
-			windowEndUTC:   monthEnd,
-		})
-
-		// User and user_project scopes apply only when billing_user_id is non-NULL (D3).
-		if ev.BillingUserID != nil && *ev.BillingUserID != "" {
-			uid := *ev.BillingUserID
-			upCounterID := uid + ":" + ev.ProjectID
-
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserDay,
-				scopeKind:      store.UsageScopeKindUser,
-				scopeID:        uid,
-				counterScopeID: uid,
-				bindingSubject: uid,
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			})
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserMonth,
-				scopeKind:      store.UsageScopeKindUser,
-				scopeID:        uid,
-				counterScopeID: uid,
-				bindingSubject: uid,
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			})
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserProjectDay,
-				scopeKind:      store.UsageScopeKindUserProject,
-				scopeID:        uid,
-				projectScopeID: ev.ProjectID,
-				counterScopeID: upCounterID,
-				bindingSubject: uid,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: ev.ProjectID,
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			})
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerUserProjectMonth,
-				scopeKind:      store.UsageScopeKindUserProject,
-				scopeID:        uid,
-				projectScopeID: ev.ProjectID,
-				counterScopeID: upCounterID,
-				bindingSubject: uid,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: ev.ProjectID,
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			})
+		billingUserID := ""
+		if ev.BillingUserID != nil {
+			billingUserID = *ev.BillingUserID
 		}
-
-		// Pooled user-group scopes: evaluate every charged group for both its
-		// system-wide pool (project_scope_id = "") and project-scoped pool
-		// (project_scope_id = ev.ProjectID). Overlapping pools are each
-		// evaluated independently (non-additive, §4.4).
-		for _, gid := range ev.ChargedGroupIDs {
-			if gid == "" {
-				continue
-			}
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupDay,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: "",
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			})
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupMonth,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: "",
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			})
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupDay,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: ev.ProjectID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: ev.ProjectID,
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			})
-			addIfOpen(budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupMonth,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: ev.ProjectID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: ev.ProjectID,
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			})
+		for _, spec := range applicableTokenBudgetSpecs(ev.ProjectID, billingUserID, ev.ChargedGroupIDs, dayStart, dayEnd, monthStart, monthEnd) {
+			addIfOpen(spec)
 		}
 	}
 
 	evalCache := newTokenLimitEvalCache(e.quota)
+	var bestNotice *BudgetNoticeStatus
 	for _, spec := range specs {
-		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
+		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
+		if err != nil {
 			e.evalErrors.Add(1)
 			e.logger.Warn("token budget evaluation failed",
 				"limit", spec.limitName,
@@ -448,106 +353,168 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 				"project_scope_id", spec.projectScopeID,
 				"window_start_utc", spec.windowStartUTC,
 				"error", err)
+			continue
 		}
+		if st == nil || (st.State != store.UsageBudgetStateWarn && st.State != store.UsageBudgetStateExhausted) {
+			continue
+		}
+		if st.OverrideUntil != nil && st.OverrideUntil.After(now) {
+			continue
+		}
+		bestNotice = pickHigherBudgetNotice(bestNotice, &BudgetNoticeStatus{
+			State:       st.State,
+			LimitName:   spec.limitName,
+			ScopeKind:   spec.scopeKind,
+			Consumed:    st.ConsumedAtEval,
+			Cap:         st.CapAtEval,
+			WindowEnd:   st.WindowEndUTC,
+			TokenAction: action,
+		})
 	}
+	return bestNotice
 }
 
-// EvaluateGroupScope evaluates the active UTC day and month pooled-group
-// budgets for (groupID, projectScopeID) at `now`. Called by the pooled-group
-// seeder right after writing origin="seed" rows so usage_budget_state reflects
-// newly seeded spend immediately.
-func (e *TokenBudgetEvaluator) EvaluateGroupScope(ctx context.Context, groupID, projectScopeID string, now time.Time) error {
-	if !e.enabled() || groupID == "" {
+func pickHigherBudgetNotice(best, cand *BudgetNoticeStatus) *BudgetNoticeStatus {
+	if cand == nil {
+		return best
+	}
+	if best == nil {
+		return cand
+	}
+	rBest, rCand := budgetStateRank(best.State), budgetStateRank(cand.State)
+	if rCand != rBest {
+		if rCand > rBest {
+			return cand
+		}
+		return best
+	}
+	// Tie-break by higher utilization ratio (cand.Consumed/cand.Cap > best.Consumed/best.Cap).
+	if cand.Cap > 0 && best.Cap > 0 && cand.Consumed >= 0 && best.Consumed >= 0 {
+		hiC, loC := bits.Mul64(uint64(cand.Consumed), uint64(best.Cap))
+		hiB, loB := bits.Mul64(uint64(best.Consumed), uint64(cand.Cap))
+		if hiC > hiB || (hiC == hiB && loC > loB) {
+			return cand
+		}
+	}
+	return best
+}
+
+// HighestActiveBudgetNotice reads active usage_budget_state rows for
+// (projectID, billingUserID) at the evaluator's clock and returns the
+// highest-severity non-overridden warn/exhausted notice, or nil.
+// Used only as a fallback on ingest batches that did not run
+// EvaluateIngestedEventsWithNotice (e.g. empty heartbeats or all-duplicate batches).
+func (e *TokenBudgetEvaluator) HighestActiveBudgetNotice(ctx context.Context, projectID, billingUserID string) *BudgetNoticeStatus {
+	if !e.enabled() || projectID == "" {
 		return nil
 	}
-	if now.IsZero() {
-		now = e.now()
-	} else {
-		now = now.UTC()
-	}
+	now := e.now()
 	dayStart, dayEnd := utcDayWindow(now)
 	monthStart, monthEnd := utcMonthWindow(now)
-	bindingScope := store.QuotaScopeSystem
-	bindingScopeID := ""
-	if projectScopeID != "" {
-		bindingScope = store.QuotaScopeProject
-		bindingScopeID = projectScopeID
-	}
-	specs := []budgetEvalSpec{
-		{
-			limitName:      store.LimitLLMTokensPerGroupDay,
-			scopeKind:      store.UsageScopeKindGroup,
-			scopeID:        groupID,
-			projectScopeID: projectScopeID,
-			bindingScope:   bindingScope,
-			bindingScopeID: bindingScopeID,
-			windowStartUTC: dayStart,
-			windowEndUTC:   dayEnd,
-		},
-		{
-			limitName:      store.LimitLLMTokensPerGroupMonth,
-			scopeKind:      store.UsageScopeKindGroup,
-			scopeID:        groupID,
-			projectScopeID: projectScopeID,
-			bindingScope:   bindingScope,
-			bindingScopeID: bindingScopeID,
-			windowStartUTC: monthStart,
-			windowEndUTC:   monthEnd,
-		},
-	}
-	evalCache := newTokenLimitEvalCache(e.quota)
-	for _, spec := range specs {
-		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
-			return err
+	var groupIDs []string
+	if billingUserID != "" && e.pooledGroups != nil {
+		var err error
+		groupIDs, err = e.pooledGroups.ResolveForUser(ctx, billingUserID)
+		if err != nil {
+			e.logger.Warn("token budget notice: failed to resolve pooled groups",
+				"billing_user_id", billingUserID, "error", err)
 		}
 	}
-	return nil
+	specs := applicableTokenBudgetSpecs(projectID, billingUserID, groupIDs, dayStart, dayEnd, monthStart, monthEnd)
+
+	type scopeQuery struct {
+		scopeKind      string
+		scopeID        string
+		projectScopeID string
+		bindingSubject string
+		bindingScope   string
+		bindingScopeID string
+	}
+	type scopeDedupeKey struct {
+		scopeKind      string
+		scopeID        string
+		projectScopeID string
+	}
+	seenScopes := make(map[scopeDedupeKey]struct{}, len(specs))
+	queries := make([]scopeQuery, 0, len(specs))
+	for _, spec := range specs {
+		dk := scopeDedupeKey{
+			scopeKind:      spec.scopeKind,
+			scopeID:        spec.scopeID,
+			projectScopeID: spec.projectScopeID,
+		}
+		if _, dup := seenScopes[dk]; dup {
+			continue
+		}
+		seenScopes[dk] = struct{}{}
+		queries = append(queries, scopeQuery{
+			scopeKind:      spec.scopeKind,
+			scopeID:        spec.scopeID,
+			projectScopeID: spec.projectScopeID,
+			bindingSubject: spec.bindingSubject,
+			bindingScope:   spec.bindingScope,
+			bindingScopeID: spec.bindingScopeID,
+		})
+	}
+
+	var bestRow *store.UsageBudgetState
+	var bestQuery scopeQuery
+	var bestNotice *BudgetNoticeStatus
+	for _, q := range queries {
+		rows, err := e.store.ListUsageBudgetStatesForScope(ctx, q.scopeKind, q.scopeID, q.projectScopeID, now)
+		if err != nil {
+			e.logger.Warn("token budget notice lookup failed",
+				"scope_kind", q.scopeKind, "scope_id", q.scopeID, "error", err)
+			continue
+		}
+		for _, row := range rows {
+			if row == nil || (row.State != store.UsageBudgetStateWarn && row.State != store.UsageBudgetStateExhausted) {
+				continue
+			}
+			if row.OverrideUntil != nil && row.OverrideUntil.After(now) {
+				continue
+			}
+			cand := &BudgetNoticeStatus{
+				State:     row.State,
+				ScopeKind: row.ScopeKind,
+				Consumed:  row.ConsumedAtEval,
+				Cap:       row.CapAtEval,
+				WindowEnd: row.WindowEndUTC,
+			}
+			if pickHigherBudgetNotice(bestNotice, cand) == cand {
+				bestNotice = cand
+				bestRow = row
+				bestQuery = q
+			}
+		}
+	}
+	if bestNotice == nil || bestRow == nil {
+		return nil
+	}
+	if def, err := e.store.GetLimitDefinition(ctx, bestRow.LimitDefinitionID); err == nil && def != nil {
+		bestNotice.LimitName = def.Name
+		var action string
+		var rerr error
+		if bestQuery.scopeKind == store.UsageScopeKindGroup {
+			_, action, rerr = e.quota.ResolveEffectiveGroupTokenLimit(
+				ctx, def.ID, bestQuery.scopeID, bestQuery.bindingScope, bestQuery.bindingScopeID,
+			)
+		} else {
+			_, action, rerr = e.quota.ResolveEffectiveTokenLimit(
+				ctx, def.ID, bestQuery.bindingSubject, bestQuery.bindingScope, bestQuery.bindingScopeID,
+			)
+		}
+		if rerr == nil && action != "" {
+			bestNotice.TokenAction = action
+		}
+	}
+	if bestNotice.TokenAction == "" {
+		bestNotice.TokenAction = store.TokenActionPauseNew
+	}
+	return bestNotice
 }
 
-// IsScopeExhaustedForAction checks whether any applicable non-zero raw-token
-// limit for (projectID, billingUserID) in the active UTC day or month window
-// at `now` is exhausted (respecting override_until > now) with an effective
-// token_action matching `actions` (if actions is empty, any action matches).
-//
-// `now` is clamped to at least the evaluator's clock so closed windows are
-// never evaluated or created. Re-evaluates on demand from
-// usage_scope_counters_daily (≤31 rows per window) so a missed post-commit
-// evaluation self-heals (D4). Returns Exhausted=false when either
-// tokenomics.token_budgets or tokenomics.usage_ledger is disabled.
-func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
-	ctx context.Context,
-	projectID string,
-	billingUserID string,
-	now time.Time,
-	actions ...string,
-) (*BudgetExhaustionStatus, error) {
-	if !e.enabled() || projectID == "" {
-		return &BudgetExhaustionStatus{Exhausted: false}, nil
-	}
-	evalNow := e.now()
-	if now.IsZero() || now.Before(evalNow) {
-		now = evalNow
-	} else {
-		now = now.UTC()
-	}
-
-	actionSet := make(map[string]struct{}, len(actions))
-	for _, a := range actions {
-		if a != "" {
-			actionSet[a] = struct{}{}
-		}
-	}
-	matchesAction := func(act string) bool {
-		if len(actionSet) == 0 {
-			return true
-		}
-		_, ok := actionSet[act]
-		return ok
-	}
-
-	dayStart, dayEnd := utcDayWindow(now)
-	monthStart, monthEnd := utcMonthWindow(now)
-
+func applicableTokenBudgetSpecs(projectID, billingUserID string, groupIDs []string, dayStart, dayEnd, monthStart, monthEnd time.Time) []budgetEvalSpec {
 	specs := []budgetEvalSpec{
 		{
 			limitName:      store.LimitLLMTokensPerProjectDay,
@@ -620,69 +587,136 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 				windowEndUTC:   monthEnd,
 			},
 		)
+	}
+	// Pooled user-group scopes (Tokenomics P3.3, §4.4): system-wide and
+	// project-scoped day/month pools for each charged/effective group.
+	for _, gid := range groupIDs {
+		if gid == "" {
+			continue
+		}
+		specs = append(specs, groupTokenBudgetSpecs(gid, "", dayStart, dayEnd, monthStart, monthEnd)...)
+		specs = append(specs, groupTokenBudgetSpecs(gid, projectID, dayStart, dayEnd, monthStart, monthEnd)...)
+	}
+	return specs
+}
 
-		// Include every active pooled group that billingUserID effectively
-		// belongs to so admission (B1) blocks on exhausted group pools without
-		// further wiring (§4.4).
-		if e.pooledGroups != nil {
-			groupIDs, err := e.pooledGroups.ResolveForUser(ctx, billingUserID)
-			if err != nil {
-				return nil, fmt.Errorf("resolve pooled groups for admission check: %w", err)
-			}
-			for _, gid := range groupIDs {
-				specs = append(specs,
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupDay,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: "",
-						bindingScope:   store.QuotaScopeSystem,
-						bindingScopeID: "",
-						windowStartUTC: dayStart,
-						windowEndUTC:   dayEnd,
-					},
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupMonth,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: "",
-						bindingScope:   store.QuotaScopeSystem,
-						bindingScopeID: "",
-						windowStartUTC: monthStart,
-						windowEndUTC:   monthEnd,
-					},
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupDay,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: projectID,
-						bindingScope:   store.QuotaScopeProject,
-						bindingScopeID: projectID,
-						windowStartUTC: dayStart,
-						windowEndUTC:   dayEnd,
-					},
-					budgetEvalSpec{
-						limitName:      store.LimitLLMTokensPerGroupMonth,
-						scopeKind:      store.UsageScopeKindGroup,
-						scopeID:        gid,
-						projectScopeID: projectID,
-						bindingScope:   store.QuotaScopeProject,
-						bindingScopeID: projectID,
-						windowStartUTC: monthStart,
-						windowEndUTC:   monthEnd,
-					},
-				)
-			}
+func groupTokenBudgetSpecs(groupID, projectScopeID string, dayStart, dayEnd, monthStart, monthEnd time.Time) []budgetEvalSpec {
+	bindingScope := store.QuotaScopeSystem
+	bindingScopeID := ""
+	if projectScopeID != "" {
+		bindingScope = store.QuotaScopeProject
+		bindingScopeID = projectScopeID
+	}
+	return []budgetEvalSpec{
+		{
+			limitName:      store.LimitLLMTokensPerGroupDay,
+			scopeKind:      store.UsageScopeKindGroup,
+			scopeID:        groupID,
+			projectScopeID: projectScopeID,
+			bindingScope:   bindingScope,
+			bindingScopeID: bindingScopeID,
+			windowStartUTC: dayStart,
+			windowEndUTC:   dayEnd,
+		},
+		{
+			limitName:      store.LimitLLMTokensPerGroupMonth,
+			scopeKind:      store.UsageScopeKindGroup,
+			scopeID:        groupID,
+			projectScopeID: projectScopeID,
+			bindingScope:   bindingScope,
+			bindingScopeID: bindingScopeID,
+			windowStartUTC: monthStart,
+			windowEndUTC:   monthEnd,
+		},
+	}
+}
+
+// EvaluateGroupScope evaluates the active UTC day and month pooled-group
+// budgets for (groupID, projectScopeID) at `now`. Called by the pooled-group
+// seeder right after writing origin="seed" rows so usage_budget_state reflects
+// newly seeded spend immediately.
+func (e *TokenBudgetEvaluator) EvaluateGroupScope(ctx context.Context, groupID, projectScopeID string, now time.Time) error {
+	if !e.enabled() || groupID == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = e.now()
+	} else {
+		now = now.UTC()
+	}
+	dayStart, dayEnd := utcDayWindow(now)
+	monthStart, monthEnd := utcMonthWindow(now)
+	specs := groupTokenBudgetSpecs(groupID, projectScopeID, dayStart, dayEnd, monthStart, monthEnd)
+	evalCache := newTokenLimitEvalCache(e.quota)
+	for _, spec := range specs {
+		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// IsScopeExhaustedForAction checks whether any applicable non-zero raw-token
+// limit for (projectID, billingUserID) in the active UTC day or month window
+// at `now` is exhausted (respecting override_until > now) with an effective
+// token_action matching `actions` (if actions is empty, any action matches).
+//
+// `now` is clamped to at least the evaluator's clock so closed windows are
+// never evaluated or created. Re-evaluates on demand from
+// usage_scope_counters_daily (≤31 rows per window) so a missed post-commit
+// evaluation self-heals (D4). Returns Exhausted=false when either
+// tokenomics.token_budgets or tokenomics.usage_ledger is disabled.
+func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
+	ctx context.Context,
+	projectID string,
+	billingUserID string,
+	now time.Time,
+	actions ...string,
+) (*BudgetExhaustionStatus, error) {
+	if !e.enabled() || projectID == "" {
+		return &BudgetExhaustionStatus{Exhausted: false}, nil
+	}
+	evalNow := e.now()
+	if now.IsZero() || now.Before(evalNow) {
+		now = evalNow
+	} else {
+		now = now.UTC()
+	}
+
+	actionSet := make(map[string]struct{}, len(actions))
+	for _, a := range actions {
+		if a != "" {
+			actionSet[a] = struct{}{}
+		}
+	}
+	matchesAction := func(act string) bool {
+		if len(actionSet) == 0 {
+			return true
+		}
+		_, ok := actionSet[act]
+		return ok
+	}
+
+	dayStart, dayEnd := utcDayWindow(now)
+	monthStart, monthEnd := utcMonthWindow(now)
+	var groupIDs []string
+	if billingUserID != "" && e.pooledGroups != nil {
+		var err error
+		groupIDs, err = e.pooledGroups.ResolveForUser(ctx, billingUserID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve pooled groups for admission check: %w", err)
+		}
+	}
+	specs := applicableTokenBudgetSpecs(projectID, billingUserID, groupIDs, dayStart, dayEnd, monthStart, monthEnd)
 
 	evalCache := newTokenLimitEvalCache(e.quota)
+	hasActiveCap := false
 	for _, spec := range specs {
 		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
 		if err != nil {
 			return nil, err
 		}
-		if st == nil || st.State != store.UsageBudgetStateExhausted {
+		if st == nil {
 			continue
 		}
 		if !matchesAction(action) {
@@ -691,8 +725,15 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 		if st.OverrideUntil != nil && st.OverrideUntil.After(now) {
 			continue
 		}
+		// Only blocking (action-matching), non-overridden, >0 caps count as an
+		// active cap for usage.unmeasured_policy=deny (D9).
+		hasActiveCap = true
+		if st.State != store.UsageBudgetStateExhausted {
+			continue
+		}
 		return &BudgetExhaustionStatus{
 			Exhausted:      true,
+			HasActiveCap:   true,
 			LimitName:      spec.limitName,
 			ScopeKind:      spec.scopeKind,
 			ScopeID:        spec.scopeID,
@@ -705,7 +746,7 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 		}, nil
 	}
 
-	return &BudgetExhaustionStatus{Exhausted: false}, nil
+	return &BudgetExhaustionStatus{Exhausted: false, HasActiveCap: hasActiveCap}, nil
 }
 
 // evaluateSpec evaluates a single (limit, scope, window) tuple and persists

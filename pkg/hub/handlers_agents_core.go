@@ -3173,6 +3173,18 @@ func (s *Server) createAgentInProject(
 		defaultIdentityMode = ""
 	}
 
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+	// Checked before reserving broker/project slots or committing the agent row;
+	// skipped for ProvisionOnly=true since no container is launched yet.
+	if !req.ProvisionOnly {
+		if err := s.checkTokenBudgetAdmission(ctx, agent, project); err != nil {
+			if !writeTokenBudgetAdmissionError(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+	}
+
 	// Quota enforcement, in order:
 	//  1. Per-broker agent ceiling (ptone/scion#1303). Exceeding the ceiling
 	//     must reject the create outright — before any per-project
@@ -4487,6 +4499,14 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	// start claim against the trigger's own create dispatch.
 	if agentHomeFilesPending(agent) {
 		s.writeStartClaimError(ctx, w, errHomeFilesNotDelivered, agent.ID)
+		return
+	}
+
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+	if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+		if !writeTokenBudgetAdmissionError(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 

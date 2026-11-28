@@ -314,6 +314,14 @@ type ProjectSettings struct {
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
+
+	// Usage / token budget policy (gated by tokenomics.token_budgets).
+	// UsageUnmeasuredPolicy controls admission when an active non-zero token
+	// cap applies and the agent's harness does not report live token usage
+	// (unmeasured, unknown, or calls_only per usage.yaml). Valid values:
+	// "" / "allow" (default — launch proceeds with coverage warning) or "deny"
+	// (launch refused with 403 budget_unmeasured).
+	UsageUnmeasuredPolicy string `json:"usageUnmeasuredPolicy,omitempty"`
 }
 
 // ProjectGCPIdentityDefaultsUpdate is a partial project settings PUT body

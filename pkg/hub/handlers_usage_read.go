@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -860,19 +861,30 @@ func (m *usageCapabilityMemo) resolveConfigBySlug(projectID, name string) (*stor
 }
 
 func (m *usageCapabilityMemo) resolve(projectID, harnessConfig string) *api.HarnessUsageCapabilities {
+	usageCap, _ := m.resolveWithErr(projectID, harnessConfig)
+	return usageCap
+}
+
+func (m *usageCapabilityMemo) resolveWithErr(projectID, harnessConfig string) (*api.HarnessUsageCapabilities, error) {
 	if m == nil || m.s == nil {
-		return nil
+		return nil, nil
 	}
 	hcName := strings.TrimSpace(harnessConfig)
 	if hcName == "" {
-		return nil
+		return nil, nil
 	}
 	hc, err := m.resolveConfigBySlug(projectID, hcName)
-	if err != nil || hc == nil {
-		return nil
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if hc == nil {
+		return nil, nil
 	}
 	m.s.populateHarnessConfigCapabilities(m.ctx, hc)
-	return usageCapabilityFromHarnessConfig(hc)
+	return usageCapabilityFromHarnessConfig(hc), nil
 }
 
 // usageCapabilityFromHarnessConfig extracts the parsed usage.yaml capability

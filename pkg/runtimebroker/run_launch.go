@@ -968,9 +968,11 @@ var launchFailureText = map[string]string{
 	api.LaunchCodePodDisrupted:                         "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeLaunchTimeout:                        "launch timed out waiting for the agent pod to be ready",
 	api.LaunchCodeWorkspaceNotPermitted:                "the agent workspace path is not permitted",
-	// Hub-originated refusals (RuntimeTargetRefusal); kept here for CLI/web label parity.
+	// Hub-originated refusals (RuntimeTargetRefusal / token budget admission); kept here for CLI/web label parity.
 	api.LaunchCodeLimitCeilingsUnsupported:        "the runtime broker does not support hub agent limit ceilings",
 	api.LaunchCodeTelemetryEnforcementUnsupported: "the runtime broker does not support enforced telemetry; upgrade the broker",
+	api.LaunchCodeBudgetExhausted:                 "the token budget has been exhausted",
+	api.LaunchCodeBudgetUnmeasured:                "the harness is not measured for token usage under this project's policy",
 }
 
 // maxLaunchReasonLen bounds the runtime reason a failure message carries.

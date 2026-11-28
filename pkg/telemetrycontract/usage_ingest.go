@@ -187,6 +187,20 @@ type UsageEnforcement struct {
 	Message string `json:"message,omitempty"`
 }
 
+// UsageBudgetNotice carries the highest-severity active warn/exhausted
+// raw-token budget state applicable to the ingesting agent (Tokenomics P3.2 B1).
+// Omitted when all applicable budgets are ok/overridden or when
+// tokenomics.token_budgets is disabled.
+type UsageBudgetNotice struct {
+	State       string `json:"state"`
+	Limit       string `json:"limit"`
+	ScopeKind   string `json:"scopeKind"`
+	Consumed    int64  `json:"consumed"`
+	Max         int64  `json:"max"`
+	WindowEnd   string `json:"windowEnd"`
+	TokenAction string `json:"tokenAction"`
+}
+
 // UsageIngestResponse is returned by POST /api/v1/agents/{id}/usage/events
 // and POST /api/v1/brokers/{bid}/agents/{id}/usage/events.
 type UsageIngestResponse struct {
@@ -200,6 +214,9 @@ type UsageIngestResponse struct {
 	// older Hubs or replicas without an active sink, instructing sciontool to
 	// un-suppress direct container export.
 	SuppressDirectOTel bool `json:"suppress_direct_otel,omitempty"`
+	// BudgetNotice carries an additive warn/exhausted token budget notice for
+	// the running agent when tokenomics.token_budgets is enabled.
+	BudgetNotice *UsageBudgetNotice `json:"budget_notice,omitempty"`
 }
 
 // UsageCapabilitiesResponse is returned by

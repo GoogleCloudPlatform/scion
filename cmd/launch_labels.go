@@ -89,6 +89,8 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodePodDisrupted:                         "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeBrokerRestarted:                      "the runtime broker restarted during the launch",
 	api.LaunchCodeDispatchFailed:                       "the runtime broker did not accept the launch",
+	api.LaunchCodeBudgetExhausted:                      "the token budget has been exhausted",
+	api.LaunchCodeBudgetUnmeasured:                     "the harness is not measured for token usage under this project's policy",
 }
 
 // launchStepLabel returns the label for a launch step. A step this CLI does

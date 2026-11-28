@@ -679,6 +679,8 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeLaunchTimeout, api.LaunchStepAwaitingCapacity, "", "launch timed out waiting for the agent pod to be ready"},
 		{api.LaunchCodeWorkspaceNotPermitted, api.LaunchStepLaunching, "", "the agent workspace path is not permitted"},
 		{api.LaunchCodeTelemetryEnforcementUnsupported, api.LaunchStepLaunching, "", "the runtime broker does not support enforced telemetry; upgrade the broker"},
+		{api.LaunchCodeBudgetExhausted, api.LaunchStepLaunching, "", "the token budget has been exhausted"},
+		{api.LaunchCodeBudgetUnmeasured, api.LaunchStepLaunching, "", "the harness is not measured for token usage under this project's policy"},
 		// A reason that is not an enum (free text) is never reported.
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "back-off restarting ns-secret/agent-secret-pod", "the agent container keeps crashing on start"},
 	} {

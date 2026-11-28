@@ -988,6 +988,7 @@ func TestHeadlessCreate_ProjectDefaultsParityTable(t *testing.T) {
 			projectSettingDefaultResourcesDisk:           "20Gi",
 			projectSettingMaxAgentRole:                   string(AgentRoleFull),
 			projectSettingDefaultAgentRole:               string(AgentRoleBaseline),
+			projectSettingUsageUnmeasuredPolicy:          UsageUnmeasuredPolicyAllow,
 			projectSettingDefaultGCPIdentitySAIDByBroker: string(byBrokerJSON),
 		})
 	})

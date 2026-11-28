@@ -376,6 +376,9 @@ func (s *Server) wakeAgentForDMAuthorized(ctx context.Context, agent *store.Agen
 			return nil
 		}})
 		if err != nil {
+			if dmErr := tokenBudgetAdmissionDMError(err); dmErr != nil {
+				return nil, dmErr
+			}
 			if dmErr := brokerPolicyDMError(launchCtx, err); dmErr != nil {
 				return nil, dmErr
 			}

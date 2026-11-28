@@ -1762,6 +1762,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeTokenBudgetAdmissionError(w, err) {
+				return existingAgentErrored
+			}
 			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 				return existingAgentErrored
 			}
@@ -1934,6 +1937,9 @@ func (s *Server) handleExistingAgent(
 				if answered {
 					return existingAgentErrored
 				}
+				if writeTokenBudgetAdmissionError(w, err) {
+					return existingAgentErrored
+				}
 				if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 					return existingAgentErrored
 				}
@@ -2007,6 +2013,18 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
+		// Check raw-token budget exhaustion before tearing down the existing
+		// provisioning row or its secrets so a budget refusal does not lose them.
+		// Harness-dependent unmeasured policy is evaluated by the fall-through
+		// create path against the new request's resolved config.
+		if !req.ProvisionOnly {
+			if err := s.checkTokenBudgetExhaustionOnly(ctx, existingAgent, project); err != nil {
+				if !writeTokenBudgetAdmissionError(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return existingAgentErrored
+			}
+		}
 		// If the recreate flips auto -> never, check never-suspend headroom
 		// before tearing down the existing provisioning row so an over-cap
 		// request does not destroy the row and then fail at commitAgentCreate.
@@ -2222,6 +2240,9 @@ func (s *Server) handleExistingAgent(
 		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true,
 			AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 			if answered {
+				return existingAgentErrored
+			}
+			if writeTokenBudgetAdmissionError(w, err) {
 				return existingAgentErrored
 			}
 			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {

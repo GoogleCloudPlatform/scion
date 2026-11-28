@@ -249,6 +249,7 @@ var projectSettingsClearForms = map[string]projectSettingClear{
 	"defaultThinkingLevel":   clearNull,
 	"telemetryEnabled":       clearNull,
 	"trajectoryCapture":      clearEmptyString,
+	"usageUnmeasuredPolicy":  clearEmptyString,
 	"autoExposePortsEnabled": clearNull,
 	"defaultMaxTurns":        clearNull,
 	"defaultMaxModelCalls":   clearNull,

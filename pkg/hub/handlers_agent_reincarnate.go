@@ -694,6 +694,21 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		TransferMode:          moveTransferMode(move),
 		HomeReset:             plan.HomeReset,
 	}
+	// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1)
+	// before reserving capacity or claiming the reincarnation, so a refused
+	// reincarnation leaves the running agent untouched. Evaluated against the
+	// post-reincarnation AppliedConfig (fresh) so harness switches are checked
+	// against the target harness rather than the pre-reincarnation one.
+	nextAgent := *agent
+	nextAgent.AppliedConfig = fresh
+	nextAgent.HarnessConfig = ""
+	if err := s.checkTokenBudgetAdmission(ctx, &nextAgent, nil); err != nil {
+		if !writeTokenBudgetAdmissionError(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+
 	// A reincarnation starts the agent, so it is admitted like a start
 	// (ptone/scion#6033): reserve its project slot, and unless it moves its
 	// broker slot, with the cap check, before anything is claimed. Both

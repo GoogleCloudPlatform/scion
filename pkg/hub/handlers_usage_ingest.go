@@ -555,13 +555,44 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		s.UsageOTelMetrics().RecordCommittedEvents(ctx, res.InsertedEvents, attrCache)
 	}
 
-	// Post-commit raw-token budget evaluation (Tokenomics P3.1, D4): runs
-	// strictly after IngestUsageBatch commits, only for newly inserted rows,
-	// when tokenomics.token_budgets is enabled. Evaluation errors are logged
-	// and never fail or alter the ingest response.
-	if len(res.InsertedEvents) > 0 && s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+	// Post-commit raw-token budget evaluation (Tokenomics P3.1/P3.2 B1, D4):
+	// runs strictly after IngestUsageBatch commits when tokenomics.token_budgets
+	// is enabled. For batches with newly inserted rows, the notice is derived
+	// directly from the evaluator pass (zero extra queries); otherwise (empty
+	// heartbeats / all-duplicate batches) fall back to active budget state.
+	// Evaluation errors are logged and never fail or change the HTTP status.
+	var budgetNotice *telemetrycontract.UsageBudgetNotice
+	if s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
 		if eval := s.TokenBudgetEvaluator(); eval != nil {
-			eval.EvaluateIngestedEvents(ctx, res.InsertedEvents)
+			var noticeStatus *BudgetNoticeStatus
+			if len(res.InsertedEvents) > 0 {
+				noticeStatus = eval.EvaluateIngestedEventsWithNotice(ctx, res.InsertedEvents)
+			} else if agent != nil && agent.ProjectID != "" {
+				var billingUserID string
+				for _, attr := range attrCache {
+					if attr != nil && attr.BillingUserID != nil && *attr.BillingUserID != "" {
+						billingUserID = *attr.BillingUserID
+						break
+					}
+				}
+				if billingUserID == "" && len(attrCache) == 0 {
+					if uid, rerr := s.resolveAdmissionBillingUserID(ctx, agent); rerr == nil {
+						billingUserID = uid
+					}
+				}
+				noticeStatus = eval.HighestActiveBudgetNotice(ctx, agent.ProjectID, billingUserID)
+			}
+			if noticeStatus != nil {
+				budgetNotice = &telemetrycontract.UsageBudgetNotice{
+					State:       noticeStatus.State,
+					Limit:       noticeStatus.LimitName,
+					ScopeKind:   noticeStatus.ScopeKind,
+					Consumed:    noticeStatus.Consumed,
+					Max:         noticeStatus.Cap,
+					WindowEnd:   noticeStatus.WindowEnd.UTC().Format(time.RFC3339),
+					TokenAction: noticeStatus.TokenAction,
+				}
+			}
 		}
 	}
 
@@ -587,6 +618,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 			Action: telemetrycontract.UsageEnforcementActionNone,
 		},
 		SuppressDirectOTel: s.UsageOTelMetrics().HasConfiguredSink(),
+		BudgetNotice:       budgetNotice,
 	})
 }
 
