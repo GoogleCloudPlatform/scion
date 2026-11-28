@@ -1033,6 +1033,12 @@ export class ScionPageProjectDetail extends LitElement {
         color: var(--scion-primary, #3b82f6);
       }
 
+      .reincarnated-meta {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted);
+        margin-top: 0.125rem;
+      }
+
       .agent-task {
         font-size: 0.875rem;
         color: var(--scion-text, #1e293b);
@@ -4467,6 +4473,11 @@ export class ScionPageProjectDetail extends LitElement {
                         : agent.updated || agent.updatedAt)!
                     )
                   : '\u2014'}
+                ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
+                  ? html`<div class="reincarnated-meta" data-testid="agent-row-reincarnated">
+                      Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
+                    </div>`
+                  : nothing}
               </td>
             `
           : nothing}
@@ -4636,6 +4647,12 @@ export class ScionPageProjectDetail extends LitElement {
                     </a>
                   </div>`
                 : ''}
+              ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
+                ? html`<div data-testid="agent-card-reincarnated">
+                    <sl-icon name="arrow-repeat"></sl-icon>
+                    Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
+                  </div>`
+                : nothing}
             </div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}

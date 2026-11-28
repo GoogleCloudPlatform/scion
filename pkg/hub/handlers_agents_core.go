@@ -5190,6 +5190,14 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		s.neverSuspendActive(agent),
 		harnessSupportsResume,
 	)
+	var lastReincarnatedAt *time.Time
+	if ts, err := s.store.LatestCompletedAgentReincarnationAt(ctx, agent.ID); err != nil {
+		slog.WarnContext(ctx, "agent detail: reading latest completed reincarnation failed; omitting lastReincarnatedAt",
+			"agent_id", agent.ID, "error", err)
+	} else if ts != nil {
+		t := ts.UTC()
+		lastReincarnatedAt = &t
+	}
 
 	// Compute capabilities for this agent
 	resp := AgentWithCapabilities{
@@ -5203,6 +5211,7 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		SSHHostKey:          s.agentSSHHostKey(agent),
 		ActivitySince:       activitySince,
 		IdleSuspendAt:       idleSuspendAt,
+		LastReincarnatedAt:  lastReincarnatedAt,
 	}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, agentResource(agent))

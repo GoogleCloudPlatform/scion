@@ -124,3 +124,86 @@ func TestWriteAgentGetResponse_IdleSuspendFields(t *testing.T) {
 		assert.False(t, hasSA)
 	})
 }
+
+func TestWriteAgentGetResponse_LastReincarnatedAt(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	callGetResponse := func(a *store.Agent) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+a.ID, nil)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		srv.writeAgentGetResponse(rec, req, a)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		return out
+	}
+
+	t.Run("omitted when agent has no completed reincarnation", func(t *testing.T) {
+		a := &store.Agent{ID: "agent-never-reinc", Name: "never", Phase: string(state.PhaseRunning)}
+		out := callGetResponse(a)
+		_, has := out["lastReincarnatedAt"]
+		assert.False(t, has)
+	})
+
+	t.Run("returns newest completed reincarnation and ignores later failed attempt", func(t *testing.T) {
+		a := &store.Agent{ID: "agent-reinc", Name: "reinc", Phase: string(state.PhaseRunning)}
+		t1 := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+		t2 := time.Date(2026, 11, 28, 11, 15, 0, 0, time.UTC)
+		require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+			AgentID: a.ID, FromGeneration: 1, ToGeneration: 2,
+			State: store.AgentReincarnationStateCompleted, CompletedAt: &t1,
+		}))
+		require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+			AgentID: a.ID, FromGeneration: 2, ToGeneration: 3,
+			State: store.AgentReincarnationStateCompleted, CompletedAt: &t2,
+		}))
+		require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+			AgentID: a.ID, FromGeneration: 3, ToGeneration: 4,
+			State: store.AgentReincarnationStateFailed, RequestedAt: t2.Add(5 * time.Minute),
+		}))
+
+		out := callGetResponse(a)
+		assert.Equal(t, t2.Format(time.RFC3339), out["lastReincarnatedAt"])
+	})
+}
+
+func TestWriteAgentList_LastReincarnatedAt(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	t1 := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 11, 28, 11, 15, 0, 0, time.UTC)
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-reinc", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStateCompleted, CompletedAt: &t1,
+	}))
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-reinc", FromGeneration: 2, ToGeneration: 3,
+		State: store.AgentReincarnationStateCompleted, CompletedAt: &t2,
+	}))
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-reinc", FromGeneration: 3, ToGeneration: 4,
+		State: store.AgentReincarnationStateFailed, RequestedAt: t2.Add(5 * time.Minute),
+	}))
+
+	rec := httptest.NewRecorder()
+	srv.writeAgentList(ctx, rec, agentListViewFull, agentListIncludes{}, ListAgentsResponse{
+		Agents: []AgentWithCapabilities{
+			{Agent: store.Agent{ID: "agent-reinc", Name: "reinc", Phase: string(state.PhaseRunning)}},
+			{Agent: store.Agent{ID: "agent-never", Name: "never", Phase: string(state.PhaseRunning)}},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Agents []map[string]any `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Agents, 2)
+	assert.Equal(t, t2.Format(time.RFC3339), body.Agents[0]["lastReincarnatedAt"])
+	_, hasNever := body.Agents[1]["lastReincarnatedAt"]
+	assert.False(t, hasNever, "never-reincarnated agent must omit lastReincarnatedAt")
+}

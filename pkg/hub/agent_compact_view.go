@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -200,6 +202,39 @@ func legacyAgentListView(query url.Values) string {
 	return agentListViewFull
 }
 
+// setAgentListLastReincarnatedAt populates LastReincarnatedAt for a page of
+// agents with a single batched store query. Errors are logged at warn level
+// unless the request context has already ended, and never fail the list
+// response.
+func (s *Server) setAgentListLastReincarnatedAt(ctx context.Context, agents []AgentWithCapabilities) {
+	if s == nil || s.store == nil || len(agents) == 0 || ctx.Err() != nil {
+		return
+	}
+	ids := make([]string, 0, len(agents))
+	for i := range agents {
+		if agents[i].ID != "" {
+			ids = append(ids, agents[i].ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	latest, err := s.store.LatestCompletedAgentReincarnationsAt(ctx, ids)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			slog.WarnContext(ctx, "agent list: reading latest completed reincarnations failed; omitting lastReincarnatedAt",
+				"error", err)
+		}
+		return
+	}
+	for i := range agents {
+		if ts, ok := latest[agents[i].ID]; ok {
+			t := ts.UTC()
+			agents[i].LastReincarnatedAt = &t
+		}
+	}
+}
+
 // writeAgentList writes a fully built agent list response in the requested
 // view. It is the last step of every agent list response on both
 // endpoints: everything that decides membership, order, cursors, counts,
@@ -213,6 +248,7 @@ func legacyAgentListView(query url.Values) string {
 func (s *Server) writeAgentList(ctx context.Context, w http.ResponseWriter, view string, inc agentListIncludes, resp ListAgentsResponse) {
 	memo := s.setAgentListBadges(ctx, resp.Agents)
 	if view != agentListViewCompact {
+		s.setAgentListLastReincarnatedAt(ctx, resp.Agents)
 		if inc.capabilities {
 			s.populateAgentListCapabilities(ctx, resp.Agents, memo)
 		}

@@ -79,6 +79,9 @@ type AgentWithCapabilities struct {
 	// for idle auto-suspend, or nil when ineligible/blocked/disabled. Set on
 	// the single-agent GET only.
 	IdleSuspendAt *time.Time `json:"idleSuspendAt,omitempty"`
+	// LastReincarnatedAt is when the agent's most recent reincarnation
+	// completed (nil if never). Set on single-agent GET and full-view list responses.
+	LastReincarnatedAt *time.Time `json:"lastReincarnatedAt,omitempty"`
 	// TrajectoryCapture reports the effective Track 2 capture policy for the
 	// agent's project and whether the Hub opt-out lock enforces it. Set on the
 	// single-agent GET only when experiment tokenomics.trajectory_capture is on.
@@ -106,6 +109,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		Authority           *api.AgentAuthority                              `json:"authority,omitempty"`
 		ActivitySince       *time.Time                                       `json:"activitySince,omitempty"`
 		IdleSuspendAt       *time.Time                                       `json:"idleSuspendAt,omitempty"`
+		LastReincarnatedAt  *time.Time                                       `json:"lastReincarnatedAt,omitempty"`
 		TrajectoryCapture   *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
@@ -125,6 +129,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		Authority:           a.Authority,
 		ActivitySince:       a.ActivitySince,
 		IdleSuspendAt:       a.IdleSuspendAt,
+		LastReincarnatedAt:  a.LastReincarnatedAt,
 		TrajectoryCapture:   a.TrajectoryCapture,
 	})
 }
@@ -151,6 +156,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		Authority           *api.AgentAuthority                              `json:"authority,omitempty"`
 		ActivitySince       *time.Time                                       `json:"activitySince,omitempty"`
 		IdleSuspendAt       *time.Time                                       `json:"idleSuspendAt,omitempty"`
+		LastReincarnatedAt  *time.Time                                       `json:"lastReincarnatedAt,omitempty"`
 		TrajectoryCapture   *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 	}
 	var wrapper WrapperFields
@@ -173,6 +179,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.Authority = wrapper.Authority
 	a.ActivitySince = wrapper.ActivitySince
 	a.IdleSuspendAt = wrapper.IdleSuspendAt
+	a.LastReincarnatedAt = wrapper.LastReincarnatedAt
 	a.TrajectoryCapture = wrapper.TrajectoryCapture
 	return nil
 }

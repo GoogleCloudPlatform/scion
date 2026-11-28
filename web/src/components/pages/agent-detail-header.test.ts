@@ -321,3 +321,111 @@ describe('agent detail status badges', () => {
     expect(badge?.getAttribute('tooltip')).toContain('Agent says: waiting for review from X');
   });
 });
+
+describe('agent detail header labels', () => {
+  beforeAll(async () => {
+    await import('./agent-detail.js');
+  }, 30_000);
+
+  function renderHeaderHost(agent: Agent): HTMLElement {
+    const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail;
+    el.agentId = agent.id;
+    (el as unknown as { agent: Agent }).agent = agent;
+    const tpl = (el as unknown as { renderHeader(): TemplateResult }).renderHeader();
+    const host = document.createElement('div');
+    render(tpl, host);
+    return host;
+  }
+
+  it('omits header labels when the agent has no labels', () => {
+    const host = renderHeaderHost(makeAgent({ labels: undefined }));
+    expect(host.querySelector('[data-testid="agent-header-labels"]')).toBeNull();
+
+    const emptyHost = renderHeaderHost(makeAgent({ labels: {} }));
+    expect(emptyHost.querySelector('[data-testid="agent-header-labels"]')).toBeNull();
+  });
+
+  it('renders labels sorted by key immediately before the message-mode badge with title tooltips', () => {
+    const host = renderHeaderHost(
+      makeAgent({
+        labels: { zeta: 'last', alpha: 'first', middle: 'mid' },
+      })
+    );
+    const labelsEl = host.querySelector('[data-testid="agent-header-labels"]');
+    expect(labelsEl).not.toBeNull();
+
+    const tags = Array.from(labelsEl!.querySelectorAll(':scope > sl-tag'));
+    expect(tags.map((t) => t.textContent?.trim())).toEqual([
+      'alpha: first',
+      'middle: mid',
+      'zeta: last',
+    ]);
+    expect(tags.map((t) => t.getAttribute('title'))).toEqual([
+      'alpha: first',
+      'middle: mid',
+      'zeta: last',
+    ]);
+    expect(labelsEl!.querySelector('.header-labels-more')).toBeNull();
+
+    // Positioned immediately left of <scion-message-mode-badge>.
+    expect(labelsEl!.nextElementSibling?.tagName.toLowerCase()).toBe('scion-message-mode-badge');
+  });
+
+  it('renders first 3 labels inline and puts all remaining labels in the +N more tooltip', () => {
+    const host = renderHeaderHost(
+      makeAgent({
+        labels: {
+          e: 'five',
+          b: 'two',
+          d: 'four',
+          a: 'one',
+          c: 'three',
+          f: 'six',
+        },
+      })
+    );
+    const labelsEl = host.querySelector('[data-testid="agent-header-labels"]')!;
+    const inlineTags = Array.from(labelsEl.querySelectorAll(':scope > sl-tag'));
+    expect(inlineTags.map((t) => t.textContent?.trim())).toEqual(['a: one', 'b: two', 'c: three']);
+
+    const moreTag = labelsEl.querySelector('.header-labels-more');
+    expect(moreTag?.textContent?.trim()).toBe('+3 more');
+
+    const tooltipContent = labelsEl.querySelector('sl-tooltip [slot="content"]');
+    expect(tooltipContent).not.toBeNull();
+    const lines = Array.from(tooltipContent!.querySelectorAll('div')).map((d) =>
+      d.textContent?.trim()
+    );
+    expect(lines).toEqual(['d: four', 'e: five', 'f: six']);
+  });
+
+  it('renders header labels for shell agents even when message-mode badge is absent', () => {
+    const host = renderHeaderHost(
+      makeAgent({
+        harnessConfig: 'shell',
+        labels: { env: 'dev' },
+      })
+    );
+    const labelsEl = host.querySelector('[data-testid="agent-header-labels"]');
+    expect(labelsEl).not.toBeNull();
+    expect(labelsEl!.textContent).toContain('env: dev');
+    expect(host.querySelector('scion-message-mode-badge')).toBeNull();
+  });
+
+  it('does not render a Labels card in the Configuration tab', () => {
+    const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail;
+    el.agentId = 'a-1';
+    (el as unknown as { agent: Agent }).agent = makeAgent({
+      labels: { env: 'prod', team: 'core' },
+    });
+    const tpl = (
+      el as unknown as { renderConfigurationTab(): TemplateResult }
+    ).renderConfigurationTab();
+    const host = document.createElement('div');
+    render(tpl, host);
+    const titles = Array.from(host.querySelectorAll('.card-title')).map((h) =>
+      h.textContent?.trim()
+    );
+    expect(titles).not.toContain('Labels');
+  });
+});

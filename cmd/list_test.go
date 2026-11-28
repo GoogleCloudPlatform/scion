@@ -2640,6 +2640,33 @@ func TestHubclientAgent_DecodesStalledFromActivity(t *testing.T) {
 	assert.Equal(t, "working", a.StalledFromActivity)
 }
 
+func TestHubAgentToAgentInfo_LastReincarnatedAt(t *testing.T) {
+	ts := time.Date(2026, 11, 28, 11, 15, 0, 0, time.UTC)
+
+	var decoded hubclient.Agent
+	require.NoError(t, json.Unmarshal([]byte(`{"slug":"a","lastReincarnatedAt":"2026-11-28T11:15:00Z"}`), &decoded))
+	require.NotNil(t, decoded.LastReincarnatedAt)
+	assert.True(t, decoded.LastReincarnatedAt.Equal(ts))
+
+	info := hubAgentToAgentInfo(decoded)
+	require.NotNil(t, info.LastReincarnatedAt)
+	assert.True(t, info.LastReincarnatedAt.Equal(ts))
+
+	raw, err := json.Marshal(info)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	assert.Equal(t, ts.Format(time.RFC3339), m["lastReincarnatedAt"])
+
+	// Never-reincarnated agent omits lastReincarnatedAt from JSON.
+	rawNever, err := json.Marshal(hubAgentToAgentInfo(hubclient.Agent{Slug: "b"}))
+	require.NoError(t, err)
+	var mNever map[string]any
+	require.NoError(t, json.Unmarshal(rawNever, &mNever))
+	_, has := mNever["lastReincarnatedAt"]
+	assert.False(t, has)
+}
+
 func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 	oldFormat, oldPhase, oldAct, oldTmpl, oldRunning := outputFormat, filterPhase, filterActivity, filterTemplate, listRunning
 	defer func() {

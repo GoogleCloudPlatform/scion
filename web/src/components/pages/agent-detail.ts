@@ -153,7 +153,12 @@ import {
   isTrajectoryCaptureEffective,
 } from '../../shared/trajectory-capture-notice.js';
 import '../shared/secret-list.js';
-import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
+import {
+  REINCARNATE_PREPARE_MESSAGE,
+  reincarnatePrepareAvailability,
+} from '../../shared/agent-reincarnate.js';
+import '../shared/reincarnate-dialog.js';
+import type { ReincarnateChoiceDetail } from '../shared/reincarnate-dialog.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
@@ -350,6 +355,14 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private reincarnateError: string | null = null;
 
+  /** Whether the Reincarnate choice dialog is open. */
+  @state()
+  private reincarnateDialogOpen = false;
+
+  /** Inline confirmation shown after "Ask the agent to prepare" succeeds. */
+  @state()
+  private reincarnatePrepareSent = false;
+
   /** Whether the Conversations|Log toggle is in "conversations" mode (vs "log" mode). */
   @state()
   private chatViewActive = true;
@@ -434,6 +447,33 @@ export class ScionPageAgentDetail extends LitElement {
       }
 
       /* ---- Header (layout in scion-detail-header) ---- */
+      .header-labels {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35em;
+        min-width: 0;
+        max-width: 100%;
+      }
+      .header-labels sl-tag {
+        max-width: 100%;
+      }
+      .header-labels sl-tag::part(base) {
+        max-width: min(20rem, 100%);
+        overflow: hidden;
+      }
+      .header-labels sl-tag::part(content) {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .header-labels-tooltip {
+        display: flex;
+        flex-direction: column;
+        gap: 0.125rem;
+      }
       .header-meta {
         display: flex;
         flex-wrap: wrap;
@@ -744,7 +784,11 @@ export class ScionPageAgentDetail extends LitElement {
         color: var(--scion-text-secondary, #475569);
         font-size: 0.875rem;
       }
-      .reincarnate-error {
+      .reincarnate-meta {
+        margin-bottom: 1rem;
+      }
+      .reincarnate-error,
+      .reincarnate-prepare-sent {
         margin-bottom: 1rem;
       }
       .card {
@@ -1630,21 +1674,27 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   /**
+   * Renders an absolute timestamp with a muted relative suffix, or a muted
+   * empty-state label when the timestamp is unset or Go's zero time.
+   */
+  private renderTimestampValue(ts: string | undefined, emptyLabel: string) {
+    if (ts && !this.isZeroDate(ts)) {
+      return html`${this.formatDate(ts)}<span
+          style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
+          >(${this.formatRelativeTime(ts)})</span
+        >`;
+    }
+    return html`<span style="color: var(--scion-text-muted, #64748b);">${emptyLabel}</span>`;
+  }
+
+  /**
    * The Container started row inside Status -> Current State.
    */
   private renderContainerStarted(agent: Agent) {
-    const hasStarted = Boolean(agent.startedAt && !this.isZeroDate(agent.startedAt));
     return html`
       <div class="info-item" data-testid="agent-container-started">
         <span class="info-label">Container started</span>
-        <span class="info-value">
-          ${hasStarted
-            ? html`${this.formatDate(agent.startedAt!)}<span
-                  style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
-                  >(${this.formatRelativeTime(agent.startedAt!)})</span
-                >`
-            : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
-        </span>
+        <span class="info-value">${this.renderTimestampValue(agent.startedAt, '—')}</span>
       </div>
     `;
   }
@@ -2327,6 +2377,7 @@ export class ScionPageAgentDetail extends LitElement {
             ></scion-quick-message-dialog>
           `
         : nothing}
+      ${this.renderReincarnateDialog(this.agent)}
     `;
   }
 
@@ -2561,6 +2612,34 @@ export class ScionPageAgentDetail extends LitElement {
     return view?.state === 'deleting' ? view : null;
   }
 
+  private renderHeaderLabels(agent: Agent): TemplateResult | typeof nothing {
+    if (!agent.labels) return nothing;
+    const entries = Object.entries(agent.labels).sort(([a], [b]) => a.localeCompare(b));
+    if (entries.length === 0) return nothing;
+    const visible = entries.slice(0, 3);
+    const overflow = entries.slice(3);
+    return html`
+      <span class="header-labels" data-testid="agent-header-labels">
+        ${visible.map(
+          ([k, v]) =>
+            html`<sl-tag size="small" variant="neutral" title="${k}: ${v}">${k}: ${v}</sl-tag>`
+        )}
+        ${overflow.length > 0
+          ? html`
+              <sl-tooltip>
+                <div slot="content" class="header-labels-tooltip">
+                  ${overflow.map(([k, v]) => html`<div>${k}: ${v}</div>`)}
+                </div>
+                <sl-tag size="small" variant="neutral" class="header-labels-more">
+                  +${overflow.length} more
+                </sl-tag>
+              </sl-tooltip>
+            `
+          : nothing}
+      </span>
+    `;
+  }
+
   private renderHeader() {
     const agent = this.agent!;
     const isShell = this.isShellAgent(agent);
@@ -2595,6 +2674,7 @@ export class ScionPageAgentDetail extends LitElement {
           : nothing}
         <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
         <scion-authority-badge .authority=${agent.authority}></scion-authority-badge>
+        ${this.renderHeaderLabels(agent)}
         ${!isShell
           ? html`
               <scion-message-mode-badge
@@ -3368,8 +3448,8 @@ export class ScionPageAgentDetail extends LitElement {
         contextType="agent"
         contextId=${this.agentId}
       ></scion-effective-access-boundary-notice>
-      ${this.renderMessagingCard()} ${this.renderLabelsCard(agent)}
-      ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
+      ${this.renderMessagingCard()} ${this.renderHarnessModelCard(agent, cfg, inline)}
+      ${this.renderRuntimeCard(agent, inline)}
       ${this.renderGCPIdentityCard(
         cfg?.gcpIdentity,
         this.gcpServiceAccount,
@@ -3398,6 +3478,30 @@ export class ScionPageAgentDetail extends LitElement {
           Stop this agent and provision it again from its current settings and template. Use this to
           apply configuration changes.
         </p>
+        <div class="info-item reincarnate-meta" data-testid="agent-last-reincarnated">
+          <span class="info-label">Last reincarnated</span>
+          <span class="info-value"
+            >${this.renderTimestampValue(agent.lastReincarnatedAt, 'Never')}</span
+          >
+        </div>
+        ${this.reincarnatePrepareSent
+          ? html`<sl-alert
+              variant="primary"
+              open
+              closable
+              class="reincarnate-prepare-sent"
+              data-testid="reincarnate-prepare-sent"
+              @sl-after-hide=${(e: Event) => {
+                if (e.target === e.currentTarget) {
+                  this.reincarnatePrepareSent = false;
+                }
+              }}
+            >
+              <sl-icon slot="icon" name="info-circle"></sl-icon>
+              Asked the agent to prepare. It will reincarnate itself when ready; Last reincarnated
+              updates when it completes.
+            </sl-alert>`
+          : nothing}
         ${this.reincarnateError
           ? html`<sl-alert variant="danger" open class="reincarnate-error">
               <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
@@ -3409,7 +3513,7 @@ export class ScionPageAgentDetail extends LitElement {
           variant="default"
           ?loading=${this.reincarnating}
           ?disabled=${this.reincarnating}
-          @click=${() => void this.handleReincarnate()}
+          @click=${() => this.openReincarnateDialog()}
         >
           <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
           Reincarnate
@@ -3418,24 +3522,80 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
+  private renderReincarnateDialog(agent: Agent): TemplateResult {
+    const prepare = reincarnatePrepareAvailability(agent);
+    return html`
+      <scion-reincarnate-dialog
+        agentName=${agent.name || ''}
+        ?open=${this.reincarnateDialogOpen}
+        .prepareAvailable=${prepare.available}
+        prepareUnavailableReason=${prepare.reason}
+        ?busy=${this.reincarnating}
+        @reincarnate-choice=${(e: CustomEvent<ReincarnateChoiceDetail>) =>
+          void this.handleReincarnateChoice(e.detail.mode)}
+        @reincarnate-cancel=${() => {
+          if (!this.reincarnating) {
+            this.reincarnateDialogOpen = false;
+          }
+        }}
+      ></scion-reincarnate-dialog>
+    `;
+  }
+
+  private openReincarnateDialog(): void {
+    if (!this.agent || this.reincarnateBusy || this.reincarnateDialogOpen) return;
+    this.reincarnateError = null;
+    this.reincarnatePrepareSent = false;
+    this.reincarnateDialogOpen = true;
+  }
+
   /**
-   * Confirm, then POST the reincarnate action on the agent-scoped route the
-   * page uses for every other lifecycle action. The hub decodes a JSON body
-   * (an empty body is a 400), so an empty object is sent. A second click
-   * while the confirm is open or the request runs is ignored.
+   * Executes the choice made in `<scion-reincarnate-dialog>`:
+   * - `now`: POST `/api/v1/agents/{id}/reincarnate` with `{}` and refresh.
+   * - `prepare`: POST `/api/v1/agents/{id}/message` with `REINCARNATE_PREPARE_MESSAGE`,
+   *   `interrupt: false`, and `wake: true`.
    */
-  private async handleReincarnate(): Promise<void> {
+  private async handleReincarnateChoice(mode: 'now' | 'prepare'): Promise<void> {
     if (!this.agent || this.reincarnateBusy) return;
     this.reincarnateBusy = true;
-    try {
-      const confirmed = await showConfirm(REINCARNATE_CONFIRM_MESSAGE, {
-        title: 'Reincarnate agent',
-        confirmText: 'Reincarnate',
-      });
-      if (!confirmed) return;
+    this.reincarnating = true;
+    this.reincarnateError = null;
+    this.reincarnatePrepareSent = false;
+    this.reincarnateDialogOpen = false;
 
-      this.reincarnating = true;
-      this.reincarnateError = null;
+    try {
+      if (mode === 'prepare') {
+        const response = await apiFetch(`/api/v1/agents/${this.agentId}/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            structured_message: { msg: REINCARNATE_PREPARE_MESSAGE, plain: false },
+            interrupt: false,
+            wake: true,
+          }),
+        });
+        if (!response.ok) {
+          try {
+            const errorBody = (await response.clone().json()) as {
+              error?: { code?: string; details?: { reason?: string } };
+            };
+            if (errorBody.error?.code === 'message_denied' && errorBody.error?.details?.reason) {
+              this.reincarnateError = getDenialMessage(
+                errorBody.error.details.reason,
+                this.agent.name || ''
+              );
+              return;
+            }
+          } catch {
+            // Fall through to generic API error extraction.
+          }
+          this.reincarnateError = await extractApiError(response, 'Failed to send message');
+          return;
+        }
+        this.reincarnatePrepareSent = true;
+        return;
+      }
+
       const response = await apiFetch(`/api/v1/agents/${this.agentId}/reincarnate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3448,7 +3608,9 @@ export class ScionPageAgentDetail extends LitElement {
     } catch (err) {
       console.error('Failed to reincarnate agent:', err);
       this.reincarnateError = err instanceof Error ? err.message : 'Failed to reincarnate agent';
-      this.backgroundRefresh();
+      if (mode === 'now') {
+        this.backgroundRefresh();
+      }
     } finally {
       this.reincarnating = false;
       this.reincarnateBusy = false;
@@ -3723,20 +3885,6 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
-        </div>
-      </div>
-    `;
-  }
-
-  private renderLabelsCard(agent: Agent) {
-    if (!agent.labels || Object.keys(agent.labels).length === 0) return nothing;
-    return html`
-      <div class="card">
-        <h3 class="card-title">Labels</h3>
-        <div style="display: flex; flex-wrap: wrap; gap: 0.35em; padding: 0.25em 0;">
-          ${Object.entries(agent.labels).map(
-            ([k, v]) => html`<sl-tag size="small" variant="neutral">${k}: ${v}</sl-tag>`
-          )}
         </div>
       </div>
     `;
