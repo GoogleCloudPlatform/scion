@@ -259,20 +259,54 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	writeJSON(w, http.StatusOK, s.buildCommandRequestDetail(ctx, user, row, promptMsg, chatKey, nil))
+}
+
+// commandRequestDetailDeps carries optional batch-loaded lookups for
+// buildCommandRequestDetail. Nil fields fall back to per-row store loads
+// (used by GET /api/v1/command-requests/{id}).
+type commandRequestDetailDeps struct {
+	Runs               map[string]*store.CommandRun
+	ReplacedBy         map[string]*store.CommandRequest
+	HasOutput          map[string]bool
+	ExecView           *messages.CommandRequestExecContainerView
+	ExecLoaded         bool
+	ProjectName        func(id string) string
+	Approver           func(id string) (name, email string)
+	SkipResolvedExtras bool
+}
+
+// buildCommandRequestDetail assembles the CommandRequestDetailResponse for
+// viewer. Shared by GET /api/v1/command-requests/{id} and
+// GET /api/v1/users/me/command-requests so both paths preserve identical
+// field and redaction semantics.
+func (s *Server) buildCommandRequestDetail(
+	ctx context.Context,
+	viewer UserIdentity,
+	row *store.CommandRequest,
+	promptMsg *store.Message,
+	chatKey string,
+	deps *commandRequestDetailDeps,
+) messages.CommandRequestDetailResponse {
 	var replacedBy *store.CommandRequest
 	if row.ReplacedByID != "" {
-		if rb, rerr := s.store.GetCommandRequest(ctx, row.ReplacedByID); rerr == nil {
+		if deps != nil && deps.ReplacedBy != nil {
+			replacedBy = deps.ReplacedBy[row.ReplacedByID]
+		} else if rb, rerr := s.store.GetCommandRequest(ctx, row.ReplacedByID); rerr == nil {
 			replacedBy = rb
 		}
 	}
 	var runRow *store.CommandRun
-	if run, rerr := s.store.GetCommandRunByRequestID(ctx, row.ID); rerr == nil {
+	if deps != nil && deps.Runs != nil {
+		runRow = deps.Runs[row.ID]
+	} else if run, rerr := s.store.GetCommandRunByRequestID(ctx, row.ID); rerr == nil {
 		runRow = run
 	}
 
 	now := time.Now().UTC()
-	isApprover := user.ID() == row.ApproverUserID
-	canApprove := isApprover && row.Status == store.CommandRequestStatusPending && row.ExpiresAt.After(now)
+	isApprover := viewer != nil && viewer.ID() == row.ApproverUserID
+	isPending := row.Status == store.CommandRequestStatusPending && row.ExpiresAt.After(now)
+	canApprove := isApprover && isPending
 	canDismiss := canApprove
 	reason := ""
 	if !isApprover {
@@ -283,22 +317,22 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		reason = msgaction.ConflictExpired
 	}
 
+	skipResolved := deps != nil && deps.SkipResolvedExtras
+
 	var execView *messages.CommandRequestExecContainerView
-	if isApprover {
-		res, rerr := s.resolveExecContainerForIdentity(ctx, user)
-		if rerr != nil {
-			execView = &messages.CommandRequestExecContainerView{
-				State:  string(ExecContainerStateUnavailable),
-				Reason: "lookup_error",
-			}
+	if isApprover && (!skipResolved || isPending) {
+		if deps != nil && deps.ExecLoaded {
+			execView = deps.ExecView
 		} else {
-			execView = s.buildExecContainerView(ctx, user, res)
+			execView = s.resolveExecContainerViewForIdentity(ctx, viewer)
 		}
 	}
 
 	projectName := ""
 	if row.ProjectID != "" {
-		if proj, perr := s.store.GetProject(ctx, row.ProjectID); perr == nil && proj != nil {
+		if deps != nil && deps.ProjectName != nil {
+			projectName = deps.ProjectName(row.ProjectID)
+		} else if proj, perr := s.store.GetProject(ctx, row.ProjectID); perr == nil && proj != nil {
 			projectName = proj.Name
 			if projectName == "" {
 				projectName = proj.Slug
@@ -312,13 +346,15 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 	approverName := ""
 	approverEmail := ""
 	if row.ApproverUserID != "" {
-		if approver, uerr := s.store.GetUser(ctx, row.ApproverUserID); uerr == nil && approver != nil {
+		if deps != nil && deps.Approver != nil {
+			approverName, approverEmail = deps.Approver(row.ApproverUserID)
+		} else if approver, uerr := s.store.GetUser(ctx, row.ApproverUserID); uerr == nil && approver != nil {
 			approverName = approver.DisplayName
 			approverEmail = approver.Email
 		}
 	}
 	var prevUnknown *messages.CommandRequestPreviousUnknown
-	if row.Version > 1 {
+	if row.Version > 1 && (!skipResolved || isPending) {
 		if listRes, lerr := s.store.ListAgentCommandRequests(ctx, &store.ListAgentCommandRequestsOptions{
 			AgentID: row.AgentID,
 			Key:     row.Key,
@@ -340,8 +376,10 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 	}
 
 	outputAvailable := false
-	if isApprover && runRow != nil && runRow.FinishedAt != nil && user.ID() == runRow.ApproverUserID {
-		if has, herr := s.store.HasActionRunOutput(ctx, runRow.ID); herr == nil && has {
+	if isApprover && runRow != nil && runRow.FinishedAt != nil && viewer.ID() == runRow.ApproverUserID {
+		if deps != nil && deps.HasOutput != nil {
+			outputAvailable = deps.HasOutput[runRow.ID]
+		} else if has, herr := s.store.HasActionRunOutput(ctx, runRow.ID); herr == nil && has {
 			outputAvailable = true
 		}
 	}
@@ -354,7 +392,7 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 	} else {
 		reqView = commandRequestSSEView(row, replacedBy, runRow)
 	}
-	writeJSON(w, http.StatusOK, messages.CommandRequestDetailResponse{
+	return messages.CommandRequestDetailResponse{
 		Request:                reqView,
 		Run:                    reqView.Run,
 		ExecContainer:          execView,
@@ -367,8 +405,20 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		CanApprove:             canApprove,
 		CanDismiss:             canDismiss,
 		OutputAvailable:        outputAvailable,
+		PromptAvailable:        promptMsg != nil,
 		Reason:                 reason,
-	})
+	}
+}
+
+func (s *Server) resolveExecContainerViewForIdentity(ctx context.Context, viewer UserIdentity) *messages.CommandRequestExecContainerView {
+	res, rerr := s.resolveExecContainerForIdentity(ctx, viewer)
+	if rerr != nil {
+		return &messages.CommandRequestExecContainerView{
+			State:  string(ExecContainerStateUnavailable),
+			Reason: "lookup_error",
+		}
+	}
+	return s.buildExecContainerView(ctx, viewer, res)
 }
 
 func (s *Server) buildExecContainerView(ctx context.Context, actor UserIdentity, res ExecContainerResolution) *messages.CommandRequestExecContainerView {
@@ -528,10 +578,8 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Step 7: post-commit SSE card update, audit event, and handoff to executor.
-	if chatKey != "" {
-		s.publishActionUpdated(msgaction.KindCommandRequest, appRes.Request.ProjectID, appRes.Request.MessageID, chatKey, commandRequestSSEView(appRes.Request, nil, appRes.Run))
-	}
+	// Step 7: post-commit SSE card update, inbox hint, audit event, and handoff to executor.
+	s.notifyCommandRequestChanged(ctx, appRes.Request, nil, appRes.Run)
 	s.emitMessageActionEvent(ctx, &MessageActionEvent{
 		Kind:      msgaction.KindCommandRequest,
 		EventType: msgaction.CommandRequestResolvedStatus,
@@ -1177,9 +1225,7 @@ func (s *Server) handleCommandRequestDismiss(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if chatKey != "" {
-		s.publishActionUpdated(msgaction.KindCommandRequest, res.Request.ProjectID, res.Request.MessageID, chatKey, commandRequestSSEView(res.Request, nil, nil))
-	}
+	s.notifyCommandRequestChanged(ctx, res.Request, nil, nil)
 	s.emitMessageActionEvent(ctx, &MessageActionEvent{
 		Kind:      msgaction.KindCommandRequest,
 		EventType: MessageActionEventDismissed,
@@ -1347,7 +1393,7 @@ func (s *Server) handleAgentCommandRequestWithdraw(w http.ResponseWriter, r *htt
 		return
 	}
 
-	s.publishCommandRequestUpdated(ctx, res.Request, nil)
+	s.notifyCommandRequestChanged(ctx, res.Request, nil, nil)
 	s.emitMessageActionEvent(ctx, &MessageActionEvent{
 		Kind:      msgaction.KindCommandRequest,
 		EventType: MessageActionEventWithdrawn,

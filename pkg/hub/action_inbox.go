@@ -95,6 +95,18 @@ type authorizedActionRow struct {
 	Answerable bool
 }
 
+// actionInboxScopeMode selects how an actionInboxKind discovers candidate rows.
+type actionInboxScopeMode int
+
+const (
+	// scopeMemberProjects discovers rows across the viewer's member projects
+	// (capped at maxActionInboxProjects) and DMs.
+	scopeMemberProjects actionInboxScopeMode = iota
+	// scopeViewer discovers rows directly by viewer identity (e.g. named
+	// approver) without loading project memberships.
+	scopeViewer
+)
+
 // actionInboxKind is implemented once per message-action kind that participates
 // in the reusable action-inbox list endpoint and inbox summary category.
 type actionInboxKind interface {
@@ -102,9 +114,15 @@ type actionInboxKind interface {
 	Experiment() string // feature gate experiment key
 	Category() string   // inbox summary category key
 	Href() string       // web detail page href
+	Scope() actionInboxScopeMode
 	ListOpen(ctx context.Context, q actionOpenQuery) ([]actionInboxRow, error)
 	ListResolved(ctx context.Context, q actionHistoryQuery) ([]actionInboxRow, error)
-	// CanRespond is the kind's extra permission beyond recipient(answering=true).
+	// Recipient is the kind's recipient test for read (answering=false) or
+	// respond (answering=true).
+	Recipient(ctx context.Context, sc *actionInboxScope, row actionInboxRow, answering bool) bool
+	// CanRead is the kind's extra read permission beyond Recipient(false).
+	CanRead(ctx context.Context, sc *actionInboxScope, row actionInboxRow) bool
+	// CanRespond is the kind's extra permission beyond Recipient(true).
 	CanRespond(ctx context.Context, sc *actionInboxScope, row actionInboxRow) bool
 	// CardsFor groups authorized rows into the kind's existing card wire shape.
 	CardsFor(ctx context.Context, sc *actionInboxScope, rows []authorizedActionRow) (any, error)
@@ -168,7 +186,9 @@ type actionInboxScope struct {
 	srv               *Server
 	user              UserIdentity
 	viewerID          string
-	projectIDs        []string
+	scopeMode         actionInboxScopeMode
+	memberProjectIDs  []string
+	projectIDsLoaded  bool
 	truncatedProjects bool
 
 	recipientMemo map[recipientMemoKey]bool
@@ -194,8 +214,36 @@ func (s *Server) actionInboxScanCapLimit() int {
 	return actionInboxScanCap
 }
 
-func (s *Server) newActionInboxScope(ctx context.Context, user UserIdentity) (*actionInboxScope, error) {
-	memberMap, err := s.chatMemberProjectIDs(ctx, user.ID())
+func (s *Server) newActionInboxScope(ctx context.Context, user UserIdentity, mode actionInboxScopeMode) (*actionInboxScope, error) {
+	sc := &actionInboxScope{
+		srv:           s,
+		user:          user,
+		viewerID:      user.ID(),
+		scopeMode:     mode,
+		recipientMemo: make(map[recipientMemoKey]bool),
+		agentMemo:     make(map[string]*store.Agent),
+		agentLoaded:   make(map[string]bool),
+		agentPermMemo: make(map[agentPermMemoKey]bool),
+		promptMsgMemo: make(map[string]*store.Message),
+		promptLoaded:  make(map[string]bool),
+		projectNames:  make(map[string]string),
+	}
+	if mode == scopeMemberProjects {
+		if _, err := sc.projectIDs(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return sc, nil
+}
+
+func (sc *actionInboxScope) projectIDs(ctx context.Context) ([]string, error) {
+	if sc.scopeMode == scopeViewer {
+		return nil, nil
+	}
+	if sc.projectIDsLoaded {
+		return sc.memberProjectIDs, nil
+	}
+	memberMap, err := sc.srv.chatMemberProjectIDs(ctx, sc.viewerID)
 	if err != nil {
 		return nil, err
 	}
@@ -204,26 +252,16 @@ func (s *Server) newActionInboxScope(ctx context.Context, user UserIdentity) (*a
 		projIDs = append(projIDs, pid)
 	}
 	sort.Strings(projIDs)
-	maxProj := s.actionInboxMaxProjects()
+	maxProj := sc.srv.actionInboxMaxProjects()
 	truncated := false
 	if len(projIDs) > maxProj {
 		projIDs = projIDs[:maxProj]
 		truncated = true
 	}
-	return &actionInboxScope{
-		srv:               s,
-		user:              user,
-		viewerID:          user.ID(),
-		projectIDs:        projIDs,
-		truncatedProjects: truncated,
-		recipientMemo:     make(map[recipientMemoKey]bool),
-		agentMemo:         make(map[string]*store.Agent),
-		agentLoaded:       make(map[string]bool),
-		agentPermMemo:     make(map[agentPermMemoKey]bool),
-		promptMsgMemo:     make(map[string]*store.Message),
-		promptLoaded:      make(map[string]bool),
-		projectNames:      make(map[string]string),
-	}, nil
+	sc.memberProjectIDs = projIDs
+	sc.truncatedProjects = truncated
+	sc.projectIDsLoaded = true
+	return sc.memberProjectIDs, nil
 }
 
 // isMessageActionRecipient reports whether user is a recipient of a message
@@ -271,6 +309,34 @@ func (s *Server) publishDMActionInboxHint(ctx context.Context, chatKey, category
 	}
 	if kindB == "user" && idB != "" && (kindA != "user" || idB != idA) {
 		s.publishInboxHint(ctx, idB, InboxHint{Category: category})
+	}
+}
+
+func (sc *actionInboxScope) preloadPromptMessages(ctx context.Context, messageIDs []string) {
+	missing := make([]string, 0, len(messageIDs))
+	seen := make(map[string]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		if id == "" || sc.promptLoaded[id] {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		missing = append(missing, id)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	msgs, err := sc.srv.store.GetMessagesByIDs(ctx, missing)
+	if err != nil {
+		return
+	}
+	for _, id := range missing {
+		sc.promptLoaded[id] = true
+		if m := msgs[id]; m != nil {
+			sc.promptMsgMemo[id] = m
+		}
 	}
 }
 
@@ -362,18 +428,18 @@ func (sc *actionInboxScope) checkAgentPerm(ctx context.Context, agentID, project
 	return allowed
 }
 
-func (sc *actionInboxScope) isReadable(ctx context.Context, row actionInboxRow) bool {
-	if !sc.isRecipient(ctx, row.ChatKey, row.MessageID, false) {
+func (sc *actionInboxScope) isReadable(ctx context.Context, kind actionInboxKind, row actionInboxRow) bool {
+	if !kind.Recipient(ctx, sc, row, false) {
 		return false
 	}
-	return sc.checkAgentPerm(ctx, row.AgentID, row.ProjectID, ActionRead)
+	return kind.CanRead(ctx, sc, row)
 }
 
 func (sc *actionInboxScope) isAnswerable(ctx context.Context, kind actionInboxKind, row actionInboxRow) bool {
 	if !row.Class.Answerable() {
 		return false
 	}
-	if !sc.isRecipient(ctx, row.ChatKey, row.MessageID, true) {
+	if !kind.Recipient(ctx, sc, row, true) {
 		return false
 	}
 	return kind.CanRespond(ctx, sc, row)
@@ -442,9 +508,13 @@ func (sc *actionInboxScope) projectName(ctx context.Context, projectID string) s
 // handleUserMeActionInbox and actionInboxCategory so the Inbox summary count
 // and the page's counts.answerable match by construction.
 func (s *Server) collectOpenActionRows(ctx context.Context, sc *actionInboxScope, kind actionInboxKind, now time.Time) ([]authorizedActionRow, bool, error) {
+	projIDs, err := sc.projectIDs(ctx)
+	if err != nil {
+		return nil, false, err
+	}
 	scanCap := s.actionInboxScanCapLimit()
 	raw, err := kind.ListOpen(ctx, actionOpenQuery{
-		ProjectIDs: sc.projectIDs,
+		ProjectIDs: projIDs,
 		ViewerID:   sc.viewerID,
 		Now:        now,
 		ScanCap:    scanCap + 1,
@@ -458,7 +528,7 @@ func (s *Server) collectOpenActionRows(ctx context.Context, sc *actionInboxScope
 	}
 	out := make([]authorizedActionRow, 0, len(raw))
 	for _, row := range raw {
-		if !sc.isReadable(ctx, row) {
+		if !sc.isReadable(ctx, kind, row) {
 			continue
 		}
 		ans := sc.isAnswerable(ctx, kind, row)
@@ -496,7 +566,7 @@ func (s *Server) actionInboxCategory(ctx context.Context, v inboxViewer, kind ac
 		}
 	}
 
-	sc, err := s.newActionInboxScope(ctx, v.user)
+	sc, err := s.newActionInboxScope(ctx, v.user, kind.Scope())
 	if err != nil {
 		code := inboxCategoryErrorCode(ctx, err)
 		slog.Warn("inbox summary: category source failed",
@@ -895,7 +965,7 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 	ctx := withAuthzInputMemo(r.Context())
 	ctx = withChatMemberProjectIDsMemo(ctx)
 
-	sc, err := s.newActionInboxScope(ctx, user)
+	sc, err := s.newActionInboxScope(ctx, user, kind.Scope())
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1026,8 +1096,13 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 		if reqLimit > remaining+1 {
 			reqLimit = remaining + 1
 		}
+		projIDs, perr := sc.projectIDs(ctx)
+		if perr != nil {
+			writeErrorFromErr(w, perr, "")
+			return
+		}
 		batch, lerr := kind.ListResolved(ctx, actionHistoryQuery{
-			ProjectIDs:      sc.projectIDs,
+			ProjectIDs:      projIDs,
 			ViewerID:        sc.viewerID,
 			FilterProjectID: params.project,
 			FilterAgentID:   params.agent,
@@ -1054,7 +1129,7 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 			row := batch[i]
 			rCopy := row
 			lastDBRow = &rCopy
-			if !sc.isReadable(ctx, row) {
+			if !sc.isReadable(ctx, kind, row) {
 				continue
 			}
 			if !actionRowMatchesFilters(row, params) {

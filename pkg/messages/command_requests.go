@@ -451,7 +451,10 @@ type CommandRequestDetailResponse struct {
 	CanDismiss bool `json:"canDismiss,omitempty"`
 	// OutputAvailable is true for the approver when the run has finished and
 	// an action_run output row exists in exec_run_outputs.
-	OutputAvailable bool   `json:"outputAvailable,omitempty"`
+	OutputAvailable bool `json:"outputAvailable,omitempty"`
+	// PromptAvailable is true when the original prompt message still exists in
+	// chat storage so the UI can link directly to it.
+	PromptAvailable bool   `json:"promptAvailable"`
 	Reason          string `json:"reason,omitempty"`
 }
 

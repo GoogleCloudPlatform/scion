@@ -112,6 +112,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/decisions":                            "authenticated:user-decisions",
 	"/api/v1/users/me/decisions/suggestions":                "authenticated:user-decisions",
 	"/api/v1/users/me/secret-requests":                      "authenticated:user-secret-requests",
+	"/api/v1/users/me/command-requests":                     "authenticated:user-command-requests",
 	"/api/v1/users/me/inbox/summary":                        "authenticated:user-inbox-summary",
 	"/api/v1/users/me/delegations":                          "authenticated:agent-delegations",
 	"/api/v1/users/me/delegations/revoke-all":               "authenticated:agent-delegations",

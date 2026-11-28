@@ -352,21 +352,23 @@ func (s *Server) storeCommandRequestPrompt(ctx context.Context, cr *commandReque
 }
 
 func (s *Server) publishReplacedCommandRequest(ctx context.Context, res *store.CommandRequestPromptResult) {
-	if res == nil || res.Replaced == nil || res.Replaced.ID == "" {
+	if res == nil {
 		return
 	}
-	old := res.Replaced
-	chatKey := old.ChatKey
-	if chatKey == "" && old.MessageID != "" {
-		if prompt, err := s.store.GetMessage(ctx, old.MessageID); err == nil && prompt != nil {
-			chatKey = prompt.ThreadID
+	if res.Replaced != nil && res.Replaced.ID != "" {
+		old := res.Replaced
+		chatKey := old.ChatKey
+		if chatKey == "" && old.MessageID != "" {
+			if prompt, err := s.store.GetMessage(ctx, old.MessageID); err == nil && prompt != nil {
+				chatKey = prompt.ThreadID
+			}
+		}
+		if chatKey != "" {
+			view := commandRequestSSEView(old, res.Request, nil)
+			s.publishActionUpdated(msgaction.KindCommandRequest, old.ProjectID, old.MessageID, chatKey, view)
 		}
 	}
-	if chatKey == "" {
-		return
-	}
-	view := commandRequestView(old, res.Request, nil)
-	s.publishActionUpdated(msgaction.KindCommandRequest, old.ProjectID, old.MessageID, chatKey, view)
+	s.publishCommandRequestInboxHintsOnce(ctx, []*store.CommandRequest{res.Request, res.Replaced})
 }
 
 func (s *Server) emitCommandRequestSendAudit(ctx context.Context, res *store.CommandRequestPromptResult) {

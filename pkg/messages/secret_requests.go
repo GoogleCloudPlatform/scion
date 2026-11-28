@@ -373,7 +373,10 @@ type SecretRequestCardResponse struct {
 	Intro          string              `json:"intro,omitempty"`
 	Rows           []SecretRequestView `json:"rows"`
 	CanRespond     bool                `json:"canRespond"`
-	Reason         string              `json:"reason,omitempty"`
+	// PromptAvailable is true when the original prompt message still exists in
+	// chat storage so the UI can link directly to it.
+	PromptAvailable bool   `json:"promptAvailable"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // FulfillSecretRequestBody is the request body of

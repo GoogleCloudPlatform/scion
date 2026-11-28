@@ -353,6 +353,7 @@ func (s *Server) emitPostCommitDeletedAgentCommandRequests(ctx context.Context, 
 	}
 	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentScopedSecretCleanupTimeout)
 	defer cancel()
+	withdrawn := make([]*store.CommandRequest, 0, len(order))
 	for _, id := range order {
 		cr := byID[id]
 		if cr.Status != store.CommandRequestStatusWithdrawn ||
@@ -360,6 +361,7 @@ func (s *Server) emitPostCommitDeletedAgentCommandRequests(ctx context.Context, 
 			cr.WithdrawnReason != "agent deleted" {
 			continue
 		}
+		withdrawn = append(withdrawn, cr)
 		s.publishCommandRequestUpdated(postCtx, cr, nil)
 		ts := time.Now().UTC()
 		if cr.ResolvedAt != nil {
@@ -384,6 +386,7 @@ func (s *Server) emitPostCommitDeletedAgentCommandRequests(ctx context.Context, 
 			Timestamp: ts,
 		})
 	}
+	s.publishCommandRequestInboxHintsOnce(postCtx, withdrawn)
 }
 
 // snapshotAgentSecrets reads the metadata and values of all agent-scoped

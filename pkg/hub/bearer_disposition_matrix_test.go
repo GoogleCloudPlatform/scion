@@ -383,6 +383,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.agent_secrets experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestUserMeSecretRequests_AuthorizationAndScope enables the experiment and drives GET with a user access token, agent token, visitor, and session users",
 		Pin:    "TestUserMeSecretRequests_AuthorizationAndScope",
 	},
+	{OperationID: "chat.usercommandrequests.list", Method: "GET", Pattern: "/api/v1/users/me/command-requests"}: {
+		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestUserMeCommandRequests_AuthorizationAndScope enables the experiment and drives GET with a user access token, agent token, visitor, federated identity, and session users",
+		Pin:    "TestUserMeCommandRequests_AuthorizationAndScope",
+	},
 	{OperationID: "chat.commandrequest.read", Method: "GET", Pattern: "/api/v1/command-requests/{id}"}: {
 		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestCommandRequests_EndToEnd enables the experiment and drives GET with a real CLI session token, real PAT through Handler(), real agent JWT through Handler(), visitor identity, federated identity, and non-recipient",
 		Pin:    "TestCommandRequests_EndToEnd",
