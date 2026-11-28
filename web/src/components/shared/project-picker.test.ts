@@ -95,11 +95,40 @@ describe('scion-project-picker', () => {
     expect(input?.getAttribute('placeholder')).toContain('project name');
   });
 
-  it('has combobox ARIA role on input', async () => {
+  it('forwards combobox ARIA state to the inner <input> instead of the <sl-input> host', async () => {
     const el = await createElement();
-    const input = el.shadowRoot?.querySelector('sl-input');
-    expect(input?.getAttribute('role')).toBe('combobox');
-    expect(input?.getAttribute('aria-expanded')).toBe('false');
+    const slInput = el.shadowRoot?.querySelector('sl-input');
+    expect(slInput).not.toBeNull();
+    expect(slInput?.hasAttribute('aria-expanded')).toBe(false);
+    expect(slInput?.hasAttribute('role')).toBe(false);
+
+    // Attach a shadow-DOM <input> matching Shoelace's upgraded <sl-input>
+    // structure and trigger an update to verify collapsed and expanded states.
+    const inner = document.createElement('input');
+    slInput!.attachShadow({ mode: 'open' }).appendChild(inner);
+    el.requestUpdate();
+    await el.updateComplete;
+
+    expect(inner.getAttribute('role')).toBe('combobox');
+    expect(inner.getAttribute('aria-expanded')).toBe('false');
+    expect(inner.getAttribute('aria-controls')).toBe('project-picker-listbox');
+
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    (el as Record<string, unknown>)['activeDescendantIndex'] = 0;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    expect(slInput?.hasAttribute('aria-expanded')).toBe(false);
+    expect(inner.getAttribute('aria-expanded')).toBe('true');
+    expect(inner.getAttribute('aria-activedescendant')).toBe('project-picker-option-0');
+
+    (el as Record<string, unknown>)['searchOpen'] = false;
+    (el as Record<string, unknown>)['activeDescendantIndex'] = -1;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    expect(inner.getAttribute('aria-expanded')).toBe('false');
+    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
   });
 
   it('fires debounced project query on input', async () => {
