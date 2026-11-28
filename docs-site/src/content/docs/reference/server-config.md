@@ -1956,6 +1956,8 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `agent_secrets` | `user_scope_only` |
 | `broker_policy` | `admin_managed_only` (gated by experiment `hub.admin_managed_brokers`; live-applied; refused to user access tokens; env: `SCION_SERVER_BROKERPOLICY_ADMINMANAGEDONLY`; see [Admin-Managed Runtime Brokers](/scion/reference/security/#7-admin-managed-runtime-brokers)) |
 | `agent_delegation_policy` | `remove` map per boundary kind (`project`, `hub`) listing permissions removed from what may be delegated to agents; it can only narrow (`hub.agent_delegation` experiment; runtime/DB-only; refused to user access tokens) |
+| `uploads` | `hub.uploads.max_attachment_size`, `hub.uploads.max_workspace_file_size` (live-applied; see [Uploads](#uploads-serverhubuploads)) |
+| `agent_limits` | `max_turns`, `max_model_calls`, `max_duration` Hub-level run-limit ceilings (gated by experiment `agent_policy.limit_ceilings`; DB-only, no `settings.yaml` key; see [Limits](/scion/reference/agent-config/#limits)) |
 | `messaging` | `cross_project_messaging_enabled`, `offload_threshold_runes`, `attachment_delivery_max_bytes`, `attachment_inbox_retention_days`, `failed_message_retention_days` (managed via `/api/v1/admin/messaging`) |
 | `runtimes` | The whole `runtimes` map |
 | `profiles` | The whole `profiles` map |

@@ -149,6 +149,21 @@ global directory (`~/.scion/harness-configs`) and target the global Hub scope (`
 with `--scope project`). They create the config in that scope or update an existing one of the same
 name, and print the scope they used.
 
+### Inactive Hub harness configs
+
+A Hub harness config has a status: `active`, `pending` or `archived` (`scion harness-config show`
+prints it). When an agent is created or reincarnated, the Hub looks up the harness config by name in
+scope order: on a hosted Hub the global scope first, then the project scope; on a workstation Hub
+the project scope first, then the global scope. If the first match is not `active`, the request
+fails with `400 validation_error`, for example `harness config "my-claude" is not active (status:
+archived)`. The Hub does not fall through to a harness config of the same name in the other scope,
+or to a harness config on the Runtime Broker; choose an active harness config instead. A
+name with no Hub harness config at all still resolves on the Runtime Broker.
+
+Existing agents that already use an archived harness config keep working: starting, stopping and
+reading them are unaffected. Only a create or a reincarnation, including
+`scion reincarnate --harness` and a move to another Runtime Broker, checks the status.
+
 ### Listing, inspecting, and resetting
 
 ```bash

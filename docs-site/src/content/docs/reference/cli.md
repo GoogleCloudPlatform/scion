@@ -557,7 +557,7 @@ scion label my-agent env=prod --remove tmp --project my-project
 
 ### `scion set-message-mode`
 
-Sets the message mode for an agent, controlling which users and agents can send messages to it. Full-role agents can also call this command programmatically.
+Sets the message mode for an agent, controlling which users and agents can send messages to it. Full-role agents can also call this command programmatically, but only on their descendants (agents they started, directly or through their children); an agent changing its own mode or a peer's gets `403`.
 
 **Usage:** `scion set-message-mode <agent-name> <mode>`
 
@@ -612,8 +612,8 @@ Conversations are referenced using one of three forms:
 - **Commands:**
     - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name. Conversation IDs and default-agent IDs are printed in full (never truncated), so any listed ID can be passed directly as `conv:<id>`. When results are truncated by `--limit`, a notice (`Showing N of M conversations; use --limit or --all to see more.`) is written to stderr in both table and `--json` modes.
     - `get <conversation-ref>`: Show conversation details (prints full conversation and default-agent IDs).
-    - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
-    - `messages <conversation-ref>`: View messages in a conversation.
+    - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages. In text output, each attachment the caller may read follows the message as `Attachment: <name> (<size>, <content type>) scion://attachment/<id>`, with a `published as <artifact ref>` line under it for each artifact published from it. With `--save-attachments`, it also downloads them (see the flags below).
+    - `messages <conversation-ref>`: View messages in a conversation. The table's `ATT` column counts each message's attachments (blank when it has none).
     - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
     - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
     - `participants <conversation-ref>`: List participants in a conversation.
@@ -648,6 +648,11 @@ Conversations are referenced using one of three forms:
     - When results are truncated, a notice is written to stderr in both table and `--json` modes.
 - **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
+    - `--body`: Print only the message body to stdout, with no added bytes. Cannot be combined with `--save-attachments`.
+    - `--save-attachments <dir>`: Download the message's attachments into `<dir>` (created if missing; an error if it exists and is not a directory). Only attachments stored as artifacts (the `hub.attachment_artifacts` experiment) can be downloaded, from `GET /api/v1/conversations/:id/messages/:messageId/attachments/:attachmentId`. Each file's size and SHA-256 digest are checked against the Hub's record. In file names, every character other than letters, digits, `.`, `_` and `-` becomes `_`; names that collide (ignoring case) get the first 8 characters of the attachment ID inserted before the extension. An attachment already published as an artifact is skipped with a note on stderr naming the artifact (fetch it with `scion artifact get`), and one the Hub no longer serves is reported as no longer available. An existing file is not overwritten: the command saves the others and exits with an error. With `--json`, each attachment in the output carries `savedPath`, or `skipped` (`published` or `exists`).
+    - `--attachment <id|name>`: Save only the attachment with this exact ID or name (repeatable). An unmatched value fails before anything is downloaded. Requires `--save-attachments`.
+    - `--force`: Overwrite existing files. Requires `--save-attachments`.
+    - `--include-published`: Also download attachments that were published as artifacts. Requires `--save-attachments`.
 
 ### `scion conversation watch`
 

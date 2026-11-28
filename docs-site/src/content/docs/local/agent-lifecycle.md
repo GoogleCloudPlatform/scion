@@ -202,8 +202,11 @@ In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --bro
 
 With the **server-layer, alpha, default-off** [`hub.reincarnate_harness_switch`
 experiment](/scion/reference/experiments/) enabled, use `--harness <harness-config>`
-to select a named harness-config from the project's catalog, falling back to the
-global catalog. This rebuilds the agent home, even when you name its current
+to select a named harness-config from the Hub's catalog: on a hosted Hub the global
+catalog first, then the project's; on a workstation Hub the project's first, then the
+global one. If that first match is archived or pending, the reincarnation fails with
+`400` (see [Inactive Hub harness configs](/scion/reference/harness-settings/#inactive-hub-harness-configs)).
+This rebuilds the agent home, even when you name its current
 harness-config. It keeps the same agent identity and workspace.
 
 Write a handoff that captures the agent's active work, then **run `--dry-run`
