@@ -40,6 +40,7 @@ import type { LoadedDoc } from './bridge.js';
 import { definitionNodes } from './create.js';
 import type { Core, MdNode, MdRead, MdRoot } from './create.js';
 import {
+  diffOwnMarks,
   docMarkRuns,
   earlierKept,
   keyedMarks,
@@ -111,6 +112,13 @@ export class ReviewSession {
   private hazardous = true;
   /** The clean reading of the opening text, as the hub compares it. */
   private cleanSource = '';
+  /** Source offsets of marks/comments in the opening text restored as this reviewer's own. */
+  private ownStarts: ReadonlySet<number> = new Set();
+  /**
+   * Whether load(md, base) failed closed because base had earlier marks and
+   * md's clean text differed from base's clean text.
+   */
+  private _baseFailClosed = false;
 
   constructor(private readonly core: Core) {}
 
@@ -141,16 +149,19 @@ export class ReviewSession {
    * fall back to the source view: no free alphabet, a mark or note that
    * would show in another place than the source has it, or with other
    * text (the load invariant: consumedAsInSource, then readOnlyUnits).
+   *
+   * When base is provided (the unmodified base version text before this
+   * review draft), marks absent from base are restored as this reviewer's
+   * own (mine: true) while marks present in base stay earlier (mine: false).
    */
-  load(md: string): boolean {
+  load(md: string, base?: string): boolean {
     const { view, parseMd } = this.core;
-    const o = this.opening(md);
+    const diff = base !== undefined ? diffOwnMarks(md, base) : null;
+    const ownStarts: ReadonlySet<number> = diff ? diff.ownStarts : new Set();
+    const o = this.opening(md, ownStarts);
     if (!o) return false;
-    const { a, loaded, held, base, readOnly } = o;
-    // A fresh state: the opened document, with no undo history. Every
-    // mark in it is earlier: a mark is the reviewer's own only if it is
-    // made in this editor after this load (design E5/E6), and that is
-    // recorded on the mark when it is made, never worked out later.
+    const { a, loaded, held, base: baseline, readOnly } = o;
+    // A fresh state: the opened document, with no undo history.
     view.updateState(
       EditorState.create({
         doc: loaded.doc,
@@ -161,8 +172,10 @@ export class ReviewSession {
     // The state holds the opened document itself, so its baseline is the
     // one the load checks built (block nodes are matched by identity).
     this.baseline =
-      view.state.doc === loaded.doc ? base : makeBaseline(md, view.state.doc, parseMd, a);
+      view.state.doc === loaded.doc ? baseline : makeBaseline(md, view.state.doc, parseMd, a);
     this.source = md;
+    this.ownStarts = ownStarts;
+    this._baseFailClosed = diff?.failClosed ?? false;
     this.readOnly = readOnly;
     this.starts = this.baseline ? blockStarts(this.baseline) : [];
     this.held = held;
@@ -259,15 +272,22 @@ export class ReviewSession {
   }
 
   /**
-   * The marks of blocks i..j of the opening text (the whole text when i
-   * is undefined), all earlier, keyed as the save invariant compares them:
-   * each with its place in that unit's source with the marks removed
-   * (withPlace).
+   * The earlier marks of blocks i..j of the opening text (the whole text
+   * when i is undefined), excluding marks restored as this reviewer's own,
+   * keyed as the save invariant compares them: each with its place in that
+   * unit's source with the marks removed (withPlace).
    */
   private earlierOf(i?: number, j?: number, withPlace = true): string[] {
     const whole = i === undefined || j === undefined;
     const src = whole ? this.source : unitSource(this.baseline!, i, j);
-    return keyedMarks(src, () => false, withPlace).map((m) => m.key);
+    const offset = whole ? 0 : this.starts[i];
+    const mineAt =
+      this.ownStarts.size > 0
+        ? (st: number): boolean => this.ownStarts.has(offset + st)
+        : () => false;
+    return keyedMarks(src, mineAt, withPlace)
+      .filter((m) => !m.mine)
+      .map((m) => m.key);
   }
 
   /**
@@ -343,6 +363,11 @@ export class ReviewSession {
     return this.hazardous;
   }
 
+  /** Whether load(md, base) failed closed due to unmarked edits against a marked base. */
+  get baseFailClosed(): boolean {
+    return this._baseFailClosed;
+  }
+
   /** Whether md opens in the editor (the load checks, without showing it). */
   private reopens(md: string): boolean {
     return this.opening(md) !== null;
@@ -355,7 +380,7 @@ export class ReviewSession {
    * other than the critic parser's). Each distinct text is read as Markdown
    * once (Core.read) and that reading serves every check that reads it.
    */
-  private opening(md: string): Opening | null {
+  private opening(md: string, ownStarts?: ReadonlySet<number>): Opening | null {
     const { schema } = this.core;
     const reads = new Map<string, MdRead>();
     const read = (text: string): MdRead => {
@@ -382,7 +407,8 @@ export class ReviewSession {
         return read(text).doc;
       },
       schema,
-      a
+      a,
+      ownStarts
     );
     if (!loaded) return null;
     if (sentinelInDefinition(md, a, read(tagged).definitions)) return null;

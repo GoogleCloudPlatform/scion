@@ -24,6 +24,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../artifact-review/review-editor-loader.js', () => ({
+  loadReviewEditor: vi.fn(() => Promise.resolve()),
+  preloadReviewEditor: vi.fn(),
+}));
+
 import './artifact-detail.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
@@ -34,6 +39,28 @@ import {
   ARTIFACTS_REVIEW_DRAFTS_FLAG,
   resetServerFlagStateForTests,
 } from '../../utils/feature-flags.js';
+
+/** Stand-in for <scion-review-editor> so graphical-mode draft tests mount it directly. */
+class FakeReviewEditor extends HTMLElement {
+  content = '';
+  baseContent?: string;
+  scrollInset = 0;
+  hasOwnMarks(): boolean {
+    return false;
+  }
+  isComposing(): boolean {
+    return false;
+  }
+  flush(): string | null {
+    return this.content;
+  }
+  comment(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+if (!customElements.get('scion-review-editor')) {
+  customElements.define('scion-review-editor', FakeReviewEditor);
+}
 
 const PROJECT_ID = '11111111-1111-1111-1111-111111111111';
 const ARTIFACT_ID = '22222222-2222-2222-2222-222222222222';
@@ -920,7 +947,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
   });
 
-  it('resumes byte-exact from the History chip menu with no replace prompt and shows fail-closed notice in graphical view', async () => {
+  it('resumes byte-exact from the History chip menu with no replace prompt and passes baseContent in graphical view', async () => {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACT_REVIEW_EDITOR_FLAG]: true,
@@ -961,9 +988,104 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(internals.reviewNote).toBe('Byte-exact note');
     expect(internals.draftController?.currentRev).toBe(4);
 
-    // Fail-closed marks notice in graphical view (v3 §7.1).
-    const hint = el.shadowRoot!.querySelector('.hint-strip');
-    expect(hint?.textContent).toContain('read-only in the graphical view');
+    // Normal resume passes baseContent so own marks remain editable with no read-only hint.
+    expect(el.shadowRoot!.querySelector('.hint-strip')).toBeNull();
+    let editor: FakeReviewEditor | null = null;
+    await vi.waitFor(() => {
+      editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+      expect(editor).not.toBeNull();
+    });
+    expect(editor!.content).toBe(MARKED_TEXT);
+    expect(editor!.baseContent).toBe(BASE_TEXT);
+  });
+
+  it('clears baseContent on 409 conflict load when loaded.base differs from the viewed version and keeps it when base matches', async () => {
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+    };
+    const state: DraftServerState = {
+      draft: {
+        rev: 1,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    const chipMenu = el.shadowRoot!.querySelector('.draft-chip-menu sl-menu')!;
+    chipMenu.dispatchEvent(new CustomEvent('sl-select', { detail: { item: { value: 'resume' } } }));
+    await settle(el);
+
+    let editor: FakeReviewEditor | null = null;
+    await vi.waitFor(() => {
+      editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+      expect(editor).not.toBeNull();
+    });
+    expect(editor!.baseContent).toBe(BASE_TEXT);
+
+    const internals = el as unknown as {
+      reviewBaseSeq: number | null;
+      resolveConflictLoad: () => Promise<void>;
+      draftController?: {
+        resolveConflictLoad: () => Promise<ReviewDraft | null>;
+      };
+    };
+    expect(internals.reviewBaseSeq).toBe(1);
+
+    // Positive control: a 409 conflict load on the same base (seq 1) keeps baseContent.
+    const sameBaseBody = 'We ship in {~~Q3~>Q5~~}.\n';
+    internals.draftController!.resolveConflictLoad = () =>
+      Promise.resolve({
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: sameBaseBody,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:08:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      });
+    await internals.resolveConflictLoad();
+    await settle(el);
+
+    expect(internals.reviewBaseSeq).toBe(1);
+    editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+    expect(editor).not.toBeNull();
+    expect(editor!.content).toBe(sameBaseBody);
+    expect(editor!.baseContent).toBe(BASE_TEXT);
+
+    // Moved base: another device moves the draft to a newer base version (seq 2);
+    // baseContent must clear so marks from v2 are not misclassified as own.
+    const movedBaseBody = 'Newer version body {++edit++}.\n';
+    internals.draftController!.resolveConflictLoad = () =>
+      Promise.resolve({
+        rev: 3,
+        base: 2,
+        entry: 'plan.md',
+        body: movedBaseBody,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:10:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      });
+    await internals.resolveConflictLoad();
+    await settle(el);
+
+    expect(internals.reviewBaseSeq).toBe(2);
+    editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+    expect(editor).not.toBeNull();
+    expect(editor!.content).toBe(movedBaseBody);
+    expect(editor!.baseContent).toBeUndefined();
   });
 
   it('discards a draft from the History chip with confirmation and DELETE ?rev=', async () => {

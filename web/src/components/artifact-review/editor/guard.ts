@@ -31,8 +31,8 @@
 
 import type { Node } from '@milkdown/prose/model';
 
-import { parseCritic } from '../../../utils/critic.js';
-import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
+import { normalizeCritic, parseCritic, projectCritic } from '../../../utils/critic.js';
+import { COMMENT, isMine, isSubPair, markKeyOf, runKeyOf } from './schema.js';
 import type { MarkKey } from './schema.js';
 
 /** The clean reading of a node: what the text is with every mark rejected. */
@@ -117,7 +117,7 @@ export function docMarkRuns(doc: Node): MarkRun[] {
       return false;
     }
     if (run !== prev) {
-      if (prev === 'subOld' && k === 'subNew' && cur) {
+      if (isSubPair(prev, run) && cur) {
         side = 'next';
         cur.next = '';
       } else {
@@ -158,7 +158,7 @@ export function docMarkRanges(doc: Node): { from: number; to: number }[][] {
       prev = null;
       return false;
     }
-    if (run !== prev && !(prev === 'subOld' && run === 'subNew')) out.push([]);
+    if (run !== prev && !isSubPair(prev, run)) out.push([]);
     out[out.length - 1].push({ from: pos, to: pos + n.nodeSize });
     prev = run;
     return false;
@@ -367,4 +367,68 @@ export function earlierKept(
     .filter((m) => !m.mine)
     .map((m) => m.key);
   return kept.length === before.length && kept.every((k, i) => k === before[i]);
+}
+
+/**
+ * Compares the CriticMarkup marks of md against base (the base version text
+ * before this review draft) to find which marks in md belong to the current
+ * draft (mine: true) vs. earlier reviews already present in base (mine: false).
+ *
+ * - Each mark segment is keyed by kind, text, replacement new side, and its
+ *   offset in the clean projection (invariant under mark-only edits).
+ * - If base has marks and md's clean text differs from base's clean text
+ *   (e.g. an unmarked Source edit shifted clean offsets), fails closed:
+ *   returns an empty set and failClosed: true so no earlier mark is
+ *   misclassified as editable.
+ * - If base has no marks, all marks in md are own (failClosed: false).
+ * - Otherwise, untouched marks matching base (per-mark multiset by key+place)
+ *   stay earlier, and added or edited marks are returned in ownStarts (their
+ *   parseCritic segment start offsets in md).
+ */
+export function diffOwnMarks(
+  md: string,
+  base: string
+): { ownStarts: Set<number>; failClosed: boolean } {
+  const placed = (src: string): { key: string; start: number }[] => {
+    const out: { key: string; start: number }[] = [];
+    let clean = 0;
+    for (const x of parseCritic(src)) {
+      if (x.kind !== 'text') {
+        out.push({ key: `${markKey(x)}\u0000@${clean}`, start: x.start });
+      }
+      if (
+        x.kind === 'text' ||
+        x.kind === 'deletion' ||
+        x.kind === 'highlight' ||
+        x.kind === 'substitution'
+      ) {
+        clean += normalizeCritic(x.text).length;
+      }
+    }
+    return out;
+  };
+  const baseMarks = placed(base);
+  const curMarks = placed(md);
+  if (baseMarks.length === 0) {
+    return { ownStarts: new Set(curMarks.map((m) => m.start)), failClosed: false };
+  }
+  if (
+    normalizeCritic(projectCritic(md, 'clean')) !== normalizeCritic(projectCritic(base, 'clean'))
+  ) {
+    return { ownStarts: new Set(), failClosed: true };
+  }
+  const baseCounts = new Map<string, number>();
+  for (const m of baseMarks) {
+    baseCounts.set(m.key, (baseCounts.get(m.key) ?? 0) + 1);
+  }
+  const ownStarts = new Set<number>();
+  for (const m of curMarks) {
+    const left = baseCounts.get(m.key) ?? 0;
+    if (left > 0) {
+      baseCounts.set(m.key, left - 1);
+    } else {
+      ownStarts.add(m.start);
+    }
+  }
+  return { ownStarts, failClosed: false };
 }
