@@ -239,8 +239,10 @@ type messagePolicyShadowJob struct {
 }
 
 func policyUsesUnmentionedAgentSlugs(pol *store.MessagePolicy) bool {
-	return pol != nil &&
-		messagepolicy.SystemOneRuleReferencesInput(pol.SystemOneRule, messagepolicy.FieldConversationUnmentionedAgentSlug)
+	if pol == nil || pol.HasChain() {
+		return false
+	}
+	return messagepolicy.SystemOneRuleReferencesInput(pol.SystemOneRule, messagepolicy.FieldConversationUnmentionedAgentSlug)
 }
 
 func anyPolicyUsesUnmentionedAgentSlugs(pols []store.MessagePolicy) bool {
@@ -386,7 +388,7 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 	bodyTruncated := len(job.snapshot.msgBody) > messagepolicy.MaxBodyBytes
 	hasSystemOne := false
 	for i := range job.policies {
-		if strings.TrimSpace(job.policies[i].SystemOneRule) != "" {
+		if !job.policies[i].HasChain() && strings.TrimSpace(job.policies[i].SystemOneRule) != "" {
 			hasSystemOne = true
 			break
 		}
@@ -433,10 +435,12 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 			return
 		}
 		pol := &job.policies[i]
-		polHasS1 := strings.TrimSpace(pol.SystemOneRule) != ""
+		polHasS1 := !pol.HasChain() && strings.TrimSpace(pol.SystemOneRule) != ""
 		var classification messagepolicy.Classification
 		var elapsed time.Duration
 		switch {
+		case pol.HasChain():
+			classification, elapsed = s.evaluateChainPolicyOnUnit(ctx, pol, store.MessagePolicyModeShadow, 0, job.snapshot, nil, budget)
 		case !polHasS1 && bodyTruncated:
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
@@ -636,7 +640,7 @@ func (s *Server) evalPlannedSystemOnePolicies(
 	candidates := make([]messagepolicy.GroupCandidate, 0, limit)
 	for i := 0; i < limit; i++ {
 		pol := &policies[i]
-		if strings.TrimSpace(pol.SystemOneRule) == "" {
+		if pol.HasChain() || strings.TrimSpace(pol.SystemOneRule) == "" {
 			continue
 		}
 		if unmentionedUnavailable && policyUsesUnmentionedAgentSlugs(pol) {
@@ -1027,14 +1031,40 @@ func renderPolicyRejectReason(pol *store.MessagePolicy, tplData messagepolicy.Te
 	if pol == nil {
 		return messagepolicy.DefaultRejectReason("")
 	}
-	if strings.TrimSpace(pol.RejectReason) == "" {
+	raw := pol.RejectReason
+	if pol.HasChain() {
+		raw = pol.Chain.RejectReason
+	}
+	if strings.TrimSpace(raw) == "" {
 		return messagepolicy.DefaultRejectReason(pol.Name)
 	}
-	rendered := strings.TrimSpace(messagepolicy.RenderTemplate(pol.RejectReason, tplData))
+	rendered := strings.TrimSpace(messagepolicy.RenderTemplate(raw, tplData))
 	if rendered == "" {
 		return messagepolicy.DefaultRejectReason(pol.Name)
 	}
 	return rendered
+}
+
+func renderClassificationRejectReason(pol *store.MessagePolicy, cls messagepolicy.Classification, tplData messagepolicy.TemplateData) string {
+	if pol != nil && pol.HasChain() && strings.TrimSpace(cls.DecidingReason) != "" {
+		if rendered := strings.TrimSpace(messagepolicy.RenderTemplate(cls.DecidingReason, tplData)); rendered != "" {
+			return rendered
+		}
+	}
+	return renderPolicyRejectReason(pol, tplData)
+}
+
+func renderClassificationRejectRemediation(pol *store.MessagePolicy, cls messagepolicy.Classification, tplData messagepolicy.TemplateData) string {
+	if pol == nil {
+		return ""
+	}
+	if pol.HasChain() {
+		if strings.TrimSpace(cls.DecidingRemediation) != "" {
+			return messagepolicy.RenderTemplate(cls.DecidingRemediation, tplData)
+		}
+		return messagepolicy.RenderTemplate(pol.Chain.RejectRemediation, tplData)
+	}
+	return messagepolicy.RenderTemplate(pol.RejectRemediation, tplData)
 }
 
 func buildMessagePolicyDecisionRecord(
@@ -1052,7 +1082,7 @@ func buildMessagePolicyDecisionRecord(
 	case classification.Class == messagepolicy.ClassPass:
 		reason = ""
 	case classification.Class == messagepolicy.ClassViolation || outcome == messagepolicy.OutcomeReject:
-		reason = renderPolicyRejectReason(pol, tplData)
+		reason = renderClassificationRejectReason(pol, classification, tplData)
 	default:
 		reason = classification.Reason
 	}
@@ -1084,6 +1114,7 @@ func buildMessagePolicyDecisionRecord(
 		Reason:         reason,
 		CELErrorReason: celErrReason,
 		Evaluation:     messagepolicy.MarshalEvaluationProjectionWithSource(classification.Evaluation, classification.SourceEvalID),
+		Chain:          messagepolicy.MarshalChainProvenance(classification.ChainProvenance),
 		ElapsedMs:      elapsedMs,
 	}
 }

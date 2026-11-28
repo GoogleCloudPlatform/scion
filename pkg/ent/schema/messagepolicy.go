@@ -72,6 +72,9 @@ func (MessagePolicy) Fields() []ent.Field {
 		field.JSON("system_one_refs", []string{}).
 			Optional().
 			Comment("Derived System One instance and pool names referenced by system_one_rule."),
+		field.JSON("chain", &store.MessagePolicyChain{}).
+			Optional().
+			Comment("Ordered rule chain (versioned). When non-NULL, violation_rule/system_one_rule/reject_* hold a fail-closed downgrade sentinel and are ignored."),
 		field.String("on_uncertain").
 			Default("").
 			MaxLen(16).

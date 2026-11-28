@@ -47,6 +47,8 @@ const (
 	FieldCelErrorReason = "cel_error_reason"
 	// FieldEvaluation holds the string denoting the evaluation field in the database.
 	FieldEvaluation = "evaluation"
+	// FieldChain holds the string denoting the chain field in the database.
+	FieldChain = "chain"
 	// FieldElapsedMs holds the string denoting the elapsed_ms field in the database.
 	FieldElapsedMs = "elapsed_ms"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -74,6 +76,7 @@ var Columns = []string{
 	FieldReason,
 	FieldCelErrorReason,
 	FieldEvaluation,
+	FieldChain,
 	FieldElapsedMs,
 	FieldCreatedAt,
 }
@@ -121,6 +124,8 @@ var (
 	CelErrorReasonValidator func(string) error
 	// DefaultEvaluation holds the default value on creation for the "evaluation" field.
 	DefaultEvaluation string
+	// DefaultChain holds the default value on creation for the "chain" field.
+	DefaultChain string
 	// DefaultElapsedMs holds the default value on creation for the "elapsed_ms" field.
 	DefaultElapsedMs int64
 	// ElapsedMsValidator is a validator for the "elapsed_ms" field. It is called by the builders before save.
@@ -289,6 +294,11 @@ func ByCelErrorReason(opts ...sql.OrderTermOption) OrderOption {
 // ByEvaluation orders the results by the evaluation field.
 func ByEvaluation(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldEvaluation, opts...).ToFunc()
+}
+
+// ByChain orders the results by the chain field.
+func ByChain(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChain, opts...).ToFunc()
 }
 
 // ByElapsedMs orders the results by the elapsed_ms field.

@@ -70,4 +70,8 @@ package version
 //     recognize that marker in isRoleGated / readGrantFilter / ResolveLink and
 //     would treat bounded review grants as ordinary review grants that confer
 //     read access without a home-project role.
+//   - Ordered rule chains on project message policies (SP1 P1, message_policies.chain
+//     nullable JSON column + message_policy_decisions.chain provenance): chain-native
+//     policy rows store a fail-closed sentinel in violation_rule so older binaries
+//     cannot silently bypass them, and cannot honor the chain column.
 const DowngradeFloor = "nightly-20261129"

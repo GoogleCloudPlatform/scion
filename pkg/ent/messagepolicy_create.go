@@ -111,6 +111,12 @@ func (_c *MessagePolicyCreate) SetSystemOneRefs(v []string) *MessagePolicyCreate
 	return _c
 }
 
+// SetChain sets the "chain" field.
+func (_c *MessagePolicyCreate) SetChain(v *store.MessagePolicyChain) *MessagePolicyCreate {
+	_c.mutation.SetChain(v)
+	return _c
+}
+
 // SetOnUncertain sets the "on_uncertain" field.
 func (_c *MessagePolicyCreate) SetOnUncertain(v string) *MessagePolicyCreate {
 	_c.mutation.SetOnUncertain(v)
@@ -493,6 +499,10 @@ func (_c *MessagePolicyCreate) createSpec() (*MessagePolicy, *sqlgraph.CreateSpe
 		_spec.SetField(messagepolicy.FieldSystemOneRefs, field.TypeJSON, value)
 		_node.SystemOneRefs = value
 	}
+	if value, ok := _c.mutation.Chain(); ok {
+		_spec.SetField(messagepolicy.FieldChain, field.TypeJSON, value)
+		_node.Chain = value
+	}
 	if value, ok := _c.mutation.OnUncertain(); ok {
 		_spec.SetField(messagepolicy.FieldOnUncertain, field.TypeString, value)
 		_node.OnUncertain = value
@@ -684,6 +694,24 @@ func (u *MessagePolicyUpsert) UpdateSystemOneRefs() *MessagePolicyUpsert {
 // ClearSystemOneRefs clears the value of the "system_one_refs" field.
 func (u *MessagePolicyUpsert) ClearSystemOneRefs() *MessagePolicyUpsert {
 	u.SetNull(messagepolicy.FieldSystemOneRefs)
+	return u
+}
+
+// SetChain sets the "chain" field.
+func (u *MessagePolicyUpsert) SetChain(v *store.MessagePolicyChain) *MessagePolicyUpsert {
+	u.Set(messagepolicy.FieldChain, v)
+	return u
+}
+
+// UpdateChain sets the "chain" field to the value that was provided on create.
+func (u *MessagePolicyUpsert) UpdateChain() *MessagePolicyUpsert {
+	u.SetExcluded(messagepolicy.FieldChain)
+	return u
+}
+
+// ClearChain clears the value of the "chain" field.
+func (u *MessagePolicyUpsert) ClearChain() *MessagePolicyUpsert {
+	u.SetNull(messagepolicy.FieldChain)
 	return u
 }
 
@@ -977,6 +1005,27 @@ func (u *MessagePolicyUpsertOne) UpdateSystemOneRefs() *MessagePolicyUpsertOne {
 func (u *MessagePolicyUpsertOne) ClearSystemOneRefs() *MessagePolicyUpsertOne {
 	return u.Update(func(s *MessagePolicyUpsert) {
 		s.ClearSystemOneRefs()
+	})
+}
+
+// SetChain sets the "chain" field.
+func (u *MessagePolicyUpsertOne) SetChain(v *store.MessagePolicyChain) *MessagePolicyUpsertOne {
+	return u.Update(func(s *MessagePolicyUpsert) {
+		s.SetChain(v)
+	})
+}
+
+// UpdateChain sets the "chain" field to the value that was provided on create.
+func (u *MessagePolicyUpsertOne) UpdateChain() *MessagePolicyUpsertOne {
+	return u.Update(func(s *MessagePolicyUpsert) {
+		s.UpdateChain()
+	})
+}
+
+// ClearChain clears the value of the "chain" field.
+func (u *MessagePolicyUpsertOne) ClearChain() *MessagePolicyUpsertOne {
+	return u.Update(func(s *MessagePolicyUpsert) {
+		s.ClearChain()
 	})
 }
 
@@ -1457,6 +1506,27 @@ func (u *MessagePolicyUpsertBulk) UpdateSystemOneRefs() *MessagePolicyUpsertBulk
 func (u *MessagePolicyUpsertBulk) ClearSystemOneRefs() *MessagePolicyUpsertBulk {
 	return u.Update(func(s *MessagePolicyUpsert) {
 		s.ClearSystemOneRefs()
+	})
+}
+
+// SetChain sets the "chain" field.
+func (u *MessagePolicyUpsertBulk) SetChain(v *store.MessagePolicyChain) *MessagePolicyUpsertBulk {
+	return u.Update(func(s *MessagePolicyUpsert) {
+		s.SetChain(v)
+	})
+}
+
+// UpdateChain sets the "chain" field to the value that was provided on create.
+func (u *MessagePolicyUpsertBulk) UpdateChain() *MessagePolicyUpsertBulk {
+	return u.Update(func(s *MessagePolicyUpsert) {
+		s.UpdateChain()
+	})
+}
+
+// ClearChain clears the value of the "chain" field.
+func (u *MessagePolicyUpsertBulk) ClearChain() *MessagePolicyUpsertBulk {
+	return u.Update(func(s *MessagePolicyUpsert) {
+		s.ClearChain()
 	})
 }
 

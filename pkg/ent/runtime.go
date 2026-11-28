@@ -2672,39 +2672,39 @@ func init() {
 	// messagepolicy.DefaultSystemOneRule holds the default value on creation for the system_one_rule field.
 	messagepolicy.DefaultSystemOneRule = messagepolicyDescSystemOneRule.Default.(string)
 	// messagepolicyDescOnUncertain is the schema descriptor for on_uncertain field.
-	messagepolicyDescOnUncertain := messagepolicyFields[10].Descriptor()
+	messagepolicyDescOnUncertain := messagepolicyFields[11].Descriptor()
 	// messagepolicy.DefaultOnUncertain holds the default value on creation for the on_uncertain field.
 	messagepolicy.DefaultOnUncertain = messagepolicyDescOnUncertain.Default.(string)
 	// messagepolicy.OnUncertainValidator is a validator for the "on_uncertain" field. It is called by the builders before save.
 	messagepolicy.OnUncertainValidator = messagepolicyDescOnUncertain.Validators[0].(func(string) error)
 	// messagepolicyDescRejectReason is the schema descriptor for reject_reason field.
-	messagepolicyDescRejectReason := messagepolicyFields[13].Descriptor()
+	messagepolicyDescRejectReason := messagepolicyFields[14].Descriptor()
 	// messagepolicy.DefaultRejectReason holds the default value on creation for the reject_reason field.
 	messagepolicy.DefaultRejectReason = messagepolicyDescRejectReason.Default.(string)
 	// messagepolicyDescRejectRemediation is the schema descriptor for reject_remediation field.
-	messagepolicyDescRejectRemediation := messagepolicyFields[14].Descriptor()
+	messagepolicyDescRejectRemediation := messagepolicyFields[15].Descriptor()
 	// messagepolicy.DefaultRejectRemediation holds the default value on creation for the reject_remediation field.
 	messagepolicy.DefaultRejectRemediation = messagepolicyDescRejectRemediation.Default.(string)
 	// messagepolicyDescRevision is the schema descriptor for revision field.
-	messagepolicyDescRevision := messagepolicyFields[15].Descriptor()
+	messagepolicyDescRevision := messagepolicyFields[16].Descriptor()
 	// messagepolicy.DefaultRevision holds the default value on creation for the revision field.
 	messagepolicy.DefaultRevision = messagepolicyDescRevision.Default.(int64)
 	// messagepolicy.RevisionValidator is a validator for the "revision" field. It is called by the builders before save.
 	messagepolicy.RevisionValidator = messagepolicyDescRevision.Validators[0].(func(int64) error)
 	// messagepolicyDescCreatedBy is the schema descriptor for created_by field.
-	messagepolicyDescCreatedBy := messagepolicyFields[16].Descriptor()
+	messagepolicyDescCreatedBy := messagepolicyFields[17].Descriptor()
 	// messagepolicy.DefaultCreatedBy holds the default value on creation for the created_by field.
 	messagepolicy.DefaultCreatedBy = messagepolicyDescCreatedBy.Default.(string)
 	// messagepolicyDescUpdatedBy is the schema descriptor for updated_by field.
-	messagepolicyDescUpdatedBy := messagepolicyFields[17].Descriptor()
+	messagepolicyDescUpdatedBy := messagepolicyFields[18].Descriptor()
 	// messagepolicy.DefaultUpdatedBy holds the default value on creation for the updated_by field.
 	messagepolicy.DefaultUpdatedBy = messagepolicyDescUpdatedBy.Default.(string)
 	// messagepolicyDescCreatedAt is the schema descriptor for created_at field.
-	messagepolicyDescCreatedAt := messagepolicyFields[18].Descriptor()
+	messagepolicyDescCreatedAt := messagepolicyFields[19].Descriptor()
 	// messagepolicy.DefaultCreatedAt holds the default value on creation for the created_at field.
 	messagepolicy.DefaultCreatedAt = messagepolicyDescCreatedAt.Default.(func() time.Time)
 	// messagepolicyDescUpdatedAt is the schema descriptor for updated_at field.
-	messagepolicyDescUpdatedAt := messagepolicyFields[19].Descriptor()
+	messagepolicyDescUpdatedAt := messagepolicyFields[20].Descriptor()
 	// messagepolicy.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	messagepolicy.DefaultUpdatedAt = messagepolicyDescUpdatedAt.Default.(func() time.Time)
 	// messagepolicy.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
@@ -2781,14 +2781,18 @@ func init() {
 	messagepolicydecisionDescEvaluation := messagepolicydecisionFields[16].Descriptor()
 	// messagepolicydecision.DefaultEvaluation holds the default value on creation for the evaluation field.
 	messagepolicydecision.DefaultEvaluation = messagepolicydecisionDescEvaluation.Default.(string)
+	// messagepolicydecisionDescChain is the schema descriptor for chain field.
+	messagepolicydecisionDescChain := messagepolicydecisionFields[17].Descriptor()
+	// messagepolicydecision.DefaultChain holds the default value on creation for the chain field.
+	messagepolicydecision.DefaultChain = messagepolicydecisionDescChain.Default.(string)
 	// messagepolicydecisionDescElapsedMs is the schema descriptor for elapsed_ms field.
-	messagepolicydecisionDescElapsedMs := messagepolicydecisionFields[17].Descriptor()
+	messagepolicydecisionDescElapsedMs := messagepolicydecisionFields[18].Descriptor()
 	// messagepolicydecision.DefaultElapsedMs holds the default value on creation for the elapsed_ms field.
 	messagepolicydecision.DefaultElapsedMs = messagepolicydecisionDescElapsedMs.Default.(int64)
 	// messagepolicydecision.ElapsedMsValidator is a validator for the "elapsed_ms" field. It is called by the builders before save.
 	messagepolicydecision.ElapsedMsValidator = messagepolicydecisionDescElapsedMs.Validators[0].(func(int64) error)
 	// messagepolicydecisionDescCreatedAt is the schema descriptor for created_at field.
-	messagepolicydecisionDescCreatedAt := messagepolicydecisionFields[18].Descriptor()
+	messagepolicydecisionDescCreatedAt := messagepolicydecisionFields[19].Descriptor()
 	// messagepolicydecision.DefaultCreatedAt holds the default value on creation for the created_at field.
 	messagepolicydecision.DefaultCreatedAt = messagepolicydecisionDescCreatedAt.Default.(func() time.Time)
 	// messagepolicydecisionDescID is the schema descriptor for id field.

@@ -120,6 +120,11 @@ func Evaluation(v string) predicate.MessagePolicyDecision {
 	return predicate.MessagePolicyDecision(sql.FieldEQ(FieldEvaluation, v))
 }
 
+// Chain applies equality check predicate on the "chain" field. It's identical to ChainEQ.
+func Chain(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldEQ(FieldChain, v))
+}
+
 // ElapsedMs applies equality check predicate on the "elapsed_ms" field. It's identical to ElapsedMsEQ.
 func ElapsedMs(v int64) predicate.MessagePolicyDecision {
 	return predicate.MessagePolicyDecision(sql.FieldEQ(FieldElapsedMs, v))
@@ -943,6 +948,71 @@ func EvaluationEqualFold(v string) predicate.MessagePolicyDecision {
 // EvaluationContainsFold applies the ContainsFold predicate on the "evaluation" field.
 func EvaluationContainsFold(v string) predicate.MessagePolicyDecision {
 	return predicate.MessagePolicyDecision(sql.FieldContainsFold(FieldEvaluation, v))
+}
+
+// ChainEQ applies the EQ predicate on the "chain" field.
+func ChainEQ(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldEQ(FieldChain, v))
+}
+
+// ChainNEQ applies the NEQ predicate on the "chain" field.
+func ChainNEQ(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldNEQ(FieldChain, v))
+}
+
+// ChainIn applies the In predicate on the "chain" field.
+func ChainIn(vs ...string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldIn(FieldChain, vs...))
+}
+
+// ChainNotIn applies the NotIn predicate on the "chain" field.
+func ChainNotIn(vs ...string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldNotIn(FieldChain, vs...))
+}
+
+// ChainGT applies the GT predicate on the "chain" field.
+func ChainGT(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldGT(FieldChain, v))
+}
+
+// ChainGTE applies the GTE predicate on the "chain" field.
+func ChainGTE(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldGTE(FieldChain, v))
+}
+
+// ChainLT applies the LT predicate on the "chain" field.
+func ChainLT(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldLT(FieldChain, v))
+}
+
+// ChainLTE applies the LTE predicate on the "chain" field.
+func ChainLTE(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldLTE(FieldChain, v))
+}
+
+// ChainContains applies the Contains predicate on the "chain" field.
+func ChainContains(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldContains(FieldChain, v))
+}
+
+// ChainHasPrefix applies the HasPrefix predicate on the "chain" field.
+func ChainHasPrefix(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldHasPrefix(FieldChain, v))
+}
+
+// ChainHasSuffix applies the HasSuffix predicate on the "chain" field.
+func ChainHasSuffix(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldHasSuffix(FieldChain, v))
+}
+
+// ChainEqualFold applies the EqualFold predicate on the "chain" field.
+func ChainEqualFold(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldEqualFold(FieldChain, v))
+}
+
+// ChainContainsFold applies the ContainsFold predicate on the "chain" field.
+func ChainContainsFold(v string) predicate.MessagePolicyDecision {
+	return predicate.MessagePolicyDecision(sql.FieldContainsFold(FieldChain, v))
 }
 
 // ElapsedMsEQ applies the EQ predicate on the "elapsed_ms" field.

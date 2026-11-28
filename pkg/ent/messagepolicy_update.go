@@ -146,6 +146,18 @@ func (_u *MessagePolicyUpdate) ClearSystemOneRefs() *MessagePolicyUpdate {
 	return _u
 }
 
+// SetChain sets the "chain" field.
+func (_u *MessagePolicyUpdate) SetChain(v *store.MessagePolicyChain) *MessagePolicyUpdate {
+	_u.mutation.SetChain(v)
+	return _u
+}
+
+// ClearChain clears the value of the "chain" field.
+func (_u *MessagePolicyUpdate) ClearChain() *MessagePolicyUpdate {
+	_u.mutation.ClearChain()
+	return _u
+}
+
 // SetOnUncertain sets the "on_uncertain" field.
 func (_u *MessagePolicyUpdate) SetOnUncertain(v string) *MessagePolicyUpdate {
 	_u.mutation.SetOnUncertain(v)
@@ -389,6 +401,12 @@ func (_u *MessagePolicyUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if _u.mutation.SystemOneRefsCleared() {
 		_spec.ClearField(messagepolicy.FieldSystemOneRefs, field.TypeJSON)
 	}
+	if value, ok := _u.mutation.Chain(); ok {
+		_spec.SetField(messagepolicy.FieldChain, field.TypeJSON, value)
+	}
+	if _u.mutation.ChainCleared() {
+		_spec.ClearField(messagepolicy.FieldChain, field.TypeJSON)
+	}
 	if value, ok := _u.mutation.OnUncertain(); ok {
 		_spec.SetField(messagepolicy.FieldOnUncertain, field.TypeString, value)
 	}
@@ -555,6 +573,18 @@ func (_u *MessagePolicyUpdateOne) AppendSystemOneRefs(v []string) *MessagePolicy
 // ClearSystemOneRefs clears the value of the "system_one_refs" field.
 func (_u *MessagePolicyUpdateOne) ClearSystemOneRefs() *MessagePolicyUpdateOne {
 	_u.mutation.ClearSystemOneRefs()
+	return _u
+}
+
+// SetChain sets the "chain" field.
+func (_u *MessagePolicyUpdateOne) SetChain(v *store.MessagePolicyChain) *MessagePolicyUpdateOne {
+	_u.mutation.SetChain(v)
+	return _u
+}
+
+// ClearChain clears the value of the "chain" field.
+func (_u *MessagePolicyUpdateOne) ClearChain() *MessagePolicyUpdateOne {
+	_u.mutation.ClearChain()
 	return _u
 }
 
@@ -830,6 +860,12 @@ func (_u *MessagePolicyUpdateOne) sqlSave(ctx context.Context) (_node *MessagePo
 	}
 	if _u.mutation.SystemOneRefsCleared() {
 		_spec.ClearField(messagepolicy.FieldSystemOneRefs, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Chain(); ok {
+		_spec.SetField(messagepolicy.FieldChain, field.TypeJSON, value)
+	}
+	if _u.mutation.ChainCleared() {
+		_spec.ClearField(messagepolicy.FieldChain, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.OnUncertain(); ok {
 		_spec.SetField(messagepolicy.FieldOnUncertain, field.TypeString, value)

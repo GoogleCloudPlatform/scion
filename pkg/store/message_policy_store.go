@@ -78,6 +78,27 @@ const (
 	MaxMessagePolicyTemplateBytes              = 1024
 	DefaultMessagePolicyDecisionMaxAge         = 7 * 24 * time.Hour
 	DefaultMaxMessagePolicyDecisionsPerProject = 100_000
+
+	// MessagePolicyChainVersion is the current version of the versioned
+	// MessagePolicyChain JSON document stored in message_policies.chain.
+	MessagePolicyChainVersion          = 1
+	MaxMessagePolicyChainSteps         = 8
+	MaxMessagePolicyChainJudgmentSteps = 2
+	MaxMessagePolicyChainBytes         = 64 * 1024
+
+	// MessagePolicyStepRole constants enumerate ordered chain step roles (SP1 §1.2).
+	MessagePolicyStepRoleGuard     = "guard"
+	MessagePolicyStepRoleViolation = "violation"
+	MessagePolicyStepRoleJudgment  = "judgment"
+
+	// MessagePolicyStepDialect constants enumerate chain step dialects (SP1 §1.2).
+	MessagePolicyStepDialectCEL       = "cel"
+	MessagePolicyStepDialectSystemOne = "system_one"
+
+	// MessagePolicyChainSource constants distinguish authored chains from
+	// read-time mapped legacy policies on GET responses (SP1 §1.2).
+	MessagePolicyChainSourceAuthored     = "authored"
+	MessagePolicyChainSourceLegacyMapped = "legacy_mapped"
 )
 
 // IsValidMessagePolicyName reports whether name is a canonical slug suitable
@@ -214,29 +235,150 @@ func (sc MessagePolicyScope) Matches(surface, senderAgentID, recipientKind, reci
 	return true
 }
 
+// MessagePolicyAnswerMatch matches a System One question's typed answer
+// primitive in a declarative VerdictMapping (SP1 §1.2).
+type MessagePolicyAnswerMatch struct {
+	Bool   *bool  `json:"bool,omitempty"`
+	Choice string `json:"choice,omitempty"`
+}
+
+// Clone returns a deep copy of m.
+func (m *MessagePolicyAnswerMatch) Clone() *MessagePolicyAnswerMatch {
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	if m.Bool != nil {
+		b := *m.Bool
+		cp.Bool = &b
+	}
+	return &cp
+}
+
+// MessagePolicyMetricFloor specifies an optional confidence/metric floor for a
+// declarative VerdictMapping (SP1 §1.2).
+type MessagePolicyMetricFloor struct {
+	Metric string  `json:"metric"`
+	Op     string  `json:"op"`
+	Value  float64 `json:"value"`
+}
+
+// Clone returns a deep copy of f.
+func (f *MessagePolicyMetricFloor) Clone() *MessagePolicyMetricFloor {
+	if f == nil {
+		return nil
+	}
+	cp := *f
+	return &cp
+}
+
+// MessagePolicyVerdictMapping specifies declarative direct-verdict thresholds
+// on a judgment step (SP1 §1.2).
+type MessagePolicyVerdictMapping struct {
+	Question    string                    `json:"question"`
+	AnswerMatch *MessagePolicyAnswerMatch `json:"answer_match,omitempty"`
+	Metric      string                    `json:"metric"`
+	Op          string                    `json:"op"`
+	Threshold   float64                   `json:"threshold"`
+	Verdict     string                    `json:"verdict"`
+	Floor       *MessagePolicyMetricFloor `json:"floor,omitempty"`
+}
+
+// Clone returns a deep copy of vm.
+func (vm *MessagePolicyVerdictMapping) Clone() *MessagePolicyVerdictMapping {
+	if vm == nil {
+		return nil
+	}
+	cp := *vm
+	cp.AnswerMatch = vm.AnswerMatch.Clone()
+	cp.Floor = vm.Floor.Clone()
+	return &cp
+}
+
+// MessagePolicyStep is a single ordered step inside a MessagePolicyChain
+// (SP1 §1.2).
+type MessagePolicyStep struct {
+	ID             string                       `json:"id"`
+	Role           string                       `json:"role"`
+	Dialect        string                       `json:"dialect"`
+	Expr           string                       `json:"expr,omitempty"`
+	SystemOne      json.RawMessage              `json:"system_one,omitempty"`
+	Reason         string                       `json:"reason,omitempty"`
+	Remediation    string                       `json:"remediation,omitempty"`
+	VerdictMapping *MessagePolicyVerdictMapping `json:"verdict_mapping,omitempty"`
+}
+
+// Clone returns a deep copy of s.
+func (s MessagePolicyStep) Clone() MessagePolicyStep {
+	cp := s
+	if len(s.SystemOne) > 0 {
+		cp.SystemOne = slices.Clone(s.SystemOne)
+	} else {
+		cp.SystemOne = nil
+	}
+	cp.VerdictMapping = s.VerdictMapping.Clone()
+	return cp
+}
+
+// MessagePolicyChain holds the versioned ordered rule chain document stored in
+// the nullable JSON `chain` column on message_policies (SP1 §1.2).
+// When non-nil on a MessagePolicy, legacy columns (violation_rule,
+// system_one_rule, reject_reason, reject_remediation) carry a fail-closed
+// downgrade sentinel and are ignored by this binary.
+type MessagePolicyChain struct {
+	Version           int                 `json:"v"`
+	Steps             []MessagePolicyStep `json:"steps"`
+	RejectReason      string              `json:"reject_reason,omitempty"`
+	RejectRemediation string              `json:"reject_remediation,omitempty"`
+}
+
+// Clone returns a deep copy of c.
+func (c *MessagePolicyChain) Clone() *MessagePolicyChain {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	if len(c.Steps) > 0 {
+		cp.Steps = make([]MessagePolicyStep, len(c.Steps))
+		for i, st := range c.Steps {
+			cp.Steps[i] = st.Clone()
+		}
+	} else {
+		cp.Steps = nil
+	}
+	return &cp
+}
+
 // MessagePolicy is a project-scoped message admission policy record
 // (consumer design §5.3).
 type MessagePolicy struct {
-	ID                string             `json:"id"`
-	ProjectID         string             `json:"project_id"`
-	Name              string             `json:"name"`
-	Description       string             `json:"description,omitempty"`
-	Enabled           bool               `json:"enabled"`
-	Mode              string             `json:"mode"`
-	Scope             MessagePolicyScope `json:"scope"`
-	ViolationRule     string             `json:"violation_rule"`
-	SystemOneRule     string             `json:"system_one_rule,omitempty"`
-	SystemOneRefs     []string           `json:"system_one_refs,omitempty"`
-	OnUncertain       string             `json:"on_uncertain,omitempty"`
-	OnFailed          string             `json:"on_failed"`
-	OnFailedReasons   map[string]string  `json:"on_failed_reasons,omitempty"`
-	RejectReason      string             `json:"reject_reason,omitempty"`
-	RejectRemediation string             `json:"reject_remediation,omitempty"`
-	Revision          int64              `json:"revision"`
-	CreatedBy         string             `json:"created_by,omitempty"`
-	UpdatedBy         string             `json:"updated_by,omitempty"`
-	CreatedAt         time.Time          `json:"created_at"`
-	UpdatedAt         time.Time          `json:"updated_at"`
+	ID                string              `json:"id"`
+	ProjectID         string              `json:"project_id"`
+	Name              string              `json:"name"`
+	Description       string              `json:"description,omitempty"`
+	Enabled           bool                `json:"enabled"`
+	Mode              string              `json:"mode"`
+	Scope             MessagePolicyScope  `json:"scope"`
+	ViolationRule     string              `json:"violation_rule,omitempty"`
+	SystemOneRule     string              `json:"system_one_rule,omitempty"`
+	SystemOneRefs     []string            `json:"system_one_refs,omitempty"`
+	Chain             *MessagePolicyChain `json:"chain,omitempty"`
+	OnUncertain       string              `json:"on_uncertain,omitempty"`
+	OnFailed          string              `json:"on_failed"`
+	OnFailedReasons   map[string]string   `json:"on_failed_reasons,omitempty"`
+	RejectReason      string              `json:"reject_reason,omitempty"`
+	RejectRemediation string              `json:"reject_remediation,omitempty"`
+	Revision          int64               `json:"revision"`
+	CreatedBy         string              `json:"created_by,omitempty"`
+	UpdatedBy         string              `json:"updated_by,omitempty"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
+}
+
+// HasChain reports whether p is a chain-native policy (nullable chain column
+// is non-nil).
+func (p *MessagePolicy) HasChain() bool {
+	return p != nil && p.Chain != nil
 }
 
 // Clone returns a deep copy of p.
@@ -246,6 +388,7 @@ func (p *MessagePolicy) Clone() *MessagePolicy {
 	}
 	cp := *p
 	cp.Scope = p.Scope.Clone()
+	cp.Chain = p.Chain.Clone()
 	if len(p.SystemOneRefs) > 0 {
 		cp.SystemOneRefs = slices.Clone(p.SystemOneRefs)
 	} else {
@@ -292,6 +435,7 @@ type MessagePolicyDecision struct {
 	Reason         string          `json:"reason,omitempty"`
 	CELErrorReason string          `json:"cel_error_reason,omitempty"`
 	Evaluation     json.RawMessage `json:"evaluation,omitempty"`
+	Chain          json.RawMessage `json:"chain,omitempty"`
 	ElapsedMs      int64           `json:"elapsed_ms"`
 	CreatedAt      time.Time       `json:"created_at"`
 }

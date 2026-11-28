@@ -33,6 +33,8 @@ const (
 	FieldSystemOneRule = "system_one_rule"
 	// FieldSystemOneRefs holds the string denoting the system_one_refs field in the database.
 	FieldSystemOneRefs = "system_one_refs"
+	// FieldChain holds the string denoting the chain field in the database.
+	FieldChain = "chain"
 	// FieldOnUncertain holds the string denoting the on_uncertain field in the database.
 	FieldOnUncertain = "on_uncertain"
 	// FieldOnFailed holds the string denoting the on_failed field in the database.
@@ -69,6 +71,7 @@ var Columns = []string{
 	FieldViolationRule,
 	FieldSystemOneRule,
 	FieldSystemOneRefs,
+	FieldChain,
 	FieldOnUncertain,
 	FieldOnFailed,
 	FieldOnFailedReasons,

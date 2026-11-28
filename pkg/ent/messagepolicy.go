@@ -38,6 +38,8 @@ type MessagePolicy struct {
 	SystemOneRule string `json:"system_one_rule,omitempty"`
 	// Derived System One instance and pool names referenced by system_one_rule.
 	SystemOneRefs []string `json:"system_one_refs,omitempty"`
+	// Ordered rule chain (versioned). When non-NULL, violation_rule/system_one_rule/reject_* hold a fail-closed downgrade sentinel and are ignored.
+	Chain *store.MessagePolicyChain `json:"chain,omitempty"`
 	// Outcome when evaluation class is uncertain (admit or reject; empty allowed for CEL-only policies).
 	OnUncertain string `json:"on_uncertain,omitempty"`
 	// Required fallback outcome when evaluation class is failed.
@@ -66,7 +68,7 @@ func (*MessagePolicy) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case messagepolicy.FieldScope, messagepolicy.FieldSystemOneRefs, messagepolicy.FieldOnFailedReasons:
+		case messagepolicy.FieldScope, messagepolicy.FieldSystemOneRefs, messagepolicy.FieldChain, messagepolicy.FieldOnFailedReasons:
 			values[i] = new([]byte)
 		case messagepolicy.FieldEnabled:
 			values[i] = new(sql.NullBool)
@@ -155,6 +157,14 @@ func (_m *MessagePolicy) assignValues(columns []string, values []any) error {
 			} else if value != nil && len(*value) > 0 {
 				if err := json.Unmarshal(*value, &_m.SystemOneRefs); err != nil {
 					return fmt.Errorf("unmarshal field system_one_refs: %w", err)
+				}
+			}
+		case messagepolicy.FieldChain:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field chain", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Chain); err != nil {
+					return fmt.Errorf("unmarshal field chain: %w", err)
 				}
 			}
 		case messagepolicy.FieldOnUncertain:
@@ -281,6 +291,9 @@ func (_m *MessagePolicy) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("system_one_refs=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SystemOneRefs))
+	builder.WriteString(", ")
+	builder.WriteString("chain=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Chain))
 	builder.WriteString(", ")
 	builder.WriteString("on_uncertain=")
 	builder.WriteString(_m.OnUncertain)

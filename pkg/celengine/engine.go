@@ -26,6 +26,7 @@ import (
 	"cel.dev/cel-go/cel"
 	"cel.dev/cel-go/common"
 	celast "cel.dev/cel-go/common/ast"
+	"cel.dev/cel-go/common/operators"
 	"cel.dev/cel-go/common/types"
 	"cel.dev/cel-go/ext"
 	"cel.dev/cel-go/interpreter"
@@ -633,6 +634,135 @@ func (p Program) ReferencesIdent(names ...string) (bool, error) {
 		return true, walkErr
 	}
 	return found, nil
+}
+
+// MapKeyAccesses inspects p's checked AST for all free (unshadowed) references
+// to the top-level map identifier rootName (e.g. "chain"). It returns sorted
+// unique literal string keys accessed via rootName.key, has(rootName.key),
+// rootName["key"], or "key" in rootName. If rootName is accessed with a
+// non-literal key (e.g. rootName[x] or x in rootName) or used directly as a
+// value (e.g. size(chain), chain == {}), dynamic is true. Comprehension
+// iteration and accumulator variables shadow rootName inside the loop
+// condition/step/result as appropriate, but never in the range or init
+// expressions. It is conservative: a missing checked AST or empty rootName
+// returns an error.
+func (p Program) MapKeyAccesses(rootName string) ([]string, bool, error) {
+	if p.checked == nil {
+		return nil, true, errors.New("celengine: program has no checked AST")
+	}
+	if rootName == "" {
+		return nil, true, errors.New("celengine: empty root identifier name")
+	}
+	rep := p.checked.NativeRep()
+	if rep == nil || rep.Expr() == nil {
+		return nil, true, errors.New("celengine: program has empty checked AST")
+	}
+	keySet := make(map[string]struct{})
+	dynamic := false
+
+	var walk func(expr celast.Expr, parent celast.Expr, shadowed bool)
+	walk = func(expr celast.Expr, parent celast.Expr, shadowed bool) {
+		if expr == nil {
+			return
+		}
+		switch expr.Kind() {
+		case celast.IdentKind:
+			if shadowed || expr.AsIdent() != rootName {
+				return
+			}
+			if parent == nil {
+				dynamic = true
+				return
+			}
+			switch parent.Kind() {
+			case celast.SelectKind:
+				sel := parent.AsSelect()
+				if sel.Operand() != nil && sel.Operand().ID() == expr.ID() {
+					if field := sel.FieldName(); field != "" {
+						keySet[field] = struct{}{}
+						return
+					}
+				}
+				dynamic = true
+			case celast.CallKind:
+				call := parent.AsCall()
+				args := call.Args()
+				switch call.FunctionName() {
+				case operators.Index:
+					if len(args) == 2 && args[0].ID() == expr.ID() && args[1].Kind() == celast.LiteralKind {
+						if s, ok := args[1].AsLiteral().Value().(string); ok {
+							keySet[s] = struct{}{}
+							return
+						}
+					}
+					dynamic = true
+				case operators.In, operators.OldIn:
+					if len(args) == 2 && args[1].ID() == expr.ID() && args[0].Kind() == celast.LiteralKind {
+						if s, ok := args[0].AsLiteral().Value().(string); ok {
+							keySet[s] = struct{}{}
+							return
+						}
+					}
+					dynamic = true
+				default:
+					dynamic = true
+				}
+			default:
+				dynamic = true
+			}
+		case celast.SelectKind:
+			sel := expr.AsSelect()
+			walk(sel.Operand(), expr, shadowed)
+		case celast.CallKind:
+			call := expr.AsCall()
+			if call.IsMemberFunction() {
+				walk(call.Target(), expr, shadowed)
+			}
+			for _, arg := range call.Args() {
+				walk(arg, expr, shadowed)
+			}
+		case celast.ListKind:
+			for _, el := range expr.AsList().Elements() {
+				walk(el, expr, shadowed)
+			}
+		case celast.MapKind:
+			for _, ent := range expr.AsMap().Entries() {
+				me := ent.AsMapEntry()
+				walk(me.Key(), expr, shadowed)
+				walk(me.Value(), expr, shadowed)
+			}
+		case celast.StructKind:
+			for _, f := range expr.AsStruct().Fields() {
+				walk(f.AsStructField().Value(), expr, shadowed)
+			}
+		case celast.ComprehensionKind:
+			comp := expr.AsComprehension()
+			// Range and accumulator init evaluate in the outer scope.
+			walk(comp.IterRange(), expr, shadowed)
+			walk(comp.AccuInit(), expr, shadowed)
+			accuShadowed := shadowed || comp.AccuVar() == rootName
+			loopShadowed := accuShadowed ||
+				comp.IterVar() == rootName ||
+				(comp.IterVar2() != "" && comp.IterVar2() == rootName)
+			walk(comp.LoopCondition(), expr, accuShadowed)
+			walk(comp.LoopStep(), expr, loopShadowed)
+			walk(comp.Result(), expr, accuShadowed)
+		case celast.LiteralKind:
+			// No identifiers inside literals.
+		default:
+			// Conservative fallback for any unexpected AST node kind.
+			dynamic = true
+		}
+	}
+
+	walk(rep.Expr(), nil, false)
+
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys, dynamic, nil
 }
 
 // nowFunc is the clock used to measure Program.Eval elapsed wall-clock time;

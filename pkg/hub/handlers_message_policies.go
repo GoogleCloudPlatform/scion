@@ -67,10 +67,13 @@ const (
 )
 
 // MessagePolicyResponse represents a persisted message policy along with the
-// build's surface enforcement coverage declaration (consumer design §5.3, §11).
+// build's surface enforcement coverage declaration (consumer design §5.3, §11;
+// SP1 §1.2).
 type MessagePolicyResponse struct {
 	store.MessagePolicy
-	Coverage messagepolicy.CoverageInfo `json:"coverage"`
+	Steps       []store.MessagePolicyStep  `json:"steps,omitempty"`
+	ChainSource string                     `json:"chain_source,omitempty"`
+	Coverage    messagepolicy.CoverageInfo `json:"coverage"`
 }
 
 // ListMessagePoliciesResponse is the response for GET .../message-policies.
@@ -91,36 +94,38 @@ type ListMessagePolicyDecisionsResponse struct {
 
 // CreateMessagePolicyRequest is the request body for POST .../message-policies.
 type CreateMessagePolicyRequest struct {
-	Name              string                   `json:"name"`
-	Description       string                   `json:"description,omitempty"`
-	Enabled           *bool                    `json:"enabled,omitempty"`
-	Mode              string                   `json:"mode,omitempty"`
-	Scope             store.MessagePolicyScope `json:"scope"`
-	ViolationRule     string                   `json:"violation_rule"`
-	SystemOneRule     string                   `json:"system_one_rule,omitempty"`
-	OnUncertain       string                   `json:"on_uncertain,omitempty"`
-	OnFailed          string                   `json:"on_failed"`
-	OnFailedReasons   map[string]string        `json:"on_failed_reasons,omitempty"`
-	RejectReason      string                   `json:"reject_reason,omitempty"`
-	RejectRemediation string                   `json:"reject_remediation,omitempty"`
+	Name              string                    `json:"name"`
+	Description       string                    `json:"description,omitempty"`
+	Enabled           *bool                     `json:"enabled,omitempty"`
+	Mode              string                    `json:"mode,omitempty"`
+	Scope             store.MessagePolicyScope  `json:"scope"`
+	ViolationRule     string                    `json:"violation_rule"`
+	SystemOneRule     string                    `json:"system_one_rule,omitempty"`
+	Steps             []store.MessagePolicyStep `json:"steps,omitempty"`
+	OnUncertain       string                    `json:"on_uncertain,omitempty"`
+	OnFailed          string                    `json:"on_failed"`
+	OnFailedReasons   map[string]string         `json:"on_failed_reasons,omitempty"`
+	RejectReason      string                    `json:"reject_reason,omitempty"`
+	RejectRemediation string                    `json:"reject_remediation,omitempty"`
 }
 
 // PatchMessagePolicyRequest is the request body for PATCH .../message-policies/{policyId}.
 // Omitted pointer fields preserve the stored policy's value.
 type PatchMessagePolicyRequest struct {
-	Name              *string                   `json:"name,omitempty"`
-	Description       *string                   `json:"description,omitempty"`
-	Enabled           *bool                     `json:"enabled,omitempty"`
-	Mode              *string                   `json:"mode,omitempty"`
-	Scope             *store.MessagePolicyScope `json:"scope,omitempty"`
-	ViolationRule     *string                   `json:"violation_rule,omitempty"`
-	SystemOneRule     *string                   `json:"system_one_rule,omitempty"`
-	OnUncertain       *string                   `json:"on_uncertain,omitempty"`
-	OnFailed          *string                   `json:"on_failed,omitempty"`
-	OnFailedReasons   *map[string]string        `json:"on_failed_reasons,omitempty"`
-	RejectReason      *string                   `json:"reject_reason,omitempty"`
-	RejectRemediation *string                   `json:"reject_remediation,omitempty"`
-	ExpectedRevision  int64                     `json:"expected_revision,omitempty"`
+	Name              *string                    `json:"name,omitempty"`
+	Description       *string                    `json:"description,omitempty"`
+	Enabled           *bool                      `json:"enabled,omitempty"`
+	Mode              *string                    `json:"mode,omitempty"`
+	Scope             *store.MessagePolicyScope  `json:"scope,omitempty"`
+	ViolationRule     *string                    `json:"violation_rule,omitempty"`
+	SystemOneRule     *string                    `json:"system_one_rule,omitempty"`
+	Steps             *[]store.MessagePolicyStep `json:"steps,omitempty"`
+	OnUncertain       *string                    `json:"on_uncertain,omitempty"`
+	OnFailed          *string                    `json:"on_failed,omitempty"`
+	OnFailedReasons   *map[string]string         `json:"on_failed_reasons,omitempty"`
+	RejectReason      *string                    `json:"reject_reason,omitempty"`
+	RejectRemediation *string                    `json:"reject_remediation,omitempty"`
+	ExpectedRevision  int64                      `json:"expected_revision,omitempty"`
 }
 
 // MessagePolicyInlineSpec carries an inline policy definition for the policy
@@ -132,6 +137,7 @@ type MessagePolicyInlineSpec struct {
 	Scope             *store.MessagePolicyScope `json:"scope,omitempty"`
 	ViolationRule     string                    `json:"violation_rule,omitempty"`
 	SystemOneRule     string                    `json:"system_one_rule,omitempty"`
+	Steps             []store.MessagePolicyStep `json:"steps,omitempty"`
 	OnUncertain       string                    `json:"on_uncertain,omitempty"`
 	OnFailed          string                    `json:"on_failed,omitempty"`
 	OnFailedReasons   map[string]string         `json:"on_failed_reasons,omitempty"`
@@ -171,6 +177,7 @@ type TestMessagePolicyRequest struct {
 	Scope             *store.MessagePolicyScope `json:"scope,omitempty"`
 	ViolationRule     string                    `json:"violation_rule,omitempty"`
 	SystemOneRule     string                    `json:"system_one_rule,omitempty"`
+	Steps             []store.MessagePolicyStep `json:"steps,omitempty"`
 	OnUncertain       string                    `json:"on_uncertain,omitempty"`
 	OnFailed          string                    `json:"on_failed,omitempty"`
 	OnFailedReasons   map[string]string         `json:"on_failed_reasons,omitempty"`
@@ -203,13 +210,77 @@ type TestMessagePolicyResponse struct {
 	BodyTruncated  bool            `json:"body_truncated"`
 }
 
-func toMessagePolicyResponse(pol store.MessagePolicy) MessagePolicyResponse {
+func cloneStoreSteps(in []store.MessagePolicyStep) []store.MessagePolicyStep {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.MessagePolicyStep, len(in))
+	for i, st := range in {
+		out[i] = st.Clone()
+	}
+	return out
+}
+
+func chainStepSpecsFromStore(in []store.MessagePolicyStep) []messagepolicy.ChainStepSpec {
+	out := make([]messagepolicy.ChainStepSpec, len(in))
+	for i, st := range in {
+		out[i] = messagepolicy.ChainStepSpec{
+			ID:                st.ID,
+			Role:              st.Role,
+			Dialect:           st.Dialect,
+			Expr:              st.Expr,
+			SystemOne:         st.SystemOne,
+			Reason:            st.Reason,
+			Remediation:       st.Remediation,
+			HasVerdictMapping: st.VerdictMapping != nil,
+		}
+	}
+	return out
+}
+
+func toMessagePolicyResponse(pol store.MessagePolicy, chainsEnabled, isList bool) MessagePolicyResponse {
 	cp := pol.Clone()
 	if cp.Scope.Surfaces == nil {
 		cp.Scope.Surfaces = []string{}
 	}
+	var steps []store.MessagePolicyStep
+	var chainSource string
+	if cp.HasChain() {
+		steps = cloneStoreSteps(cp.Chain.Steps)
+		chainSource = store.MessagePolicyChainSourceAuthored
+		// O3: do not expose the legacy downgrade sentinel (violation_rule: "true")
+		// as the user's rule on API responses, and avoid duplicating steps under
+		// both `chain` and top-level `steps`. Storage is unchanged.
+		cp.ViolationRule = ""
+		cp.SystemOneRule = ""
+		cp.RejectReason = cp.Chain.RejectReason
+		cp.RejectRemediation = cp.Chain.RejectRemediation
+		cp.Chain = nil
+	} else if chainsEnabled {
+		// O2: gate the legacy_mapped steps projection on hub.message_policy_chains
+		// so legacy responses remain byte-identical while the flag is off, and
+		// omit system_one payloads from list projections to keep list responses bounded.
+		mapped := messagepolicy.MapLegacyToSteps(cp.ViolationRule, cp.SystemOneRule)
+		steps = make([]store.MessagePolicyStep, len(mapped))
+		for i, ms := range mapped {
+			sysOne := ms.SystemOne
+			if isList {
+				sysOne = nil
+			}
+			steps[i] = store.MessagePolicyStep{
+				ID:        ms.ID,
+				Role:      ms.Role,
+				Dialect:   ms.Dialect,
+				Expr:      ms.Expr,
+				SystemOne: sysOne,
+			}
+		}
+		chainSource = store.MessagePolicyChainSourceLegacyMapped
+	}
 	return MessagePolicyResponse{
 		MessagePolicy: *cp,
+		Steps:         steps,
+		ChainSource:   chainSource,
 		Coverage:      messagepolicy.Coverage(),
 	}
 }
@@ -880,9 +951,10 @@ func (s *Server) handleListMessagePolicies(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	chainsOn := s.experimentEnabled(experiments.MessagePolicyChains)
 	out := make([]MessagePolicyResponse, 0, len(res.Items))
 	for i := range res.Items {
-		out = append(out, toMessagePolicyResponse(res.Items[i]))
+		out = append(out, toMessagePolicyResponse(res.Items[i], chainsOn, true))
 	}
 	writeJSON(w, http.StatusOK, ListMessagePoliciesResponse{
 		Policies:   out,
@@ -898,7 +970,7 @@ func (s *Server) handleGetMessagePolicy(w http.ResponseWriter, r *http.Request, 
 		writeErrorFromErr(w, err, "Message policy")
 		return
 	}
-	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*pol))
+	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*pol, s.experimentEnabled(experiments.MessagePolicyChains), false))
 }
 
 func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, actorID string) {
@@ -910,12 +982,22 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	hasSteps := req.Steps != nil
+	if hasSteps && !s.experimentEnabled(experiments.MessagePolicyChains) {
+		writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+			"message policy rule chains are disabled (hub.message_policy_chains)",
+			map[string]interface{}{"experiment": experiments.MessagePolicyChains})
+		return
+	}
+
 	spec := messagepolicy.AuthoringSpec{
 		Name:              strings.TrimSpace(req.Name),
 		Mode:              req.Mode,
 		Scope:             authoringScopeFromStore(req.Scope),
 		ViolationRule:     req.ViolationRule,
 		SystemOneRule:     req.SystemOneRule,
+		HasSteps:          hasSteps,
+		Steps:             chainStepSpecsFromStore(req.Steps),
 		OnUncertain:       strings.TrimSpace(req.OnUncertain),
 		OnFailed:          strings.TrimSpace(req.OnFailed),
 		OnFailedReasons:   req.OnFailedReasons,
@@ -956,6 +1038,20 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		CreatedBy:         actorID,
 		UpdatedBy:         actorID,
 	}
+	if hasSteps {
+		policy.Chain = &store.MessagePolicyChain{
+			Version:           store.MessagePolicyChainVersion,
+			Steps:             cloneStoreSteps(req.Steps),
+			RejectReason:      req.RejectReason,
+			RejectRemediation: req.RejectRemediation,
+		}
+		// D6 downgrade safeguard: store fail-closed sentinel in legacy columns.
+		policy.ViolationRule = messagepolicy.ChainLegacySentinelViolationRule
+		policy.SystemOneRule = ""
+		policy.SystemOneRefs = nil
+		policy.RejectReason = messagepolicy.ChainLegacySentinelRejectReason(spec.Name)
+		policy.RejectRemediation = ""
+	}
 
 	if err := s.store.CreateMessagePolicy(ctx, policy); err != nil {
 		switch {
@@ -984,7 +1080,7 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		AfterSummary: string(afterSummary),
 	})
 
-	writeJSON(w, http.StatusCreated, toMessagePolicyResponse(*policy))
+	writeJSON(w, http.StatusCreated, toMessagePolicyResponse(*policy, s.experimentEnabled(experiments.MessagePolicyChains), false))
 }
 
 func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, policyRef, actorID string) {
@@ -1010,6 +1106,47 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 				"expected_revision": req.ExpectedRevision,
 				"current_revision":  prevRevision,
 			})
+		return
+	}
+
+	isChainPatch := existing.HasChain() || req.Steps != nil
+	if isChainPatch && !s.experimentEnabled(experiments.MessagePolicyChains) {
+		// D3: when hub.message_policy_chains is off, disable-only PATCH on an
+		// existing chain policy stays allowed; all other chain edits/conversions
+		// return 400 experiment_disabled.
+		isDisableOnly := existing.HasChain() &&
+			req.Steps == nil &&
+			req.Enabled != nil && !*req.Enabled &&
+			req.Name == nil &&
+			req.Description == nil &&
+			req.Mode == nil &&
+			req.Scope == nil &&
+			req.ViolationRule == nil &&
+			req.SystemOneRule == nil &&
+			req.OnUncertain == nil &&
+			req.OnFailed == nil &&
+			req.OnFailedReasons == nil &&
+			req.RejectReason == nil &&
+			req.RejectRemediation == nil
+		if !isDisableOnly {
+			writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+				"message policy rule chains are disabled (hub.message_policy_chains)",
+				map[string]interface{}{"experiment": experiments.MessagePolicyChains})
+			return
+		}
+	}
+	if existing.HasChain() && (req.ViolationRule != nil || req.SystemOneRule != nil) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"cannot set violation_rule or system_one_rule on a chain policy; delete and recreate instead",
+			map[string]interface{}{"field": "steps"})
+		return
+	}
+	if !existing.HasChain() && req.Steps != nil {
+		// P1 boundary: legacy read-time projection is display-only; legacy->chain
+		// conversion via PATCH arrives in P3.
+		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeNotYetSupported,
+			"converting a legacy policy to a rule chain via PATCH is not yet supported in this phase",
+			map[string]interface{}{"field": "steps"})
 		return
 	}
 
@@ -1062,39 +1199,97 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 	// Pin optimistic concurrency against the revision we loaded.
 	candidate.Revision = prevRevision
 
-	spec := messagepolicy.AuthoringSpec{
-		Name:              candidate.Name,
-		Mode:              candidate.Mode,
-		Scope:             authoringScopeFromStore(candidate.Scope),
-		ViolationRule:     candidate.ViolationRule,
-		SystemOneRule:     candidate.SystemOneRule,
-		OnUncertain:       candidate.OnUncertain,
-		OnFailed:          candidate.OnFailed,
-		OnFailedReasons:   candidate.OnFailedReasons,
-		RejectReason:      candidate.RejectReason,
-		RejectRemediation: candidate.RejectRemediation,
-	}
-	// Attach project.ID to ctx so System One authoring enforces the P2b
-	// per-project instance allowlist and runtime binding checks via
-	// ValidateCompiled, except when PATCH results in a disabled policy with
-	// system_one_rule unchanged (so operators can always disable a policy
-	// whose provider binding is broken, ambiguous, deleted, or while
-	// hub.system_one is off). Re-enabling or changing system_one_rule stays
-	// strictly validated.
-	authorCtx := ctx
-	if req.SystemOneRule == nil && !candidate.Enabled {
-		spec.SkipSystemOneBindingValidation = true
+	if isChainPatch {
+		if candidate.Chain == nil {
+			candidate.Chain = &store.MessagePolicyChain{
+				Version:           store.MessagePolicyChainVersion,
+				RejectReason:      candidate.RejectReason,
+				RejectRemediation: candidate.RejectRemediation,
+			}
+		} else {
+			if req.RejectReason != nil {
+				candidate.Chain.RejectReason = *req.RejectReason
+			}
+			if req.RejectRemediation != nil {
+				candidate.Chain.RejectRemediation = *req.RejectRemediation
+			}
+		}
+		if req.Steps != nil {
+			candidate.Chain.Steps = cloneStoreSteps(*req.Steps)
+		}
+		// D6 downgrade safeguard: maintain fail-closed sentinel in legacy columns.
+		candidate.ViolationRule = messagepolicy.ChainLegacySentinelViolationRule
+		candidate.SystemOneRule = ""
+		candidate.SystemOneRefs = nil
+		candidate.RejectReason = messagepolicy.ChainLegacySentinelRejectReason(candidate.Name)
+		candidate.RejectRemediation = ""
+
+		// Skip full chain validation only on disable-only PATCH while the chains flag is off.
+		if s.experimentEnabled(experiments.MessagePolicyChains) {
+			spec := messagepolicy.AuthoringSpec{
+				Name:              candidate.Name,
+				Mode:              candidate.Mode,
+				Scope:             authoringScopeFromStore(candidate.Scope),
+				HasSteps:          true,
+				Steps:             chainStepSpecsFromStore(candidate.Chain.Steps),
+				OnUncertain:       candidate.OnUncertain,
+				OnFailed:          candidate.OnFailed,
+				OnFailedReasons:   candidate.OnFailedReasons,
+				RejectReason:      candidate.Chain.RejectReason,
+				RejectRemediation: candidate.Chain.RejectRemediation,
+			}
+			// If converting from legacy, reject mixing steps with explicit violation_rule/system_one_rule.
+			if req.Steps != nil {
+				if req.ViolationRule != nil {
+					spec.ViolationRule = *req.ViolationRule
+				}
+				if req.SystemOneRule != nil {
+					spec.SystemOneRule = *req.SystemOneRule
+				}
+			}
+			mode, canonicalSenderIDs, canonicalRecipientIDs, ok := s.validateMessagePolicyAuthoring(systemoneruntime.WithEvalProjectID(ctx, project.ID), w, project.ID, spec, true)
+			if !ok {
+				return
+			}
+			candidate.Mode = mode
+			candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
+			candidate.Scope.Recipient.AgentIDs = canonicalRecipientIDs
+		}
 	} else {
-		authorCtx = systemoneruntime.WithEvalProjectID(ctx, project.ID)
+		spec := messagepolicy.AuthoringSpec{
+			Name:              candidate.Name,
+			Mode:              candidate.Mode,
+			Scope:             authoringScopeFromStore(candidate.Scope),
+			ViolationRule:     candidate.ViolationRule,
+			SystemOneRule:     candidate.SystemOneRule,
+			OnUncertain:       candidate.OnUncertain,
+			OnFailed:          candidate.OnFailed,
+			OnFailedReasons:   candidate.OnFailedReasons,
+			RejectReason:      candidate.RejectReason,
+			RejectRemediation: candidate.RejectRemediation,
+		}
+		// Attach project.ID to ctx so System One authoring enforces the P2b
+		// per-project instance allowlist and runtime binding checks via
+		// ValidateCompiled, except when PATCH results in a disabled policy with
+		// system_one_rule unchanged (so operators can always disable a policy
+		// whose provider binding is broken, ambiguous, deleted, or while
+		// hub.system_one is off). Re-enabling or changing system_one_rule stays
+		// strictly validated.
+		authorCtx := ctx
+		if req.SystemOneRule == nil && !candidate.Enabled {
+			spec.SkipSystemOneBindingValidation = true
+		} else {
+			authorCtx = systemoneruntime.WithEvalProjectID(ctx, project.ID)
+		}
+		mode, canonicalSenderIDs, canonicalRecipientIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
+		if !ok {
+			return
+		}
+		candidate.Mode = mode
+		candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
+		candidate.Scope.Recipient.AgentIDs = canonicalRecipientIDs
+		candidate.SystemOneRefs = messagepolicy.ExtractSystemOneRefs(candidate.SystemOneRule)
 	}
-	mode, canonicalSenderIDs, canonicalRecipientIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
-	if !ok {
-		return
-	}
-	candidate.Mode = mode
-	candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
-	candidate.Scope.Recipient.AgentIDs = canonicalRecipientIDs
-	candidate.SystemOneRefs = messagepolicy.ExtractSystemOneRefs(candidate.SystemOneRule)
 
 	if err := s.store.UpdateMessagePolicy(ctx, candidate); err != nil {
 		switch {
@@ -1135,7 +1330,7 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 		AfterSummary:  string(afterSummary),
 	})
 
-	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*candidate))
+	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*candidate, s.experimentEnabled(experiments.MessagePolicyChains), false))
 }
 
 func (s *Server) handleDeleteMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, policyRef string) {
@@ -1201,6 +1396,7 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		Scope:             req.Scope,
 		ViolationRule:     req.ViolationRule,
 		SystemOneRule:     req.SystemOneRule,
+		Steps:             req.Steps,
 		OnUncertain:       req.OnUncertain,
 		OnFailed:          req.OnFailed,
 		OnFailedReasons:   req.OnFailedReasons,
@@ -1209,6 +1405,13 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 	if req.Policy != nil {
 		inline = *req.Policy
+	}
+
+	if (stored != nil && stored.HasChain()) || len(inline.Steps) > 0 {
+		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeNotYetSupported,
+			"per-step /test for rule-chain policies is not yet supported in this phase",
+			map[string]interface{}{"field": "steps"})
+		return
 	}
 
 	var effective store.MessagePolicy

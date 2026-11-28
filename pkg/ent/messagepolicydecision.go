@@ -50,6 +50,8 @@ type MessagePolicyDecision struct {
 	CelErrorReason string `json:"cel_error_reason,omitempty"`
 	// Optional JSON projection of systemone.Evaluation (empty in M1; content-free).
 	Evaluation string `json:"evaluation,omitempty"`
+	// Optional content-free JSON provenance of rule-chain evaluation (deciding step, through, engine_class, consumer_handling, step trace).
+	Chain string `json:"chain,omitempty"`
 	// ElapsedMs holds the value of the "elapsed_ms" field.
 	ElapsedMs int64 `json:"elapsed_ms,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
@@ -66,7 +68,7 @@ func (*MessagePolicyDecision) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case messagepolicydecision.FieldPolicyRevision, messagepolicydecision.FieldElapsedMs:
 			values[i] = new(sql.NullInt64)
-		case messagepolicydecision.FieldPolicyName, messagepolicydecision.FieldMode, messagepolicydecision.FieldSurface, messagepolicydecision.FieldSenderKind, messagepolicydecision.FieldSenderID, messagepolicydecision.FieldRecipientKind, messagepolicydecision.FieldRecipientID, messagepolicydecision.FieldClass, messagepolicydecision.FieldAction, messagepolicydecision.FieldReason, messagepolicydecision.FieldCelErrorReason, messagepolicydecision.FieldEvaluation:
+		case messagepolicydecision.FieldPolicyName, messagepolicydecision.FieldMode, messagepolicydecision.FieldSurface, messagepolicydecision.FieldSenderKind, messagepolicydecision.FieldSenderID, messagepolicydecision.FieldRecipientKind, messagepolicydecision.FieldRecipientID, messagepolicydecision.FieldClass, messagepolicydecision.FieldAction, messagepolicydecision.FieldReason, messagepolicydecision.FieldCelErrorReason, messagepolicydecision.FieldEvaluation, messagepolicydecision.FieldChain:
 			values[i] = new(sql.NullString)
 		case messagepolicydecision.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -190,6 +192,12 @@ func (_m *MessagePolicyDecision) assignValues(columns []string, values []any) er
 			} else if value.Valid {
 				_m.Evaluation = value.String
 			}
+		case messagepolicydecision.FieldChain:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field chain", values[i])
+			} else if value.Valid {
+				_m.Chain = value.String
+			}
 		case messagepolicydecision.FieldElapsedMs:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
 				return fmt.Errorf("unexpected type %T for field elapsed_ms", values[i])
@@ -287,6 +295,9 @@ func (_m *MessagePolicyDecision) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("evaluation=")
 	builder.WriteString(_m.Evaluation)
+	builder.WriteString(", ")
+	builder.WriteString("chain=")
+	builder.WriteString(_m.Chain)
 	builder.WriteString(", ")
 	builder.WriteString("elapsed_ms=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ElapsedMs))

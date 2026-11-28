@@ -16,9 +16,11 @@ package messagepolicy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -29,14 +31,40 @@ import (
 	s1spec "github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
-// Authoring validation error codes (brief §§1, 1a, 3, 5).
+// Authoring validation error codes (brief §§1, 1a, 3, 5; SP1 §1.2).
 const (
-	ErrCodeValidation         = "validation_error"
-	ErrCodeNotYetSupported    = "not_yet_supported"
-	ErrCodeSurfaceNotCovered  = "surface_not_covered"
-	ErrCodeInvalidRule        = "invalid_rule"
-	ErrCodeUnsupportedDialect = "unsupported_dialect"
+	ErrCodeValidation           = "validation_error"
+	ErrCodeNotYetSupported      = "not_yet_supported"
+	ErrCodeSurfaceNotCovered    = "surface_not_covered"
+	ErrCodeInvalidRule          = "invalid_rule"
+	ErrCodeUnsupportedDialect   = "unsupported_dialect"
+	ErrCodeRoleDialectMismatch  = "role_dialect_mismatch"
+	ErrCodeChainHasNoVerdict    = "chain_has_no_verdict"
+	ErrCodeForwardReference     = "forward_reference"
+	ErrCodeDynamicStepReference = "dynamic_step_reference"
+	ErrCodeReservedName         = "reserved_name"
 )
+
+var (
+	chainStepIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+	// reservedLegacyJudgmentNames are unavailable in new chain CEL steps (A1 §5).
+	reservedLegacyJudgmentNames = []string{
+		"judgment_flags",
+		"judgment_labels",
+		"judgment_scores",
+	}
+)
+
+// IsValidChainStepID reports whether id matches ^[a-z][a-z0-9_]{0,31}$.
+func IsValidChainStepID(id string) bool {
+	return chainStepIDPattern.MatchString(id)
+}
+
+// IsP1ChainSurface reports whether surface is supported for chain-native
+// policies in P1 (E1/E2 origin surfaces only: agent_to_user, agent_to_conversation).
+func IsP1ChainSurface(surface string) bool {
+	return surface == SurfaceAgentToUser || surface == SurfaceAgentToConversation
+}
 
 // ValidationError carries structured authoring-time validation details so HTTP
 // handlers can return precise 400 error payloads (including CEL compile line,
@@ -159,10 +187,13 @@ var knownCELFailureReasons = func() []string {
 		celengine.ReasonType,
 		ReasonBodyTruncated,
 		ReasonBudgetExhausted,
+		ReasonChainDisabled,
+		ReasonChainUnsupported,
 		ReasonCompileError,
 		ReasonFactsUnavailable,
 		ReasonInvalidCompiledProgram,
 		ReasonPolicyCapExceeded,
+		ReasonSystemOneCapExceeded,
 		ReasonUninitializedProgram,
 		ReasonUnsupportedDialect,
 		ruleengine.ReasonConsumerNotRegistered,
@@ -265,6 +296,19 @@ type Scope struct {
 	Recipient RecipientSelector
 }
 
+// ChainStepSpec mirrors one authored chain step for authoring validation
+// without importing pkg/store.
+type ChainStepSpec struct {
+	ID                string          `json:"id"`
+	Role              string          `json:"role"`
+	Dialect           string          `json:"dialect"`
+	Expr              string          `json:"expr,omitempty"`
+	SystemOne         json.RawMessage `json:"system_one,omitempty"`
+	Reason            string          `json:"reason,omitempty"`
+	Remediation       string          `json:"remediation,omitempty"`
+	HasVerdictMapping bool            `json:"-"`
+}
+
 // AuthoringSpec carries the author-supplied fields of a message policy for
 // validation and compilation at create/update/test time.
 type AuthoringSpec struct {
@@ -273,6 +317,8 @@ type AuthoringSpec struct {
 	Scope             Scope
 	ViolationRule     string
 	SystemOneRule     string
+	HasSteps          bool
+	Steps             []ChainStepSpec
 	OnUncertain       string
 	OnFailed          string
 	OnFailedReasons   map[string]string
@@ -309,6 +355,14 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 			Code:    ErrCodeValidation,
 			Field:   "mode",
 			Message: fmt.Sprintf("mode must be %q or %q", ModeShadow, ModeEnforce),
+		}
+	}
+
+	if spec.HasSteps && (strings.TrimSpace(spec.ViolationRule) != "" || strings.TrimSpace(spec.SystemOneRule) != "") {
+		return "", &ValidationError{
+			Code:    ErrCodeValidation,
+			Field:   "steps",
+			Message: "steps cannot be combined with violation_rule or system_one_rule",
 		}
 	}
 
@@ -443,6 +497,13 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 		return "", err
 	}
 
+	if spec.HasSteps {
+		if err := e.validateChainAuthoring(ctx, mode, spec); err != nil {
+			return "", err
+		}
+		return mode, nil
+	}
+
 	if strings.TrimSpace(spec.ViolationRule) == "" {
 		return "", &ValidationError{
 			Code:    ErrCodeInvalidRule,
@@ -527,4 +588,261 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 	}
 
 	return mode, nil
+}
+
+func (e *Evaluator) validateChainAuthoring(ctx context.Context, mode string, spec AuthoringSpec) error {
+	if strings.TrimSpace(spec.ViolationRule) != "" || strings.TrimSpace(spec.SystemOneRule) != "" {
+		return &ValidationError{
+			Code:    ErrCodeValidation,
+			Field:   "steps",
+			Message: "steps cannot be combined with violation_rule or system_one_rule",
+		}
+	}
+	if len(spec.Steps) == 0 || len(spec.Steps) > MaxChainSteps {
+		return &ValidationError{
+			Code:    ErrCodeValidation,
+			Field:   "steps",
+			Message: fmt.Sprintf("steps must contain between 1 and %d elements", MaxChainSteps),
+		}
+	}
+
+	// P1 phase acceptance invariant (SP1 §1.1, policy-chain-plan §5):
+	// enforce mode and E1/E2 origin surfaces only; CEL steps only.
+	if mode != ModeEnforce {
+		return &ValidationError{
+			Code:    ErrCodeNotYetSupported,
+			Field:   "mode",
+			Message: fmt.Sprintf("chain policies only support mode %q in this phase (got %q)", ModeEnforce, mode),
+		}
+	}
+	for _, s := range spec.Scope.Surfaces {
+		if !IsP1ChainSurface(s) {
+			return &ValidationError{
+				Code:    ErrCodeNotYetSupported,
+				Field:   "scope.surfaces",
+				Message: fmt.Sprintf("chain policies do not yet support surface %q (supported in P1: %s, %s)", s, SurfaceAgentToUser, SurfaceAgentToConversation),
+			}
+		}
+	}
+
+	// Bound total canonical chain JSON size (<= 64 KiB).
+	if raw, err := json.Marshal(struct {
+		Version           int             `json:"v"`
+		Steps             []ChainStepSpec `json:"steps"`
+		RejectReason      string          `json:"reject_reason,omitempty"`
+		RejectRemediation string          `json:"reject_remediation,omitempty"`
+	}{
+		Version:           ChainVersion,
+		Steps:             spec.Steps,
+		RejectReason:      spec.RejectReason,
+		RejectRemediation: spec.RejectRemediation,
+	}); err == nil && len(raw) > MaxChainBytes {
+		return &ValidationError{
+			Code:    ErrCodeValidation,
+			Field:   "steps",
+			Message: fmt.Sprintf("chain document size %d exceeds maximum %d bytes", len(raw), MaxChainBytes),
+		}
+	}
+
+	seenIDs := make(map[string]struct{}, len(spec.Steps))
+	priorJudgments := make(map[string]struct{})
+	judgmentCount := 0
+	verdictCapable := 0
+
+	for i, st := range spec.Steps {
+		fieldPrefix := fmt.Sprintf("steps[%d]", i)
+		if !IsValidChainStepID(st.ID) {
+			return &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   fieldPrefix + ".id",
+				Message: fmt.Sprintf("invalid step id %q (must match ^[a-z][a-z0-9_]{0,31}$)", st.ID),
+			}
+		}
+		if _, dup := seenIDs[st.ID]; dup {
+			return &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   fieldPrefix + ".id",
+				Message: fmt.Sprintf("duplicate step id %q", st.ID),
+			}
+		}
+		seenIDs[st.ID] = struct{}{}
+
+		switch st.Role {
+		case StepRoleGuard, StepRoleViolation, StepRoleJudgment:
+		default:
+			return &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   fieldPrefix + ".role",
+				Message: fmt.Sprintf("invalid step role %q (must be guard, violation, or judgment)", st.Role),
+			}
+		}
+		switch st.Dialect {
+		case StepDialectCEL, StepDialectSystemOne:
+		default:
+			return &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   fieldPrefix + ".dialect",
+				Message: fmt.Sprintf("invalid step dialect %q (must be cel or system_one)", st.Dialect),
+			}
+		}
+
+		// Role/dialect pairing (SP1 §1.2): guard->cel, violation->cel, judgment->system_one.
+		expectedDialect := StepDialectCEL
+		if st.Role == StepRoleJudgment {
+			expectedDialect = StepDialectSystemOne
+		}
+		if st.Dialect != expectedDialect {
+			return &ValidationError{
+				Code:    ErrCodeRoleDialectMismatch,
+				Field:   fieldPrefix + ".dialect",
+				Message: fmt.Sprintf("step role %q requires dialect %q (got %q)", st.Role, expectedDialect, st.Dialect),
+			}
+		}
+
+		if st.Role == StepRoleJudgment {
+			judgmentCount++
+			if judgmentCount > MaxChainJudgmentSteps {
+				return &ValidationError{
+					Code:    ErrCodeValidation,
+					Field:   fieldPrefix + ".role",
+					Message: fmt.Sprintf("chain may contain at most %d judgment steps", MaxChainJudgmentSteps),
+				}
+			}
+			// P1/2a boundary: reject judgment steps at authoring (SP1 §1.1 option (ii)).
+			return &ValidationError{
+				Code:    ErrCodeNotYetSupported,
+				Field:   fieldPrefix + ".role",
+				Message: "judgment steps are not yet supported in this phase",
+			}
+		}
+
+		if len(st.SystemOne) > 0 {
+			return &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   fieldPrefix + ".system_one",
+				Message: "system_one is only valid on judgment steps",
+			}
+		}
+		if st.HasVerdictMapping {
+			return &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   fieldPrefix + ".verdict_mapping",
+				Message: "verdict_mapping is only valid on judgment steps",
+			}
+		}
+
+		if err := ValidateTemplate(fieldPrefix+".reason", st.Reason); err != nil {
+			return err
+		}
+		if err := ValidateTemplate(fieldPrefix+".remediation", st.Remediation); err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(st.Expr) == "" {
+			return &ValidationError{
+				Code:    ErrCodeInvalidRule,
+				Field:   fieldPrefix + ".expr",
+				Message: "expr is required for cel steps",
+			}
+		}
+
+		compiled, err := e.CompileChainStep(ctx, st.Expr)
+		if err != nil {
+			var compErr *celengine.CompileError
+			if errors.As(err, &compErr) {
+				if reserved := matchReservedLegacyName(compErr.Message); reserved != "" {
+					return &ValidationError{
+						Code:     ErrCodeReservedName,
+						Field:    fieldPrefix + ".expr",
+						Message:  fmt.Sprintf("reserved legacy variable %q is unavailable in chain steps; reference chain.<step_id> instead", reserved),
+						Line:     compErr.Line,
+						Column:   compErr.Column,
+						Category: compErr.Category,
+						Cause:    err,
+					}
+				}
+				return &ValidationError{
+					Code:     ErrCodeInvalidRule,
+					Field:    fieldPrefix + ".expr",
+					Message:  compErr.Message,
+					Line:     compErr.Line,
+					Column:   compErr.Column,
+					Category: compErr.Category,
+					Cause:    err,
+				}
+			}
+			var unsupErr *ruleengine.UnsupportedDialectError
+			if errors.As(err, &unsupErr) {
+				return &ValidationError{
+					Code:     ErrCodeUnsupportedDialect,
+					Field:    fieldPrefix + ".expr",
+					Message:  unsupErr.Error(),
+					Category: unsupErr.Reason,
+					Cause:    err,
+				}
+			}
+			return &ValidationError{
+				Code:    ErrCodeInvalidRule,
+				Field:   fieldPrefix + ".expr",
+				Message: err.Error(),
+				Cause:   err,
+			}
+		}
+
+		prog, ok := compiled.Rep().(celengine.Program)
+		if !ok || prog.IsZero() {
+			return &ValidationError{
+				Code:    ErrCodeInvalidRule,
+				Field:   fieldPrefix + ".expr",
+				Message: "invalid compiled CEL program",
+			}
+		}
+		refs, dynamic, refErr := prog.MapKeyAccesses("chain")
+		if refErr != nil {
+			return &ValidationError{
+				Code:    ErrCodeInvalidRule,
+				Field:   fieldPrefix + ".expr",
+				Message: refErr.Error(),
+				Cause:   refErr,
+			}
+		}
+		if dynamic {
+			return &ValidationError{
+				Code:    ErrCodeDynamicStepReference,
+				Field:   fieldPrefix + ".expr",
+				Message: "chain must only be indexed with static literal step ids (e.g. chain.<step_id> or chain[\"<step_id>\"])",
+			}
+		}
+		for _, refID := range refs {
+			if _, ok := priorJudgments[refID]; !ok {
+				return &ValidationError{
+					Code:    ErrCodeForwardReference,
+					Field:   fieldPrefix + ".expr",
+					Message: fmt.Sprintf("chain.%s does not reference an earlier judgment step", refID),
+				}
+			}
+		}
+
+		if st.Role == StepRoleViolation {
+			verdictCapable++
+		}
+	}
+
+	if verdictCapable == 0 {
+		return &ValidationError{
+			Code:    ErrCodeChainHasNoVerdict,
+			Field:   "steps",
+			Message: "chain must contain at least one verdict-capable step (violation or judgment with verdict_mapping)",
+		}
+	}
+	return nil
+}
+
+func matchReservedLegacyName(msg string) string {
+	for _, name := range reservedLegacyJudgmentNames {
+		if strings.Contains(msg, "'"+name+"'") || strings.Contains(msg, "`"+name+"`") {
+			return name
+		}
+	}
+	return ""
 }
