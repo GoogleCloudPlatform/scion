@@ -813,6 +813,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/project-schedules.js'),
   },
   {
+    // Project GitHub page (shown when remote is on App host and App is configured; renders 404 otherwise).
+    pattern: /^\/projects\/[^/]+\/github$/,
+    tag: 'scion-page-project-github',
+    load: () => import('../components/pages/project-github.js'),
+  },
+  {
     // Project Triggers page (experiment hub.triggers; renders 404 when off).
     pattern: /^\/projects\/[^/]+\/triggers$/,
     tag: 'scion-page-project-triggers',

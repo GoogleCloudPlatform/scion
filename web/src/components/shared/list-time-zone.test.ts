@@ -31,9 +31,9 @@ import { setPreferredTimeZone } from '../../utils/time.js';
 await import('./token-list.js');
 await import('./project-template-list.js');
 await import('./pre-start-hook-list.js');
+await import('./project-github-card.js');
 await import('../pages/broker-detail.js');
 await import('../pages/project-detail.js');
-await import('../pages/project-settings.js');
 await import('../pages/home.js');
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -110,20 +110,49 @@ describe('list and detail times in the display zone (tz-refactor task 19)', () =
     expect(text).toContain('Oct 2, 2026 (Asia/Tokyo)');
   });
 
-  it('project settings shows the last token mint in the preferred zone, labelled', () => {
+  it('project github card shows the last token mint in the preferred zone, labelled', () => {
     setPreferredTimeZone('Asia/Tokyo');
-    const el = element('scion-page-project-settings');
-    el.project = { id: 'p1', name: 'p', gitRemote: 'https://github.com/acme/repo' };
-    el.githubAppConfigured = true;
-    el.githubAppInstallationId = 42;
-    el.githubAppStatus = {
-      state: 'ok',
-      last_token_mint: MIDNIGHT_TOKYO,
-      last_checked: MIDNIGHT_TOKYO,
+    const el = element('scion-project-github-card');
+    el.projectId = 'p1';
+    el.section = 'connection';
+    el.info = {
+      project_id: 'p1',
+      app: { configured: true, slug: 'scion-bot', web_host: 'github.com' },
+      remote: { owner: 'acme', repo: 'repo', on_app_host: true },
+      association: {
+        installation_id: 42,
+        account_login: 'acme',
+        basis: 'admin_binding',
+        write_allowed: true,
+        authorized: true,
+        verified: true,
+        error_code: '',
+        reason: '',
+      },
+      status: {
+        state: 'ok',
+        last_token_mint: MIDNIGHT_TOKYO,
+        last_checked: MIDNIGHT_TOKYO,
+      },
+      permissions: {
+        mode: 'default',
+        app_grant_known: true,
+        requested: {},
+        app_granted: {},
+        effective: {},
+        capped: [],
+        cap_reasons: {},
+      },
+      can: {
+        bind: false,
+        unbind: false,
+        check: false,
+        edit_permissions: false,
+        edit_extra_repos: false,
+        discover: false,
+      },
     };
-    expect(renderText(el.renderGitHubAppSection())).toContain(
-      'Last Token Mint Oct 2, 2026, 00:00 (Asia/Tokyo)'
-    );
+    expect(renderText(el.render())).toContain('Last Token Mint Oct 2, 2026, 00:00 (Asia/Tokyo)');
   });
 
   it('home shows items older than 30 days as a labelled date in the preferred zone', () => {
