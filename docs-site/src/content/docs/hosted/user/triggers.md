@@ -332,7 +332,7 @@ Triggers can notify a human and/or an in-project agent when a fire fails, is ref
 - **At-most-once semantics:** the cooldown bucket is claimed before recipient lookup, authorization, or delivery, so a failed or skipped delivery consumes the bucket for the remainder of the hour. A Hub crash between committing the terminal fire outcome and dispatching the notification loses the notice, and fires reaped after a Hub crash (`hub restarted during fire`) or cancelled by coalescing do not notify.
 - **Project live-agent cap:** breaching the 25-agent per-project trigger cap always routes through notify-on-failure (once per hour bucket per trigger) even when `skipped` is not opted in.
 
-Notify-on-failure is configured with the CLI or API (`scion trigger create` / `scion trigger update`):
+Notify-on-failure is configured with the CLI, API, or the web rule editor (`scion trigger create` / `scion trigger update`):
 
 - `--notify-user` / `--notify-user=false` — toggle creator user notices (default `true`).
 - `--notify-agent <name|id>` — optional in-project agent to notify (pass `""` on `update` to clear).
@@ -358,9 +358,9 @@ Visibility into non-matching rule evaluations is tracked in `ptone/scion#9780`.
 When `hub.triggers` is enabled, each project displays a **Triggers** button in its header linking to `/projects/{id}/triggers` with four tabs:
 
 - **Endpoints** — create endpoints (shows the one-time signing secret and sender example in a result dialog; secrets are never kept in component state), edit settings/bindings, disable/enable, rotate secrets, and delete (listing rules that will pause).
-- **Rules** — create and edit single- or multi-action triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors (showing derived untrusted variables read-only as **Event values inserted as data, not instructions:**), and limits. Each rule row also offers a **Preview render** (eye) icon that calls `POST .../render` against the latest event received on the trigger's source with untrusted values highlighted.
+- **Rules** — create and edit single- or multi-action triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors (showing derived untrusted variables read-only as **Event values inserted as data, not instructions:**), limits, and notify-on-failure settings (user notice toggle, optional notify agent, and outcomes). Each rule row also offers a **Preview render** (eye) icon that calls `POST .../render` against the latest event received on the trigger's source with untrusted values highlighted.
 - **Events** — browse received events filtered by endpoint, status, or time; inspect attributes, headers, `external_payload` (with download for overflow bodies), and resulting fires.
-- **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or time, linking to the event, created agent, or `waiting` deadline (`wait_until`).
+- **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or time, linking to the event, created agent, or `waiting` deadline (`wait_until`); notify agent-sink rows appear as `notification (agent sink)` with no event link.
 
 Hub administrators can also inspect durable queue health (`durableQueues`) on the Admin Scheduler page.
 
