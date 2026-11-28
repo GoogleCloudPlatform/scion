@@ -39,6 +39,8 @@ const (
 	FieldRawSha256 = "raw_sha256"
 	// FieldCompressedSize holds the string denoting the compressed_size field in the database.
 	FieldCompressedSize = "compressed_size"
+	// FieldChargedBytes holds the string denoting the charged_bytes field in the database.
+	FieldChargedBytes = "charged_bytes"
 	// FieldCompressedSha256 holds the string denoting the compressed_sha256 field in the database.
 	FieldCompressedSha256 = "compressed_sha256"
 	// FieldIncompleteTail holds the string denoting the incomplete_tail field in the database.
@@ -79,6 +81,7 @@ var Columns = []string{
 	FieldByteEnd,
 	FieldRawSha256,
 	FieldCompressedSize,
+	FieldChargedBytes,
 	FieldCompressedSha256,
 	FieldIncompleteTail,
 	FieldSessionID,
@@ -128,6 +131,10 @@ var (
 	RawSha256Validator func(string) error
 	// CompressedSizeValidator is a validator for the "compressed_size" field. It is called by the builders before save.
 	CompressedSizeValidator func(int64) error
+	// DefaultChargedBytes holds the default value on creation for the "charged_bytes" field.
+	DefaultChargedBytes int64
+	// ChargedBytesValidator is a validator for the "charged_bytes" field. It is called by the builders before save.
+	ChargedBytesValidator func(int64) error
 	// CompressedSha256Validator is a validator for the "compressed_sha256" field. It is called by the builders before save.
 	CompressedSha256Validator func(string) error
 	// DefaultIncompleteTail holds the default value on creation for the "incomplete_tail" field.
@@ -223,6 +230,11 @@ func ByRawSha256(opts ...sql.OrderTermOption) OrderOption {
 // ByCompressedSize orders the results by the compressed_size field.
 func ByCompressedSize(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCompressedSize, opts...).ToFunc()
+}
+
+// ByChargedBytes orders the results by the charged_bytes field.
+func ByChargedBytes(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChargedBytes, opts...).ToFunc()
 }
 
 // ByCompressedSha256 orders the results by the compressed_sha256 field.

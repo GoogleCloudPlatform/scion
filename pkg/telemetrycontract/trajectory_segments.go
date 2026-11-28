@@ -28,8 +28,14 @@ const (
 	DefaultTrajectoryMaxSegmentRawBytes int64 = 16 * 1024 * 1024
 
 	// DefaultTrajectoryMaxRunRawBytes is the default maximum cumulative
-	// uncompressed raw bytes across all segments of a single run (2 GiB).
+	// charged bytes (MAX(raw, compressed) per segment) across all segments of
+	// a single run (2 GiB).
 	DefaultTrajectoryMaxRunRawBytes int64 = 2 * 1024 * 1024 * 1024
+
+	// DefaultTrajectoryMaxRunSegments is the default maximum number of
+	// trajectory_segments rows (committed + pending) allowed per run so
+	// tiny segments cannot inflate the database.
+	DefaultTrajectoryMaxRunSegments int64 = 100_000
 
 	// DefaultTrajectoryUploadURLExpiry is the validity duration of signed or
 	// Hub-proxied PUT upload URLs returned by segments:prepare.

@@ -74,6 +74,9 @@ func (TrajectorySegment) Fields() []ent.Field {
 			NotEmpty(),
 		field.Int64("compressed_size").
 			Positive(),
+		field.Int64("charged_bytes").
+			NonNegative().
+			Default(0),
 		field.String("compressed_sha256").
 			NotEmpty(),
 		field.Bool("incomplete_tail").

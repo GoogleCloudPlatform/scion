@@ -4146,40 +4146,46 @@ func init() {
 	trajectorysegmentDescCompressedSize := trajectorysegmentFields[13].Descriptor()
 	// trajectorysegment.CompressedSizeValidator is a validator for the "compressed_size" field. It is called by the builders before save.
 	trajectorysegment.CompressedSizeValidator = trajectorysegmentDescCompressedSize.Validators[0].(func(int64) error)
+	// trajectorysegmentDescChargedBytes is the schema descriptor for charged_bytes field.
+	trajectorysegmentDescChargedBytes := trajectorysegmentFields[14].Descriptor()
+	// trajectorysegment.DefaultChargedBytes holds the default value on creation for the charged_bytes field.
+	trajectorysegment.DefaultChargedBytes = trajectorysegmentDescChargedBytes.Default.(int64)
+	// trajectorysegment.ChargedBytesValidator is a validator for the "charged_bytes" field. It is called by the builders before save.
+	trajectorysegment.ChargedBytesValidator = trajectorysegmentDescChargedBytes.Validators[0].(func(int64) error)
 	// trajectorysegmentDescCompressedSha256 is the schema descriptor for compressed_sha256 field.
-	trajectorysegmentDescCompressedSha256 := trajectorysegmentFields[14].Descriptor()
+	trajectorysegmentDescCompressedSha256 := trajectorysegmentFields[15].Descriptor()
 	// trajectorysegment.CompressedSha256Validator is a validator for the "compressed_sha256" field. It is called by the builders before save.
 	trajectorysegment.CompressedSha256Validator = trajectorysegmentDescCompressedSha256.Validators[0].(func(string) error)
 	// trajectorysegmentDescIncompleteTail is the schema descriptor for incomplete_tail field.
-	trajectorysegmentDescIncompleteTail := trajectorysegmentFields[15].Descriptor()
+	trajectorysegmentDescIncompleteTail := trajectorysegmentFields[16].Descriptor()
 	// trajectorysegment.DefaultIncompleteTail holds the default value on creation for the incomplete_tail field.
 	trajectorysegment.DefaultIncompleteTail = trajectorysegmentDescIncompleteTail.Default.(bool)
 	// trajectorysegmentDescSessionID is the schema descriptor for session_id field.
-	trajectorysegmentDescSessionID := trajectorysegmentFields[16].Descriptor()
+	trajectorysegmentDescSessionID := trajectorysegmentFields[17].Descriptor()
 	// trajectorysegment.DefaultSessionID holds the default value on creation for the session_id field.
 	trajectorysegment.DefaultSessionID = trajectorysegmentDescSessionID.Default.(string)
 	// trajectorysegmentDescObjectPath is the schema descriptor for object_path field.
-	trajectorysegmentDescObjectPath := trajectorysegmentFields[17].Descriptor()
+	trajectorysegmentDescObjectPath := trajectorysegmentFields[18].Descriptor()
 	// trajectorysegment.ObjectPathValidator is a validator for the "object_path" field. It is called by the builders before save.
 	trajectorysegment.ObjectPathValidator = trajectorysegmentDescObjectPath.Validators[0].(func(string) error)
 	// trajectorysegmentDescManifestPath is the schema descriptor for manifest_path field.
-	trajectorysegmentDescManifestPath := trajectorysegmentFields[18].Descriptor()
+	trajectorysegmentDescManifestPath := trajectorysegmentFields[19].Descriptor()
 	// trajectorysegment.DefaultManifestPath holds the default value on creation for the manifest_path field.
 	trajectorysegment.DefaultManifestPath = trajectorysegmentDescManifestPath.Default.(string)
 	// trajectorysegmentDescStatus is the schema descriptor for status field.
-	trajectorysegmentDescStatus := trajectorysegmentFields[19].Descriptor()
+	trajectorysegmentDescStatus := trajectorysegmentFields[20].Descriptor()
 	// trajectorysegment.DefaultStatus holds the default value on creation for the status field.
 	trajectorysegment.DefaultStatus = trajectorysegmentDescStatus.Default.(string)
 	// trajectorysegment.StatusValidator is a validator for the "status" field. It is called by the builders before save.
 	trajectorysegment.StatusValidator = trajectorysegmentDescStatus.Validators[0].(func(string) error)
 	// trajectorysegmentDescNormalizeStatus is the schema descriptor for normalize_status field.
-	trajectorysegmentDescNormalizeStatus := trajectorysegmentFields[20].Descriptor()
+	trajectorysegmentDescNormalizeStatus := trajectorysegmentFields[21].Descriptor()
 	// trajectorysegment.DefaultNormalizeStatus holds the default value on creation for the normalize_status field.
 	trajectorysegment.DefaultNormalizeStatus = trajectorysegmentDescNormalizeStatus.Default.(string)
 	// trajectorysegment.NormalizeStatusValidator is a validator for the "normalize_status" field. It is called by the builders before save.
 	trajectorysegment.NormalizeStatusValidator = trajectorysegmentDescNormalizeStatus.Validators[0].(func(string) error)
 	// trajectorysegmentDescCreatedAt is the schema descriptor for created_at field.
-	trajectorysegmentDescCreatedAt := trajectorysegmentFields[21].Descriptor()
+	trajectorysegmentDescCreatedAt := trajectorysegmentFields[22].Descriptor()
 	// trajectorysegment.DefaultCreatedAt holds the default value on creation for the created_at field.
 	trajectorysegment.DefaultCreatedAt = trajectorysegmentDescCreatedAt.Default.(func() time.Time)
 	// trajectorysegmentDescID is the schema descriptor for id field.

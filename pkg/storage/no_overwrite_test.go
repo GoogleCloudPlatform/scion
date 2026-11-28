@@ -25,8 +25,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -171,5 +173,64 @@ func TestLocalStorage_UploadIfGenerationMatchZero_NoOverwrite(t *testing.T) {
 	}
 	if !bytes.Equal(got, original) {
 		t.Errorf("stored bytes = %q, want %q (must never be overwritten)", got, original)
+	}
+}
+
+type repeatZeroReader struct{}
+
+func (repeatZeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// TestGCSUpload_PreconditionFailed_SmallAndOver16MiB verifies that a GCS HTTP
+// 412 Precondition Failed response maps to ErrPreconditionFailed for both a
+// small single-shot body and a body exceeding the 16 MiB default resumable
+// chunk size (where the 412 surfaces on the io.Copy path).
+func TestGCSUpload_PreconditionFailed_SmallAndOver16MiB(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int64
+	}{
+		{name: "small body (3 bytes)", size: 3},
+		{name: "large body (>16 MiB)", size: 17 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu             sync.Mutex
+				sawIfGenMatch0 bool
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("ifGenerationMatch") == "0" {
+					mu.Lock()
+					sawIfGenMatch0 = true
+					mu.Unlock()
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":{"code":412,"message":"At least one of the pre-conditions you specified did not hold."}}`))
+			}))
+			t.Cleanup(srv.Close)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			gcs := newFakeGCS(t, srv)
+			zero := int64(0)
+			_, err := gcs.Upload(ctx, "hub-1/trajectories/v1/raw/g0-0000000000000000.seg.gz",
+				io.LimitReader(repeatZeroReader{}, tc.size),
+				UploadOptions{
+					ContentType:       "application/gzip",
+					IfGenerationMatch: &zero,
+				})
+			if !errors.Is(err, ErrPreconditionFailed) {
+				t.Fatalf("Upload(size=%d) err = %v, want ErrPreconditionFailed", tc.size, err)
+			}
+			mu.Lock()
+			gotPrecond := sawIfGenMatch0
+			mu.Unlock()
+			if !gotPrecond {
+				t.Errorf("fake GCS did not receive ifGenerationMatch=0 query parameter")
+			}
+		})
 	}
 }
