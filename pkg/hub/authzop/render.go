@@ -27,7 +27,6 @@ func RenderMarkdown(specs []OperationSpec) string {
 
 	b.WriteString("# Authorization Operation Catalog\n\n")
 	b.WriteString("*Generated from Go-native OperationSpec definitions. Do not edit manually.*\n\n")
-	fmt.Fprintf(&b, "**Operations:** %d\n\n", len(specs))
 
 	// Table of contents.
 	b.WriteString("## Table of Contents\n\n")
