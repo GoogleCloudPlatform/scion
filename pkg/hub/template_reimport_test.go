@@ -200,7 +200,11 @@ func TestTemplateReimport_RefreshesOnlyTargetTemplate(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, []string{"my-template"}, resp.Templates)
 	assert.Equal(t, 1, resp.Count)
-	assert.Equal(t, []string{"https://github.com/acme/repo/archive/" + defaultFakeReimportSHA + ".tar.gz"}, fetcher.recordedTarballURLs())
+	assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+	assert.NotEmpty(t, fetcher.recordedRawURLs())
+	for _, u := range fetcher.recordedRawURLs() {
+		assert.True(t, strings.HasPrefix(u, "https://raw.githubusercontent.com/acme/repo/"+defaultFakeReimportSHA+"/templates/"), "raw URL = %q", u)
+	}
 
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
@@ -226,7 +230,11 @@ func TestTemplateReimport_OverrideURLIsStored(t *testing.T) {
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport",
 		ReimportTemplateRequest{SourceURL: override})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"https://github.com/acme/repo/archive/" + defaultFakeReimportSHA + ".tar.gz"}, fetcher.recordedTarballURLs())
+	assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+	assert.NotEmpty(t, fetcher.recordedRawURLs())
+	for _, u := range fetcher.recordedRawURLs() {
+		assert.True(t, strings.HasPrefix(u, "https://raw.githubusercontent.com/acme/repo/"+defaultFakeReimportSHA+"/templates/"), "raw URL = %q", u)
+	}
 
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
@@ -297,6 +305,7 @@ func TestTemplateReimport_DownloadFailuresAreReported(t *testing.T) {
 		"auth rejected":      {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusUnauthorized, Detail: "status 401"}, http.StatusBadRequest, "reimport_failed", "rejected"},
 		"forbidden SSO":      {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusForbidden, Header: http.Header{"X-Github-Sso": {"required"}}, Detail: "status 403"}, http.StatusBadRequest, "reimport_failed", "SAML SSO"},
 		"rate limited 429":   {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"45"}}, Detail: "status 429"}, http.StatusTooManyRequests, "rate_limited", "rate limit"},
+		"upstream 502":       {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusBadGateway, Detail: "status 502"}, http.StatusBadRequest, "reimport_failed", "invalid or inconsistent response"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{err: tc.err})
@@ -606,7 +615,8 @@ func TestTemplateReimport_UserScopeAuthorization(t *testing.T) {
 	// The owner may refresh it.
 	rec = doRequestAsUser(t, srv, owner, http.MethodPost, path, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.NotEmpty(t, fetcher.recordedRawURLs())
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Len(t, got.Files, 2)
@@ -824,15 +834,17 @@ func TestTemplateReimport_UnchangedSourceKeepsHash(t *testing.T) {
 	}
 	assert.Equal(t, "0755", modes["hooks/start.sh"])
 	assert.Equal(t, "0644", modes["scion-agent.yaml"])
-	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
 
-	// Second reimport at the same commit/tree SHA must be a no-op (no second tarball download).
+	// Second reimport at the same commit/tree SHA must be a no-op (no second download).
 	rec = doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	second, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, first.ContentHash, second.ContentHash, "an unchanged source must keep the content hash")
-	assert.Len(t, fetcher.recordedTarballURLs(), 1, "unchanged tree SHA must skip tarball download and storage write")
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2, "unchanged tree SHA must skip download and storage write")
 }
 
 func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
@@ -859,10 +871,11 @@ func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, commit1, got.SourceCommit)
 	firstHash := got.ContentHash
-	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
 
 	// Refresh again with identical files (same tree SHA) at a newer commit:
-	// tarball download and storage write are skipped, hash stays, commit advances.
+	// download and storage write are skipped, hash stays, commit advances.
 	fetcher.setCommitBody(commit2, buildTarGz(t, []tarEntry{
 		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
@@ -874,7 +887,8 @@ func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, firstHash, got.ContentHash)
 	assert.Equal(t, commit2, got.SourceCommit)
-	assert.Len(t, fetcher.recordedTarballURLs(), 1, "unchanged tree SHA must skip tarball download and storage write")
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2, "unchanged tree SHA must skip download and storage write")
 }
 
 func TestTemplateReimport_ChangedTreeAtNewCommitReimports(t *testing.T) {
@@ -900,10 +914,11 @@ func TestTemplateReimport_ChangedTreeAtNewCommitReimports(t *testing.T) {
 	first, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, commit1, first.SourceCommit)
-	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
 
 	// Advance to commit2 with a modified file (different tree SHA):
-	// tarball MUST be downloaded, ContentHash must change, and SourceCommit must advance.
+	// new commit files MUST be downloaded, ContentHash must change, and SourceCommit must advance.
 	fetcher.setCommitBody(commit2, buildTarGz(t, []tarEntry{
 		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
@@ -915,7 +930,8 @@ func TestTemplateReimport_ChangedTreeAtNewCommitReimports(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, commit2, second.SourceCommit)
 	assert.NotEqual(t, first.ContentHash, second.ContentHash, "changed tree must rewrite storage and update ContentHash")
-	assert.Len(t, fetcher.recordedTarballURLs(), 2, "changed tree SHA must download the new commit tarball")
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 4, "changed tree SHA must download the new commit files")
 }
 
 func TestTemplateReimport_TagsSHAsAndSlashedBranches(t *testing.T) {
@@ -1031,16 +1047,48 @@ func TestTemplateReimport_OverrideFolderAtSameCommitDownloads(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, folderA, first.SourceURL)
 	assert.Equal(t, commitC, first.SourceCommit)
-	assert.Len(t, fetcher.recordedTarballURLs(), 1)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
 
 	// Reimport with sourceUrl override pointing to folder B in the same repo at the same commit C:
-	// must NOT take the no-op shortcut; must download tarball and store folder B's content and URL.
+	// must NOT take the no-op shortcut; must download folder B's files and store its content and URL.
 	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, ReimportTemplateRequest{SourceURL: folderB})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	second, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
-	assert.Len(t, fetcher.recordedTarballURLs(), 2, "override to a different folder at the same commit must download the tarball")
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 4, "override to a different folder at the same commit must download folder B")
 	assert.Equal(t, folderB, second.SourceURL, "folder B's URL must be stored")
 	assert.Equal(t, commitC, second.SourceCommit)
 	assert.NotEqual(t, first.ContentHash, second.ContentHash, "folder B's content must replace folder A's content")
+}
+
+// TestTemplateReimport_ForcedTarballStrategySucceeds exercises the tarball
+// branch end-to-end through template reimport (PAX commit SHA + tree blob
+// verification) when the raw strategy is disabled.
+func TestTemplateReimport_ForcedTarballStrategySucceeds(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-reimport-tarball", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = githubfetch.New(githubfetch.Options{
+		Endpoint:    githubfetch.DefaultEndpoint(),
+		Doer:        fetcher,
+		Cooldown:    githubfetch.NewCooldown(nil),
+		MaxRetries:  0,
+		RawMaxFiles: -1, // force tarball strategy
+	})
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Empty(t, fetcher.recordedRawURLs(), "forced tarball strategy must not make raw requests")
+	assert.Equal(t, []string{"https://github.com/acme/repo/archive/" + defaultFakeReimportSHA + ".tar.gz"}, fetcher.recordedTarballURLs())
+
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, defaultFakeReimportSHA, got.SourceCommit)
+	assert.Len(t, got.Files, 2)
 }

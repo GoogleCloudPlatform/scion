@@ -52,6 +52,8 @@ type fakeReimportGitHub struct {
 	auths       []string
 	tarballURLs []string
 	tarballAuth []string
+	rawURLs     []string
+	rawAuth     []string
 }
 
 func newFakeReimportGitHubClient(t *testing.T, f *fakeReimportGitHub) *githubfetch.Client {
@@ -97,6 +99,22 @@ func (f *fakeReimportGitHub) recordedTarballAuths() []string {
 	defer f.mu.Unlock()
 	out := make([]string, len(f.tarballAuth))
 	copy(out, f.tarballAuth)
+	return out
+}
+
+func (f *fakeReimportGitHub) recordedRawURLs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.rawURLs))
+	copy(out, f.rawURLs)
+	return out
+}
+
+func (f *fakeReimportGitHub) recordedRawAuths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.rawAuth))
+	copy(out, f.rawAuth)
 	return out
 }
 
@@ -149,6 +167,30 @@ func (f *fakeReimportGitHub) Open(_ context.Context, r githubfetch.Request) (*gi
 			}
 		}
 		return inspectAndNormalizeArchive(body, commitOverride)
+	}
+
+	if strings.EqualFold(u.Host, "raw.githubusercontent.com") {
+		parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 4)
+		if len(parts) < 4 {
+			return &githubfetch.Response{Status: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		reqSHA := parts[2]
+		filePath := parts[3]
+		_, _, files := archiveForSHA(reqSHA)
+		f.mu.Lock()
+		f.rawURLs = append(f.rawURLs, r.URL)
+		f.rawAuth = append(f.rawAuth, r.Authorization)
+		f.mu.Unlock()
+		for _, af := range files {
+			if af.rel == filePath {
+				return &githubfetch.Response{
+					Status: http.StatusOK,
+					Header: make(http.Header),
+					Body:   io.NopCloser(bytes.NewReader(af.data)),
+				}, nil
+			}
+		}
+		return &githubfetch.Response{Status: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
 	}
 
 	isTarball := strings.Contains(u.Path, "/tarball/") || strings.HasSuffix(u.Path, ".tar.gz")
@@ -272,6 +314,7 @@ type fakeArchiveFile struct {
 	mode    int64
 	size    int64
 	blobSHA string
+	data    []byte
 }
 
 func inspectAndNormalizeArchive(raw []byte, commitOverride string) (string, []byte, []fakeArchiveFile) {
@@ -326,6 +369,7 @@ func inspectAndNormalizeArchive(raw []byte, commitOverride string) (string, []by
 					mode:    hdr.Mode,
 					size:    int64(len(data)),
 					blobSHA: hex.EncodeToString(h.Sum(nil)),
+					data:    data,
 				})
 			}
 		}

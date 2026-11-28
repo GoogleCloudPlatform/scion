@@ -29,7 +29,25 @@ const (
 
 // DefaultMaxNameBytes is the default maximum relative path length (in bytes)
 // for a single file or directory inside a fetched folder.
-const DefaultMaxNameBytes = 4096
+const (
+	DefaultMaxNameBytes = 4096
+
+	// DefaultRawMaxFiles is the default maximum number of files in a tree for
+	// which FetchFolder uses the per-file raw download strategy.
+	DefaultRawMaxFiles = 64
+
+	// DefaultRawMaxBytes is the default maximum total file bytes in a tree for
+	// which FetchFolder uses the per-file raw download strategy.
+	DefaultRawMaxBytes = 4 << 20 // 4 MiB
+
+	// DefaultRawConcurrency is the default maximum number of concurrent raw
+	// file downloads in FetchFolder.
+	DefaultRawConcurrency = 8
+
+	// DefaultFetchFileMaxBytes is the fallback per-file byte limit used by
+	// Client.FetchFile when neither File.Size nor a caller limit is set.
+	DefaultFetchFileMaxBytes = 16 << 20 // 16 MiB
+)
 
 // Limits bounds one GitHub tree listing and folder materialization.
 type Limits struct {
@@ -39,6 +57,14 @@ type Limits struct {
 	MaxTotal     int64
 	MaxDownload  int64
 	MaxUnpacked  int64
+	// RawMaxFiles is the maximum number of files eligible for the per-file raw
+	// strategy in FetchFolder. Zero falls back to Client Options /
+	// DefaultRawMaxFiles; a negative value disables raw and forces tarball.
+	RawMaxFiles int
+	// RawMaxBytes is the maximum total file bytes eligible for the per-file raw
+	// strategy in FetchFolder. Zero falls back to Client Options /
+	// DefaultRawMaxBytes; a negative value disables raw and forces tarball.
+	RawMaxBytes int64
 	// Timeout bounds the entire FetchFolder operation.
 	Timeout time.Duration
 	// RequestTimeout bounds one HTTP request (defaults to Timeout when <= 0).
@@ -61,6 +87,8 @@ func SkillLimits() Limits {
 		MaxNameBytes:   DefaultMaxNameBytes,
 		MaxFileBytes:   10 << 20,
 		MaxTotal:       32 << 20,
+		MaxDownload:    64 << 20,
+		MaxUnpacked:    512 << 20,
 		Timeout:        20 * time.Second,
 		RequestTimeout: 20 * time.Second,
 		OnSubmodule:    PolicyReject,

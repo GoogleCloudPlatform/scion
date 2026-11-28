@@ -77,10 +77,10 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 	}
 	defer func() { _ = gzr.Close() }()
 
-	var tarStream io.Reader = gzr
-	if l.MaxUnpacked > 0 {
-		tarStream = &unpackedCapReader{r: gzr, remaining: l.MaxUnpacked}
+	if l.MaxUnpacked <= 0 {
+		return 0, 0, SkipCounts{}, &Error{Kind: KindTooLarge, Repo: repo, Hint: "archive extraction requires a positive MaxUnpacked limit"}
 	}
+	tarStream := &unpackedCapReader{r: gzr, remaining: l.MaxUnpacked}
 	tr := tar.NewReader(tarStream)
 
 	subPath = strings.Trim(subPath, "/")
