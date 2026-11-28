@@ -436,6 +436,36 @@ The `command` block defines how the agent's primary LLM tool is invoked.
 *   `resume_flag`: CLI flag to resume a previous session (e.g., `--session`).
 *   `system_prompt_flag`: CLI flag for the system prompt.
 
+#### Generic and declarative-generic harnesses (exec form vs. shell form)
+
+By default, the built-in `generic` harness and declarative-generic harness-configs without `command.base` execute the agent's task string in **exec form** — as a single `argv[0]` program path, with no shell parsing. A task containing spaces or shell operators (such as `sleep infinity` or `npm test && echo ok`) is treated as a single executable name and fails with exit code `127`.
+
+To run shell-form tasks, opt in explicitly by configuring `sh -c` as the base command:
+
+- **Declarative harness-config (`config.yaml`):**
+  ```yaml
+  harness: generic
+  image: scion-base:latest
+  command:
+    base: ["sh", "-c"]
+  ```
+- **Settings override (`settings.yaml`) or template/agent config (`command_args`):**
+  ```yaml
+  harness_configs:
+    generic:
+      harness: generic
+      args: ["sh", "-c"]
+  ```
+  (Or set `command_args: ["sh", "-c"]` on the template or agent.)
+
+:::caution[Shell opt-in evaluates all task text]
+With `sh -c`, **any** task text passed to the agent — including trigger-rendered variables, webhook payloads, or system-generated notices — is interpreted by the shell. Only opt in to `sh -c` when all task sources for that harness-config or template are trusted. Keep exec form (or pass a script path with explicit arguments) whenever untrusted inputs can reach the task string.
+:::
+
+Unlike container-script harnesses (and non-generic declarative harnesses with a non-shell `command.base`), the built-in `generic` harness, any declarative harness with `harness: generic` (even with a non-shell `command.base`), and any declarative harness without `command.base` or with a shell `command.base` do not have `--model <name>` prepended to their command arguments; the resolved model is still available in the `SCION_MODEL` environment variable.
+
+Session resume (`scion resume`) is not supported for shell-form generic tasks: resuming without an explicit task runs `sh -c` with no command string (which exits with status `2`). Start the agent fresh or pass a task explicitly instead.
+
 #### Launcher harnesses and live-work detection
 
 The Hub's live-work detection treats the process `command.base` starts as the harness itself, never as work, because a TUI keeps redrawing while it waits (see [Agent Lifecycle](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents)). Some tools start through a launcher that keeps running and spawns the real TUI as a child. Codex's npm launcher (`node bin/codex.js`) is one. For a harness like that, set `HARNESS_HINT_LIVENESS_ROOT_DEPTH` in the config's `env` map. The value is the number of process levels counted as the harness, so the launcher and its TUI make 2. The default is 1 and the maximum is 4. Without it, a hung agent's animated status can keep it from ever being marked stalled. (An operator- or Hub-supplied `SCION_LIVENESS_HARNESS_ROOT_DEPTH` takes precedence over the hint.)

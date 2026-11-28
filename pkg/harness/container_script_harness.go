@@ -257,6 +257,10 @@ func WakeResumeInstruction(prior *api.PriorStatus) string {
 	return "Resumed session after suspension to handle the message above. " + clause + ". Respond to the message first, then check for other pending work."
 }
 
+func (c *ContainerScriptHarness) supportsModelFlag() bool {
+	return true
+}
+
 // GetCommand builds the harness CLI invocation from the declarative
 // command spec. Falls back to baseArgs alone if no command is declared.
 //

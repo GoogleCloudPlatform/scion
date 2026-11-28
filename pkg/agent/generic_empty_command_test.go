@@ -390,3 +390,113 @@ func TestStart_GenericHarnessValidStartsUnchanged(t *testing.T) {
 		}
 	})
 }
+
+// TestStart_GenericHarnessSkipsModelFlag verifies that generic and
+// shell-based declarative-generic harnesses do not have "--model <name>"
+// prepended to CommandArgs when an effective model is present, while still
+// receiving SCION_MODEL in their environment (ptone/scion#6386).
+func TestStart_GenericHarnessSkipsModelFlag(t *testing.T) {
+	hasEnv := func(env []string, want string) bool {
+		for _, kv := range env {
+			if kv == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("built-in generic exec form with SCION_MODEL", func(t *testing.T) {
+		projectScionDir := setupGenericHarnessProject(t, "")
+		var gotCfg runtime.RunConfig
+		var gotCmd []string
+		mgr := NewManager(&runtime.MockRuntime{
+			ListFunc:        func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+			ImageExistsFunc: func(context.Context, string) (bool, error) { return true, nil },
+			RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+				gotCfg = cfg
+				gotCmd = cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+				return "mock-id", nil
+			},
+		})
+		opts := api.StartOptions{
+			Name:          "gen-model-exec",
+			ProjectPath:   projectScionDir,
+			HarnessConfig: "generic",
+			Task:          "/usr/local/bin/run.sh",
+			Env:           map[string]string{"SCION_MODEL": "some-model"},
+			BrokerMode:    true,
+		}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if !reflect.DeepEqual(gotCmd, []string{"/usr/local/bin/run.sh"}) {
+			t.Errorf("GetCommand() = %v, want [/usr/local/bin/run.sh] (must not prepend --model)", gotCmd)
+		}
+		if !hasEnv(gotCfg.Env, "SCION_MODEL=some-model") {
+			t.Errorf("expected SCION_MODEL=some-model in env, got %v", gotCfg.Env)
+		}
+	})
+
+	t.Run("built-in generic with command_args sh -c and SCION_MODEL", func(t *testing.T) {
+		projectScionDir := setupGenericHarnessProject(t, "")
+		var gotCmd []string
+		mgr := NewManager(&runtime.MockRuntime{
+			ListFunc:        func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+			ImageExistsFunc: func(context.Context, string) (bool, error) { return true, nil },
+			RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+				gotCmd = cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+				return "mock-id", nil
+			},
+		})
+		opts := api.StartOptions{
+			Name:          "gen-model-sh",
+			ProjectPath:   projectScionDir,
+			HarnessConfig: "generic",
+			InlineConfig:  &api.ScionConfig{CommandArgs: []string{"sh", "-c"}},
+			Task:          "npm test && echo ok",
+			Env:           map[string]string{"SCION_MODEL": "some-model"},
+			BrokerMode:    true,
+		}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if !reflect.DeepEqual(gotCmd, []string{"sh", "-c", "npm test && echo ok"}) {
+			t.Errorf("GetCommand() = %v, want [sh -c 'npm test && echo ok']", gotCmd)
+		}
+	})
+
+	t.Run("declarative generic with command.base sh -c and SCION_MODEL", func(t *testing.T) {
+		projectScionDir := setupGenericHarnessProject(t, "")
+		hcDir := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "generic-sh")
+		if err := os.MkdirAll(hcDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		const cfgYAML = "harness: generic\nuser: scion\nimage: test-image:latest\ncommand:\n  base: [\"sh\", \"-c\"]\n"
+		if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(cfgYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var gotCmd []string
+		mgr := NewManager(&runtime.MockRuntime{
+			ListFunc:        func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+			ImageExistsFunc: func(context.Context, string) (bool, error) { return true, nil },
+			RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+				gotCmd = cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+				return "mock-id", nil
+			},
+		})
+		opts := api.StartOptions{
+			Name:          "gen-decl-sh-model",
+			ProjectPath:   projectScionDir,
+			HarnessConfig: "generic-sh",
+			Task:          "npm test && echo ok",
+			Env:           map[string]string{"SCION_MODEL": "some-model"},
+			BrokerMode:    true,
+		}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if !reflect.DeepEqual(gotCmd, []string{"sh", "-c", "npm test && echo ok"}) {
+			t.Errorf("GetCommand() = %v, want [sh -c 'npm test && echo ok']", gotCmd)
+		}
+	})
+}
