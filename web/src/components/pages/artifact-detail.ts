@@ -1397,6 +1397,55 @@ export class ScionPageArtifactDetail extends LitElement {
         color: var(--sl-color-danger-500);
         margin-bottom: 0.5rem;
       }
+      sl-dialog::part(panel) {
+        width: min(34rem, calc(100vw - 2rem));
+      }
+      sl-dialog.stale-draft-dialog::part(panel) {
+        width: min(38rem, calc(100vw - 2rem));
+      }
+      sl-dialog p {
+        margin: 0 0 0.75rem;
+        font-size: 0.875rem;
+        line-height: 1.5;
+      }
+      sl-dialog p:last-of-type {
+        margin-bottom: 0;
+      }
+      .dialog-footer {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        width: 100%;
+      }
+      .dialog-footer-start {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        margin-inline-end: auto;
+      }
+      .dialog-footer-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        margin-inline-start: auto;
+      }
+      @media (max-width: 480px) {
+        .dialog-footer {
+          flex-direction: column-reverse;
+          align-items: stretch;
+        }
+        .dialog-footer-start,
+        .dialog-footer-actions {
+          flex-direction: column-reverse;
+          align-items: stretch;
+          margin-inline: 0;
+        }
+      }
     `,
   ];
 
@@ -4531,26 +4580,26 @@ export class ScionPageArtifactDetail extends LitElement {
           ${runes} / ${MAX_REVIEW_REQUEST_NOTE_RUNES}
         </span>
       </div>
-      <sl-button
-        slot="footer"
-        size="small"
-        class="dismiss-request-cancel"
-        ?disabled=${this.dismissRequestBusy}
-        @click=${(): void => this.closeDismissRequestDialog()}
-      >
-        Cancel
-      </sl-button>
-      <sl-button
-        slot="footer"
-        size="small"
-        variant="primary"
-        class="dismiss-request-confirm"
-        ?disabled=${tooLong}
-        ?loading=${this.dismissRequestBusy}
-        @click=${(): void => void this.confirmDismissRequest()}
-      >
-        Dismiss
-      </sl-button>
+      <div slot="footer" class="dialog-footer">
+        <sl-button
+          size="small"
+          class="dismiss-request-cancel"
+          ?disabled=${this.dismissRequestBusy}
+          @click=${(): void => this.closeDismissRequestDialog()}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="primary"
+          class="dismiss-request-confirm"
+          ?disabled=${tooLong}
+          ?loading=${this.dismissRequestBusy}
+          @click=${(): void => void this.confirmDismissRequest()}
+        >
+          Dismiss
+        </sl-button>
+      </div>
     </sl-dialog>`;
   }
 
@@ -5260,32 +5309,39 @@ export class ScionPageArtifactDetail extends LitElement {
               Save your changes to your draft before closing, or discard them? Discarding reverts to
               your last saved draft and does not delete it.
             </p>
-            <sl-button
-              slot="footer"
-              class="draft-cancel-back"
-              ?disabled=${this.draftCancelBusy}
-              @click=${(): void => {
-                this.draftCancelOpen = false;
-              }}
-              >Back to review</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-cancel-discard"
-              variant="danger"
-              ?disabled=${this.draftCancelBusy}
-              @click=${this.cancelDiscardChanges}
-              >Discard changes</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-cancel-save"
-              variant="primary"
-              autofocus
-              ?loading=${this.draftCancelBusy}
-              @click=${(): void => void this.cancelSaveAndClose()}
-              >Save draft and close</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <div class="dialog-footer-start">
+                <sl-button
+                  size="small"
+                  class="draft-cancel-discard"
+                  variant="danger"
+                  outline
+                  ?disabled=${this.draftCancelBusy}
+                  @click=${this.cancelDiscardChanges}
+                  >Discard changes</sl-button
+                >
+              </div>
+              <div class="dialog-footer-actions">
+                <sl-button
+                  size="small"
+                  class="draft-cancel-back"
+                  ?disabled=${this.draftCancelBusy}
+                  @click=${(): void => {
+                    this.draftCancelOpen = false;
+                  }}
+                  >Back to review</sl-button
+                >
+                <sl-button
+                  size="small"
+                  class="draft-cancel-save"
+                  variant="primary"
+                  autofocus
+                  ?loading=${this.draftCancelBusy}
+                  @click=${(): void => void this.cancelSaveAndClose()}
+                  >Save draft and close</sl-button
+                >
+              </div>
+            </div>
           </sl-dialog>`
         : nothing}
       ${conflict
@@ -5304,31 +5360,37 @@ export class ScionPageArtifactDetail extends LitElement {
                 : nothing}.
               Autosave is paused until you choose how to continue.
             </p>
-            <sl-button
-              slot="footer"
-              class="draft-conflict-download"
-              ?disabled=${this.draftConflictBusy}
-              @click=${this.downloadCurrentReview}
-            >
-              <sl-icon slot="prefix" name="download"></sl-icon>
-              Download this one
-            </sl-button>
-            <sl-button
-              slot="footer"
-              class="draft-conflict-keep"
-              variant="warning"
-              ?loading=${this.draftConflictBusy}
-              @click=${(): void => void this.resolveConflictKeep()}
-              >Keep this one</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-conflict-load"
-              variant="primary"
-              ?loading=${this.draftConflictBusy}
-              @click=${(): void => void this.resolveConflictLoad()}
-              >Load the newer draft</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <div class="dialog-footer-start">
+                <sl-button
+                  size="small"
+                  class="draft-conflict-download"
+                  ?disabled=${this.draftConflictBusy}
+                  @click=${this.downloadCurrentReview}
+                >
+                  <sl-icon slot="prefix" name="download"></sl-icon>
+                  Download this one
+                </sl-button>
+              </div>
+              <div class="dialog-footer-actions">
+                <sl-button
+                  size="small"
+                  class="draft-conflict-keep"
+                  variant="warning"
+                  ?loading=${this.draftConflictBusy}
+                  @click=${(): void => void this.resolveConflictKeep()}
+                  >Keep this one</sl-button
+                >
+                <sl-button
+                  size="small"
+                  class="draft-conflict-load"
+                  variant="primary"
+                  ?loading=${this.draftConflictBusy}
+                  @click=${(): void => void this.resolveConflictLoad()}
+                  >Load the newer draft</sl-button
+                >
+              </div>
+            </div>
           </sl-dialog>`
         : nothing}
       ${stale
@@ -5353,45 +5415,52 @@ export class ScionPageArtifactDetail extends LitElement {
                   ${this.staleDraftError}
                 </sl-alert>`
               : nothing}
-            <sl-button
-              slot="footer"
-              class="stale-draft-cancel"
-              ?disabled=${this.staleDraftBusy}
-              @click=${(): void => {
-                this.staleDraft = null;
-              }}
-              >Cancel</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="stale-draft-download"
-              ?disabled=${this.staleDraftBusy}
-              @click=${(): void =>
-                downloadTextFile(
-                  safeReviewDownloadName(stale.draft.entry, stale.draft.base),
-                  stale.draft.body
-                )}
-            >
-              <sl-icon slot="prefix" name="download"></sl-icon>
-              Download draft
-            </sl-button>
-            <sl-button
-              slot="footer"
-              class="stale-draft-discard"
-              variant="danger"
-              ?loading=${this.staleDraftBusy}
-              @click=${(): void => void this.discardStaleDraft()}
-              >Discard draft</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="stale-draft-move"
-              variant="primary"
-              autofocus
-              ?loading=${this.staleDraftBusy}
-              @click=${(): void => void this.moveStaleDraftToCurrent()}
-              >Move my review to v${stale.currentSeq}</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <div class="dialog-footer-start">
+                <sl-button
+                  size="small"
+                  class="stale-draft-download"
+                  ?disabled=${this.staleDraftBusy}
+                  @click=${(): void =>
+                    downloadTextFile(
+                      safeReviewDownloadName(stale.draft.entry, stale.draft.base),
+                      stale.draft.body
+                    )}
+                >
+                  <sl-icon slot="prefix" name="download"></sl-icon>
+                  Download draft
+                </sl-button>
+                <sl-button
+                  size="small"
+                  class="stale-draft-discard"
+                  variant="danger"
+                  outline
+                  ?loading=${this.staleDraftBusy}
+                  @click=${(): void => void this.discardStaleDraft()}
+                  >Discard draft</sl-button
+                >
+              </div>
+              <div class="dialog-footer-actions">
+                <sl-button
+                  size="small"
+                  class="stale-draft-cancel"
+                  ?disabled=${this.staleDraftBusy}
+                  @click=${(): void => {
+                    this.staleDraft = null;
+                  }}
+                  >Cancel</sl-button
+                >
+                <sl-button
+                  size="small"
+                  class="stale-draft-move"
+                  variant="primary"
+                  autofocus
+                  ?loading=${this.staleDraftBusy}
+                  @click=${(): void => void this.moveStaleDraftToCurrent()}
+                  >Move my review to v${stale.currentSeq}</sl-button
+                >
+              </div>
+            </div>
           </sl-dialog>`
         : nothing}
       ${this.draftDiscardTarget
@@ -5414,24 +5483,26 @@ export class ScionPageArtifactDetail extends LitElement {
                   ${this.draftDiscardError}
                 </sl-alert>`
               : nothing}
-            <sl-button
-              slot="footer"
-              class="draft-discard-cancel"
-              ?disabled=${this.draftDiscardBusy}
-              @click=${(): void => {
-                this.closeDiscardDraftDialog();
-              }}
-              >${this.draftDiscardConflict ? 'Close' : 'Cancel'}</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-discard-confirm"
-              variant="danger"
-              ?disabled=${this.draftDiscardConflict}
-              ?loading=${this.draftDiscardBusy}
-              @click=${(): void => void this.confirmDiscardDraft()}
-              >Discard draft</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <sl-button
+                size="small"
+                class="draft-discard-cancel"
+                ?disabled=${this.draftDiscardBusy}
+                @click=${(): void => {
+                  this.closeDiscardDraftDialog();
+                }}
+                >${this.draftDiscardConflict ? 'Close' : 'Cancel'}</sl-button
+              >
+              <sl-button
+                size="small"
+                class="draft-discard-confirm"
+                variant="danger"
+                ?disabled=${this.draftDiscardConflict}
+                ?loading=${this.draftDiscardBusy}
+                @click=${(): void => void this.confirmDiscardDraft()}
+                >Discard draft</sl-button
+              >
+            </div>
           </sl-dialog>`
         : nothing}
     `;
@@ -5536,17 +5607,24 @@ export class ScionPageArtifactDetail extends LitElement {
           If you publish now, their review can't be saved on this version. They keep their text.
           Your edit stays in the editor if you wait.
         </p>
-        <sl-button slot="footer" class="review-open-wait" variant="primary" autofocus @click=${wait}
-          >Wait</sl-button
-        >
-        <sl-button
-          slot="footer"
-          class="review-open-force"
-          variant="warning"
-          ?loading=${this.editBusy}
-          @click=${(): void => void this.publishEdit(true)}
-          >Publish anyway</sl-button
-        >
+        <div slot="footer" class="dialog-footer">
+          <sl-button
+            size="small"
+            class="review-open-force"
+            variant="warning"
+            ?loading=${this.editBusy}
+            @click=${(): void => void this.publishEdit(true)}
+            >Publish anyway</sl-button
+          >
+          <sl-button
+            size="small"
+            class="review-open-wait"
+            variant="primary"
+            autofocus
+            @click=${wait}
+            >Wait</sl-button
+          >
+        </div>
       </sl-dialog>
     `;
   }

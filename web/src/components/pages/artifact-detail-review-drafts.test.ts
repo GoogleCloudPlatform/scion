@@ -1321,4 +1321,47 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(el.shadowRoot!.querySelector('sl-dialog.draft-discard-dialog')).toBeNull();
     expect(el.shadowRoot!.querySelector('.review-draft-badge')?.textContent?.trim()).toBe('Draft');
   });
+
+  it('renders draft-cancel-dialog footer with grouped start/end actions and small buttons (ptone/scion#9693)', async () => {
+    const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    await settle(el);
+
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } }));
+    await el.updateComplete;
+
+    findButton(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-cancel-dialog')!;
+    expect(dialog).not.toBeNull();
+
+    // Footer buttons live inside a flex container rather than raw sl-dialog footer slot children.
+    const footer = dialog.querySelector<HTMLElement>(':scope > .dialog-footer[slot="footer"]');
+    expect(footer).not.toBeNull();
+    expect(dialog.querySelectorAll(':scope > sl-button[slot="footer"]')).toHaveLength(0);
+
+    const startGroup = footer!.querySelector('.dialog-footer-start');
+    const actionsGroup = footer!.querySelector('.dialog-footer-actions');
+    expect(startGroup).not.toBeNull();
+    expect(actionsGroup).not.toBeNull();
+
+    const discardBtn = startGroup!.querySelector('sl-button.draft-cancel-discard');
+    const backBtn = actionsGroup!.querySelector('sl-button.draft-cancel-back');
+    const saveBtn = actionsGroup!.querySelector('sl-button.draft-cancel-save');
+    expect(discardBtn).not.toBeNull();
+    expect(backBtn).not.toBeNull();
+    expect(saveBtn).not.toBeNull();
+
+    expect(discardBtn!.getAttribute('size')).toBe('small');
+    expect(discardBtn!.getAttribute('variant')).toBe('danger');
+    expect(discardBtn!.hasAttribute('outline')).toBe(true);
+    expect(backBtn!.getAttribute('size')).toBe('small');
+    expect(saveBtn!.getAttribute('size')).toBe('small');
+    expect(saveBtn!.getAttribute('variant')).toBe('primary');
+  });
 });
