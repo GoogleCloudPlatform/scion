@@ -1,11 +1,11 @@
 ---
 title: External Channels
-description: Connect Scion to Telegram, Discord, and A2A for external messaging and notifications.
+description: Connect Scion to Telegram, Discord, Slack, Google Chat, Microsoft Teams, and A2A for external messaging and notifications.
 ---
 
 ## Overview
 
-Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Multiple external channels are supported: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), **Google Chat** (comprehensive bidirectional workspace integration), **Microsoft Teams** (enterprise-grade bidirectional channel messaging), and the **A2A protocol** (exposing agents as programmatically queryable endpoints).
+Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Multiple external channels are supported: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), **Slack** (bidirectional channel/thread bot and outbound webhook notifications), **Google Chat** (comprehensive bidirectional workspace integration), **Microsoft Teams** (enterprise-grade bidirectional channel messaging), and the **A2A protocol** (exposing agents as programmatically queryable endpoints).
 
 ## Telegram
 
@@ -167,6 +167,83 @@ Set the webhook URL in one of two ways:
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
 
 For more details, see [Hub Setup — Discord Integration](/scion/hosted/single-node/hub-server/#discord-integration).
+
+## Slack
+
+Scion supports Slack in two modes: the **Interactive Slack Bot** (`scion-plugin-slack`) for bidirectional channel and thread messaging, and **Outbound-Only Webhook Notifications** (`slack` notification channel) for one-way status alerts.
+
+### 1. Interactive Slack Bot (`scion-plugin-slack`)
+
+The interactive Slack bot runs as a `go-plugin` Message Broker subprocess launched by the Hub's plugin manager (`scion-plugin-slack`). It supports bidirectional messaging in Slack channels and threads, per-agent display names on outbound posts, interactive Block Kit prompts and modals for `input-needed` requests, and outbound mention resolution (replacing linked Scion user emails with Slack `<@user_id>` mentions).
+
+#### Transport Modes & Configuration
+
+Configure the plugin in the Hub Admin UI or Hub `settings.yaml`. `bot_token` (`xoxb-...`) is always required. Choose one inbound transport mode:
+
+- **Socket Mode (`socket_mode: true`)**: Set `socket_mode: "true"` and supply `app_token` (Slack app-level token, `xapp-...`). The plugin connects outbound to Slack over WebSocket, so no public HTTP endpoint is needed.
+- **HTTP Events API (`socket_mode: false`, default)**: Supply `signing_secret` to verify Slack request signatures on `POST /slack/events`, `POST /slack/commands`, and `POST /slack/interactions` (plus `GET /slack/healthz`). Set `listen_address` to override the default `:3000`.
+
+Optional keys:
+
+- `db_path`: Path to the local SQLite database storing channel links, user mappings, and conversation context (default `slack.db`).
+- `routed_inbound_enabled`: When `true` (default `false`), routes ordinary user messages through the Hub's `/api/v1/broker/inbound/routed` endpoint for centralized mention extraction and multi-agent routing instead of legacy `/api/v1/broker/inbound`.
+
+Hub-managed keys are injected automatically from live Hub settings (see [Message-Bus Plugin Supervision](#message-bus-plugin-supervision) for the full list; `scion-plugin-slack` builds user registration links from `hub_url`).
+
+#### Setup, Routing & Delegated Identity
+
+:::note[Hub account-linking prerequisite]
+`/scion register` relies on the Hub's `/api/v1/slack/link*` endpoints and `/profile/slack` verification page, and interactive slash commands (`/scion setup`, `/scion agents`, `/scion status`, `/scion msg`) as well as inbound message routing require a linked Scion user account (`requireLinkedUser`). On Hubs where Slack account-linking routes are not enabled, `/scion register` cannot complete.
+:::
+
+1. **Link your account (`/scion register`)**: Generates a 6-character code registered with the Hub (`POST /api/v1/slack/link`) and posts an ephemeral sign-in URL (`<hub_url>/profile/slack?code=...`, valid for 15 minutes).
+2. **Link a channel (`/scion setup`)**: Presents interactive project buttons filtered strictly to the projects your linked Scion account can see.
+3. **Delegated identity (`X-Scion-On-Behalf-Of`)**: Hub API calls made on your behalf (`/api/v1/projects`, `/api/v1/projects/{id}/agents`) send `X-Scion-On-Behalf-Of: user:<email>` covered by the plugin's HMAC signature (`X-Scion-Signed-Headers: x-scion-on-behalf-of`). Inbound messages carry `Sender: user:<email>` so Hub RBAC and agent message modes are enforced under your Scion account.
+4. **`@`-mention routing and threads**: Mentioning the bot (`@ScionBot <text>`) in a linked channel strips the bot mention and delivers the message to the channel's default agent (or routes by mention on the Hub when `routed_inbound_enabled: true`). Direct messages follow the same delivery path only after the DM channel is linked via `/scion setup` (messages in unlinked channels or DMs are dropped). Slack thread timestamps (`thread_ts`) are tracked as conversation context so replies post back into the originating thread.
+
+#### Available Slash Commands (`/scion`)
+
+All slash commands reply ephemerally (visible only to the caller):
+
+| Command | Description |
+| :--- | :--- |
+| `/scion setup` | Link the current channel to a Scion project visible to your linked account. |
+| `/scion unlink` | Unlink the channel from its Scion project. |
+| `/scion agents` | List agents in the linked project with their current activity and default marker. |
+| `/scion status <agent>` | Show the current activity of a specific agent. |
+| `/scion msg <agent> <text>` | Send a message directly to a specific agent. |
+| `/scion default [agent]` | Show, set, or clear (`none` or `clear`) the channel's default agent. |
+| `/scion register` | Link your Slack account to your Scion Hub identity (15-minute sign-in link). |
+| `/scion unregister` | Unlink your Slack account from Scion Hub. |
+| `/scion settings` | Toggle channel **Observe Mode** (agent-to-agent messages) and **State Notifications**. |
+| `/scion info` | Show your Hub registration status and the channel's linked project and default agent. |
+| `/scion help` | Show available `/scion` commands. |
+
+### 2. Outbound-Only Webhook Notifications
+
+If you only need one-way status notifications without running `scion-plugin-slack`, configure the built-in `slack` notification channel (`pkg/hub/channels_slack.go`) under `server.notification_channels` in `settings.yaml` (or in Admin Server Config):
+
+| Parameter | Required | Description |
+| :--- | :--- | :--- |
+| `webhook_url` | Yes | Slack incoming webhook URL (must start with `https://hooks.slack.com/`). |
+| `channel` | No | Override the incoming webhook's default Slack channel. |
+| `mention_on_urgent` | No | Mention prefix prepended to urgent messages (for example `@here` or `@channel`). |
+
+```yaml
+server:
+  notification_channels:
+    - type: slack
+      params:
+        webhook_url: https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX
+        channel: "#scion-alerts"
+        mention_on_urgent: "@here"
+      filter_urgent_only: false
+      filter_types:
+        - input-needed
+        - state-change
+```
+
+See [Server Configuration Reference: Slack channel](/scion/reference/server-config/#slack-channel) for full channel filtering options.
 
 ## Google Chat
 

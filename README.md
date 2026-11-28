@@ -8,7 +8,7 @@ Scion is an open-source orchestration platform for teams of AI agents and the pe
 
 As agents take on longer, more complex projects, the challenge becomes how they work together: who owns a task, what context they share, when they ask for help, and how you follow their progress. Scion provides the running environments, communication, identity, and visibility to explore those questions in practice.
 
-Run harnesses such as Claude Code, Antigravity, Codex, and OpenCode as independent processes, with per-agent configuration and credentials. Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with a local CLI or the Workstation web UI, then move to a hosted Hub when your team needs shared access and remote execution.
+Run 10 bundled declarative harnesses (Gemini CLI, Claude Code, Antigravity, Codex, GitHub Copilot, OpenCode, Hermes, Grok Build, Muse Code, and pi) as independent processes, or run Managed Agents directly via cloud APIs without a Runtime Broker, with per-agent configuration and credentials (see [Supported Harnesses](https://googlecloudplatform.github.io/scion/supported-harnesses/)). Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with the Workstation CLI or web UI, then move to a hosted Hub when your team needs shared access and remote execution.
 
 Scion's philosophy is **less is more**. Agents learn the `scion` CLI through skills and help text; you describe responsibilities and collaboration patterns in instructions. Teams can grow, delegate, review, and regroup as a task unfolds. Use Scion as a practical testbed for emerging patterns in agent collaboration, with the freedom to choose your models, tools, and infrastructure. Read more in [Philosophy](https://googlecloudplatform.github.io/scion/philosophy/).
 
@@ -122,7 +122,9 @@ scion start debug "Help me debug this error" --attach
 - **People in the conversation** — Follow work in native web chat or connect Telegram, Discord, Slack, Google Chat, and Microsoft Teams. Attach to supported interactive harness sessions when you want to work directly with an agent.
 - **Reusable expertise** — Package instructions and tools in [templates](https://googlecloudplatform.github.io/scion/local/templates/) and versioned skills. Publish, discover, and resolve skills through the Skill Bank and connected registries.
 - **Local to hosted execution** — Use Docker, Podman, Apple Container, Kubernetes, or Cloud Run. Choose Workstation, single-node hosted, or HA hosted operation, with a managed-agent API path for supported providers.
-- **Visibility and control** — Inspect logs, session metrics, and system health. Hosted deployments add roles, access boundaries, scoped secrets, and federated identity to control how people and agents work together.
+- **Scheduling & event triggers**: Automate agent messages, headless dispatches, and container commands with one-shot or cron [schedules](https://googlecloudplatform.github.io/scion/hosted/user/scheduling/), or react to signed webhooks and GitHub App deliveries with [event triggers](https://googlecloudplatform.github.io/scion/hosted/user/triggers/) (experimental).
+- **Observability & audit logging**: Export harness and Hub telemetry via OpenTelemetry (`gen_ai.*`, `agent.*`, `scion.hub.*`), track database-backed session metrics, and capture structured audit telemetry (`hub.audit`, typed `auditevent` / `hub.auth` records, GCP `actAs` audit events, and database-backed mutation audit records).
+- **Security & governance**: Isolate agents per container with fail-closed RBAC, monotonic access boundaries, frozen delegation ceilings, scoped secrets, human-approved command execution, and GCP/AWS cloud workload identity federation (see [Security Reference](https://googlecloudplatform.github.io/scion/reference/security/)).
 - **Open interfaces** — Integrate through the CLI, APIs, lifecycle hooks, MCP configuration, and the A2A bridge. Build on Apache-2.0-licensed code and contribute new patterns back to the project.
 
 ## Core Concepts
@@ -145,10 +147,16 @@ Visit our **[Documentation Site](https://googlecloudplatform.github.io/scion/)**
 - **[Overview](https://googlecloudplatform.github.io/scion/overview/)**: Introduction to Scion.
 - **[Installation](https://googlecloudplatform.github.io/scion/getting-started/install/)**: How to get Scion up and running.
 - **[Concepts](https://googlecloudplatform.github.io/scion/concepts/)**: Understanding Agents, Projects, Harnesses, and Runtimes.
+- **[Supported Harnesses](https://googlecloudplatform.github.io/scion/supported-harnesses/)**: Harness setup, auth modes, and feature capability matrix.
 - **[CLI Reference](https://googlecloudplatform.github.io/scion/reference/cli/)**: Comprehensive guide to all Scion commands.
+- **[Security Reference](https://googlecloudplatform.github.io/scion/reference/security/)**: Authentication, RBAC, isolation, secrets, and governance controls.
 - **Guides**:
     - [Using Templates](https://googlecloudplatform.github.io/scion/local/templates/)
     - [Using Tmux](https://googlecloudplatform.github.io/scion/local/tmux/)
+    - [External Channels](https://googlecloudplatform.github.io/scion/hosted/user/external-channels/)
+    - [Scheduling & Events](https://googlecloudplatform.github.io/scion/hosted/user/scheduling/)
+    - [Event Triggers & Webhooks](https://googlecloudplatform.github.io/scion/hosted/user/triggers/)
+    - [Observability](https://googlecloudplatform.github.io/scion/hosted/single-node/observability/)
     - [Kubernetes Runtime](https://googlecloudplatform.github.io/scion/hosted/ha/kubernetes/)
 
 ## Project Status

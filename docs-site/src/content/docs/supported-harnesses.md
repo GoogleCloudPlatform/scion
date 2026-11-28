@@ -109,7 +109,7 @@ When the level is unset or blank, the variable is not set, so Claude Code keeps 
 
 ---
 
-## 3. OpenCode (`opencode`) [Experimental]
+## 3. OpenCode (`opencode`)
 
 The OpenCode TUI.
 
@@ -419,6 +419,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Hooks** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Support | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ? |
 | **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| **MCP** | ❌ | ✅ | ✅ | ◐ | ✅ | ✅ | ✅ | ✅ | ◐ | ◐ |
 | **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ | ◐ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ | ✅ |
 | **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -430,6 +431,7 @@ The following table summarizes the capabilities supported by each agent harness 
 * **Enqueue**: Ability to send messages to the agent while it's running (supported via the built-in Tmux session).
 * **Hooks**: Support for lifecycle hooks (e.g., `SessionStart`, `AfterTool`).
 * **OpenTelemetry**: Specific events vary by harness and native emitter schema.
+* **MCP**: Universal `mcp_servers` provisioning via each harness's `provision.py`. Only Claude Code (`claude`) supports project-scoped MCP (`~/.claude.json`); all other MCP-capable harnesses merge project-scoped entries into their user-level global MCP config. ◐ = *partial*: Codex and Muse Code map `sse` onto their HTTP / `streamable_http` transport, and pi supports `stdio` and `streamable-http` only (skipping legacy `sse`). `gemini-cli` does not provision `mcp_servers` on this build.
 * **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini-cli` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes and Muse Code, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot. pi is also ◐ for a different reason: it reads the system prompt natively from `~/.pi/agent/APPEND_SYSTEM.md`, which pi *appends to its own default system prompt* rather than replacing it.
 * **Auth types**: The universal auth types (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`) each harness accepts. Set an explicit type with `--harness-auth` or `auth_selectedType`; otherwise Scion auto-detects. See [Harness Authentication](/scion/local/agent-credentials/).
     * ¹ **Copilot** authenticates with a **GitHub token** (`COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) under the `api-key` type, not an LLM-provider key.

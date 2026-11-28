@@ -98,3 +98,6 @@ walks you through machine setup, runtime detection, harness selection, and your 
 - [Core Concepts](/scion/concepts/) — Agent, Project, Hub, Runtime Broker, and the state model.
 - [Glossary](/scion/glossary/) — canonical definitions for every term.
 - [Philosophy](/scion/philosophy/) — the "less is more" design principles behind Scion.
+- [Event Triggers & Webhooks](/scion/hosted/user/triggers/): automate agent work from signed webhooks and GitHub App events (experimental).
+- [Observability](/scion/hosted/single-node/observability/): OpenTelemetry forwarding, logs, and metrics across agents and the Hub.
+- [Security Architecture](/scion/reference/security/): overview of isolation, SSO, RBAC, cloud workload identity, secrets, and audit logging.
