@@ -67,10 +67,15 @@ const (
 // (returns nil). Agent identities lacking agentAuthoringFloorScope return an
 // error so HTTP handlers write 403 and fire-time authorization refuses the fire.
 func requireAgentAuthoringFloor(identity Identity) error {
-	// Guard with isNilIdentity before type-asserting so a typed-nil concrete
-	// identity (e.g. (*agentIdentityWrapper)(nil)) does not panic in HasScope.
-	if isNilIdentity(identity) {
+	// Untyped nil means no agent identity (e.g. non-agent HTTP caller via
+	// GetAgentIdentityFromContext); floor does not apply.
+	if identity == nil {
 		return nil
+	}
+	// Fail closed on a typed-nil concrete identity (e.g. (*agentIdentityWrapper)(nil))
+	// so it never passes the floor or panics in HasScope (security Low-1).
+	if isNilIdentity(identity) {
+		return fmt.Errorf("%w: agent lacks baseline authoring floor (%s)", errScheduledAuthorityDenied, agentAuthoringFloorScope)
 	}
 	agentIdent, ok := identity.(AgentIdentity)
 	if !ok {
@@ -662,11 +667,12 @@ func (s *Server) authorizeTriggerNotifyAuthoring(
 	agentName := strings.TrimSpace(spec.AgentName)
 	if agentID != "" || agentName != "" {
 		_, resolved, ok := s.resolveTriggerMessageTarget(w, r, identity, projectID, sourceKind, MessageEventPayload{
-			AgentID:   agentID,
-			AgentName: agentName,
-			Message:   "Trigger failure notification",
-			Wake:      false,
-			Plain:     false,
+			AgentID:       agentID,
+			AgentName:     agentName,
+			Message:       "Trigger failure notification",
+			Wake:          false,
+			Plain:         false,
+			UntrustedVars: []string{},
 		}, "github trigger notify authoring")
 		if !ok {
 			return nil, false
