@@ -310,4 +310,50 @@ func TestShareHealth_OwnerCheck(t *testing.T) {
 		require.True(t, strings.HasPrefix(info.Checks[shareHealthCheck], shareHealthNotVisible+" ("))
 		require.Equal(t, "degraded", info.Status)
 	})
+
+	t.Run("transient owner read error preserves active warning and logs no false recovery", func(t *testing.T) {
+		logs := captureDefaultLog(t)
+		f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
+		marker := filepath.Join(f.hostBase, "projects", api.ExportOwnerMarkerName)
+		require.NoError(t, os.WriteFile(marker, []byte("2000:1000\n"), 0o644))
+		f.srv.shareHealth.agentOwnerIDs = func() (int, int, bool) { return 1000, 1000, true }
+
+		const recoveryMsg = "Broker effective agent uid/gid matches recorded project storage owner again"
+		countRecoveryLog := func() int {
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			n := 0
+			for _, r := range logs.records {
+				if r.Level == slog.LevelInfo && r.Message == recoveryMsg {
+					n++
+				}
+			}
+			return n
+		}
+
+		// Establish an active mismatch warning.
+		f.srv.checkShareHealth(ctx)
+		activeWarn := f.srv.GetHealthInfo(ctx).Checks[shareHealthCheck]
+		require.True(t, strings.HasPrefix(activeWarn, shareHealthOwnerMismatch+" ("), "got %q", activeWarn)
+
+		// Replace the marker with an unreadable directory so ownerErr != nil
+		// across two consecutive checks (second check has prevOwnerErrLogged=true).
+		require.NoError(t, os.Remove(marker))
+		require.NoError(t, os.Mkdir(marker, 0o755))
+
+		f.srv.checkShareHealth(ctx)
+		require.Equal(t, activeWarn, f.srv.GetHealthInfo(ctx).Checks[shareHealthCheck], "first transient error must preserve active warning")
+		require.Equal(t, 0, countRecoveryLog(), "first transient error must not log recovery")
+
+		f.srv.checkShareHealth(ctx)
+		require.Equal(t, activeWarn, f.srv.GetHealthInfo(ctx).Checks[shareHealthCheck], "repeated transient error must preserve active warning")
+		require.Equal(t, 0, countRecoveryLog(), "repeated transient error must not log false recovery")
+
+		// Restoring a matching marker clears the warning and logs recovery once.
+		require.NoError(t, os.Remove(marker))
+		require.NoError(t, os.WriteFile(marker, []byte("1000:1000\n"), 0o644))
+		f.srv.checkShareHealth(ctx)
+		require.Equal(t, "healthy", f.srv.GetHealthInfo(ctx).Checks[shareHealthCheck])
+		require.Equal(t, 1, countRecoveryLog(), "actual recovery must log recovery once")
+	})
 }

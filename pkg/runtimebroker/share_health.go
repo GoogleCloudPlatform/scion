@@ -112,7 +112,12 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 	wasNotVisible := c.checked && c.err != nil
 	prevOwnerWarning := c.ownerWarning
 	prevOwnerErrLogged := c.ownerErrLogged
-	c.checked, c.err, c.ownerWarning = true, err, ownerWarning
+	c.checked, c.err = true, err
+	if err != nil {
+		c.ownerWarning = ""
+	} else if ownerErr == nil {
+		c.ownerWarning = ownerWarning
+	}
 	if ownerErr != nil && !errors.Is(ownerErr, errors.ErrUnsupported) {
 		c.ownerErrLogged = true
 	} else if ownerErr == nil {
@@ -132,22 +137,26 @@ func (s *Server) checkShareHealth(ctx context.Context) {
 	}
 
 	if err == nil {
-		if ownerErr == nil && ownerCreated {
-			slog.Info("Recorded canonical project storage owner marker",
-				"path", filepath.Join(path, api.ExportOwnerMarkerName),
-				"uid", recordedUID, "gid", recordedGID)
-		}
-		switch {
-		case ownerErr != nil && !errors.Is(ownerErr, errors.ErrUnsupported) && !prevOwnerErrLogged:
-			slog.Warn("Could not read or record project storage canonical owner marker; skipping ownership alignment check",
-				"path", path, "error", ownerErr)
-		case ownerWarning != "" && ownerWarning != prevOwnerWarning:
-			slog.Warn("Broker effective agent uid/gid differs from recorded project storage owner",
-				"agent_uid", agentUID, "agent_gid", agentGID,
-				"recorded_uid", recordedUID, "recorded_gid", recordedGID,
-				"remedy", ownerMismatchRemediation)
-		case ownerWarning == "" && prevOwnerWarning != "":
-			slog.Info("Broker effective agent uid/gid matches recorded project storage owner again")
+		if ownerErr != nil {
+			if !errors.Is(ownerErr, errors.ErrUnsupported) && !prevOwnerErrLogged {
+				slog.Warn("Could not read or record project storage canonical owner marker; skipping ownership alignment check",
+					"path", path, "error", ownerErr)
+			}
+		} else {
+			if ownerCreated {
+				slog.Info("Recorded canonical project storage owner marker",
+					"path", filepath.Join(path, api.ExportOwnerMarkerName),
+					"uid", recordedUID, "gid", recordedGID)
+			}
+			switch {
+			case ownerWarning != "" && ownerWarning != prevOwnerWarning:
+				slog.Warn("Broker effective agent uid/gid differs from recorded project storage owner",
+					"agent_uid", agentUID, "agent_gid", agentGID,
+					"recorded_uid", recordedUID, "recorded_gid", recordedGID,
+					"remedy", ownerMismatchRemediation)
+			case ownerWarning == "" && prevOwnerWarning != "":
+				slog.Info("Broker effective agent uid/gid matches recorded project storage owner again")
+			}
 		}
 	}
 }
