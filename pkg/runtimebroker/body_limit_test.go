@@ -121,6 +121,7 @@ func TestRuntimeBroker_HandlerBodyLimits(t *testing.T) {
 		path   string
 		prefix string
 		suffix string
+		limit  int
 	}{
 		{
 			name:   "createAgent",
@@ -149,6 +150,7 @@ func TestRuntimeBroker_HandlerBodyLimits(t *testing.T) {
 			path:   "/api/v1/agents/test-agent/message",
 			prefix: `{"message":"`,
 			suffix: `"}`,
+			limit:  int(maxBrokerSendMessageBodyBytes),
 		},
 		{
 			name:   "execCommand",
@@ -194,9 +196,11 @@ func TestRuntimeBroker_HandlerBodyLimits(t *testing.T) {
 		},
 	}
 
-	limit := int(defaultMaxJSONBodyBytes)
-
 	for _, tc := range cases {
+		limit := tc.limit
+		if limit == 0 {
+			limit = int(defaultMaxJSONBodyBytes)
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testServerConfig()
 			cfg.BrokerID = "test-broker"

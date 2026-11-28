@@ -5969,6 +5969,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	})
 }
 
+// maxBrokerSendMessageBodyBytes bounds POST /api/v1/agents/{id}/message at
+// 8 MiB. The Hub accepts message bodies up to 2 MiB on its public ingress and
+// forwards a rebuilt JSON request in which the message text can appear three
+// times (structured_message.msg, nested structured_message.delivery_text, and
+// top-level delivery_text), producing ~6 MiB plus JSON framing for a near-limit
+// message. 8 MiB admits the largest valid Hub-forwarded message while still
+// bounding local/unauthenticated requests against unbounded reads.
+const maxBrokerSendMessageBodyBytes int64 = 8 << 20
+
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -5980,11 +5989,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		BadRequest(w, "Invalid request body: empty request body")
 		return
 	}
-	// Bound at defaultMaxJSONBodyBytes (apiclient.MaxSignedRequestBodyBytes,
-	// 2 MiB), matching the HMAC middleware ceiling so rebuilt Hub messages
-	// (which may carry both msg and delivery_text) stay well within budget
-	// while unauthenticated/local requests cannot trigger unbounded reads.
-	r.Body = http.MaxBytesReader(w, r.Body, defaultMaxJSONBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBrokerSendMessageBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if isMaxBytesError(err) {
