@@ -16,8 +16,8 @@ package entadapter
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,73 +28,101 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegroupbudgetseed"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-const groupSeedUserChunkSize = 200
+const usageGroupEpisodeTTLCoverDelay = 2 * time.Minute
 
-func entUsageGroupBudgetSeedToStore(row *ent.UsageGroupBudgetSeed) *store.UsageGroupSeedRecord {
-	if row == nil {
+type usageGroupSeedRow struct {
+	dayUTC         time.Time
+	projectScopeID string
+	tokensSummable int64
+	input          int64
+	output         int64
+	cacheRead      int64
+	cacheWrite     int64
+	calls          int64
+	events         int64
+}
+
+func groupEpisodeSeedOrigin(episodeID string) string {
+	return store.UsageGroupRollupOriginSeed + ":" + episodeID
+}
+
+func utcMonthStart(ts time.Time) time.Time {
+	t := ts.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+func sqlBigIntSumExpr(dialectName, innerExpr string) string {
+	if dialectName == dialect.Postgres {
+		return fmt.Sprintf("CAST(COALESCE(SUM(%s), 0) AS BIGINT)", innerExpr)
+	}
+	return fmt.Sprintf("COALESCE(SUM(%s), 0)", innerExpr)
+}
+
+// acquireGroupEpisodeAdvisoryLock takes a single per-group transaction-scoped
+// PostgreSQL advisory lock so every episode lifecycle transition (open, close,
+// seed pass) for groupID serializes cleanly across Hub replicas (D6a, O4).
+// On SQLite, transactions are already serialized by the single writer connection.
+func acquireGroupEpisodeAdvisoryLock(ctx context.Context, drv dialect.Driver, groupID string) error {
+	if drv.Dialect() != dialect.Postgres {
+		return nil
+	}
+	lockKey := "usage_group_episode:" + groupID
+	return drv.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", []any{lockKey}, nil)
+}
+
+func entUsageGroupSeedToStore(r *ent.UsageGroupBudgetSeed) *store.UsageGroupSeedEpisode {
+	if r == nil {
 		return nil
 	}
 	var members []string
-	if len(row.FrozenMemberIds) > 0 {
-		members = make([]string, len(row.FrozenMemberIds))
-		copy(members, row.FrozenMemberIds)
+	if len(r.FrozenMemberIds) > 0 {
+		members = make([]string, len(r.FrozenMemberIds))
+		copy(members, r.FrozenMemberIds)
 	}
-	return &store.UsageGroupSeedRecord{
-		ID:                row.ID.String(),
-		GroupID:           row.GroupID,
-		ProjectScopeID:    row.ProjectScopeID,
-		WindowKind:        row.WindowKind,
-		WindowStartUTC:    row.WindowStartUtc.UTC(),
-		WindowEndUTC:      row.WindowEndUtc.UTC(),
-		ActivatedAt:       row.ActivatedAt.UTC(),
-		CutoffAt:          row.CutoffAt.UTC(),
+	var endedCopy *time.Time
+	if r.EndedAt != nil {
+		t := r.EndedAt.UTC()
+		endedCopy = &t
+	}
+	return &store.UsageGroupSeedEpisode{
+		ID:                r.ID.String(),
+		GroupID:           r.GroupID,
+		ActivatedAt:       r.ActivatedAt.UTC(),
+		SeedFromUTC:       r.SeedFromUtc.UTC(),
+		CutoffAt:          r.CutoffAt.UTC(),
+		EndedAt:           endedCopy,
 		FrozenMemberIDs:   members,
-		MemberSnapshotSet: row.MemberSnapshotSet,
-		Finalized:         row.Finalized,
-		StateVersion:      row.StateVersion,
-		CreatedAt:         row.CreatedAt.UTC(),
-		UpdatedAt:         row.UpdatedAt.UTC(),
+		MemberSnapshotSet: r.MemberSnapshotSet,
+		Finalized:         r.Finalized,
+		StateVersion:      r.StateVersion,
+		CreatedAt:         r.CreatedAt.UTC(),
+		UpdatedAt:         r.UpdatedAt.UTC(),
 	}
 }
 
-func sqlBigIntSumExpr(dialectName, expr string) string {
-	if dialectName == dialect.Postgres {
-		return fmt.Sprintf("CAST(COALESCE(SUM(%s), 0) AS BIGINT)", expr)
-	}
-	return fmt.Sprintf("COALESCE(SUM(%s), 0)", expr)
-}
-
-// ComputeUnchargedGroupRollupSeed implements store.UsageBudgetStore.ComputeUnchargedGroupRollupSeed.
-// Aggregates usage_events in SQL (GROUP BY UTC day) for memberUserIDs in
-// [fromTS, toTS) (optionally restricted to projectScopeID) where groupID is NOT
-// in charged_group_ids using dialect-aware JSON containment on Postgres
-// (jsonb @>) and SQLite (json_each). Anomalous events are excluded from token
-// counters identically to ingest.
-func (s *UsageLedgerStore) ComputeUnchargedGroupRollupSeed(
-	ctx context.Context,
-	groupID, projectScopeID string,
-	memberUserIDs []string,
-	fromTS, toTS time.Time,
-) ([]store.UsageGroupRollupDay, error) {
-	return computeUnchargedGroupRollupSeedWithDriver(ctx, s.client.Driver(), groupID, projectScopeID, memberUserIDs, fromTS, toTS)
-}
-
-func computeUnchargedGroupRollupSeedWithDriver(
+// computeUnchargedGroupEpisodeRollupSeedWithDriver aggregates uncharged
+// usage_events in [fromTS, toTS) for memberUserIDs using SQL GROUP BY
+// (day_utc, project_id), returning both system (project_scope_id="") and
+// project-scoped (project_scope_id=<event project>) rollup rows plus the sorted
+// list of touched project scopes (D6a, R5).
+func computeUnchargedGroupEpisodeRollupSeedWithDriver(
 	ctx context.Context,
 	drv dialect.Driver,
-	groupID, projectScopeID string,
+	groupID string,
 	memberUserIDs []string,
 	fromTS, toTS time.Time,
-) ([]store.UsageGroupRollupDay, error) {
+) ([]usageGroupSeedRow, []string, error) {
 	if groupID == "" {
-		return nil, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
+		return nil, nil, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
 	}
 	if len(memberUserIDs) == 0 || !toTS.After(fromTS) {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	dialectName := drv.Dialect()
@@ -108,7 +136,7 @@ func computeUnchargedGroupRollupSeedWithDriver(
 		dayExpr = "to_char(event_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
 		b, err := json.Marshal([]string{groupID})
 		if err != nil {
-			return nil, fmt.Errorf("marshal group id json: %w", err)
+			return nil, nil, fmt.Errorf("marshal group id json: %w", err)
 		}
 		groupParam = string(b)
 		notChargedClause = "(charged_group_ids IS NULL OR NOT (charged_group_ids @> CAST(? AS jsonb)))"
@@ -119,565 +147,594 @@ func computeUnchargedGroupRollupSeedWithDriver(
 	sumOut := sqlBigIntSumExpr(dialectName, "CASE WHEN anomalous THEN 0 ELSE COALESCE(output, 0) END")
 	sumCR := sqlBigIntSumExpr(dialectName, "CASE WHEN anomalous THEN 0 ELSE COALESCE(cache_read, 0) END")
 	sumCW := sqlBigIntSumExpr(dialectName, "CASE WHEN anomalous THEN 0 ELSE COALESCE(cache_write, 0) END")
-	sumCalls := sqlBigIntSumExpr(dialectName, "calls")
+	sumCalls := sqlBigIntSumExpr(dialectName, "COALESCE(calls, 0)")
+	cntEvents := "COUNT(*)"
 
-	byDay := make(map[time.Time]*store.UsageGroupRollupDay)
+	placeholders := strings.Repeat("?,", len(memberUserIDs))
+	placeholders = placeholders[:len(placeholders)-1]
 
-	for start := 0; start < len(memberUserIDs); start += groupSeedUserChunkSize {
-		end := start + groupSeedUserChunkSize
-		if end > len(memberUserIDs) {
-			end = len(memberUserIDs)
-		}
-		chunk := memberUserIDs[start:end]
+	args := make([]any, 0, len(memberUserIDs)+3)
+	args = append(args, fromUTC, toUTC)
+	for _, uid := range memberUserIDs {
+		args = append(args, uid)
+	}
+	args = append(args, groupParam)
 
-		var b strings.Builder
-		args := make([]any, 0, len(chunk)+5)
-		fmt.Fprintf(&b, `SELECT %s AS day_str, %s, %s, %s, %s, %s, %s, COUNT(*) FROM usage_events WHERE billing_user_id IN (`,
-			dayExpr, sumTok, sumIn, sumOut, sumCR, sumCW, sumCalls)
-		for i, uid := range chunk {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteByte('?')
-			args = append(args, uid)
-		}
-		b.WriteString(`) AND event_ts >= ? AND event_ts < ?`)
-		args = append(args, fromUTC, toUTC)
-		if projectScopeID != "" {
-			b.WriteString(` AND project_id = ?`)
-			args = append(args, projectScopeID)
-		}
-		b.WriteString(` AND `)
-		b.WriteString(notChargedClause)
-		args = append(args, groupParam)
-		fmt.Fprintf(&b, ` GROUP BY %s`, dayExpr)
+	query := fmt.Sprintf(`
+SELECT
+	%s AS day_str,
+	COALESCE(project_id, '') AS proj_id,
+	%s AS tok_sum,
+	%s AS in_sum,
+	%s AS out_sum,
+	%s AS cr_sum,
+	%s AS cw_sum,
+	%s AS calls_sum,
+	%s AS events_cnt
+FROM usage_events
+WHERE event_ts >= ? AND event_ts < ?
+  AND billing_user_id IN (%s)
+  AND %s
+GROUP BY %s, COALESCE(project_id, '')
+ORDER BY day_str ASC, proj_id ASC`,
+		dayExpr, sumTok, sumIn, sumOut, sumCR, sumCW, sumCalls, cntEvents,
+		placeholders, notChargedClause, dayExpr,
+	)
+	query = usageRebindSQL(dialectName, query)
 
-		q := usageRebindSQL(dialectName, b.String())
-		rows := &entsql.Rows{}
-		if err := drv.Query(ctx, q, args, rows); err != nil {
-			return nil, mapError(err)
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, args, rows); err != nil {
+		return nil, nil, fmt.Errorf("query uncharged group episode seed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	type rowKey struct {
+		dayUTC time.Time
+		projID string
+	}
+	byKey := make(map[rowKey]*usageGroupSeedRow)
+	projectSet := make(map[string]struct{})
+
+	addAgg := func(dayUTC time.Time, projID string, tok, in, out, cr, cw, calls, evCnt int64) {
+		k := rowKey{dayUTC: dayUTC, projID: projID}
+		r, ok := byKey[k]
+		if !ok {
+			r = &usageGroupSeedRow{dayUTC: dayUTC, projectScopeID: projID}
+			byKey[k] = r
 		}
-		for rows.Next() {
-			var dayStr string
-			var tokens, inTok, outTok, crTok, cwTok, calls, events int64
-			if err := rows.Scan(&dayStr, &tokens, &inTok, &outTok, &crTok, &cwTok, &calls, &events); err != nil {
-				_ = rows.Close()
-				return nil, mapError(err)
-			}
-			dayUTC, err := time.Parse("2006-01-02", dayStr)
-			if err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("parse day_utc %q: %w", dayStr, err)
-			}
-			dayUTC = dayUTC.UTC()
-			agg, ok := byDay[dayUTC]
-			if !ok {
-				agg = &store.UsageGroupRollupDay{DayUTC: dayUTC}
-				byDay[dayUTC] = agg
-			}
-			agg.TokensSummable = saturatingAddInt64(agg.TokensSummable, tokens)
-			agg.Input = saturatingAddInt64(agg.Input, inTok)
-			agg.Output = saturatingAddInt64(agg.Output, outTok)
-			agg.CacheRead = saturatingAddInt64(agg.CacheRead, crTok)
-			agg.CacheWrite = saturatingAddInt64(agg.CacheWrite, cwTok)
-			agg.Calls = saturatingAddInt64(agg.Calls, calls)
-			agg.Events = saturatingAddInt64(agg.Events, events)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, mapError(err)
-		}
-		_ = rows.Close()
+		r.tokensSummable = saturatingAddInt64(r.tokensSummable, tok)
+		r.input = saturatingAddInt64(r.input, in)
+		r.output = saturatingAddInt64(r.output, out)
+		r.cacheRead = saturatingAddInt64(r.cacheRead, cr)
+		r.cacheWrite = saturatingAddInt64(r.cacheWrite, cw)
+		r.calls = saturatingAddInt64(r.calls, calls)
+		r.events = saturatingAddInt64(r.events, evCnt)
 	}
 
-	out := make([]store.UsageGroupRollupDay, 0, len(byDay))
-	for _, agg := range byDay {
-		out = append(out, *agg)
+	for rows.Next() {
+		var dayStr, projID string
+		var tok, in, out, cr, cw, calls, evCnt int64
+		if err := rows.Scan(&dayStr, &projID, &tok, &in, &out, &cr, &cw, &calls, &evCnt); err != nil {
+			return nil, nil, fmt.Errorf("scan uncharged group episode seed: %w", err)
+		}
+		dayUTC, err := time.Parse("2006-01-02", dayStr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse seed day %q: %w", dayStr, err)
+		}
+		dayUTC = dayUTC.UTC()
+		// Mirror ingest: write BOTH system (project_scope_id="") and project
+		// (project_scope_id=<event project>) rows for every uncharged event.
+		addAgg(dayUTC, "", tok, in, out, cr, cw, calls, evCnt)
+		if projID != "" {
+			addAgg(dayUTC, projID, tok, in, out, cr, cw, calls, evCnt)
+			projectSet[projID] = struct{}{}
+		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].DayUTC.Before(out[j].DayUTC)
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate uncharged group episode seed: %w", err)
+	}
+
+	outRows := make([]usageGroupSeedRow, 0, len(byKey))
+	for _, r := range byKey {
+		outRows = append(outRows, *r)
+	}
+	sort.Slice(outRows, func(i, j int) bool {
+		if !outRows[i].dayUTC.Equal(outRows[j].dayUTC) {
+			return outRows[i].dayUTC.Before(outRows[j].dayUTC)
+		}
+		return outRows[i].projectScopeID < outRows[j].projectScopeID
 	})
-	return out, nil
+
+	touchedProjects := make([]string, 0, len(projectSet))
+	for p := range projectSet {
+		touchedProjects = append(touchedProjects, p)
+	}
+	sort.Strings(touchedProjects)
+	return outRows, touchedProjects, nil
 }
 
-// ReplaceUsageGroupRollupSeed implements store.UsageBudgetStore.ReplaceUsageGroupRollupSeed.
-// Atomically replaces (SET, never adds) all origin="seed" rows for
-// (groupID, projectScopeID) within [windowStartUTC, windowEndUTC), never
-// touching origin="ingest" rows.
-func (s *UsageLedgerStore) ReplaceUsageGroupRollupSeed(
-	ctx context.Context,
-	groupID, projectScopeID string,
-	windowStartUTC, windowEndUTC time.Time,
-	rows []store.UsageGroupRollupDay,
-) error {
-	if groupID == "" {
-		return fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
-	}
-	winStart := utcDayStart(windowStartUTC)
-	winEnd := utcDayStart(windowEndUTC)
-	if !winEnd.After(winStart) {
-		return nil
-	}
-
-	run := func(client *ent.Client) error {
-		drv := client.Driver()
-		if drv.Dialect() == dialect.Postgres {
-			var lockRes sql.Result
-			if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('usage_group_seed:' || $1 || ':' || $2))", []any{groupID, projectScopeID}, &lockRes); err != nil {
-				return mapError(err)
-			}
-		}
-		return replaceUsageGroupRollupSeedWithDriver(ctx, drv, groupID, projectScopeID, winStart, winEnd, rows)
-	}
-
-	if s.inTx {
-		return run(s.client)
-	}
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return mapError(err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := run(tx.Client()); err != nil {
-		return err
-	}
-	return mapError(tx.Commit())
-}
-
-func replaceUsageGroupRollupSeedWithDriver(
+// replaceUsageGroupEpisodeRollupSeedWithDriver replaces ONLY rows tagged with
+// origin="seed:<episodeID>" for groupID inside an existing transaction. It
+// never touches origin="ingest" or any other episode's seed rows (D6a).
+func replaceUsageGroupEpisodeRollupSeedWithDriver(
 	ctx context.Context,
 	drv dialect.Driver,
-	groupID, projectScopeID string,
-	winStart, winEnd time.Time,
-	rows []store.UsageGroupRollupDay,
+	groupID, episodeID string,
+	rows []usageGroupSeedRow,
 ) error {
+	origin := groupEpisodeSeedOrigin(episodeID)
 	dialectName := drv.Dialect()
-	sorted := make([]store.UsageGroupRollupDay, len(rows))
-	copy(sorted, rows)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].DayUTC.Before(sorted[j].DayUTC)
-	})
-
 	delSQL := usageRebindSQL(dialectName, `
 DELETE FROM usage_group_rollups_daily
 WHERE group_id = ?
-  AND project_scope_id = ?
-  AND origin = ?
-  AND day_utc >= ?
-  AND day_utc < ?`)
-	var delRes sql.Result
-	if err := drv.Exec(ctx, delSQL, []any{groupID, projectScopeID, store.UsageGroupRollupOriginSeed, winStart, winEnd}, &delRes); err != nil {
-		return mapError(err)
+  AND origin = ?`)
+	if err := drv.Exec(ctx, delSQL, []any{groupID, origin}, nil); err != nil {
+		return fmt.Errorf("delete existing episode seed rollups: %w", err)
 	}
 
-	if len(sorted) == 0 {
+	if len(rows) == 0 {
 		return nil
 	}
 
-	setSQL := usageRebindSQL(dialectName, `
-INSERT INTO usage_group_rollups_daily (
-	id, day_utc, group_id, project_scope_id, origin,
-	tokens_summable, input, output, cache_read, cache_write, calls, events
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (day_utc, group_id, project_scope_id, origin)
-DO UPDATE SET
-	tokens_summable = EXCLUDED.tokens_summable,
-	input = EXCLUDED.input,
-	output = EXCLUDED.output,
-	cache_read = EXCLUDED.cache_read,
-	cache_write = EXCLUDED.cache_write,
-	calls = EXCLUDED.calls,
-	events = EXCLUDED.events`)
-
-	for _, r := range sorted {
-		day := utcDayStart(r.DayUTC)
-		if day.Before(winStart) || !day.Before(winEnd) {
-			continue
-		}
-		var res sql.Result
-		args := []any{
-			uuid.New(),
-			day,
+	insSQL := usageRebindSQL(dialectName, `
+INSERT INTO usage_group_rollups_daily
+	(id, day_utc, group_id, project_scope_id, origin, tokens_summable, input, output, cache_read, cache_write, calls, events)
+VALUES
+	(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	for _, r := range rows {
+		if err := drv.Exec(ctx, insSQL, []any{
+			uuid.New().String(),
+			utcDayStart(r.dayUTC),
 			groupID,
-			projectScopeID,
-			store.UsageGroupRollupOriginSeed,
-			r.TokensSummable,
-			r.Input,
-			r.Output,
-			r.CacheRead,
-			r.CacheWrite,
-			r.Calls,
-			r.Events,
-		}
-		if err := drv.Exec(ctx, setSQL, args, &res); err != nil {
-			return mapError(err)
+			r.projectScopeID,
+			origin,
+			r.tokensSummable,
+			r.input,
+			r.output,
+			r.cacheRead,
+			r.cacheWrite,
+			r.calls,
+			r.events,
+		}, nil); err != nil {
+			return fmt.Errorf("insert episode seed rollup %s (%s): %w", r.dayUTC.UTC().Format("2006-01-02"), r.projectScopeID, err)
 		}
 	}
 	return nil
 }
 
-func acquireGroupSeedAdvisoryLock(ctx context.Context, drv dialect.Driver, groupID, projectScopeID, windowKind string, winStart time.Time) error {
-	if drv.Dialect() != dialect.Postgres {
-		return nil
+// OpenUsageGroupChargingEpisode implements store.UsageBudgetStore.OpenUsageGroupChargingEpisode.
+//
+// Under the per-group advisory lock:
+//   - If an open episode (ended_at IS NULL) already exists for groupID, returns
+//     (existing, opened=false, nil) — bindings activating inside an open
+//     episode trigger NO seed (D6a).
+//   - Otherwise creates a new episode with seed_from_utc = max(utcMonthStart(activatedAt),
+//     previousEpisode.ended_at) and cutoff_at = activatedAt + 2m.
+func (s *UsageLedgerStore) OpenUsageGroupChargingEpisode(
+	ctx context.Context,
+	groupID string,
+	activatedAt time.Time,
+) (*store.UsageGroupSeedEpisode, bool, error) {
+	if groupID == "" {
+		return nil, false, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
 	}
-	var lockRes sql.Result
-	lockKey := fmt.Sprintf("usage_group_seed:%s:%s:%s:%s", groupID, projectScopeID, windowKind, winStart.UTC().Format("2006-01-02"))
-	if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", []any{lockKey}, &lockRes); err != nil {
-		return mapError(err)
+	if activatedAt.IsZero() {
+		activatedAt = time.Now().UTC()
 	}
-	return nil
-}
+	activatedAt = activatedAt.UTC().Truncate(time.Microsecond)
 
-// RecordUsageGroupSeedActivation implements store.UsageBudgetStore.RecordUsageGroupSeedActivation.
-// Records an explicit binding activation in usage_group_budget_seeds under the
-// per-key advisory lock. Never resets an existing record unless the new
-// ActivatedAt is strictly newer than the stored ActivatedAt.
-func (s *UsageLedgerStore) RecordUsageGroupSeedActivation(ctx context.Context, rec *store.UsageGroupSeedRecord) (*store.UsageGroupSeedRecord, error) {
-	if rec == nil || rec.GroupID == "" || rec.WindowKind == "" || !rec.WindowEndUTC.After(rec.WindowStartUTC) {
-		return nil, fmt.Errorf("%w: invalid group seed activation record", store.ErrInvalidInput)
-	}
-	winStart := utcDayStart(rec.WindowStartUTC)
-	winEnd := utcDayStart(rec.WindowEndUTC)
-	activatedAt := rec.ActivatedAt.UTC().Truncate(time.Microsecond)
-	cutoffAt := rec.CutoffAt.UTC().Truncate(time.Microsecond)
-	if cutoffAt.IsZero() {
-		cutoffAt = activatedAt.Add(2 * time.Minute)
-	}
-	now := time.Now().UTC().Truncate(time.Microsecond)
-
-	var out *store.UsageGroupSeedRecord
-	run := func(client *ent.Client) error {
-		if err := acquireGroupSeedAdvisoryLock(ctx, client.Driver(), rec.GroupID, rec.ProjectScopeID, rec.WindowKind, winStart); err != nil {
-			return err
-		}
-		existing, err := client.UsageGroupBudgetSeed.Query().
-			Where(
-				usagegroupbudgetseed.GroupIDEQ(rec.GroupID),
-				usagegroupbudgetseed.ProjectScopeIDEQ(rec.ProjectScopeID),
-				usagegroupbudgetseed.WindowKindEQ(rec.WindowKind),
-				usagegroupbudgetseed.WindowStartUtcEQ(winStart),
-			).
-			Only(ctx)
-		if err != nil && !ent.IsNotFound(err) {
-			return mapError(err)
-		}
-		if existing == nil {
-			created, err := client.UsageGroupBudgetSeed.Create().
-				SetID(uuid.New()).
-				SetGroupID(rec.GroupID).
-				SetProjectScopeID(rec.ProjectScopeID).
-				SetWindowKind(rec.WindowKind).
-				SetWindowStartUtc(winStart).
-				SetWindowEndUtc(winEnd).
-				SetActivatedAt(activatedAt).
-				SetCutoffAt(cutoffAt).
-				SetMemberSnapshotSet(false).
-				SetFinalized(false).
-				SetStateVersion(1).
-				SetCreatedAt(now).
-				SetUpdatedAt(now).
-				Save(ctx)
-			if err != nil {
-				return mapError(err)
-			}
-			out = entUsageGroupBudgetSeedToStore(created)
-			return nil
-		}
-
-		// Older or identical activation does not reset existing seed state.
-		if !activatedAt.After(existing.ActivatedAt.UTC()) {
-			out = entUsageGroupBudgetSeedToStore(existing)
-			return nil
-		}
-
-		// Genuine newer re-activation resets snapshot and finality via CAS.
-		updated, err := client.UsageGroupBudgetSeed.UpdateOneID(existing.ID).
-			Where(usagegroupbudgetseed.StateVersionEQ(existing.StateVersion)).
-			SetActivatedAt(activatedAt).
-			SetCutoffAt(cutoffAt).
-			ClearFrozenMemberIds().
-			SetMemberSnapshotSet(false).
-			SetFinalized(false).
-			SetStateVersion(existing.StateVersion + 1).
-			SetUpdatedAt(now).
-			Save(ctx)
-		if err != nil {
-			return mapError(err)
-		}
-		out = entUsageGroupBudgetSeedToStore(updated)
-		return nil
-	}
-
-	if s.inTx {
-		if err := run(s.client); err != nil {
-			return nil, err
-		}
-		return out, nil
-	}
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return nil, mapError(err)
+		return nil, false, mapError(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := run(tx.Client()); err != nil {
-		return nil, err
+
+	txClient := tx.Client()
+	drv := txClient.Driver()
+	if err := acquireGroupEpisodeAdvisoryLock(ctx, drv, groupID); err != nil {
+		return nil, false, fmt.Errorf("acquire group episode lock: %w", err)
+	}
+
+	existingOpen, err := txClient.UsageGroupBudgetSeed.Query().
+		Where(
+			usagegroupbudgetseed.GroupIDEQ(groupID),
+			usagegroupbudgetseed.EndedAtIsNil(),
+		).
+		Order(ent.Desc(usagegroupbudgetseed.FieldActivatedAt)).
+		First(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return nil, false, mapError(err)
+	}
+	if existingOpen != nil {
+		if err := tx.Commit(); err != nil {
+			return nil, false, mapError(err)
+		}
+		return entUsageGroupSeedToStore(existingOpen), false, nil
+	}
+
+	// Determine seed_from_utc = max(current UTC month start, previous episode's ended_at).
+	seedFrom := utcMonthStart(activatedAt)
+	prevClosed, err := txClient.UsageGroupBudgetSeed.Query().
+		Where(
+			usagegroupbudgetseed.GroupIDEQ(groupID),
+			usagegroupbudgetseed.EndedAtNotNil(),
+		).
+		Order(ent.Desc(usagegroupbudgetseed.FieldEndedAt)).
+		First(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return nil, false, mapError(err)
+	}
+	if prevClosed != nil && prevClosed.EndedAt != nil {
+		prevEnd := prevClosed.EndedAt.UTC().Truncate(time.Microsecond)
+		if prevEnd.After(seedFrom) {
+			seedFrom = prevEnd
+		}
+		// Guarantee strict uniqueness on (group_id, activated_at) if a rapid
+		// close+reopen occurs within the same microsecond.
+		if !activatedAt.After(prevClosed.ActivatedAt.UTC()) {
+			activatedAt = prevClosed.ActivatedAt.UTC().Add(time.Microsecond)
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	cutoffAt := activatedAt.Add(usageGroupEpisodeTTLCoverDelay)
+	created, err := txClient.UsageGroupBudgetSeed.Create().
+		SetID(uuid.New()).
+		SetGroupID(groupID).
+		SetActivatedAt(activatedAt).
+		SetSeedFromUtc(seedFrom).
+		SetCutoffAt(cutoffAt).
+		SetMemberSnapshotSet(false).
+		SetFinalized(false).
+		SetStateVersion(1).
+		SetCreatedAt(now).
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, mapError(err)
+		return nil, false, mapError(err)
 	}
-	return out, nil
+	return entUsageGroupSeedToStore(created), true, nil
 }
 
-// ExecuteUsageGroupBudgetSeedPass implements store.UsageBudgetStore.ExecuteUsageGroupBudgetSeedPass.
-// Runs the full D6 seed pass (load -> snapshot effective members if unset ->
-// compute uncharged events -> SET origin="seed" rollups -> finalize if
-// activatedAt matches -> save record) atomically inside one per-key locked tx.
-func (s *UsageLedgerStore) ExecuteUsageGroupBudgetSeedPass(ctx context.Context, in store.UsageGroupSeedPassInput) (*store.UsageGroupSeedRecord, bool, error) {
-	if in.GroupID == "" || in.WindowKind == "" || !in.WindowEndUTC.After(in.WindowStartUTC) {
-		return nil, false, fmt.Errorf("%w: invalid group budget seed pass input", store.ErrInvalidInput)
+// CloseUsageGroupChargingEpisodeIfInactive implements
+// store.UsageBudgetStore.CloseUsageGroupChargingEpisodeIfInactive.
+func (s *UsageLedgerStore) CloseUsageGroupChargingEpisodeIfInactive(
+	ctx context.Context,
+	groupID string,
+	endedAt time.Time,
+) (*store.UsageGroupSeedEpisode, bool, error) {
+	if groupID == "" {
+		return nil, false, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
 	}
-	winStart := utcDayStart(in.WindowStartUTC)
-	winEnd := utcDayStart(in.WindowEndUTC)
+	if endedAt.IsZero() {
+		endedAt = time.Now().UTC()
+	}
+	endedAt = endedAt.UTC().Truncate(time.Microsecond)
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txClient := tx.Client()
+	drv := txClient.Driver()
+	if err := acquireGroupEpisodeAdvisoryLock(ctx, drv, groupID); err != nil {
+		return nil, false, fmt.Errorf("acquire group episode lock: %w", err)
+	}
+
+	// Check whether groupID still has ANY active pooled binding (day or month, any scope).
+	defs, err := txClient.LimitDefinition.Query().
+		Where(limitdefinition.NameIn(
+			store.LimitLLMTokensPerGroupDay,
+			store.LimitLLMTokensPerGroupMonth,
+		)).
+		All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	if len(defs) > 0 {
+		defIDs := make([]uuid.UUID, 0, len(defs))
+		for _, d := range defs {
+			defIDs = append(defIDs, d.ID)
+		}
+		hasActive, err := txClient.EntitlementBinding.Query().
+			Where(
+				entitlementbinding.LimitDefinitionIDIn(defIDs...),
+				entitlementbinding.SubjectTypeEQ(store.EntitlementSubjectGroup),
+				entitlementbinding.SubjectIDEQ(groupID),
+				entitlementbinding.ValueGT(0),
+			).
+			Exist(ctx)
+		if err != nil {
+			return nil, false, mapError(err)
+		}
+		if hasActive {
+			if err := tx.Commit(); err != nil {
+				return nil, false, mapError(err)
+			}
+			return nil, false, nil
+		}
+	}
+
+	openEp, err := txClient.UsageGroupBudgetSeed.Query().
+		Where(
+			usagegroupbudgetseed.GroupIDEQ(groupID),
+			usagegroupbudgetseed.EndedAtIsNil(),
+		).
+		Order(ent.Desc(usagegroupbudgetseed.FieldActivatedAt)).
+		First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			if commitErr := tx.Commit(); commitErr != nil {
+				return nil, false, mapError(commitErr)
+			}
+			return nil, false, nil
+		}
+		return nil, false, mapError(err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	n, err := txClient.UsageGroupBudgetSeed.Update().
+		Where(
+			usagegroupbudgetseed.IDEQ(openEp.ID),
+			usagegroupbudgetseed.StateVersionEQ(openEp.StateVersion),
+		).
+		SetEndedAt(endedAt).
+		SetStateVersion(openEp.StateVersion + 1).
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	if n == 0 {
+		return nil, false, store.ErrBudgetStateConflict
+	}
+
+	updated, err := txClient.UsageGroupBudgetSeed.Get(ctx, openEp.ID)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, mapError(err)
+	}
+	return entUsageGroupSeedToStore(updated), true, nil
+}
+
+// ExecuteUsageGroupEpisodeSeedPass implements
+// store.UsageBudgetStore.ExecuteUsageGroupEpisodeSeedPass.
+func (s *UsageLedgerStore) ExecuteUsageGroupEpisodeSeedPass(
+	ctx context.Context,
+	in store.UsageGroupEpisodeSeedPassInput,
+) (*store.UsageGroupEpisodeSeedPassResult, error) {
+	if in.EpisodeID == "" || in.GroupID == "" {
+		return nil, fmt.Errorf("%w: episode_id and group_id are required", store.ErrInvalidInput)
+	}
+	epUUID, err := uuid.Parse(in.EpisodeID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid episode_id: %v", store.ErrInvalidInput, err)
+	}
 	now := in.Now.UTC().Truncate(time.Microsecond)
 	if now.IsZero() {
 		now = time.Now().UTC().Truncate(time.Microsecond)
 	}
-	activatedAt := in.ActivatedAt.UTC().Truncate(time.Microsecond)
-	if activatedAt.IsZero() {
-		activatedAt = now
-	}
-	cutoffAt := in.CutoffAt.UTC().Truncate(time.Microsecond)
-	if cutoffAt.IsZero() {
-		cutoffAt = activatedAt.Add(2 * time.Minute)
-	}
 
-	var out *store.UsageGroupSeedRecord
-	var didMutate bool
+	var outRes *store.UsageGroupEpisodeSeedPassResult
+	runOnce := func() error {
+		tx, err := s.client.Tx(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	run := func(client *ent.Client) error {
-		drv := client.Driver()
-		if err := acquireGroupSeedAdvisoryLock(ctx, drv, in.GroupID, in.ProjectScopeID, in.WindowKind, winStart); err != nil {
-			return err
+		txClient := tx.Client()
+		drv := txClient.Driver()
+		if err := acquireGroupEpisodeAdvisoryLock(ctx, drv, in.GroupID); err != nil {
+			return fmt.Errorf("acquire group episode lock: %w", err)
 		}
 
-		existing, err := client.UsageGroupBudgetSeed.Query().
+		ep, err := txClient.UsageGroupBudgetSeed.Query().
 			Where(
+				usagegroupbudgetseed.IDEQ(epUUID),
 				usagegroupbudgetseed.GroupIDEQ(in.GroupID),
-				usagegroupbudgetseed.ProjectScopeIDEQ(in.ProjectScopeID),
-				usagegroupbudgetseed.WindowKindEQ(in.WindowKind),
-				usagegroupbudgetseed.WindowStartUtcEQ(winStart),
 			).
 			Only(ctx)
-		if err != nil && !ent.IsNotFound(err) {
+		if err != nil {
 			return mapError(err)
 		}
 
-		// D6 finality: once finalized for this activation (or a newer one),
-		// never recompute from later membership.
-		if existing != nil && existing.Finalized && !activatedAt.After(existing.ActivatedAt.UTC()) {
-			out = entUsageGroupBudgetSeedToStore(existing)
-			didMutate = false
-			return nil
-		}
-
-		// O2 guard: if an older activation item arrives after a newer
-		// activation was recorded, ignore it rather than overwriting or
-		// prematurely finalizing the newer activation.
-		if existing != nil && activatedAt.Before(existing.ActivatedAt.UTC()) {
-			out = entUsageGroupBudgetSeedToStore(existing)
-			didMutate = false
-			return nil
-		}
-
-		var frozenMembers []string
-		memberSnapshotSet := false
-		effectiveActivatedAt := activatedAt
-		effectiveCutoffAt := cutoffAt
-
-		if existing != nil && !activatedAt.After(existing.ActivatedAt.UTC()) {
-			effectiveActivatedAt = existing.ActivatedAt.UTC()
-			effectiveCutoffAt = existing.CutoffAt.UTC()
-			memberSnapshotSet = existing.MemberSnapshotSet
-			if len(existing.FrozenMemberIds) > 0 {
-				frozenMembers = make([]string, len(existing.FrozenMemberIds))
-				copy(frozenMembers, existing.FrozenMemberIds)
+		// Finalized episodes are immutable forever (D6a).
+		if ep.Finalized {
+			if err := tx.Commit(); err != nil {
+				return mapError(err)
 			}
+			outRes = &store.UsageGroupEpisodeSeedPassResult{
+				Episode:   entUsageGroupSeedToStore(ep),
+				DidMutate: false,
+			}
+			return nil
 		}
 
-		// Snapshot effective members on the first seed run only (D6).
+		frozenMembers := ep.FrozenMemberIds
+		memberSnapshotSet := ep.MemberSnapshotSet
 		if !memberSnapshotSet {
-			gs := &GroupStore{client: client}
-			members, err := gs.GetEffectiveGroupMemberUserIDs(ctx, in.GroupID)
+			members, err := NewGroupStore(txClient).GetEffectiveGroupMemberUserIDs(ctx, in.GroupID)
 			if err != nil {
-				return fmt.Errorf("resolve effective members for group %s: %w", in.GroupID, err)
+				return fmt.Errorf("snapshot effective group members: %w", err)
 			}
 			frozenMembers = members
 			memberSnapshotSet = true
 		}
 
-		// Bound seed scan to [max(winStart, ledgerRetentionCutoff), min(winEnd, effectiveCutoffAt)).
-		fromTS := winStart
-		if !in.LedgerRetentionCutoff.IsZero() && in.LedgerRetentionCutoff.UTC().After(fromTS) {
-			fromTS = in.LedgerRetentionCutoff.UTC()
+		effectiveFrom := ep.SeedFromUtc.UTC()
+		if !in.LedgerRetentionCutoff.IsZero() && effectiveFrom.Before(in.LedgerRetentionCutoff.UTC()) {
+			effectiveFrom = in.LedgerRetentionCutoff.UTC()
 		}
-		toTS := effectiveCutoffAt
-		if winEnd.Before(toTS) {
-			toTS = winEnd
-		}
+		effectiveTo := ep.CutoffAt.UTC()
 
-		var days []store.UsageGroupRollupDay
-		if len(frozenMembers) > 0 && toTS.After(fromTS) {
-			days, err = computeUnchargedGroupRollupSeedWithDriver(
-				ctx, drv, in.GroupID, in.ProjectScopeID, frozenMembers, fromTS, toTS,
+		var seedRows []usageGroupSeedRow
+		var touchedProjects []string
+		if len(frozenMembers) > 0 && effectiveTo.After(effectiveFrom) {
+			seedRows, touchedProjects, err = computeUnchargedGroupEpisodeRollupSeedWithDriver(
+				ctx, drv, in.GroupID, frozenMembers, effectiveFrom, effectiveTo,
 			)
 			if err != nil {
-				return fmt.Errorf("compute uncharged group seed: %w", err)
+				return fmt.Errorf("compute uncharged group episode seed: %w", err)
 			}
 		}
 
-		if err := replaceUsageGroupRollupSeedWithDriver(ctx, drv, in.GroupID, in.ProjectScopeID, winStart, winEnd, days); err != nil {
-			return fmt.Errorf("replace group rollup seed: %w", err)
+		if err := replaceUsageGroupEpisodeRollupSeedWithDriver(ctx, drv, in.GroupID, ep.ID.String(), seedRows); err != nil {
+			return fmt.Errorf("replace group episode rollup seed: %w", err)
 		}
 
-		// O2: finalize ONLY when the item's activation matches the record's
-		// activation and either this is the +2m final pass or now >= cutoff.
-		finalized := activatedAt.Equal(effectiveActivatedAt) && (in.IsFinalPass || !now.Before(effectiveCutoffAt))
+		finalized := in.IsFinalPass || !now.Before(ep.CutoffAt.UTC())
 
-		if existing == nil {
-			created, err := client.UsageGroupBudgetSeed.Create().
-				SetID(uuid.New()).
-				SetGroupID(in.GroupID).
-				SetProjectScopeID(in.ProjectScopeID).
-				SetWindowKind(in.WindowKind).
-				SetWindowStartUtc(winStart).
-				SetWindowEndUtc(winEnd).
-				SetActivatedAt(effectiveActivatedAt).
-				SetCutoffAt(effectiveCutoffAt).
-				SetFrozenMemberIds(frozenMembers).
-				SetMemberSnapshotSet(memberSnapshotSet).
-				SetFinalized(finalized).
-				SetStateVersion(1).
-				SetCreatedAt(now).
-				SetUpdatedAt(now).
-				Save(ctx)
-			if err != nil {
-				return mapError(err)
-			}
-			out = entUsageGroupBudgetSeedToStore(created)
-			didMutate = true
-			return nil
-		}
-
-		updated, err := client.UsageGroupBudgetSeed.UpdateOneID(existing.ID).
-			Where(usagegroupbudgetseed.StateVersionEQ(existing.StateVersion)).
-			SetActivatedAt(effectiveActivatedAt).
-			SetCutoffAt(effectiveCutoffAt).
-			SetFrozenMemberIds(frozenMembers).
+		upd := txClient.UsageGroupBudgetSeed.Update().
+			Where(
+				usagegroupbudgetseed.IDEQ(ep.ID),
+				usagegroupbudgetseed.StateVersionEQ(ep.StateVersion),
+			).
 			SetMemberSnapshotSet(memberSnapshotSet).
 			SetFinalized(finalized).
-			SetStateVersion(existing.StateVersion + 1).
-			SetUpdatedAt(now).
-			Save(ctx)
+			SetStateVersion(ep.StateVersion + 1).
+			SetUpdatedAt(now)
+		if len(frozenMembers) > 0 {
+			upd = upd.SetFrozenMemberIds(frozenMembers)
+		} else {
+			upd = upd.ClearFrozenMemberIds()
+		}
+		n, err := upd.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
-		out = entUsageGroupBudgetSeedToStore(updated)
-		didMutate = true
+		if n == 0 {
+			return store.ErrBudgetStateConflict
+		}
+
+		saved, err := txClient.UsageGroupBudgetSeed.Get(ctx, ep.ID)
+		if err != nil {
+			return mapError(err)
+		}
+		if err := tx.Commit(); err != nil {
+			return mapError(err)
+		}
+		outRes = &store.UsageGroupEpisodeSeedPassResult{
+			Episode:             entUsageGroupSeedToStore(saved),
+			DidMutate:           true,
+			TouchedProjectScope: touchedProjects,
+		}
 		return nil
 	}
 
-	if s.inTx {
-		if err := run(s.client); err != nil {
-			return nil, false, err
+	for attempt := 0; attempt < 4; attempt++ {
+		err = runOnce()
+		if err == nil {
+			return outRes, nil
 		}
-		return out, didMutate, nil
+		if !errors.Is(err, store.ErrBudgetStateConflict) {
+			return nil, err
+		}
 	}
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return nil, false, mapError(err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := run(tx.Client()); err != nil {
-		return nil, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, false, mapError(err)
-	}
-	return out, didMutate, nil
+	return nil, err
 }
 
-// GetUsageGroupSeedRecord implements store.UsageBudgetStore.GetUsageGroupSeedRecord.
-func (s *UsageLedgerStore) GetUsageGroupSeedRecord(ctx context.Context, groupID, projectScopeID, windowKind string, windowStartUTC time.Time) (*store.UsageGroupSeedRecord, error) {
-	if groupID == "" || windowKind == "" {
-		return nil, fmt.Errorf("%w: group_id and window_kind are required", store.ErrInvalidInput)
+// GetUsageGroupSeedEpisode implements store.UsageBudgetStore.GetUsageGroupSeedEpisode.
+func (s *UsageLedgerStore) GetUsageGroupSeedEpisode(ctx context.Context, episodeID string) (*store.UsageGroupSeedEpisode, error) {
+	epUUID, err := uuid.Parse(episodeID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid episode_id: %v", store.ErrInvalidInput, err)
 	}
-	winStart := utcDayStart(windowStartUTC)
-	row, err := s.client.UsageGroupBudgetSeed.Query().
-		Where(
-			usagegroupbudgetseed.GroupIDEQ(groupID),
-			usagegroupbudgetseed.ProjectScopeIDEQ(projectScopeID),
-			usagegroupbudgetseed.WindowKindEQ(windowKind),
-			usagegroupbudgetseed.WindowStartUtcEQ(winStart),
-		).
-		Only(ctx)
+	row, err := s.client.UsageGroupBudgetSeed.Get(ctx, epUUID)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	return entUsageGroupBudgetSeedToStore(row), nil
+	return entUsageGroupSeedToStore(row), nil
 }
 
-// ListIncompleteUsageGroupSeeds implements store.UsageBudgetStore.ListIncompleteUsageGroupSeeds.
-func (s *UsageLedgerStore) ListIncompleteUsageGroupSeeds(ctx context.Context, activeAt time.Time) ([]*store.UsageGroupSeedRecord, error) {
-	atUTC := activeAt.UTC().Truncate(time.Microsecond)
-	rows, err := s.client.UsageGroupBudgetSeed.Query().
+// GetOpenUsageGroupChargingEpisode implements store.UsageBudgetStore.GetOpenUsageGroupChargingEpisode.
+func (s *UsageLedgerStore) GetOpenUsageGroupChargingEpisode(ctx context.Context, groupID string) (*store.UsageGroupSeedEpisode, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
+	}
+	row, err := s.client.UsageGroupBudgetSeed.Query().
 		Where(
-			usagegroupbudgetseed.FinalizedEQ(false),
-			usagegroupbudgetseed.WindowEndUtcGT(atUTC),
+			usagegroupbudgetseed.GroupIDEQ(groupID),
+			usagegroupbudgetseed.EndedAtIsNil(),
 		).
-		Order(ent.Asc(usagegroupbudgetseed.FieldWindowStartUtc)).
+		Order(ent.Desc(usagegroupbudgetseed.FieldActivatedAt)).
+		First(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entUsageGroupSeedToStore(row), nil
+}
+
+// ListIncompleteUsageGroupSeedEpisodes implements store.UsageBudgetStore.ListIncompleteUsageGroupSeedEpisodes.
+func (s *UsageLedgerStore) ListIncompleteUsageGroupSeedEpisodes(ctx context.Context) ([]*store.UsageGroupSeedEpisode, error) {
+	rows, err := s.client.UsageGroupBudgetSeed.Query().
+		Where(usagegroupbudgetseed.FinalizedEQ(false)).
+		Order(ent.Asc(usagegroupbudgetseed.FieldActivatedAt)).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := make([]*store.UsageGroupSeedRecord, len(rows))
-	for i, r := range rows {
-		out[i] = entUsageGroupBudgetSeedToStore(r)
+	out := make([]*store.UsageGroupSeedEpisode, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entUsageGroupSeedToStore(r))
+	}
+	return out, nil
+}
+
+// ListUsageGroupSeedEpisodesOverlapping implements store.UsageBudgetStore.ListUsageGroupSeedEpisodesOverlapping.
+func (s *UsageLedgerStore) ListUsageGroupSeedEpisodesOverlapping(
+	ctx context.Context,
+	groupID string,
+	windowStartUTC, windowEndUTC time.Time,
+) ([]*store.UsageGroupSeedEpisode, error) {
+	if groupID == "" || !windowEndUTC.After(windowStartUTC) {
+		return nil, nil
+	}
+	rows, err := s.client.UsageGroupBudgetSeed.Query().
+		Where(
+			usagegroupbudgetseed.GroupIDEQ(groupID),
+			usagegroupbudgetseed.MemberSnapshotSetEQ(true),
+			usagegroupbudgetseed.SeedFromUtcLT(windowEndUTC.UTC()),
+			usagegroupbudgetseed.CutoffAtGT(windowStartUTC.UTC()),
+		).
+		Order(ent.Asc(usagegroupbudgetseed.FieldActivatedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.UsageGroupSeedEpisode, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entUsageGroupSeedToStore(r))
 	}
 	return out, nil
 }
 
 // QueryGroupMemberUsageBreakdown implements store.UsageBudgetStore.QueryGroupMemberUsageBreakdown.
-// Aggregates per-member consumption in SQL (GROUP BY billing_user_id) from
-// usage_events over [windowStartUTC, windowEndUTC) for (groupID, projectScopeID),
-// returning O(members) rows over the wire rather than streaming individual events.
-//
-// Combines:
-//  1. Ingest-charged events: groupID in charged_group_ids (any billing_user_id,
-//     preserving former members' past spend).
-//  2. Seeded pre-activation events: uncharged events (groupID NOT in
-//     charged_group_ids) in [seedFromTS, seedToTS) by seededMemberUserIDs.
-//
-// Note: for system-wide pools without a project_id filter, Pass 1 range-scans
-// usage_events over the window via the event_ts index and evaluates JSON
-// containment in SQL before grouping. Anomalous events are excluded from token
-// sums identically to rollups.
+// Aggregates per-member consumption directly in SQL (GROUP BY billing_user_id),
+// combining ingest-charged events (groupID in charged_group_ids) and uncharged
+// pre-activation seeded events from all overlapping charging episodes (each
+// usage_events row matched at most once, D6a, R5).
 func (s *UsageLedgerStore) QueryGroupMemberUsageBreakdown(
 	ctx context.Context,
 	groupID, projectScopeID string,
-	seededMemberUserIDs []string,
-	seedFromTS, seedToTS, windowStartUTC, windowEndUTC time.Time,
+	episodes []*store.UsageGroupSeedEpisode,
+	windowStartUTC, windowEndUTC time.Time,
 ) ([]store.UsageGroupMemberBreakdown, error) {
-	if groupID == "" {
-		return nil, fmt.Errorf("%w: group_id is required", store.ErrInvalidInput)
-	}
-	winStart := windowStartUTC.UTC().Truncate(time.Microsecond)
-	winEnd := windowEndUTC.UTC().Truncate(time.Microsecond)
-	if !winEnd.After(winStart) {
-		return []store.UsageGroupMemberBreakdown{}, nil
+	if groupID == "" || !windowEndUTC.After(windowStartUTC) {
+		return nil, nil
 	}
 
 	drv := s.client.Driver()
 	dialectName := drv.Dialect()
+	winStart := windowStartUTC.UTC().Truncate(time.Microsecond)
+	winEnd := windowEndUTC.UTC().Truncate(time.Microsecond)
 
 	var groupParam any = groupID
 	chargedClause := "(charged_group_ids IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(usage_events.charged_group_ids) WHERE json_each.value = ?))"
@@ -688,120 +745,102 @@ func (s *UsageLedgerStore) QueryGroupMemberUsageBreakdown(
 			return nil, fmt.Errorf("marshal group id json: %w", err)
 		}
 		groupParam = string(b)
-		chargedClause = "(charged_group_ids IS NOT NULL AND (charged_group_ids @> CAST(? AS jsonb)))"
+		chargedClause = "(charged_group_ids IS NOT NULL AND charged_group_ids @> CAST(? AS jsonb))"
 		notChargedClause = "(charged_group_ids IS NULL OR NOT (charged_group_ids @> CAST(? AS jsonb)))"
 	}
 
 	sumTok := sqlBigIntSumExpr(dialectName, "CASE WHEN anomalous THEN 0 ELSE COALESCE(input, 0) + COALESCE(output, 0) + COALESCE(cache_read, 0) + COALESCE(cache_write, 0) END")
-	sumCalls := sqlBigIntSumExpr(dialectName, "calls")
+	sumCalls := sqlBigIntSumExpr(dialectName, "COALESCE(calls, 0)")
 
-	byUser := make(map[string]*store.UsageGroupMemberBreakdown)
-	scanGrouped := func(rows *entsql.Rows) error {
-		for rows.Next() {
-			var uid string
-			var tokens, calls, events int64
-			if err := rows.Scan(&uid, &tokens, &calls, &events); err != nil {
-				return mapError(err)
-			}
-			agg, ok := byUser[uid]
-			if !ok {
-				agg = &store.UsageGroupMemberBreakdown{UserID: uid}
-				byUser[uid] = agg
-			}
-			agg.TokensSummable = saturatingAddInt64(agg.TokensSummable, tokens)
-			agg.Calls = saturatingAddInt64(agg.Calls, calls)
-			agg.Events = saturatingAddInt64(agg.Events, events)
-		}
-		return mapError(rows.Err())
+	var whereParts []string
+	args := make([]any, 0, 16)
+
+	whereParts = append(whereParts, "event_ts >= ? AND event_ts < ?")
+	args = append(args, winStart, winEnd)
+
+	if projectScopeID != "" {
+		whereParts = append(whereParts, "project_id = ?")
+		args = append(args, projectScopeID)
 	}
 
-	// Pass 1: ingest-charged events (groupID in charged_group_ids), grouped in SQL.
-	{
-		var b strings.Builder
-		args := []any{winStart, winEnd}
-		fmt.Fprintf(&b, `SELECT COALESCE(billing_user_id, ''), %s, %s, COUNT(*) FROM usage_events WHERE event_ts >= ? AND event_ts < ?`, sumTok, sumCalls)
-		if projectScopeID != "" {
-			b.WriteString(` AND project_id = ?`)
-			args = append(args, projectScopeID)
+	// Build OR clause across all overlapping episodes with non-empty member snapshots.
+	var epClauses []string
+	var epArgs []any
+	for _, ep := range episodes {
+		if ep == nil || !ep.MemberSnapshotSet || len(ep.FrozenMemberIDs) == 0 {
+			continue
 		}
-		b.WriteString(` AND `)
-		b.WriteString(chargedClause)
-		args = append(args, groupParam)
-		b.WriteString(` GROUP BY COALESCE(billing_user_id, '')`)
-
-		rows := &entsql.Rows{}
-		if err := drv.Query(ctx, usageRebindSQL(dialectName, b.String()), args, rows); err != nil {
-			return nil, mapError(err)
-		}
-		err := scanGrouped(rows)
-		_ = rows.Close()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Pass 2: pre-activation seeded events (groupID NOT in charged_group_ids), grouped in SQL.
-	if len(seededMemberUserIDs) > 0 && seedToTS.After(seedFromTS) {
-		effFrom := seedFromTS.UTC().Truncate(time.Microsecond)
+		effFrom := ep.SeedFromUTC.UTC().Truncate(time.Microsecond)
 		if effFrom.Before(winStart) {
 			effFrom = winStart
 		}
-		effTo := seedToTS.UTC().Truncate(time.Microsecond)
+		effTo := ep.CutoffAt.UTC().Truncate(time.Microsecond)
 		if effTo.After(winEnd) {
 			effTo = winEnd
 		}
-		if effTo.After(effFrom) {
-			for start := 0; start < len(seededMemberUserIDs); start += groupSeedUserChunkSize {
-				end := start + groupSeedUserChunkSize
-				if end > len(seededMemberUserIDs) {
-					end = len(seededMemberUserIDs)
-				}
-				chunk := seededMemberUserIDs[start:end]
-
-				var b strings.Builder
-				args := make([]any, 0, len(chunk)+5)
-				fmt.Fprintf(&b, `SELECT COALESCE(billing_user_id, ''), %s, %s, COUNT(*) FROM usage_events WHERE billing_user_id IN (`, sumTok, sumCalls)
-				for i, uid := range chunk {
-					if i > 0 {
-						b.WriteByte(',')
-					}
-					b.WriteByte('?')
-					args = append(args, uid)
-				}
-				b.WriteString(`) AND event_ts >= ? AND event_ts < ?`)
-				args = append(args, effFrom, effTo)
-				if projectScopeID != "" {
-					b.WriteString(` AND project_id = ?`)
-					args = append(args, projectScopeID)
-				}
-				b.WriteString(` AND `)
-				b.WriteString(notChargedClause)
-				args = append(args, groupParam)
-				b.WriteString(` GROUP BY COALESCE(billing_user_id, '')`)
-
-				rows := &entsql.Rows{}
-				if err := drv.Query(ctx, usageRebindSQL(dialectName, b.String()), args, rows); err != nil {
-					return nil, mapError(err)
-				}
-				err := scanGrouped(rows)
-				_ = rows.Close()
-				if err != nil {
-					return nil, err
-				}
-			}
+		if !effTo.After(effFrom) {
+			continue
+		}
+		placeholders := strings.Repeat("?,", len(ep.FrozenMemberIDs))
+		placeholders = placeholders[:len(placeholders)-1]
+		epClauses = append(epClauses, fmt.Sprintf("(event_ts >= ? AND event_ts < ? AND billing_user_id IN (%s))", placeholders))
+		epArgs = append(epArgs, effFrom, effTo)
+		for _, uid := range ep.FrozenMemberIDs {
+			epArgs = append(epArgs, uid)
 		}
 	}
 
-	out := make([]store.UsageGroupMemberBreakdown, 0, len(byUser))
-	for _, agg := range byUser {
-		out = append(out, *agg)
+	if len(epClauses) > 0 {
+		whereParts = append(whereParts, fmt.Sprintf(
+			"(%s OR (%s AND (%s)))",
+			chargedClause, notChargedClause, strings.Join(epClauses, " OR "),
+		))
+		args = append(args, groupParam, groupParam)
+		args = append(args, epArgs...)
+	} else {
+		whereParts = append(whereParts, chargedClause)
+		args = append(args, groupParam)
 	}
-	// Deterministic order: highest token consumption first, then user ID.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].TokensSummable != out[j].TokensSummable {
-			return out[i].TokensSummable > out[j].TokensSummable
+
+	query := fmt.Sprintf(`
+SELECT
+	COALESCE(billing_user_id, '') AS uid,
+	%s AS tok_sum,
+	%s AS calls_sum,
+	COUNT(*) AS events_cnt
+FROM usage_events
+WHERE %s
+GROUP BY COALESCE(billing_user_id, '')
+ORDER BY tok_sum DESC, uid ASC`,
+		sumTok, sumCalls, strings.Join(whereParts, " AND "),
+	)
+	query = usageRebindSQL(dialectName, query)
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, args, rows); err != nil {
+		return nil, fmt.Errorf("query group member usage breakdown: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]store.UsageGroupMemberBreakdown, 0)
+	for rows.Next() {
+		var uid string
+		var tok, calls, evCnt int64
+		if err := rows.Scan(&uid, &tok, &calls, &evCnt); err != nil {
+			return nil, fmt.Errorf("scan group member usage breakdown: %w", err)
 		}
-		return out[i].UserID < out[j].UserID
-	})
+		if uid == "" {
+			continue
+		}
+		out = append(out, store.UsageGroupMemberBreakdown{
+			UserID:         uid,
+			TokensSummable: tok,
+			Calls:          calls,
+			Events:         evCnt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate group member usage breakdown: %w", err)
+	}
 	return out, nil
 }

@@ -145228,12 +145228,10 @@ type UsageGroupBudgetSeedMutation struct {
 	typ                     string
 	id                      *uuid.UUID
 	group_id                *string
-	project_scope_id        *string
-	window_kind             *string
-	window_start_utc        *time.Time
-	window_end_utc          *time.Time
 	activated_at            *time.Time
+	seed_from_utc           *time.Time
 	cutoff_at               *time.Time
+	ended_at                *time.Time
 	frozen_member_ids       *[]string
 	appendfrozen_member_ids []string
 	member_snapshot_set     *bool
@@ -145388,150 +145386,6 @@ func (m *UsageGroupBudgetSeedMutation) ResetGroupID() {
 	m.group_id = nil
 }
 
-// SetProjectScopeID sets the "project_scope_id" field.
-func (m *UsageGroupBudgetSeedMutation) SetProjectScopeID(s string) {
-	m.project_scope_id = &s
-}
-
-// ProjectScopeID returns the value of the "project_scope_id" field in the mutation.
-func (m *UsageGroupBudgetSeedMutation) ProjectScopeID() (r string, exists bool) {
-	v := m.project_scope_id
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldProjectScopeID returns the old "project_scope_id" field's value of the UsageGroupBudgetSeed entity.
-// If the UsageGroupBudgetSeed object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UsageGroupBudgetSeedMutation) OldProjectScopeID(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldProjectScopeID is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldProjectScopeID requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldProjectScopeID: %w", err)
-	}
-	return oldValue.ProjectScopeID, nil
-}
-
-// ResetProjectScopeID resets all changes to the "project_scope_id" field.
-func (m *UsageGroupBudgetSeedMutation) ResetProjectScopeID() {
-	m.project_scope_id = nil
-}
-
-// SetWindowKind sets the "window_kind" field.
-func (m *UsageGroupBudgetSeedMutation) SetWindowKind(s string) {
-	m.window_kind = &s
-}
-
-// WindowKind returns the value of the "window_kind" field in the mutation.
-func (m *UsageGroupBudgetSeedMutation) WindowKind() (r string, exists bool) {
-	v := m.window_kind
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldWindowKind returns the old "window_kind" field's value of the UsageGroupBudgetSeed entity.
-// If the UsageGroupBudgetSeed object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UsageGroupBudgetSeedMutation) OldWindowKind(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldWindowKind is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldWindowKind requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldWindowKind: %w", err)
-	}
-	return oldValue.WindowKind, nil
-}
-
-// ResetWindowKind resets all changes to the "window_kind" field.
-func (m *UsageGroupBudgetSeedMutation) ResetWindowKind() {
-	m.window_kind = nil
-}
-
-// SetWindowStartUtc sets the "window_start_utc" field.
-func (m *UsageGroupBudgetSeedMutation) SetWindowStartUtc(t time.Time) {
-	m.window_start_utc = &t
-}
-
-// WindowStartUtc returns the value of the "window_start_utc" field in the mutation.
-func (m *UsageGroupBudgetSeedMutation) WindowStartUtc() (r time.Time, exists bool) {
-	v := m.window_start_utc
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldWindowStartUtc returns the old "window_start_utc" field's value of the UsageGroupBudgetSeed entity.
-// If the UsageGroupBudgetSeed object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UsageGroupBudgetSeedMutation) OldWindowStartUtc(ctx context.Context) (v time.Time, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldWindowStartUtc is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldWindowStartUtc requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldWindowStartUtc: %w", err)
-	}
-	return oldValue.WindowStartUtc, nil
-}
-
-// ResetWindowStartUtc resets all changes to the "window_start_utc" field.
-func (m *UsageGroupBudgetSeedMutation) ResetWindowStartUtc() {
-	m.window_start_utc = nil
-}
-
-// SetWindowEndUtc sets the "window_end_utc" field.
-func (m *UsageGroupBudgetSeedMutation) SetWindowEndUtc(t time.Time) {
-	m.window_end_utc = &t
-}
-
-// WindowEndUtc returns the value of the "window_end_utc" field in the mutation.
-func (m *UsageGroupBudgetSeedMutation) WindowEndUtc() (r time.Time, exists bool) {
-	v := m.window_end_utc
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldWindowEndUtc returns the old "window_end_utc" field's value of the UsageGroupBudgetSeed entity.
-// If the UsageGroupBudgetSeed object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UsageGroupBudgetSeedMutation) OldWindowEndUtc(ctx context.Context) (v time.Time, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldWindowEndUtc is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldWindowEndUtc requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldWindowEndUtc: %w", err)
-	}
-	return oldValue.WindowEndUtc, nil
-}
-
-// ResetWindowEndUtc resets all changes to the "window_end_utc" field.
-func (m *UsageGroupBudgetSeedMutation) ResetWindowEndUtc() {
-	m.window_end_utc = nil
-}
-
 // SetActivatedAt sets the "activated_at" field.
 func (m *UsageGroupBudgetSeedMutation) SetActivatedAt(t time.Time) {
 	m.activated_at = &t
@@ -145568,6 +145422,42 @@ func (m *UsageGroupBudgetSeedMutation) ResetActivatedAt() {
 	m.activated_at = nil
 }
 
+// SetSeedFromUtc sets the "seed_from_utc" field.
+func (m *UsageGroupBudgetSeedMutation) SetSeedFromUtc(t time.Time) {
+	m.seed_from_utc = &t
+}
+
+// SeedFromUtc returns the value of the "seed_from_utc" field in the mutation.
+func (m *UsageGroupBudgetSeedMutation) SeedFromUtc() (r time.Time, exists bool) {
+	v := m.seed_from_utc
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSeedFromUtc returns the old "seed_from_utc" field's value of the UsageGroupBudgetSeed entity.
+// If the UsageGroupBudgetSeed object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupBudgetSeedMutation) OldSeedFromUtc(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSeedFromUtc is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSeedFromUtc requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSeedFromUtc: %w", err)
+	}
+	return oldValue.SeedFromUtc, nil
+}
+
+// ResetSeedFromUtc resets all changes to the "seed_from_utc" field.
+func (m *UsageGroupBudgetSeedMutation) ResetSeedFromUtc() {
+	m.seed_from_utc = nil
+}
+
 // SetCutoffAt sets the "cutoff_at" field.
 func (m *UsageGroupBudgetSeedMutation) SetCutoffAt(t time.Time) {
 	m.cutoff_at = &t
@@ -145602,6 +145492,55 @@ func (m *UsageGroupBudgetSeedMutation) OldCutoffAt(ctx context.Context) (v time.
 // ResetCutoffAt resets all changes to the "cutoff_at" field.
 func (m *UsageGroupBudgetSeedMutation) ResetCutoffAt() {
 	m.cutoff_at = nil
+}
+
+// SetEndedAt sets the "ended_at" field.
+func (m *UsageGroupBudgetSeedMutation) SetEndedAt(t time.Time) {
+	m.ended_at = &t
+}
+
+// EndedAt returns the value of the "ended_at" field in the mutation.
+func (m *UsageGroupBudgetSeedMutation) EndedAt() (r time.Time, exists bool) {
+	v := m.ended_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEndedAt returns the old "ended_at" field's value of the UsageGroupBudgetSeed entity.
+// If the UsageGroupBudgetSeed object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupBudgetSeedMutation) OldEndedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEndedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEndedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEndedAt: %w", err)
+	}
+	return oldValue.EndedAt, nil
+}
+
+// ClearEndedAt clears the value of the "ended_at" field.
+func (m *UsageGroupBudgetSeedMutation) ClearEndedAt() {
+	m.ended_at = nil
+	m.clearedFields[usagegroupbudgetseed.FieldEndedAt] = struct{}{}
+}
+
+// EndedAtCleared returns if the "ended_at" field was cleared in this mutation.
+func (m *UsageGroupBudgetSeedMutation) EndedAtCleared() bool {
+	_, ok := m.clearedFields[usagegroupbudgetseed.FieldEndedAt]
+	return ok
+}
+
+// ResetEndedAt resets all changes to the "ended_at" field.
+func (m *UsageGroupBudgetSeedMutation) ResetEndedAt() {
+	m.ended_at = nil
+	delete(m.clearedFields, usagegroupbudgetseed.FieldEndedAt)
 }
 
 // SetFrozenMemberIds sets the "frozen_member_ids" field.
@@ -145903,27 +145842,21 @@ func (m *UsageGroupBudgetSeedMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UsageGroupBudgetSeedMutation) Fields() []string {
-	fields := make([]string, 0, 13)
+	fields := make([]string, 0, 11)
 	if m.group_id != nil {
 		fields = append(fields, usagegroupbudgetseed.FieldGroupID)
-	}
-	if m.project_scope_id != nil {
-		fields = append(fields, usagegroupbudgetseed.FieldProjectScopeID)
-	}
-	if m.window_kind != nil {
-		fields = append(fields, usagegroupbudgetseed.FieldWindowKind)
-	}
-	if m.window_start_utc != nil {
-		fields = append(fields, usagegroupbudgetseed.FieldWindowStartUtc)
-	}
-	if m.window_end_utc != nil {
-		fields = append(fields, usagegroupbudgetseed.FieldWindowEndUtc)
 	}
 	if m.activated_at != nil {
 		fields = append(fields, usagegroupbudgetseed.FieldActivatedAt)
 	}
+	if m.seed_from_utc != nil {
+		fields = append(fields, usagegroupbudgetseed.FieldSeedFromUtc)
+	}
 	if m.cutoff_at != nil {
 		fields = append(fields, usagegroupbudgetseed.FieldCutoffAt)
+	}
+	if m.ended_at != nil {
+		fields = append(fields, usagegroupbudgetseed.FieldEndedAt)
 	}
 	if m.frozen_member_ids != nil {
 		fields = append(fields, usagegroupbudgetseed.FieldFrozenMemberIds)
@@ -145953,18 +145886,14 @@ func (m *UsageGroupBudgetSeedMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case usagegroupbudgetseed.FieldGroupID:
 		return m.GroupID()
-	case usagegroupbudgetseed.FieldProjectScopeID:
-		return m.ProjectScopeID()
-	case usagegroupbudgetseed.FieldWindowKind:
-		return m.WindowKind()
-	case usagegroupbudgetseed.FieldWindowStartUtc:
-		return m.WindowStartUtc()
-	case usagegroupbudgetseed.FieldWindowEndUtc:
-		return m.WindowEndUtc()
 	case usagegroupbudgetseed.FieldActivatedAt:
 		return m.ActivatedAt()
+	case usagegroupbudgetseed.FieldSeedFromUtc:
+		return m.SeedFromUtc()
 	case usagegroupbudgetseed.FieldCutoffAt:
 		return m.CutoffAt()
+	case usagegroupbudgetseed.FieldEndedAt:
+		return m.EndedAt()
 	case usagegroupbudgetseed.FieldFrozenMemberIds:
 		return m.FrozenMemberIds()
 	case usagegroupbudgetseed.FieldMemberSnapshotSet:
@@ -145988,18 +145917,14 @@ func (m *UsageGroupBudgetSeedMutation) OldField(ctx context.Context, name string
 	switch name {
 	case usagegroupbudgetseed.FieldGroupID:
 		return m.OldGroupID(ctx)
-	case usagegroupbudgetseed.FieldProjectScopeID:
-		return m.OldProjectScopeID(ctx)
-	case usagegroupbudgetseed.FieldWindowKind:
-		return m.OldWindowKind(ctx)
-	case usagegroupbudgetseed.FieldWindowStartUtc:
-		return m.OldWindowStartUtc(ctx)
-	case usagegroupbudgetseed.FieldWindowEndUtc:
-		return m.OldWindowEndUtc(ctx)
 	case usagegroupbudgetseed.FieldActivatedAt:
 		return m.OldActivatedAt(ctx)
+	case usagegroupbudgetseed.FieldSeedFromUtc:
+		return m.OldSeedFromUtc(ctx)
 	case usagegroupbudgetseed.FieldCutoffAt:
 		return m.OldCutoffAt(ctx)
+	case usagegroupbudgetseed.FieldEndedAt:
+		return m.OldEndedAt(ctx)
 	case usagegroupbudgetseed.FieldFrozenMemberIds:
 		return m.OldFrozenMemberIds(ctx)
 	case usagegroupbudgetseed.FieldMemberSnapshotSet:
@@ -146028,34 +145953,6 @@ func (m *UsageGroupBudgetSeedMutation) SetField(name string, value ent.Value) er
 		}
 		m.SetGroupID(v)
 		return nil
-	case usagegroupbudgetseed.FieldProjectScopeID:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetProjectScopeID(v)
-		return nil
-	case usagegroupbudgetseed.FieldWindowKind:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetWindowKind(v)
-		return nil
-	case usagegroupbudgetseed.FieldWindowStartUtc:
-		v, ok := value.(time.Time)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetWindowStartUtc(v)
-		return nil
-	case usagegroupbudgetseed.FieldWindowEndUtc:
-		v, ok := value.(time.Time)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetWindowEndUtc(v)
-		return nil
 	case usagegroupbudgetseed.FieldActivatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -146063,12 +145960,26 @@ func (m *UsageGroupBudgetSeedMutation) SetField(name string, value ent.Value) er
 		}
 		m.SetActivatedAt(v)
 		return nil
+	case usagegroupbudgetseed.FieldSeedFromUtc:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSeedFromUtc(v)
+		return nil
 	case usagegroupbudgetseed.FieldCutoffAt:
 		v, ok := value.(time.Time)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCutoffAt(v)
+		return nil
+	case usagegroupbudgetseed.FieldEndedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEndedAt(v)
 		return nil
 	case usagegroupbudgetseed.FieldFrozenMemberIds:
 		v, ok := value.([]string)
@@ -146157,6 +146068,9 @@ func (m *UsageGroupBudgetSeedMutation) AddField(name string, value ent.Value) er
 // mutation.
 func (m *UsageGroupBudgetSeedMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(usagegroupbudgetseed.FieldEndedAt) {
+		fields = append(fields, usagegroupbudgetseed.FieldEndedAt)
+	}
 	if m.FieldCleared(usagegroupbudgetseed.FieldFrozenMemberIds) {
 		fields = append(fields, usagegroupbudgetseed.FieldFrozenMemberIds)
 	}
@@ -146174,6 +146088,9 @@ func (m *UsageGroupBudgetSeedMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *UsageGroupBudgetSeedMutation) ClearField(name string) error {
 	switch name {
+	case usagegroupbudgetseed.FieldEndedAt:
+		m.ClearEndedAt()
+		return nil
 	case usagegroupbudgetseed.FieldFrozenMemberIds:
 		m.ClearFrozenMemberIds()
 		return nil
@@ -146188,23 +146105,17 @@ func (m *UsageGroupBudgetSeedMutation) ResetField(name string) error {
 	case usagegroupbudgetseed.FieldGroupID:
 		m.ResetGroupID()
 		return nil
-	case usagegroupbudgetseed.FieldProjectScopeID:
-		m.ResetProjectScopeID()
-		return nil
-	case usagegroupbudgetseed.FieldWindowKind:
-		m.ResetWindowKind()
-		return nil
-	case usagegroupbudgetseed.FieldWindowStartUtc:
-		m.ResetWindowStartUtc()
-		return nil
-	case usagegroupbudgetseed.FieldWindowEndUtc:
-		m.ResetWindowEndUtc()
-		return nil
 	case usagegroupbudgetseed.FieldActivatedAt:
 		m.ResetActivatedAt()
 		return nil
+	case usagegroupbudgetseed.FieldSeedFromUtc:
+		m.ResetSeedFromUtc()
+		return nil
 	case usagegroupbudgetseed.FieldCutoffAt:
 		m.ResetCutoffAt()
+		return nil
+	case usagegroupbudgetseed.FieldEndedAt:
+		m.ResetEndedAt()
 		return nil
 	case usagegroupbudgetseed.FieldFrozenMemberIds:
 		m.ResetFrozenMemberIds()

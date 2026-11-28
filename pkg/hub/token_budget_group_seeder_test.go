@@ -114,12 +114,12 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 	setTokenomicsExperimentsForTest(t, srv, true, true)
 	srv.reconcileTokenBudgets(ctx)
 	// Pause the wall-clock background drainer so this test deterministically
-	// drains the durable_queue_items at controlled clock steps (tAct, tAct+2m).
+	// drains durable_queue_items at controlled clock steps (tAct, tAct+2m).
 	srv.stopGroupBudgetSeedDrainer(ctx)
 
 	// Deterministic clock (O5): no time.Now() anywhere in this test.
-	tPre := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
-	tAct := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	tPre := time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC)
+	tAct := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
 	now := tPre
 	srv.TokenBudgetEvaluator().nowFn = func() time.Time { return now }
 	srv.PooledGroupResolver().nowFn = func() time.Time { return now }
@@ -147,13 +147,13 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 
 	hubID := srv.config.HubID
 
-	// 1. Pre-activation spend (Nov 5): A=300, B=250 (nested member), C=400 (non-member).
+	// 1. Pre-activation spend (Nov 10 08:00): A=300, B=200 (nested member), C=400 (non-member).
 	for _, item := range []struct {
 		agID, runID, tok, evID string
 		in, out                int64
 	}{
 		{agA.ID, runA, tokA, "pre-a", 200, 100},
-		{agB.ID, runB, tokB, "pre-b", 150, 100},
+		{agB.ID, runB, tokB, "pre-b", 120, 80},
 		{agC.ID, runC, tokC, "pre-c", 300, 100},
 	} {
 		ev := e2eMakeWireUsageEvent(hubID, item.agID, proj.ID, item.runID, item.evID, 1, tPre, item.in, item.out)
@@ -163,11 +163,14 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	}
 
-	// 2. Mid-month (Nov 15): create pooled monthly binding (cap = 1000) via HTTP POST.
-	//    This records the activation event and enqueues initial (tAct) + ttl_cover (tAct+2m) items in durable_queue_items.
+	// 2. Nov 10 10:00: create pooled monthly binding (cap = 1000) via HTTP POST.
+	//    Opens charging episode 1 and enqueues initial (tAct) + ttl_cover (tAct+2m).
 	now = tAct
 	monthDef, err := st.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupMonth)
 	require.NoError(t, err)
+	dayDef, err := st.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupDay)
+	require.NoError(t, err)
+
 	recBind := doAdminJSONRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+monthDef.ID+"/entitlements", map[string]any{
 		"subjectType": "group",
 		"subjectId":   groupG.ID,
@@ -176,8 +179,12 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 		"value":       1000,
 	})
 	require.Equal(t, http.StatusCreated, recBind.Code, recBind.Body.String())
-	var createdBind store.EntitlementBinding
-	require.NoError(t, json.Unmarshal(recBind.Body.Bytes(), &createdBind))
+	var monthBind store.EntitlementBinding
+	require.NoError(t, json.Unmarshal(recBind.Body.Bytes(), &monthBind))
+
+	ep1, err := st.GetOpenUsageGroupChargingEpisode(ctx, groupG.ID)
+	require.NoError(t, err)
+	assert.False(t, ep1.Finalized)
 
 	// 3. Concurrent ingest right after binding creation: A ingests 200 tokens (charged via origin='ingest').
 	evPostA := e2eMakeWireUsageEvent(hubID, agA.ID, proj.ID, runA, "post-a", 2, tAct.Add(10*time.Second), 120, 80)
@@ -187,26 +194,19 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 	require.Equal(t, http.StatusOK, recPostA.Code, recPostA.Body.String())
 
 	monthStart, monthEnd := utcMonthWindow(tAct)
+	dayStart, dayEnd := utcDayWindow(tAct)
 
 	// 4. O5: Drain immediate seed pass from durable_queue_items via HandleQueueItem.
-	//    Only the initial pass (NotBefore == tAct) is ready at tAct; ttl_cover (tAct+2m) waits.
-	drainedInitial := drainGroupSeedQueueAt(t, ctx, st, seeder, tAct)
-	assert.Equal(t, 1, drainedInitial, "only the immediate pass should be ready at tAct")
-
+	assert.Equal(t, 1, drainGroupSeedQueueAt(t, ctx, st, seeder, tAct), "only the immediate pass should be ready at tAct")
 	// Idempotent direct re-run of initial pass produces identical total.
 	require.NoError(t, seeder.RunSeed(ctx, GroupBudgetSeedPayload{
-		GroupID:        groupG.ID,
-		ProjectScopeID: "",
-		WindowKind:     store.UsageBudgetWindowMonth,
-		WindowStartUTC: monthStart,
-		WindowEndUTC:   monthEnd,
-		ActivatedAt:    tAct,
-		IsFinalPass:    false,
+		EpisodeID: ep1.ID, GroupID: groupG.ID, IsFinalPass: false,
 	}))
 
+	// Total = pre-activation seed (300+200=500) + concurrent ingest (200) = 700 (warn).
 	total, err := st.SumUsageGroupRollupTokens(ctx, groupG.ID, "", monthStart, monthEnd)
 	require.NoError(t, err)
-	assert.Equal(t, int64(750), total, "must equal pre-activation seed (550) + concurrent ingest (200) without double counting")
+	assert.Equal(t, int64(700), total)
 
 	stRow, err := st.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
 		LimitDefinitionID: monthDef.ID,
@@ -217,29 +217,28 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.UsageBudgetStateWarn, stRow.State)
-	assert.Equal(t, int64(750), stRow.ConsumedAtEval)
+	assert.Equal(t, int64(700), stRow.ConsumedAtEval)
 
-	// 5. +2m: Drain the delayed ttl_cover pass from durable_queue_items -> marks seed finalized (D6).
+	// 5. +2m: Drain delayed ttl_cover pass -> marks episode 1 finalized forever (D6a).
 	now = tAct.Add(2 * time.Minute)
-	drainedFinal := drainGroupSeedQueueAt(t, ctx, st, seeder, now)
-	assert.Equal(t, 1, drainedFinal, "delayed +2m ttl_cover pass should drain at tAct+2m")
+	assert.Equal(t, 1, drainGroupSeedQueueAt(t, ctx, st, seeder, now))
 
-	seedRec, err := st.GetUsageGroupSeedRecord(ctx, groupG.ID, "", store.UsageBudgetWindowMonth, monthStart)
+	ep1After, err := st.GetUsageGroupSeedEpisode(ctx, ep1.ID)
 	require.NoError(t, err)
-	assert.True(t, seedRec.Finalized)
-	assert.ElementsMatch(t, []string{userA.ID, userB.ID}, seedRec.FrozenMemberIDs)
+	assert.True(t, ep1After.Finalized)
+	assert.ElementsMatch(t, []string{userA.ID, userB.ID}, ep1After.FrozenMemberIDs)
 
-	// 6. R1 regression test:
-	//    After finalization: A leaves G, C (who had 400 pre-activation spend) joins G.
-	//    Then an admin edits the binding cap (1000 -> 5000) and token_action (warn_only -> deny_new_runs),
-	//    which bumps binding.UpdatedAt.
-	//    Neither nightly reconcile nor any re-run may refund A or charge C's pre-join 400!
+	// 6. R1 / D6a regression:
+	//    A leaves G, C (who had 400 pre-activation spend) joins G.
+	//    a) Admin edits month binding cap (1000 -> 5000) & token_action (pause_new).
+	//    b) Admin creates a SECOND binding (day limit) on the same day while episode 1 is open.
+	//    NEITHER may trigger a seed, refund A's 300, or charge C's pre-join 400!
 	require.NoError(t, st.RemoveGroupMember(ctx, groupG.ID, store.GroupMemberTypeUser, userA.ID))
 	require.NoError(t, st.AddGroupMember(ctx, &store.GroupMember{GroupID: groupG.ID, MemberType: store.GroupMemberTypeUser, MemberID: userC.ID, Role: store.GroupMemberRoleMember}))
 	srv.InvalidatePooledGroupCacheAll()
 
 	now = tAct.Add(1 * time.Hour)
-	recEdit := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+createdBind.ID, map[string]any{
+	recEdit := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+monthBind.ID, map[string]any{
 		"subjectType": "group",
 		"subjectId":   groupG.ID,
 		"scopeType":   "system",
@@ -249,20 +248,46 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, recEdit.Code, recEdit.Body.String())
 
-	// No queue items were enqueued by the ordinary cap/action edit.
-	assert.Equal(t, 0, drainGroupSeedQueueAt(t, ctx, st, seeder, now.Add(5*time.Minute)))
+	now = tAct.Add(6 * time.Hour)
+	recDayBind := doAdminJSONRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+dayDef.ID+"/entitlements", map[string]any{
+		"subjectType": "group",
+		"subjectId":   groupG.ID,
+		"scopeType":   "system",
+		"scopeId":     "",
+		"value":       2000,
+	})
+	require.Equal(t, http.StatusCreated, recDayBind.Code, recDayBind.Body.String())
+	var dayBind store.EntitlementBinding
+	require.NoError(t, json.Unmarshal(recDayBind.Body.Bytes(), &dayBind))
 
+	// Zero items enqueued by either the cap edit or the second binding inside the open episode!
+	assert.Equal(t, 0, drainGroupSeedQueueAt(t, ctx, st, seeder, now.Add(5*time.Minute)))
 	enq, err := seeder.ReconcileMissingSeeds(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 0, enq, "cap/token_action edit after finalization must NOT trigger reconcile re-seeding (R1)")
+	assert.Equal(t, 0, enq)
 
-	totalAfter, err := st.SumUsageGroupRollupTokens(ctx, groupG.ID, "", monthStart, monthEnd)
+	// Month AND day windows BOTH read the exact same 700 tokens (A's 300 preserved, C's 400 excluded).
+	totalMonth, err := st.SumUsageGroupRollupTokens(ctx, groupG.ID, "", monthStart, monthEnd)
 	require.NoError(t, err)
-	assert.Equal(t, int64(750), totalAfter, "finalized seed must preserve A's spend and exclude C's pre-join spend (never 850)")
+	assert.Equal(t, int64(700), totalMonth, "month total must remain 700 (never refund leaver A)")
 
-	// 7. Genuine 0 -> >0 re-activation DOES record a new activation event and enqueue new seed passes.
-	now = tAct.Add(2 * time.Hour)
-	recDisable := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+createdBind.ID, map[string]any{
+	totalDay, err := st.SumUsageGroupRollupTokens(ctx, groupG.ID, "", dayStart, dayEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(700), totalDay, "day limit must read the same episode seed+ingest rows (700)")
+
+	// 7. Deactivate -> gap spend -> reactivate (Episode 2):
+	//    Deleting only the month binding keeps episode 1 OPEN because dayBind is still active.
+	now = tAct.Add(7 * time.Hour)
+	recDelMonth := doAdminJSONRequest(t, srv, http.MethodDelete, "/api/v1/admin/entitlements/"+monthBind.ID, nil)
+	require.Equal(t, http.StatusNoContent, recDelMonth.Code)
+	stillOpen, err := st.GetOpenUsageGroupChargingEpisode(ctx, groupG.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ep1.ID, stillOpen.ID, "episode must stay open while dayBind is still active")
+
+	//    Deactivating the last active binding (dayBind -> 0) CLOSES episode 1 at tEnd1.
+	tEnd1 := tAct.Add(8 * time.Hour)
+	now = tEnd1
+	recDisableDay := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+dayBind.ID, map[string]any{
 		"subjectType": "group",
 		"subjectId":   groupG.ID,
 		"scopeType":   "system",
@@ -270,11 +295,23 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 		"value":       0,
 		"tokenAction": "notify_only",
 	})
-	require.Equal(t, http.StatusOK, recDisable.Code, recDisable.Body.String())
-	assert.Equal(t, 0, drainGroupSeedQueueAt(t, ctx, st, seeder, now.Add(5*time.Minute)))
+	require.Equal(t, http.StatusOK, recDisableDay.Code)
+	_, err = st.GetOpenUsageGroupChargingEpisode(ctx, groupG.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "last active binding deactivating must close episode 1")
 
-	now = tAct.Add(3 * time.Hour)
-	recReactivate := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+createdBind.ID, map[string]any{
+	//    Spend in the inactive gap (Nov 10 19:00): C spends 150 tokens (uncharged because group has no active bindings).
+	tGap := tAct.Add(9 * time.Hour)
+	now = tGap
+	evGapC := e2eMakeWireUsageEvent(hubID, agC.ID, proj.ID, runC, "gap-c", 2, tGap, 100, 50)
+	recGapC := e2eDoAgentUsageRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agC.ID+"/usage/events", tokC, telemetrycontract.UsageIngestRequest{
+		RunID: runC, ProducerEpoch: "ep-1", ProducerSeq: 2, Events: []telemetrycontract.UsageEvent{evGapC},
+	})
+	require.Equal(t, http.StatusOK, recGapC.Code, recGapC.Body.String())
+
+	//    Reactivate dayBind (0 -> 6000) at Nov 10 20:00 -> opens Episode 2 with SeedFromUTC == tEnd1.
+	tAct2 := tAct.Add(10 * time.Hour)
+	now = tAct2
+	recReactivate := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+dayBind.ID, map[string]any{
 		"subjectType": "group",
 		"subjectId":   groupG.ID,
 		"scopeType":   "system",
@@ -282,13 +319,108 @@ func TestPooledGroupSeeder_MidMonthD6AndIdempotency(t *testing.T) {
 		"value":       6000,
 		"tokenAction": "notify_only",
 	})
-	require.Equal(t, http.StatusOK, recReactivate.Code, recReactivate.Body.String())
+	require.Equal(t, http.StatusOK, recReactivate.Code)
 
-	seedRecAfterReactivate, err := st.GetUsageGroupSeedRecord(ctx, groupG.ID, "", store.UsageBudgetWindowMonth, monthStart)
+	ep2, err := st.GetOpenUsageGroupChargingEpisode(ctx, groupG.ID)
 	require.NoError(t, err)
-	assert.False(t, seedRecAfterReactivate.Finalized, "0 -> >0 re-activation must open a new activation pass")
-	assert.Equal(t, now, seedRecAfterReactivate.ActivatedAt)
-	assert.Equal(t, 2, drainGroupSeedQueueAt(t, ctx, st, seeder, now.Add(2*time.Minute)))
+	assert.NotEqual(t, ep1.ID, ep2.ID)
+	assert.Equal(t, tEnd1, ep2.SeedFromUTC, "episode 2 must seed only the gap since episode 1 ended")
+
+	assert.Equal(t, 2, drainGroupSeedQueueAt(t, ctx, st, seeder, tAct2.Add(2*time.Minute)))
+
+	// Total = ep1 (700) + ep2 gap (150) = 850 (C's pre-ep1 400 is STILL excluded; ep1's rows untouched).
+	totalFinal, err := st.SumUsageGroupRollupTokens(ctx, groupG.ID, "", monthStart, monthEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(850), totalFinal, "episode 2 must add only the gap spend (150) on top of episode 1 (700)")
+}
+
+func TestPooledGroupSeeder_ReconcileStep2AndProjectScopeE2E(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	setTokenomicsExperimentsForTest(t, srv, true, true)
+	srv.reconcileTokenBudgets(ctx)
+	srv.stopGroupBudgetSeedDrainer(ctx)
+
+	tPre := time.Date(2026, 11, 12, 8, 0, 0, 0, time.UTC)
+	tCreate := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	now := tPre
+	srv.TokenBudgetEvaluator().nowFn = func() time.Time { return now }
+	srv.PooledGroupResolver().nowFn = func() time.Time { return now }
+	seeder := srv.GroupBudgetSeeder()
+	require.NotNil(t, seeder)
+	seeder.nowFn = func() time.Time { return now }
+
+	proj1 := &store.Project{ID: uuid.NewString(), Name: "p-e2e-1", Slug: "p-e2e-1"}
+	proj2 := &store.Project{ID: uuid.NewString(), Name: "p-e2e-2", Slug: "p-e2e-2"}
+	require.NoError(t, st.CreateProject(ctx, proj1))
+	require.NoError(t, st.CreateProject(ctx, proj2))
+
+	groupG := createTestGroupForBudgets(t, st, "proj-seed-g", store.GroupTypeExplicit, "")
+	userA := createTestUserForBudgets(t, st, "proj-seed-a@example.com")
+	require.NoError(t, st.AddGroupMember(ctx, &store.GroupMember{GroupID: groupG.ID, MemberType: store.GroupMemberTypeUser, MemberID: userA.ID, Role: store.GroupMemberRoleMember}))
+
+	// Pre-activation spend: 300 in proj1, 250 in proj2.
+	ag1, run1, tok1 := createTestAgentWithRunForBudgets(t, srv, st, proj1.ID, "ag-p1", userA.ID, tPre)
+	ag2, run2, tok2 := createTestAgentWithRunForBudgets(t, srv, st, proj2.ID, "ag-p2", userA.ID, tPre)
+	for _, it := range []struct {
+		agID, projID, runID, tok, evID string
+		in, out                        int64
+	}{
+		{ag1.ID, proj1.ID, run1, tok1, "ps-ev-1", 200, 100},
+		{ag2.ID, proj2.ID, run2, tok2, "ps-ev-2", 150, 100},
+	} {
+		ev := e2eMakeWireUsageEvent(srv.config.HubID, it.agID, it.projID, it.runID, it.evID, 1, tPre, it.in, it.out)
+		rec := e2eDoAgentUsageRequest(t, srv, http.MethodPost, "/api/v1/agents/"+it.agID+"/usage/events", it.tok, telemetrycontract.UsageIngestRequest{
+			RunID: it.runID, ProducerEpoch: "ep-1", ProducerSeq: 1, Events: []telemetrycontract.UsageEvent{ev},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	// O5: Insert a project-scoped pooled binding directly into the store (bypassing admin HTTP API),
+	// so no charging episode exists yet — exercises ReconcileMissingSeeds step 2 AND project-scope E2E.
+	now = tCreate.Add(5 * time.Minute)
+	monthDef, err := st.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupMonth)
+	require.NoError(t, err)
+	_, err = st.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		ID:                uuid.NewString(),
+		LimitDefinitionID: monthDef.ID,
+		SubjectType:       store.EntitlementSubjectGroup,
+		SubjectID:         groupG.ID,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj1.ID,
+		Value:             500,
+		CreatedAt:         tCreate,
+		UpdatedAt:         tCreate,
+	})
+	require.NoError(t, err)
+
+	enq, err := seeder.ReconcileMissingSeeds(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, enq, "reconcile step 2 must recover missing episode for in-window binding")
+
+	ep, err := st.GetOpenUsageGroupChargingEpisode(ctx, groupG.ID)
+	require.NoError(t, err)
+	now = ep.CutoffAt
+	assert.Equal(t, 1, drainGroupSeedQueueAt(t, ctx, st, seeder, ep.CutoffAt))
+
+	// Verify GET /api/v1/groups/{id}/usage/budgets?project_id=proj1 sees ONLY proj1's 300 tokens (warn),
+	// while system rollups received both projects (550).
+	recProj := doAdminJSONRequest(t, srv, http.MethodGet, "/api/v1/groups/"+groupG.ID+"/usage/budgets?project_id="+proj1.ID, nil)
+	require.Equal(t, http.StatusOK, recProj.Code, recProj.Body.String())
+	var resp GroupUsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &resp))
+	require.Len(t, resp.Budgets, 1)
+	assert.Equal(t, proj1.ID, resp.Budgets[0].ProjectScopeID)
+	assert.Equal(t, int64(300), resp.Budgets[0].Consumed)
+	assert.Equal(t, store.UsageBudgetStateWarn, resp.Budgets[0].State)
+	require.Len(t, resp.Budgets[0].Members, 1)
+	assert.Equal(t, userA.ID, resp.Budgets[0].Members[0].UserID)
+	assert.Equal(t, int64(300), resp.Budgets[0].Members[0].TokensSummable)
+
+	monthStart, monthEnd := utcMonthWindow(now)
+	sysSum, err := st.SumUsageGroupRollupTokens(ctx, groupG.ID, "", monthStart, monthEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(550), sysSum, "episode seed mirrors ingest by writing both system (550) and project (300/250) rows")
 }
 
 func TestPooledGroupSeeder_MultiReplicaConcurrency(t *testing.T) {
@@ -296,8 +428,6 @@ func TestPooledGroupSeeder_MultiReplicaConcurrency(t *testing.T) {
 	ctx := context.Background()
 	setTokenomicsExperimentsForTest(t, srv, true, true)
 	srv.reconcileTokenBudgets(ctx)
-	// Pause the wall-clock background drainer so this test deterministically
-	// drains the durable_queue_items at controlled clock steps (tAct, tAct+2m).
 	srv.stopGroupBudgetSeedDrainer(ctx)
 
 	tPre := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
@@ -330,22 +460,20 @@ func TestPooledGroupSeeder_MultiReplicaConcurrency(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	}
 
+	ep1, _, err := st.OpenUsageGroupChargingEpisode(ctx, g1.ID, tAct)
+	require.NoError(t, err)
+	ep2, _, err := st.OpenUsageGroupChargingEpisode(ctx, g2.ID, tAct)
+	require.NoError(t, err)
+
 	// Construct two independent GroupBudgetSeeder instances sharing the same store (simulating two Hub replicas).
 	seederA := NewGroupBudgetSeeder(st, srv.durableQueue, srv.TokenBudgetEvaluator(), nil, func() bool { return true }, func() int { return 90 })
 	seederB := NewGroupBudgetSeeder(st, srv.durableQueue, srv.TokenBudgetEvaluator(), nil, func() bool { return true }, func() int { return 90 })
 	seederA.nowFn = func() time.Time { return tAct.Add(2 * time.Minute) }
 	seederB.nowFn = func() time.Time { return tAct.Add(2 * time.Minute) }
 
-	p1 := GroupBudgetSeedPayload{
-		GroupID: g1.ID, WindowKind: store.UsageBudgetWindowMonth,
-		WindowStartUTC: monthStart, WindowEndUTC: monthEnd, ActivatedAt: tAct, IsFinalPass: true,
-	}
-	p2 := GroupBudgetSeedPayload{
-		GroupID: g2.ID, WindowKind: store.UsageBudgetWindowMonth,
-		WindowStartUTC: monthStart, WindowEndUTC: monthEnd, ActivatedAt: tAct, IsFinalPass: true,
-	}
+	p1 := GroupBudgetSeedPayload{EpisodeID: ep1.ID, GroupID: g1.ID, IsFinalPass: true}
+	p2 := GroupBudgetSeedPayload{EpisodeID: ep2.ID, GroupID: g2.ID, IsFinalPass: true}
 
-	// Run concurrently across both replicas for both different groups and the same group.
 	var wg sync.WaitGroup
 	errs := make(chan error, 4)
 	wg.Add(4)
@@ -359,16 +487,15 @@ func TestPooledGroupSeeder_MultiReplicaConcurrency(t *testing.T) {
 		require.NoError(t, e)
 	}
 
-	// Both records survive and are finalized with exact totals.
-	rec1, err := st.GetUsageGroupSeedRecord(ctx, g1.ID, "", store.UsageBudgetWindowMonth, monthStart)
+	got1, err := st.GetUsageGroupSeedEpisode(ctx, ep1.ID)
 	require.NoError(t, err)
-	assert.True(t, rec1.Finalized)
-	assert.Equal(t, []string{u1.ID}, rec1.FrozenMemberIDs)
+	assert.True(t, got1.Finalized)
+	assert.Equal(t, []string{u1.ID}, got1.FrozenMemberIDs)
 
-	rec2, err := st.GetUsageGroupSeedRecord(ctx, g2.ID, "", store.UsageBudgetWindowMonth, monthStart)
+	got2, err := st.GetUsageGroupSeedEpisode(ctx, ep2.ID)
 	require.NoError(t, err)
-	assert.True(t, rec2.Finalized)
-	assert.Equal(t, []string{u2.ID}, rec2.FrozenMemberIDs)
+	assert.True(t, got2.Finalized)
+	assert.Equal(t, []string{u2.ID}, got2.FrozenMemberIDs)
 
 	sum1, err := st.SumUsageGroupRollupTokens(ctx, g1.ID, "", monthStart, monthEnd)
 	require.NoError(t, err)
@@ -385,23 +512,19 @@ func TestPooledGroupSeeder_ExperimentOffNoWrites(t *testing.T) {
 	setTokenomicsExperimentsForTest(t, srv, true, false)
 
 	tAct := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
-	monthStart, monthEnd := utcMonthWindow(tAct)
 	groupG := createTestGroupForBudgets(t, st, "off-g", store.GroupTypeExplicit, "")
 
 	seeder := srv.GroupBudgetSeeder()
 	require.NotNil(t, seeder)
 	seeder.nowFn = func() time.Time { return tAct }
 
-	require.NoError(t, seeder.EnqueueForBindingActivation(ctx, store.LimitLLMTokensPerGroupMonth, groupG.ID, store.QuotaScopeSystem, "", tAct))
-	require.NoError(t, seeder.RunSeed(ctx, GroupBudgetSeedPayload{
-		GroupID: groupG.ID, WindowKind: store.UsageBudgetWindowMonth,
-		WindowStartUTC: monthStart, WindowEndUTC: monthEnd, ActivatedAt: tAct, IsFinalPass: true,
-	}))
+	require.NoError(t, seeder.OnGroupBindingActivated(ctx, groupG.ID, tAct))
+	require.NoError(t, seeder.OnGroupBindingDeactivated(ctx, groupG.ID, tAct))
 	n, err := seeder.ReconcileMissingSeeds(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 
-	_, err = st.GetUsageGroupSeedRecord(ctx, groupG.ID, "", store.UsageBudgetWindowMonth, monthStart)
+	_, err = st.GetOpenUsageGroupChargingEpisode(ctx, groupG.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "experiment-off must write zero usage_group_budget_seeds rows")
 }
 
@@ -410,8 +533,6 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 	ctx := context.Background()
 	setTokenomicsExperimentsForTest(t, srv, true, true)
 	srv.reconcileTokenBudgets(ctx)
-	// Pause the wall-clock background drainer so this test deterministically
-	// drains the durable_queue_items at controlled clock steps (tAct, tAct+2m).
 	srv.stopGroupBudgetSeedDrainer(ctx)
 
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
@@ -480,9 +601,11 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 
 	path := "/api/v1/groups/" + groupG.ID + "/usage/budgets"
 
-	// 1. Hub admin sees pool totals + per-member breakdown, including unlimited daily pool with cap: null (O4).
+	// 1. Hub admin sees pool totals + per-member breakdown, unlimited daily pool with cap: null (O4),
+	//    and override_until explicitly present as null (O3).
 	recHubAdmin := doAdminJSONRequest(t, srv, http.MethodGet, path, nil)
 	require.Equal(t, http.StatusOK, recHubAdmin.Code, recHubAdmin.Body.String())
+	assert.Contains(t, recHubAdmin.Body.String(), `"override_until":null`, "override_until must always be emitted (O3)")
 	var respHubAdmin GroupUsageBudgetsResponse
 	require.NoError(t, json.Unmarshal(recHubAdmin.Body.Bytes(), &respHubAdmin))
 	assert.True(t, respHubAdmin.NonAdditive)
@@ -490,7 +613,6 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 	assert.Equal(t, groupG.ID, respHubAdmin.Scope.ID)
 	require.Len(t, respHubAdmin.Budgets, 2)
 
-	// Budgets are sorted by LimitName: day comes before month.
 	dayItem := respHubAdmin.Budgets[0]
 	monthItem := respHubAdmin.Budgets[1]
 	assert.Equal(t, store.LimitLLMTokensPerGroupDay, dayItem.LimitName)
@@ -508,6 +630,34 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 	assert.Equal(t, int64(600), monthItem.Members[0].TokensSummable)
 	assert.Equal(t, uNested.ID, monthItem.Members[1].UserID)
 	assert.Equal(t, int64(400), monthItem.Members[1].TokensSummable)
+
+	// 1b. O2: While an override is active (override_until > now), report stored state ("ok")
+	//     even if consumed >= cap; once expired, fall back to max(stored, computed).
+	monthStart, _ := utcMonthWindow(now)
+	stRow, err := st.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: monthDef.ID, ScopeKind: store.UsageScopeKindGroup,
+		ScopeID: groupG.ID, ProjectScopeID: "", WindowStartUTC: monthStart,
+	})
+	require.NoError(t, err)
+	overrideUntil := now.Add(1 * time.Hour)
+	stRow.State = store.UsageBudgetStateOK
+	stRow.OverrideUntil = &overrideUntil
+	_, err = st.CompareAndSwapUsageBudgetState(ctx, stRow.StateVersion, stRow)
+	require.NoError(t, err)
+
+	recOverrideActive := doAdminJSONRequest(t, srv, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, recOverrideActive.Code)
+	var respOverrideActive GroupUsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(recOverrideActive.Body.Bytes(), &respOverrideActive))
+	assert.Equal(t, store.UsageBudgetStateOK, respOverrideActive.Budgets[1].State, "active override must return stored state (O2)")
+
+	now = overrideUntil.Add(1 * time.Minute)
+	recOverrideExpired := doAdminJSONRequest(t, srv, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, recOverrideExpired.Code)
+	var respOverrideExpired GroupUsageBudgetsResponse
+	require.NoError(t, json.Unmarshal(recOverrideExpired.Body.Bytes(), &respOverrideExpired))
+	assert.Equal(t, store.UsageBudgetStateWarn, respOverrideExpired.Budgets[1].State, "expired override must resume max(stored, computed) (O2)")
+	now = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 	// 2. Group owner and group admin also see per-member breakdown.
 	for _, u := range []*store.User{uOwner, uAdmin} {
@@ -532,15 +682,12 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 	}
 
 	// 4. R4: Scoped UAT ceiling enforcement on membership branches.
-	//    a) Group owner with hub UAT lacking quota:read -> 403 Forbidden.
 	recNoQuota := doScopedUserGETRequest(t, srv, uOwner, TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:read"}, []string{"agent.read"}, groupG.ID)
 	assert.Equal(t, http.StatusForbidden, recNoQuota.Code, "scoped UAT lacking quota:read must be denied even for group owner (R4)")
 
-	//    b) Group owner with project-bounded UAT carrying quota:read -> 403 Forbidden (boundary mismatch).
 	recProjBound := doScopedUserGETRequest(t, srv, uOwner, TokenBoundary{Kind: BoundaryKindProject, ProjectID: proj.ID}, []string{"quota:read"}, []string{"quota.read"}, groupG.ID)
 	assert.Equal(t, http.StatusForbidden, recProjBound.Code, "project-bounded UAT must be denied on hub/group quota read (R4)")
 
-	//    c) Group owner with hub UAT carrying quota:read -> 200 OK with breakdown.
 	recOwnerUAT := doScopedUserGETRequest(t, srv, uOwner, TokenBoundary{Kind: BoundaryKindHub}, []string{"quota:read"}, []string{"quota.read"}, groupG.ID)
 	require.Equal(t, http.StatusOK, recOwnerUAT.Code, recOwnerUAT.Body.String())
 	var respOwnerUAT GroupUsageBudgetsResponse
@@ -548,7 +695,6 @@ func TestGroupUsageBudgets_ReadAndAuthz(t *testing.T) {
 	require.Len(t, respOwnerUAT.Budgets, 2)
 	assert.Len(t, respOwnerUAT.Budgets[1].Members, 2)
 
-	//    d) Regular member with hub UAT carrying quota:read -> 200 OK without breakdown.
 	recMemberUAT := doScopedUserGETRequest(t, srv, uMember, TokenBoundary{Kind: BoundaryKindHub}, []string{"quota:read"}, []string{"quota.read"}, groupG.ID)
 	require.Equal(t, http.StatusOK, recMemberUAT.Code, recMemberUAT.Body.String())
 	var respMemberUAT GroupUsageBudgetsResponse

@@ -16,18 +16,14 @@ const (
 	FieldID = "id"
 	// FieldGroupID holds the string denoting the group_id field in the database.
 	FieldGroupID = "group_id"
-	// FieldProjectScopeID holds the string denoting the project_scope_id field in the database.
-	FieldProjectScopeID = "project_scope_id"
-	// FieldWindowKind holds the string denoting the window_kind field in the database.
-	FieldWindowKind = "window_kind"
-	// FieldWindowStartUtc holds the string denoting the window_start_utc field in the database.
-	FieldWindowStartUtc = "window_start_utc"
-	// FieldWindowEndUtc holds the string denoting the window_end_utc field in the database.
-	FieldWindowEndUtc = "window_end_utc"
 	// FieldActivatedAt holds the string denoting the activated_at field in the database.
 	FieldActivatedAt = "activated_at"
+	// FieldSeedFromUtc holds the string denoting the seed_from_utc field in the database.
+	FieldSeedFromUtc = "seed_from_utc"
 	// FieldCutoffAt holds the string denoting the cutoff_at field in the database.
 	FieldCutoffAt = "cutoff_at"
+	// FieldEndedAt holds the string denoting the ended_at field in the database.
+	FieldEndedAt = "ended_at"
 	// FieldFrozenMemberIds holds the string denoting the frozen_member_ids field in the database.
 	FieldFrozenMemberIds = "frozen_member_ids"
 	// FieldMemberSnapshotSet holds the string denoting the member_snapshot_set field in the database.
@@ -48,12 +44,10 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldGroupID,
-	FieldProjectScopeID,
-	FieldWindowKind,
-	FieldWindowStartUtc,
-	FieldWindowEndUtc,
 	FieldActivatedAt,
+	FieldSeedFromUtc,
 	FieldCutoffAt,
+	FieldEndedAt,
 	FieldFrozenMemberIds,
 	FieldMemberSnapshotSet,
 	FieldFinalized,
@@ -75,10 +69,6 @@ func ValidColumn(column string) bool {
 var (
 	// GroupIDValidator is a validator for the "group_id" field. It is called by the builders before save.
 	GroupIDValidator func(string) error
-	// DefaultProjectScopeID holds the default value on creation for the "project_scope_id" field.
-	DefaultProjectScopeID string
-	// WindowKindValidator is a validator for the "window_kind" field. It is called by the builders before save.
-	WindowKindValidator func(string) error
 	// DefaultMemberSnapshotSet holds the default value on creation for the "member_snapshot_set" field.
 	DefaultMemberSnapshotSet bool
 	// DefaultFinalized holds the default value on creation for the "finalized" field.
@@ -108,34 +98,24 @@ func ByGroupID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroupID, opts...).ToFunc()
 }
 
-// ByProjectScopeID orders the results by the project_scope_id field.
-func ByProjectScopeID(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldProjectScopeID, opts...).ToFunc()
-}
-
-// ByWindowKind orders the results by the window_kind field.
-func ByWindowKind(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldWindowKind, opts...).ToFunc()
-}
-
-// ByWindowStartUtc orders the results by the window_start_utc field.
-func ByWindowStartUtc(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldWindowStartUtc, opts...).ToFunc()
-}
-
-// ByWindowEndUtc orders the results by the window_end_utc field.
-func ByWindowEndUtc(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldWindowEndUtc, opts...).ToFunc()
-}
-
 // ByActivatedAt orders the results by the activated_at field.
 func ByActivatedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldActivatedAt, opts...).ToFunc()
 }
 
+// BySeedFromUtc orders the results by the seed_from_utc field.
+func BySeedFromUtc(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSeedFromUtc, opts...).ToFunc()
+}
+
 // ByCutoffAt orders the results by the cutoff_at field.
 func ByCutoffAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCutoffAt, opts...).ToFunc()
+}
+
+// ByEndedAt orders the results by the ended_at field.
+func ByEndedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldEndedAt, opts...).ToFunc()
 }
 
 // ByMemberSnapshotSet orders the results by the member_snapshot_set field.

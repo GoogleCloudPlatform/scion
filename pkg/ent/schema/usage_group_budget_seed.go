@@ -25,11 +25,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// UsageGroupBudgetSeed persists per-(group, project_scope, window_kind, window_start)
-// D6 mid-window seeding state (activation timestamp, +2m cutoff, frozen member
-// snapshot, finalization flag, and optimistic state_version) so multiple Hub
-// replicas never overwrite each other's seed records or recompute finalized
-// seeds (Tokenomics P3.3, D6).
+// UsageGroupBudgetSeed persists per-group charging-episode seed state
+// (Tokenomics P3.3, D6a).
+//
+// A charging episode for group_id starts when the group's first active pooled
+// binding (any scope, any window kind) activates, and ends (ended_at set) when
+// its last active pooled binding deactivates. Exactly one seed is computed per
+// episode over [seed_from_utc, cutoff_at), written to usage_group_rollups_daily
+// under origin="seed:<episode_id>" for both (day, G, "") and (day, G, <project>)
+// so episodes never overwrite each other and day/month windows read the same
+// rows without colliding.
 type UsageGroupBudgetSeed struct {
 	ent.Schema
 }
@@ -43,19 +48,19 @@ func (UsageGroupBudgetSeed) Fields() []ent.Field {
 		field.String("group_id").
 			NotEmpty().
 			Immutable(),
-		field.String("project_scope_id").
-			Default("").
+		field.Time("activated_at").
 			Immutable(),
-		// "day" or "month" so day and month windows never collide on the 1st of a month.
-		field.String("window_kind").
-			NotEmpty().
+		// max(start of current UTC month, previous episode's ended_at).
+		field.Time("seed_from_utc").
 			Immutable(),
-		field.Time("window_start_utc").
+		// activated_at + 2m (covers peer replicas with a stale 60s cache).
+		field.Time("cutoff_at").
 			Immutable(),
-		field.Time("window_end_utc").
-			Immutable(),
-		field.Time("activated_at"),
-		field.Time("cutoff_at"),
+		// NULL while the charging episode is open; set when the group's last
+		// active pooled binding deactivates.
+		field.Time("ended_at").
+			Optional().
+			Nillable(),
 		field.JSON("frozen_member_ids", []string{}).
 			Optional(),
 		field.Bool("member_snapshot_set").
@@ -76,10 +81,13 @@ func (UsageGroupBudgetSeed) Fields() []ent.Field {
 // Indexes of the UsageGroupBudgetSeed.
 func (UsageGroupBudgetSeed) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("group_id", "project_scope_id", "window_kind", "window_start_utc").
+		index.Fields("group_id", "activated_at").
 			Unique().
-			StorageKey("usage_group_budget_seeds_key"),
-		index.Fields("finalized", "window_end_utc"),
+			StorageKey("usage_group_budget_seeds_group_act_idx"),
+		index.Fields("group_id", "ended_at").
+			StorageKey("usage_group_budget_seeds_group_ended_idx"),
+		index.Fields("finalized", "cutoff_at").
+			StorageKey("usage_group_budget_seeds_incomplete_idx"),
 	}
 }
 

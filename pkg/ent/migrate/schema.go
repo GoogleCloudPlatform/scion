@@ -4869,12 +4869,10 @@ var (
 	UsageGroupBudgetSeedsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "group_id", Type: field.TypeString},
-		{Name: "project_scope_id", Type: field.TypeString, Default: ""},
-		{Name: "window_kind", Type: field.TypeString},
-		{Name: "window_start_utc", Type: field.TypeTime},
-		{Name: "window_end_utc", Type: field.TypeTime},
 		{Name: "activated_at", Type: field.TypeTime},
+		{Name: "seed_from_utc", Type: field.TypeTime},
 		{Name: "cutoff_at", Type: field.TypeTime},
+		{Name: "ended_at", Type: field.TypeTime, Nullable: true},
 		{Name: "frozen_member_ids", Type: field.TypeJSON, Nullable: true},
 		{Name: "member_snapshot_set", Type: field.TypeBool, Default: false},
 		{Name: "finalized", Type: field.TypeBool, Default: false},
@@ -4889,14 +4887,19 @@ var (
 		PrimaryKey: []*schema.Column{UsageGroupBudgetSeedsColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "usage_group_budget_seeds_key",
+				Name:    "usage_group_budget_seeds_group_act_idx",
 				Unique:  true,
-				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[1], UsageGroupBudgetSeedsColumns[2], UsageGroupBudgetSeedsColumns[3], UsageGroupBudgetSeedsColumns[4]},
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[1], UsageGroupBudgetSeedsColumns[2]},
 			},
 			{
-				Name:    "usagegroupbudgetseed_finalized_window_end_utc",
+				Name:    "usage_group_budget_seeds_group_ended_idx",
 				Unique:  false,
-				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[10], UsageGroupBudgetSeedsColumns[5]},
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[1], UsageGroupBudgetSeedsColumns[5]},
+			},
+			{
+				Name:    "usage_group_budget_seeds_incomplete_idx",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[8], UsageGroupBudgetSeedsColumns[4]},
 			},
 		},
 	}

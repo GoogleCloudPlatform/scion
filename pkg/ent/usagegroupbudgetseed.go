@@ -21,18 +21,14 @@ type UsageGroupBudgetSeed struct {
 	ID uuid.UUID `json:"id,omitempty"`
 	// GroupID holds the value of the "group_id" field.
 	GroupID string `json:"group_id,omitempty"`
-	// ProjectScopeID holds the value of the "project_scope_id" field.
-	ProjectScopeID string `json:"project_scope_id,omitempty"`
-	// WindowKind holds the value of the "window_kind" field.
-	WindowKind string `json:"window_kind,omitempty"`
-	// WindowStartUtc holds the value of the "window_start_utc" field.
-	WindowStartUtc time.Time `json:"window_start_utc,omitempty"`
-	// WindowEndUtc holds the value of the "window_end_utc" field.
-	WindowEndUtc time.Time `json:"window_end_utc,omitempty"`
 	// ActivatedAt holds the value of the "activated_at" field.
 	ActivatedAt time.Time `json:"activated_at,omitempty"`
+	// SeedFromUtc holds the value of the "seed_from_utc" field.
+	SeedFromUtc time.Time `json:"seed_from_utc,omitempty"`
 	// CutoffAt holds the value of the "cutoff_at" field.
 	CutoffAt time.Time `json:"cutoff_at,omitempty"`
+	// EndedAt holds the value of the "ended_at" field.
+	EndedAt *time.Time `json:"ended_at,omitempty"`
 	// FrozenMemberIds holds the value of the "frozen_member_ids" field.
 	FrozenMemberIds []string `json:"frozen_member_ids,omitempty"`
 	// MemberSnapshotSet holds the value of the "member_snapshot_set" field.
@@ -59,9 +55,9 @@ func (*UsageGroupBudgetSeed) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case usagegroupbudgetseed.FieldStateVersion:
 			values[i] = new(sql.NullInt64)
-		case usagegroupbudgetseed.FieldGroupID, usagegroupbudgetseed.FieldProjectScopeID, usagegroupbudgetseed.FieldWindowKind:
+		case usagegroupbudgetseed.FieldGroupID:
 			values[i] = new(sql.NullString)
-		case usagegroupbudgetseed.FieldWindowStartUtc, usagegroupbudgetseed.FieldWindowEndUtc, usagegroupbudgetseed.FieldActivatedAt, usagegroupbudgetseed.FieldCutoffAt, usagegroupbudgetseed.FieldCreatedAt, usagegroupbudgetseed.FieldUpdatedAt:
+		case usagegroupbudgetseed.FieldActivatedAt, usagegroupbudgetseed.FieldSeedFromUtc, usagegroupbudgetseed.FieldCutoffAt, usagegroupbudgetseed.FieldEndedAt, usagegroupbudgetseed.FieldCreatedAt, usagegroupbudgetseed.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
 		case usagegroupbudgetseed.FieldID:
 			values[i] = new(uuid.UUID)
@@ -92,41 +88,30 @@ func (_m *UsageGroupBudgetSeed) assignValues(columns []string, values []any) err
 			} else if value.Valid {
 				_m.GroupID = value.String
 			}
-		case usagegroupbudgetseed.FieldProjectScopeID:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field project_scope_id", values[i])
-			} else if value.Valid {
-				_m.ProjectScopeID = value.String
-			}
-		case usagegroupbudgetseed.FieldWindowKind:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field window_kind", values[i])
-			} else if value.Valid {
-				_m.WindowKind = value.String
-			}
-		case usagegroupbudgetseed.FieldWindowStartUtc:
-			if value, ok := values[i].(*sql.NullTime); !ok {
-				return fmt.Errorf("unexpected type %T for field window_start_utc", values[i])
-			} else if value.Valid {
-				_m.WindowStartUtc = value.Time
-			}
-		case usagegroupbudgetseed.FieldWindowEndUtc:
-			if value, ok := values[i].(*sql.NullTime); !ok {
-				return fmt.Errorf("unexpected type %T for field window_end_utc", values[i])
-			} else if value.Valid {
-				_m.WindowEndUtc = value.Time
-			}
 		case usagegroupbudgetseed.FieldActivatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field activated_at", values[i])
 			} else if value.Valid {
 				_m.ActivatedAt = value.Time
 			}
+		case usagegroupbudgetseed.FieldSeedFromUtc:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field seed_from_utc", values[i])
+			} else if value.Valid {
+				_m.SeedFromUtc = value.Time
+			}
 		case usagegroupbudgetseed.FieldCutoffAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field cutoff_at", values[i])
 			} else if value.Valid {
 				_m.CutoffAt = value.Time
+			}
+		case usagegroupbudgetseed.FieldEndedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field ended_at", values[i])
+			} else if value.Valid {
+				_m.EndedAt = new(time.Time)
+				*_m.EndedAt = value.Time
 			}
 		case usagegroupbudgetseed.FieldFrozenMemberIds:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -205,23 +190,19 @@ func (_m *UsageGroupBudgetSeed) String() string {
 	builder.WriteString("group_id=")
 	builder.WriteString(_m.GroupID)
 	builder.WriteString(", ")
-	builder.WriteString("project_scope_id=")
-	builder.WriteString(_m.ProjectScopeID)
-	builder.WriteString(", ")
-	builder.WriteString("window_kind=")
-	builder.WriteString(_m.WindowKind)
-	builder.WriteString(", ")
-	builder.WriteString("window_start_utc=")
-	builder.WriteString(_m.WindowStartUtc.Format(time.ANSIC))
-	builder.WriteString(", ")
-	builder.WriteString("window_end_utc=")
-	builder.WriteString(_m.WindowEndUtc.Format(time.ANSIC))
-	builder.WriteString(", ")
 	builder.WriteString("activated_at=")
 	builder.WriteString(_m.ActivatedAt.Format(time.ANSIC))
 	builder.WriteString(", ")
+	builder.WriteString("seed_from_utc=")
+	builder.WriteString(_m.SeedFromUtc.Format(time.ANSIC))
+	builder.WriteString(", ")
 	builder.WriteString("cutoff_at=")
 	builder.WriteString(_m.CutoffAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.EndedAt; v != nil {
+		builder.WriteString("ended_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("frozen_member_ids=")
 	builder.WriteString(fmt.Sprintf("%v", _m.FrozenMemberIds))

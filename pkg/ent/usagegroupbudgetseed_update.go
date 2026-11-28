@@ -29,31 +29,23 @@ func (_u *UsageGroupBudgetSeedUpdate) Where(ps ...predicate.UsageGroupBudgetSeed
 	return _u
 }
 
-// SetActivatedAt sets the "activated_at" field.
-func (_u *UsageGroupBudgetSeedUpdate) SetActivatedAt(v time.Time) *UsageGroupBudgetSeedUpdate {
-	_u.mutation.SetActivatedAt(v)
+// SetEndedAt sets the "ended_at" field.
+func (_u *UsageGroupBudgetSeedUpdate) SetEndedAt(v time.Time) *UsageGroupBudgetSeedUpdate {
+	_u.mutation.SetEndedAt(v)
 	return _u
 }
 
-// SetNillableActivatedAt sets the "activated_at" field if the given value is not nil.
-func (_u *UsageGroupBudgetSeedUpdate) SetNillableActivatedAt(v *time.Time) *UsageGroupBudgetSeedUpdate {
+// SetNillableEndedAt sets the "ended_at" field if the given value is not nil.
+func (_u *UsageGroupBudgetSeedUpdate) SetNillableEndedAt(v *time.Time) *UsageGroupBudgetSeedUpdate {
 	if v != nil {
-		_u.SetActivatedAt(*v)
+		_u.SetEndedAt(*v)
 	}
 	return _u
 }
 
-// SetCutoffAt sets the "cutoff_at" field.
-func (_u *UsageGroupBudgetSeedUpdate) SetCutoffAt(v time.Time) *UsageGroupBudgetSeedUpdate {
-	_u.mutation.SetCutoffAt(v)
-	return _u
-}
-
-// SetNillableCutoffAt sets the "cutoff_at" field if the given value is not nil.
-func (_u *UsageGroupBudgetSeedUpdate) SetNillableCutoffAt(v *time.Time) *UsageGroupBudgetSeedUpdate {
-	if v != nil {
-		_u.SetCutoffAt(*v)
-	}
+// ClearEndedAt clears the value of the "ended_at" field.
+func (_u *UsageGroupBudgetSeedUpdate) ClearEndedAt() *UsageGroupBudgetSeedUpdate {
+	_u.mutation.ClearEndedAt()
 	return _u
 }
 
@@ -180,11 +172,11 @@ func (_u *UsageGroupBudgetSeedUpdate) sqlSave(ctx context.Context) (_node int, e
 			}
 		}
 	}
-	if value, ok := _u.mutation.ActivatedAt(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldActivatedAt, field.TypeTime, value)
+	if value, ok := _u.mutation.EndedAt(); ok {
+		_spec.SetField(usagegroupbudgetseed.FieldEndedAt, field.TypeTime, value)
 	}
-	if value, ok := _u.mutation.CutoffAt(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldCutoffAt, field.TypeTime, value)
+	if _u.mutation.EndedAtCleared() {
+		_spec.ClearField(usagegroupbudgetseed.FieldEndedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.FrozenMemberIds(); ok {
 		_spec.SetField(usagegroupbudgetseed.FieldFrozenMemberIds, field.TypeJSON, value)
@@ -232,31 +224,23 @@ type UsageGroupBudgetSeedUpdateOne struct {
 	mutation *UsageGroupBudgetSeedMutation
 }
 
-// SetActivatedAt sets the "activated_at" field.
-func (_u *UsageGroupBudgetSeedUpdateOne) SetActivatedAt(v time.Time) *UsageGroupBudgetSeedUpdateOne {
-	_u.mutation.SetActivatedAt(v)
+// SetEndedAt sets the "ended_at" field.
+func (_u *UsageGroupBudgetSeedUpdateOne) SetEndedAt(v time.Time) *UsageGroupBudgetSeedUpdateOne {
+	_u.mutation.SetEndedAt(v)
 	return _u
 }
 
-// SetNillableActivatedAt sets the "activated_at" field if the given value is not nil.
-func (_u *UsageGroupBudgetSeedUpdateOne) SetNillableActivatedAt(v *time.Time) *UsageGroupBudgetSeedUpdateOne {
+// SetNillableEndedAt sets the "ended_at" field if the given value is not nil.
+func (_u *UsageGroupBudgetSeedUpdateOne) SetNillableEndedAt(v *time.Time) *UsageGroupBudgetSeedUpdateOne {
 	if v != nil {
-		_u.SetActivatedAt(*v)
+		_u.SetEndedAt(*v)
 	}
 	return _u
 }
 
-// SetCutoffAt sets the "cutoff_at" field.
-func (_u *UsageGroupBudgetSeedUpdateOne) SetCutoffAt(v time.Time) *UsageGroupBudgetSeedUpdateOne {
-	_u.mutation.SetCutoffAt(v)
-	return _u
-}
-
-// SetNillableCutoffAt sets the "cutoff_at" field if the given value is not nil.
-func (_u *UsageGroupBudgetSeedUpdateOne) SetNillableCutoffAt(v *time.Time) *UsageGroupBudgetSeedUpdateOne {
-	if v != nil {
-		_u.SetCutoffAt(*v)
-	}
+// ClearEndedAt clears the value of the "ended_at" field.
+func (_u *UsageGroupBudgetSeedUpdateOne) ClearEndedAt() *UsageGroupBudgetSeedUpdateOne {
+	_u.mutation.ClearEndedAt()
 	return _u
 }
 
@@ -413,11 +397,11 @@ func (_u *UsageGroupBudgetSeedUpdateOne) sqlSave(ctx context.Context) (_node *Us
 			}
 		}
 	}
-	if value, ok := _u.mutation.ActivatedAt(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldActivatedAt, field.TypeTime, value)
+	if value, ok := _u.mutation.EndedAt(); ok {
+		_spec.SetField(usagegroupbudgetseed.FieldEndedAt, field.TypeTime, value)
 	}
-	if value, ok := _u.mutation.CutoffAt(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldCutoffAt, field.TypeTime, value)
+	if _u.mutation.EndedAtCleared() {
+		_spec.ClearField(usagegroupbudgetseed.FieldEndedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.FrozenMemberIds(); ok {
 		_spec.SetField(usagegroupbudgetseed.FieldFrozenMemberIds, field.TypeJSON, value)

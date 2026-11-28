@@ -60,34 +60,24 @@ func GroupID(v string) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldGroupID, v))
 }
 
-// ProjectScopeID applies equality check predicate on the "project_scope_id" field. It's identical to ProjectScopeIDEQ.
-func ProjectScopeID(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldProjectScopeID, v))
-}
-
-// WindowKind applies equality check predicate on the "window_kind" field. It's identical to WindowKindEQ.
-func WindowKind(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldWindowKind, v))
-}
-
-// WindowStartUtc applies equality check predicate on the "window_start_utc" field. It's identical to WindowStartUtcEQ.
-func WindowStartUtc(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldWindowStartUtc, v))
-}
-
-// WindowEndUtc applies equality check predicate on the "window_end_utc" field. It's identical to WindowEndUtcEQ.
-func WindowEndUtc(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldWindowEndUtc, v))
-}
-
 // ActivatedAt applies equality check predicate on the "activated_at" field. It's identical to ActivatedAtEQ.
 func ActivatedAt(v time.Time) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldActivatedAt, v))
 }
 
+// SeedFromUtc applies equality check predicate on the "seed_from_utc" field. It's identical to SeedFromUtcEQ.
+func SeedFromUtc(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldSeedFromUtc, v))
+}
+
 // CutoffAt applies equality check predicate on the "cutoff_at" field. It's identical to CutoffAtEQ.
 func CutoffAt(v time.Time) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldCutoffAt, v))
+}
+
+// EndedAt applies equality check predicate on the "ended_at" field. It's identical to EndedAtEQ.
+func EndedAt(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldEndedAt, v))
 }
 
 // MemberSnapshotSet applies equality check predicate on the "member_snapshot_set" field. It's identical to MemberSnapshotSetEQ.
@@ -180,216 +170,6 @@ func GroupIDContainsFold(v string) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldContainsFold(FieldGroupID, v))
 }
 
-// ProjectScopeIDEQ applies the EQ predicate on the "project_scope_id" field.
-func ProjectScopeIDEQ(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDNEQ applies the NEQ predicate on the "project_scope_id" field.
-func ProjectScopeIDNEQ(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNEQ(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDIn applies the In predicate on the "project_scope_id" field.
-func ProjectScopeIDIn(vs ...string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldIn(FieldProjectScopeID, vs...))
-}
-
-// ProjectScopeIDNotIn applies the NotIn predicate on the "project_scope_id" field.
-func ProjectScopeIDNotIn(vs ...string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNotIn(FieldProjectScopeID, vs...))
-}
-
-// ProjectScopeIDGT applies the GT predicate on the "project_scope_id" field.
-func ProjectScopeIDGT(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGT(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDGTE applies the GTE predicate on the "project_scope_id" field.
-func ProjectScopeIDGTE(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGTE(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDLT applies the LT predicate on the "project_scope_id" field.
-func ProjectScopeIDLT(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLT(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDLTE applies the LTE predicate on the "project_scope_id" field.
-func ProjectScopeIDLTE(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDContains applies the Contains predicate on the "project_scope_id" field.
-func ProjectScopeIDContains(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldContains(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDHasPrefix applies the HasPrefix predicate on the "project_scope_id" field.
-func ProjectScopeIDHasPrefix(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldHasPrefix(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDHasSuffix applies the HasSuffix predicate on the "project_scope_id" field.
-func ProjectScopeIDHasSuffix(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldHasSuffix(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDEqualFold applies the EqualFold predicate on the "project_scope_id" field.
-func ProjectScopeIDEqualFold(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEqualFold(FieldProjectScopeID, v))
-}
-
-// ProjectScopeIDContainsFold applies the ContainsFold predicate on the "project_scope_id" field.
-func ProjectScopeIDContainsFold(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldContainsFold(FieldProjectScopeID, v))
-}
-
-// WindowKindEQ applies the EQ predicate on the "window_kind" field.
-func WindowKindEQ(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldWindowKind, v))
-}
-
-// WindowKindNEQ applies the NEQ predicate on the "window_kind" field.
-func WindowKindNEQ(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNEQ(FieldWindowKind, v))
-}
-
-// WindowKindIn applies the In predicate on the "window_kind" field.
-func WindowKindIn(vs ...string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldIn(FieldWindowKind, vs...))
-}
-
-// WindowKindNotIn applies the NotIn predicate on the "window_kind" field.
-func WindowKindNotIn(vs ...string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNotIn(FieldWindowKind, vs...))
-}
-
-// WindowKindGT applies the GT predicate on the "window_kind" field.
-func WindowKindGT(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGT(FieldWindowKind, v))
-}
-
-// WindowKindGTE applies the GTE predicate on the "window_kind" field.
-func WindowKindGTE(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGTE(FieldWindowKind, v))
-}
-
-// WindowKindLT applies the LT predicate on the "window_kind" field.
-func WindowKindLT(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLT(FieldWindowKind, v))
-}
-
-// WindowKindLTE applies the LTE predicate on the "window_kind" field.
-func WindowKindLTE(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldWindowKind, v))
-}
-
-// WindowKindContains applies the Contains predicate on the "window_kind" field.
-func WindowKindContains(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldContains(FieldWindowKind, v))
-}
-
-// WindowKindHasPrefix applies the HasPrefix predicate on the "window_kind" field.
-func WindowKindHasPrefix(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldHasPrefix(FieldWindowKind, v))
-}
-
-// WindowKindHasSuffix applies the HasSuffix predicate on the "window_kind" field.
-func WindowKindHasSuffix(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldHasSuffix(FieldWindowKind, v))
-}
-
-// WindowKindEqualFold applies the EqualFold predicate on the "window_kind" field.
-func WindowKindEqualFold(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEqualFold(FieldWindowKind, v))
-}
-
-// WindowKindContainsFold applies the ContainsFold predicate on the "window_kind" field.
-func WindowKindContainsFold(v string) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldContainsFold(FieldWindowKind, v))
-}
-
-// WindowStartUtcEQ applies the EQ predicate on the "window_start_utc" field.
-func WindowStartUtcEQ(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldWindowStartUtc, v))
-}
-
-// WindowStartUtcNEQ applies the NEQ predicate on the "window_start_utc" field.
-func WindowStartUtcNEQ(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNEQ(FieldWindowStartUtc, v))
-}
-
-// WindowStartUtcIn applies the In predicate on the "window_start_utc" field.
-func WindowStartUtcIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldIn(FieldWindowStartUtc, vs...))
-}
-
-// WindowStartUtcNotIn applies the NotIn predicate on the "window_start_utc" field.
-func WindowStartUtcNotIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNotIn(FieldWindowStartUtc, vs...))
-}
-
-// WindowStartUtcGT applies the GT predicate on the "window_start_utc" field.
-func WindowStartUtcGT(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGT(FieldWindowStartUtc, v))
-}
-
-// WindowStartUtcGTE applies the GTE predicate on the "window_start_utc" field.
-func WindowStartUtcGTE(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGTE(FieldWindowStartUtc, v))
-}
-
-// WindowStartUtcLT applies the LT predicate on the "window_start_utc" field.
-func WindowStartUtcLT(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLT(FieldWindowStartUtc, v))
-}
-
-// WindowStartUtcLTE applies the LTE predicate on the "window_start_utc" field.
-func WindowStartUtcLTE(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldWindowStartUtc, v))
-}
-
-// WindowEndUtcEQ applies the EQ predicate on the "window_end_utc" field.
-func WindowEndUtcEQ(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldWindowEndUtc, v))
-}
-
-// WindowEndUtcNEQ applies the NEQ predicate on the "window_end_utc" field.
-func WindowEndUtcNEQ(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNEQ(FieldWindowEndUtc, v))
-}
-
-// WindowEndUtcIn applies the In predicate on the "window_end_utc" field.
-func WindowEndUtcIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldIn(FieldWindowEndUtc, vs...))
-}
-
-// WindowEndUtcNotIn applies the NotIn predicate on the "window_end_utc" field.
-func WindowEndUtcNotIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldNotIn(FieldWindowEndUtc, vs...))
-}
-
-// WindowEndUtcGT applies the GT predicate on the "window_end_utc" field.
-func WindowEndUtcGT(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGT(FieldWindowEndUtc, v))
-}
-
-// WindowEndUtcGTE applies the GTE predicate on the "window_end_utc" field.
-func WindowEndUtcGTE(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldGTE(FieldWindowEndUtc, v))
-}
-
-// WindowEndUtcLT applies the LT predicate on the "window_end_utc" field.
-func WindowEndUtcLT(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLT(FieldWindowEndUtc, v))
-}
-
-// WindowEndUtcLTE applies the LTE predicate on the "window_end_utc" field.
-func WindowEndUtcLTE(v time.Time) predicate.UsageGroupBudgetSeed {
-	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldWindowEndUtc, v))
-}
-
 // ActivatedAtEQ applies the EQ predicate on the "activated_at" field.
 func ActivatedAtEQ(v time.Time) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldActivatedAt, v))
@@ -430,6 +210,46 @@ func ActivatedAtLTE(v time.Time) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldActivatedAt, v))
 }
 
+// SeedFromUtcEQ applies the EQ predicate on the "seed_from_utc" field.
+func SeedFromUtcEQ(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldSeedFromUtc, v))
+}
+
+// SeedFromUtcNEQ applies the NEQ predicate on the "seed_from_utc" field.
+func SeedFromUtcNEQ(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldNEQ(FieldSeedFromUtc, v))
+}
+
+// SeedFromUtcIn applies the In predicate on the "seed_from_utc" field.
+func SeedFromUtcIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldIn(FieldSeedFromUtc, vs...))
+}
+
+// SeedFromUtcNotIn applies the NotIn predicate on the "seed_from_utc" field.
+func SeedFromUtcNotIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldNotIn(FieldSeedFromUtc, vs...))
+}
+
+// SeedFromUtcGT applies the GT predicate on the "seed_from_utc" field.
+func SeedFromUtcGT(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldGT(FieldSeedFromUtc, v))
+}
+
+// SeedFromUtcGTE applies the GTE predicate on the "seed_from_utc" field.
+func SeedFromUtcGTE(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldGTE(FieldSeedFromUtc, v))
+}
+
+// SeedFromUtcLT applies the LT predicate on the "seed_from_utc" field.
+func SeedFromUtcLT(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldLT(FieldSeedFromUtc, v))
+}
+
+// SeedFromUtcLTE applies the LTE predicate on the "seed_from_utc" field.
+func SeedFromUtcLTE(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldSeedFromUtc, v))
+}
+
 // CutoffAtEQ applies the EQ predicate on the "cutoff_at" field.
 func CutoffAtEQ(v time.Time) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldCutoffAt, v))
@@ -468,6 +288,56 @@ func CutoffAtLT(v time.Time) predicate.UsageGroupBudgetSeed {
 // CutoffAtLTE applies the LTE predicate on the "cutoff_at" field.
 func CutoffAtLTE(v time.Time) predicate.UsageGroupBudgetSeed {
 	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldCutoffAt, v))
+}
+
+// EndedAtEQ applies the EQ predicate on the "ended_at" field.
+func EndedAtEQ(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldEQ(FieldEndedAt, v))
+}
+
+// EndedAtNEQ applies the NEQ predicate on the "ended_at" field.
+func EndedAtNEQ(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldNEQ(FieldEndedAt, v))
+}
+
+// EndedAtIn applies the In predicate on the "ended_at" field.
+func EndedAtIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldIn(FieldEndedAt, vs...))
+}
+
+// EndedAtNotIn applies the NotIn predicate on the "ended_at" field.
+func EndedAtNotIn(vs ...time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldNotIn(FieldEndedAt, vs...))
+}
+
+// EndedAtGT applies the GT predicate on the "ended_at" field.
+func EndedAtGT(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldGT(FieldEndedAt, v))
+}
+
+// EndedAtGTE applies the GTE predicate on the "ended_at" field.
+func EndedAtGTE(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldGTE(FieldEndedAt, v))
+}
+
+// EndedAtLT applies the LT predicate on the "ended_at" field.
+func EndedAtLT(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldLT(FieldEndedAt, v))
+}
+
+// EndedAtLTE applies the LTE predicate on the "ended_at" field.
+func EndedAtLTE(v time.Time) predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldLTE(FieldEndedAt, v))
+}
+
+// EndedAtIsNil applies the IsNil predicate on the "ended_at" field.
+func EndedAtIsNil() predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldIsNull(FieldEndedAt))
+}
+
+// EndedAtNotNil applies the NotNil predicate on the "ended_at" field.
+func EndedAtNotNil() predicate.UsageGroupBudgetSeed {
+	return predicate.UsageGroupBudgetSeed(sql.FieldNotNull(FieldEndedAt))
 }
 
 // FrozenMemberIdsIsNil applies the IsNil predicate on the "frozen_member_ids" field.

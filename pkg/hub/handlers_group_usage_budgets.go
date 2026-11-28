@@ -55,7 +55,7 @@ type GroupBudgetItem struct {
 	Consumed           int64                   `json:"consumed"`
 	State              string                  `json:"state"`
 	ThresholdsNotified int64                   `json:"thresholds_notified"`
-	OverrideUntil      *time.Time              `json:"override_until,omitempty"`
+	OverrideUntil      *time.Time              `json:"override_until"`
 	StateVersion       int64                   `json:"state_version"`
 	AsOf               time.Time               `json:"as_of"`
 	NonAdditive        bool                    `json:"non_additive"`
@@ -278,27 +278,26 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 		}
 		if stRow != nil {
 			item.ID = stRow.ID
-			item.State = maxBudgetState(stRow.State, stateStr)
+			// O2: match A2 semantics — while an override is active, report the
+			// stored state rather than overwriting it with computed exhausted.
+			if stRow.OverrideUntil != nil && stRow.OverrideUntil.After(now) {
+				item.State = stRow.State
+			} else {
+				item.State = maxBudgetState(stRow.State, stateStr)
+			}
 			item.ThresholdsNotified = stRow.ThresholdsNotified
 			item.OverrideUntil = stRow.OverrideUntil
 			item.StateVersion = stRow.StateVersion
 		}
 
 		if includeBreakdown {
-			var seededMembers []string
-			var seedFrom, seedTo time.Time
-			seedRec, seedErr := s.store.GetUsageGroupSeedRecord(ctx, group.ID, pk.projectScopeID, info.window, winStart)
-			if seedErr != nil && !errors.Is(seedErr, store.ErrNotFound) {
-				writeErrorFromErr(w, seedErr, "")
+			episodes, epErr := s.store.ListUsageGroupSeedEpisodesOverlapping(ctx, group.ID, winStart, winEnd)
+			if epErr != nil {
+				writeErrorFromErr(w, epErr, "")
 				return
 			}
-			if seedRec != nil {
-				seededMembers = seedRec.FrozenMemberIDs
-				seedFrom = seedRec.WindowStartUTC
-				seedTo = seedRec.CutoffAt
-			}
 			rawMembers, err := s.store.QueryGroupMemberUsageBreakdown(
-				ctx, group.ID, pk.projectScopeID, seededMembers, seedFrom, seedTo, winStart, winEnd,
+				ctx, group.ID, pk.projectScopeID, episodes, winStart, winEnd,
 			)
 			if err != nil {
 				writeErrorFromErr(w, err, "")

@@ -4644,32 +4644,24 @@ func init() {
 	usagegroupbudgetseedDescGroupID := usagegroupbudgetseedFields[1].Descriptor()
 	// usagegroupbudgetseed.GroupIDValidator is a validator for the "group_id" field. It is called by the builders before save.
 	usagegroupbudgetseed.GroupIDValidator = usagegroupbudgetseedDescGroupID.Validators[0].(func(string) error)
-	// usagegroupbudgetseedDescProjectScopeID is the schema descriptor for project_scope_id field.
-	usagegroupbudgetseedDescProjectScopeID := usagegroupbudgetseedFields[2].Descriptor()
-	// usagegroupbudgetseed.DefaultProjectScopeID holds the default value on creation for the project_scope_id field.
-	usagegroupbudgetseed.DefaultProjectScopeID = usagegroupbudgetseedDescProjectScopeID.Default.(string)
-	// usagegroupbudgetseedDescWindowKind is the schema descriptor for window_kind field.
-	usagegroupbudgetseedDescWindowKind := usagegroupbudgetseedFields[3].Descriptor()
-	// usagegroupbudgetseed.WindowKindValidator is a validator for the "window_kind" field. It is called by the builders before save.
-	usagegroupbudgetseed.WindowKindValidator = usagegroupbudgetseedDescWindowKind.Validators[0].(func(string) error)
 	// usagegroupbudgetseedDescMemberSnapshotSet is the schema descriptor for member_snapshot_set field.
-	usagegroupbudgetseedDescMemberSnapshotSet := usagegroupbudgetseedFields[9].Descriptor()
+	usagegroupbudgetseedDescMemberSnapshotSet := usagegroupbudgetseedFields[7].Descriptor()
 	// usagegroupbudgetseed.DefaultMemberSnapshotSet holds the default value on creation for the member_snapshot_set field.
 	usagegroupbudgetseed.DefaultMemberSnapshotSet = usagegroupbudgetseedDescMemberSnapshotSet.Default.(bool)
 	// usagegroupbudgetseedDescFinalized is the schema descriptor for finalized field.
-	usagegroupbudgetseedDescFinalized := usagegroupbudgetseedFields[10].Descriptor()
+	usagegroupbudgetseedDescFinalized := usagegroupbudgetseedFields[8].Descriptor()
 	// usagegroupbudgetseed.DefaultFinalized holds the default value on creation for the finalized field.
 	usagegroupbudgetseed.DefaultFinalized = usagegroupbudgetseedDescFinalized.Default.(bool)
 	// usagegroupbudgetseedDescStateVersion is the schema descriptor for state_version field.
-	usagegroupbudgetseedDescStateVersion := usagegroupbudgetseedFields[11].Descriptor()
+	usagegroupbudgetseedDescStateVersion := usagegroupbudgetseedFields[9].Descriptor()
 	// usagegroupbudgetseed.DefaultStateVersion holds the default value on creation for the state_version field.
 	usagegroupbudgetseed.DefaultStateVersion = usagegroupbudgetseedDescStateVersion.Default.(int64)
 	// usagegroupbudgetseedDescCreatedAt is the schema descriptor for created_at field.
-	usagegroupbudgetseedDescCreatedAt := usagegroupbudgetseedFields[12].Descriptor()
+	usagegroupbudgetseedDescCreatedAt := usagegroupbudgetseedFields[10].Descriptor()
 	// usagegroupbudgetseed.DefaultCreatedAt holds the default value on creation for the created_at field.
 	usagegroupbudgetseed.DefaultCreatedAt = usagegroupbudgetseedDescCreatedAt.Default.(func() time.Time)
 	// usagegroupbudgetseedDescUpdatedAt is the schema descriptor for updated_at field.
-	usagegroupbudgetseedDescUpdatedAt := usagegroupbudgetseedFields[13].Descriptor()
+	usagegroupbudgetseedDescUpdatedAt := usagegroupbudgetseedFields[11].Descriptor()
 	// usagegroupbudgetseed.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	usagegroupbudgetseed.DefaultUpdatedAt = usagegroupbudgetseedDescUpdatedAt.Default.(func() time.Time)
 	// usagegroupbudgetseed.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

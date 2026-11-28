@@ -30,47 +30,35 @@ func (_c *UsageGroupBudgetSeedCreate) SetGroupID(v string) *UsageGroupBudgetSeed
 	return _c
 }
 
-// SetProjectScopeID sets the "project_scope_id" field.
-func (_c *UsageGroupBudgetSeedCreate) SetProjectScopeID(v string) *UsageGroupBudgetSeedCreate {
-	_c.mutation.SetProjectScopeID(v)
-	return _c
-}
-
-// SetNillableProjectScopeID sets the "project_scope_id" field if the given value is not nil.
-func (_c *UsageGroupBudgetSeedCreate) SetNillableProjectScopeID(v *string) *UsageGroupBudgetSeedCreate {
-	if v != nil {
-		_c.SetProjectScopeID(*v)
-	}
-	return _c
-}
-
-// SetWindowKind sets the "window_kind" field.
-func (_c *UsageGroupBudgetSeedCreate) SetWindowKind(v string) *UsageGroupBudgetSeedCreate {
-	_c.mutation.SetWindowKind(v)
-	return _c
-}
-
-// SetWindowStartUtc sets the "window_start_utc" field.
-func (_c *UsageGroupBudgetSeedCreate) SetWindowStartUtc(v time.Time) *UsageGroupBudgetSeedCreate {
-	_c.mutation.SetWindowStartUtc(v)
-	return _c
-}
-
-// SetWindowEndUtc sets the "window_end_utc" field.
-func (_c *UsageGroupBudgetSeedCreate) SetWindowEndUtc(v time.Time) *UsageGroupBudgetSeedCreate {
-	_c.mutation.SetWindowEndUtc(v)
-	return _c
-}
-
 // SetActivatedAt sets the "activated_at" field.
 func (_c *UsageGroupBudgetSeedCreate) SetActivatedAt(v time.Time) *UsageGroupBudgetSeedCreate {
 	_c.mutation.SetActivatedAt(v)
 	return _c
 }
 
+// SetSeedFromUtc sets the "seed_from_utc" field.
+func (_c *UsageGroupBudgetSeedCreate) SetSeedFromUtc(v time.Time) *UsageGroupBudgetSeedCreate {
+	_c.mutation.SetSeedFromUtc(v)
+	return _c
+}
+
 // SetCutoffAt sets the "cutoff_at" field.
 func (_c *UsageGroupBudgetSeedCreate) SetCutoffAt(v time.Time) *UsageGroupBudgetSeedCreate {
 	_c.mutation.SetCutoffAt(v)
+	return _c
+}
+
+// SetEndedAt sets the "ended_at" field.
+func (_c *UsageGroupBudgetSeedCreate) SetEndedAt(v time.Time) *UsageGroupBudgetSeedCreate {
+	_c.mutation.SetEndedAt(v)
+	return _c
+}
+
+// SetNillableEndedAt sets the "ended_at" field if the given value is not nil.
+func (_c *UsageGroupBudgetSeedCreate) SetNillableEndedAt(v *time.Time) *UsageGroupBudgetSeedCreate {
+	if v != nil {
+		_c.SetEndedAt(*v)
+	}
 	return _c
 }
 
@@ -199,10 +187,6 @@ func (_c *UsageGroupBudgetSeedCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *UsageGroupBudgetSeedCreate) defaults() {
-	if _, ok := _c.mutation.ProjectScopeID(); !ok {
-		v := usagegroupbudgetseed.DefaultProjectScopeID
-		_c.mutation.SetProjectScopeID(v)
-	}
 	if _, ok := _c.mutation.MemberSnapshotSet(); !ok {
 		v := usagegroupbudgetseed.DefaultMemberSnapshotSet
 		_c.mutation.SetMemberSnapshotSet(v)
@@ -239,25 +223,11 @@ func (_c *UsageGroupBudgetSeedCreate) check() error {
 			return &ValidationError{Name: "group_id", err: fmt.Errorf(`ent: validator failed for field "UsageGroupBudgetSeed.group_id": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.ProjectScopeID(); !ok {
-		return &ValidationError{Name: "project_scope_id", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.project_scope_id"`)}
-	}
-	if _, ok := _c.mutation.WindowKind(); !ok {
-		return &ValidationError{Name: "window_kind", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.window_kind"`)}
-	}
-	if v, ok := _c.mutation.WindowKind(); ok {
-		if err := usagegroupbudgetseed.WindowKindValidator(v); err != nil {
-			return &ValidationError{Name: "window_kind", err: fmt.Errorf(`ent: validator failed for field "UsageGroupBudgetSeed.window_kind": %w`, err)}
-		}
-	}
-	if _, ok := _c.mutation.WindowStartUtc(); !ok {
-		return &ValidationError{Name: "window_start_utc", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.window_start_utc"`)}
-	}
-	if _, ok := _c.mutation.WindowEndUtc(); !ok {
-		return &ValidationError{Name: "window_end_utc", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.window_end_utc"`)}
-	}
 	if _, ok := _c.mutation.ActivatedAt(); !ok {
 		return &ValidationError{Name: "activated_at", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.activated_at"`)}
+	}
+	if _, ok := _c.mutation.SeedFromUtc(); !ok {
+		return &ValidationError{Name: "seed_from_utc", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.seed_from_utc"`)}
 	}
 	if _, ok := _c.mutation.CutoffAt(); !ok {
 		return &ValidationError{Name: "cutoff_at", err: errors.New(`ent: missing required field "UsageGroupBudgetSeed.cutoff_at"`)}
@@ -317,29 +287,21 @@ func (_c *UsageGroupBudgetSeedCreate) createSpec() (*UsageGroupBudgetSeed, *sqlg
 		_spec.SetField(usagegroupbudgetseed.FieldGroupID, field.TypeString, value)
 		_node.GroupID = value
 	}
-	if value, ok := _c.mutation.ProjectScopeID(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldProjectScopeID, field.TypeString, value)
-		_node.ProjectScopeID = value
-	}
-	if value, ok := _c.mutation.WindowKind(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldWindowKind, field.TypeString, value)
-		_node.WindowKind = value
-	}
-	if value, ok := _c.mutation.WindowStartUtc(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldWindowStartUtc, field.TypeTime, value)
-		_node.WindowStartUtc = value
-	}
-	if value, ok := _c.mutation.WindowEndUtc(); ok {
-		_spec.SetField(usagegroupbudgetseed.FieldWindowEndUtc, field.TypeTime, value)
-		_node.WindowEndUtc = value
-	}
 	if value, ok := _c.mutation.ActivatedAt(); ok {
 		_spec.SetField(usagegroupbudgetseed.FieldActivatedAt, field.TypeTime, value)
 		_node.ActivatedAt = value
 	}
+	if value, ok := _c.mutation.SeedFromUtc(); ok {
+		_spec.SetField(usagegroupbudgetseed.FieldSeedFromUtc, field.TypeTime, value)
+		_node.SeedFromUtc = value
+	}
 	if value, ok := _c.mutation.CutoffAt(); ok {
 		_spec.SetField(usagegroupbudgetseed.FieldCutoffAt, field.TypeTime, value)
 		_node.CutoffAt = value
+	}
+	if value, ok := _c.mutation.EndedAt(); ok {
+		_spec.SetField(usagegroupbudgetseed.FieldEndedAt, field.TypeTime, value)
+		_node.EndedAt = &value
 	}
 	if value, ok := _c.mutation.FrozenMemberIds(); ok {
 		_spec.SetField(usagegroupbudgetseed.FieldFrozenMemberIds, field.TypeJSON, value)
@@ -417,27 +379,21 @@ type (
 	}
 )
 
-// SetActivatedAt sets the "activated_at" field.
-func (u *UsageGroupBudgetSeedUpsert) SetActivatedAt(v time.Time) *UsageGroupBudgetSeedUpsert {
-	u.Set(usagegroupbudgetseed.FieldActivatedAt, v)
+// SetEndedAt sets the "ended_at" field.
+func (u *UsageGroupBudgetSeedUpsert) SetEndedAt(v time.Time) *UsageGroupBudgetSeedUpsert {
+	u.Set(usagegroupbudgetseed.FieldEndedAt, v)
 	return u
 }
 
-// UpdateActivatedAt sets the "activated_at" field to the value that was provided on create.
-func (u *UsageGroupBudgetSeedUpsert) UpdateActivatedAt() *UsageGroupBudgetSeedUpsert {
-	u.SetExcluded(usagegroupbudgetseed.FieldActivatedAt)
+// UpdateEndedAt sets the "ended_at" field to the value that was provided on create.
+func (u *UsageGroupBudgetSeedUpsert) UpdateEndedAt() *UsageGroupBudgetSeedUpsert {
+	u.SetExcluded(usagegroupbudgetseed.FieldEndedAt)
 	return u
 }
 
-// SetCutoffAt sets the "cutoff_at" field.
-func (u *UsageGroupBudgetSeedUpsert) SetCutoffAt(v time.Time) *UsageGroupBudgetSeedUpsert {
-	u.Set(usagegroupbudgetseed.FieldCutoffAt, v)
-	return u
-}
-
-// UpdateCutoffAt sets the "cutoff_at" field to the value that was provided on create.
-func (u *UsageGroupBudgetSeedUpsert) UpdateCutoffAt() *UsageGroupBudgetSeedUpsert {
-	u.SetExcluded(usagegroupbudgetseed.FieldCutoffAt)
+// ClearEndedAt clears the value of the "ended_at" field.
+func (u *UsageGroupBudgetSeedUpsert) ClearEndedAt() *UsageGroupBudgetSeedUpsert {
+	u.SetNull(usagegroupbudgetseed.FieldEndedAt)
 	return u
 }
 
@@ -533,17 +489,14 @@ func (u *UsageGroupBudgetSeedUpsertOne) UpdateNewValues() *UsageGroupBudgetSeedU
 		if _, exists := u.create.mutation.GroupID(); exists {
 			s.SetIgnore(usagegroupbudgetseed.FieldGroupID)
 		}
-		if _, exists := u.create.mutation.ProjectScopeID(); exists {
-			s.SetIgnore(usagegroupbudgetseed.FieldProjectScopeID)
+		if _, exists := u.create.mutation.ActivatedAt(); exists {
+			s.SetIgnore(usagegroupbudgetseed.FieldActivatedAt)
 		}
-		if _, exists := u.create.mutation.WindowKind(); exists {
-			s.SetIgnore(usagegroupbudgetseed.FieldWindowKind)
+		if _, exists := u.create.mutation.SeedFromUtc(); exists {
+			s.SetIgnore(usagegroupbudgetseed.FieldSeedFromUtc)
 		}
-		if _, exists := u.create.mutation.WindowStartUtc(); exists {
-			s.SetIgnore(usagegroupbudgetseed.FieldWindowStartUtc)
-		}
-		if _, exists := u.create.mutation.WindowEndUtc(); exists {
-			s.SetIgnore(usagegroupbudgetseed.FieldWindowEndUtc)
+		if _, exists := u.create.mutation.CutoffAt(); exists {
+			s.SetIgnore(usagegroupbudgetseed.FieldCutoffAt)
 		}
 		if _, exists := u.create.mutation.CreatedAt(); exists {
 			s.SetIgnore(usagegroupbudgetseed.FieldCreatedAt)
@@ -579,31 +532,24 @@ func (u *UsageGroupBudgetSeedUpsertOne) Update(set func(*UsageGroupBudgetSeedUps
 	return u
 }
 
-// SetActivatedAt sets the "activated_at" field.
-func (u *UsageGroupBudgetSeedUpsertOne) SetActivatedAt(v time.Time) *UsageGroupBudgetSeedUpsertOne {
+// SetEndedAt sets the "ended_at" field.
+func (u *UsageGroupBudgetSeedUpsertOne) SetEndedAt(v time.Time) *UsageGroupBudgetSeedUpsertOne {
 	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.SetActivatedAt(v)
+		s.SetEndedAt(v)
 	})
 }
 
-// UpdateActivatedAt sets the "activated_at" field to the value that was provided on create.
-func (u *UsageGroupBudgetSeedUpsertOne) UpdateActivatedAt() *UsageGroupBudgetSeedUpsertOne {
+// UpdateEndedAt sets the "ended_at" field to the value that was provided on create.
+func (u *UsageGroupBudgetSeedUpsertOne) UpdateEndedAt() *UsageGroupBudgetSeedUpsertOne {
 	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.UpdateActivatedAt()
+		s.UpdateEndedAt()
 	})
 }
 
-// SetCutoffAt sets the "cutoff_at" field.
-func (u *UsageGroupBudgetSeedUpsertOne) SetCutoffAt(v time.Time) *UsageGroupBudgetSeedUpsertOne {
+// ClearEndedAt clears the value of the "ended_at" field.
+func (u *UsageGroupBudgetSeedUpsertOne) ClearEndedAt() *UsageGroupBudgetSeedUpsertOne {
 	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.SetCutoffAt(v)
-	})
-}
-
-// UpdateCutoffAt sets the "cutoff_at" field to the value that was provided on create.
-func (u *UsageGroupBudgetSeedUpsertOne) UpdateCutoffAt() *UsageGroupBudgetSeedUpsertOne {
-	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.UpdateCutoffAt()
+		s.ClearEndedAt()
 	})
 }
 
@@ -877,17 +823,14 @@ func (u *UsageGroupBudgetSeedUpsertBulk) UpdateNewValues() *UsageGroupBudgetSeed
 			if _, exists := b.mutation.GroupID(); exists {
 				s.SetIgnore(usagegroupbudgetseed.FieldGroupID)
 			}
-			if _, exists := b.mutation.ProjectScopeID(); exists {
-				s.SetIgnore(usagegroupbudgetseed.FieldProjectScopeID)
+			if _, exists := b.mutation.ActivatedAt(); exists {
+				s.SetIgnore(usagegroupbudgetseed.FieldActivatedAt)
 			}
-			if _, exists := b.mutation.WindowKind(); exists {
-				s.SetIgnore(usagegroupbudgetseed.FieldWindowKind)
+			if _, exists := b.mutation.SeedFromUtc(); exists {
+				s.SetIgnore(usagegroupbudgetseed.FieldSeedFromUtc)
 			}
-			if _, exists := b.mutation.WindowStartUtc(); exists {
-				s.SetIgnore(usagegroupbudgetseed.FieldWindowStartUtc)
-			}
-			if _, exists := b.mutation.WindowEndUtc(); exists {
-				s.SetIgnore(usagegroupbudgetseed.FieldWindowEndUtc)
+			if _, exists := b.mutation.CutoffAt(); exists {
+				s.SetIgnore(usagegroupbudgetseed.FieldCutoffAt)
 			}
 			if _, exists := b.mutation.CreatedAt(); exists {
 				s.SetIgnore(usagegroupbudgetseed.FieldCreatedAt)
@@ -924,31 +867,24 @@ func (u *UsageGroupBudgetSeedUpsertBulk) Update(set func(*UsageGroupBudgetSeedUp
 	return u
 }
 
-// SetActivatedAt sets the "activated_at" field.
-func (u *UsageGroupBudgetSeedUpsertBulk) SetActivatedAt(v time.Time) *UsageGroupBudgetSeedUpsertBulk {
+// SetEndedAt sets the "ended_at" field.
+func (u *UsageGroupBudgetSeedUpsertBulk) SetEndedAt(v time.Time) *UsageGroupBudgetSeedUpsertBulk {
 	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.SetActivatedAt(v)
+		s.SetEndedAt(v)
 	})
 }
 
-// UpdateActivatedAt sets the "activated_at" field to the value that was provided on create.
-func (u *UsageGroupBudgetSeedUpsertBulk) UpdateActivatedAt() *UsageGroupBudgetSeedUpsertBulk {
+// UpdateEndedAt sets the "ended_at" field to the value that was provided on create.
+func (u *UsageGroupBudgetSeedUpsertBulk) UpdateEndedAt() *UsageGroupBudgetSeedUpsertBulk {
 	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.UpdateActivatedAt()
+		s.UpdateEndedAt()
 	})
 }
 
-// SetCutoffAt sets the "cutoff_at" field.
-func (u *UsageGroupBudgetSeedUpsertBulk) SetCutoffAt(v time.Time) *UsageGroupBudgetSeedUpsertBulk {
+// ClearEndedAt clears the value of the "ended_at" field.
+func (u *UsageGroupBudgetSeedUpsertBulk) ClearEndedAt() *UsageGroupBudgetSeedUpsertBulk {
 	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.SetCutoffAt(v)
-	})
-}
-
-// UpdateCutoffAt sets the "cutoff_at" field to the value that was provided on create.
-func (u *UsageGroupBudgetSeedUpsertBulk) UpdateCutoffAt() *UsageGroupBudgetSeedUpsertBulk {
-	return u.Update(func(s *UsageGroupBudgetSeedUpsert) {
-		s.UpdateCutoffAt()
+		s.ClearEndedAt()
 	})
 }
 

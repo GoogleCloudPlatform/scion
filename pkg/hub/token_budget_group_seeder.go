@@ -29,60 +29,38 @@ import (
 
 const (
 	// usageGroupBudgetSeedQueueKind is the durablequeue kind for pooled-group
-	// mid-window seeding (Tokenomics P3.3, §4.3, D6).
+	// charging-episode seeding (Tokenomics P3.3, §4.3, D6a).
 	usageGroupBudgetSeedQueueKind = "usage.group_budget_seed"
 
-	// groupBudgetSeedTTLCoverDelay is the +2m delay for the second seed pass
-	// covering peer Hub replicas whose 60s pooled-group cache may still be
-	// stale immediately after binding activation (D6).
-	groupBudgetSeedTTLCoverDelay = 2 * time.Minute
-
 	// usageGroupSeedReconcileJobName is the recurring singleton job name for
-	// filling missing/incomplete seeds.
+	// completing missing/incomplete episode seeds.
 	usageGroupSeedReconcileJobName = "usage-group-seed-reconcile"
 )
 
 // GroupBudgetSeedPayload is the JSON payload persisted in durable_queue_items
 // for usage.group_budget_seed.
 type GroupBudgetSeedPayload struct {
-	GroupID        string    `json:"group_id"`
-	ProjectScopeID string    `json:"project_scope_id"`
-	WindowKind     string    `json:"window_kind"` // "day" | "month"
-	WindowStartUTC time.Time `json:"window_start_utc"`
-	WindowEndUTC   time.Time `json:"window_end_utc"`
-	ActivatedAt    time.Time `json:"activated_at"`
-	IsFinalPass    bool      `json:"is_final_pass"`
+	EpisodeID   string `json:"episode_id"`
+	GroupID     string `json:"group_id"`
+	IsFinalPass bool   `json:"is_final_pass"`
 }
 
-func groupWindowForLimit(limitName string, ts time.Time) (windowKind string, start, end time.Time, ok bool) {
-	switch limitName {
-	case store.LimitLLMTokensPerGroupDay:
-		s, e := utcDayWindow(ts)
-		return store.UsageBudgetWindowDay, s, e, true
-	case store.LimitLLMTokensPerGroupMonth:
-		s, e := utcMonthWindow(ts)
-		return store.UsageBudgetWindowMonth, s, e, true
-	default:
-		return "", time.Time{}, time.Time{}, false
-	}
-}
-
-// GroupBudgetSeeder orchestrates D6 mid-window seeding for pooled user-group
-// token budgets via durablequeue and per-key usage_group_budget_seeds records.
+// GroupBudgetSeeder orchestrates D6a charging-episode seeding for pooled
+// user-group token budgets via durablequeue and usage_group_budget_seeds.
 //
-// D6 invariants:
-//   - Activation is recorded explicitly on binding create (value > 0), update
-//     (0 -> >0), or scope/subject change — NEVER inferred from binding.UpdatedAt.
-//   - Each (group, project_scope, window_kind, window_start_utc) has its own
-//     usage_group_budget_seeds row, updated atomically with compute + replace
-//     under a per-key advisory lock/tx so multi-replica seeders never drop or
-//     overwrite each other's records.
-//   - Effective members are snapshotted once on the first seed run; once the
-//     +2m pass finalizes (guarded by activatedAt matching the record), the seed
-//     is never recomputed from later membership ("leaving never refunds; joining
-//     charges only future spend").
-//   - Nightly reconcile only enqueues incomplete seed records and bindings
-//     whose CreatedAt fell inside the current window with no seed record at all.
+// D6a invariants:
+//   - A charging episode for group G starts when G's first active pooled
+//     binding (any scope, any window kind) activates, and ends when its last
+//     active pooled binding deactivates.
+//   - At episode start, exactly one seed is computed over
+//     [max(current UTC month start, previous episode's ended_at), activated_at+2m)
+//     for members as of the first seed run, written to usage_group_rollups_daily
+//     under origin="seed:<episode_id>" for both (day, G, "") and (day, G, <project>).
+//   - Bindings activating while an episode is already open (other scope, other
+//     window kind, cap raises) trigger NO seed. Day and month limits both read
+//     the same rollup rows.
+//   - Once the +2m pass finalizes, the episode seed is final forever.
+//   - Nightly reconcile only completes missing/incomplete episode seeds.
 type GroupBudgetSeeder struct {
 	store           store.Store
 	queue           durablequeue.Queue
@@ -144,82 +122,32 @@ func (gs *GroupBudgetSeeder) ledgerRetentionCutoff(now time.Time) time.Time {
 	return now.UTC().Add(-time.Duration(days) * 24 * time.Hour)
 }
 
-// EnqueueForBindingActivation records an explicit binding activation in
-// usage_group_budget_seeds and enqueues both the immediate seed pass and the
-// +2m TTL-cover seed pass. Called on pooled binding create (value > 0), update
-// (0 -> >0), or scope/subject change.
-func (gs *GroupBudgetSeeder) EnqueueForBindingActivation(
-	ctx context.Context,
-	limitName, groupID, scopeType, scopeID string,
-	activatedAt time.Time,
-) error {
-	if !gs.enabled() || !pooledGroupLimit(limitName) || groupID == "" {
+func (gs *GroupBudgetSeeder) enqueueEpisodePasses(ctx context.Context, ep *store.UsageGroupSeedEpisode) error {
+	if gs.queue == nil || ep == nil {
 		return nil
 	}
-	if activatedAt.IsZero() {
-		activatedAt = gs.now()
-	}
-	activatedAt = activatedAt.UTC().Truncate(time.Microsecond)
-
-	winKind, winStart, winEnd, ok := groupWindowForLimit(limitName, activatedAt)
-	if !ok {
-		return nil
-	}
-
-	projectScopeID := ""
-	if scopeType == store.QuotaScopeProject {
-		projectScopeID = scopeID
-	}
-
-	// Persist the explicit activation record before enqueueing so nightly
-	// reconcile can recover even if enqueue fails or the queue item is lost,
-	// without ever inferring activation from binding.UpdatedAt (R1).
-	rec, err := gs.store.RecordUsageGroupSeedActivation(ctx, &store.UsageGroupSeedRecord{
-		GroupID:        groupID,
-		ProjectScopeID: projectScopeID,
-		WindowKind:     winKind,
-		WindowStartUTC: winStart,
-		WindowEndUTC:   winEnd,
-		ActivatedAt:    activatedAt,
-		CutoffAt:       activatedAt.Add(groupBudgetSeedTTLCoverDelay),
-	})
-	if err != nil {
-		return fmt.Errorf("record group budget seed activation: %w", err)
-	}
-	if gs.queue == nil {
-		return nil
-	}
-
-	effActivatedAt := rec.ActivatedAt.UTC()
 	passes := []struct {
 		tag       string
 		notBefore time.Time
 		finalPass bool
 	}{
-		{tag: "initial", notBefore: effActivatedAt, finalPass: false},
-		{tag: "ttl_cover", notBefore: effActivatedAt.Add(groupBudgetSeedTTLCoverDelay), finalPass: true},
+		{tag: "initial", notBefore: ep.ActivatedAt.UTC(), finalPass: false},
+		{tag: "ttl_cover", notBefore: ep.CutoffAt.UTC(), finalPass: true},
 	}
-
 	for _, p := range passes {
 		payload := GroupBudgetSeedPayload{
-			GroupID:        groupID,
-			ProjectScopeID: projectScopeID,
-			WindowKind:     winKind,
-			WindowStartUTC: winStart,
-			WindowEndUTC:   winEnd,
-			ActivatedAt:    effActivatedAt,
-			IsFinalPass:    p.finalPass,
+			EpisodeID:   ep.ID,
+			GroupID:     ep.GroupID,
+			IsFinalPass: p.finalPass,
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("marshal group budget seed payload: %w", err)
 		}
-		dedupKey := fmt.Sprintf("%s:%s:%s:%s:act-%d:%s",
-			groupID, projectScopeID, winKind, winStart.Format("2006-01-02"), effActivatedAt.UnixMicro(), p.tag)
+		dedupKey := fmt.Sprintf("ep:%s:%s", ep.ID, p.tag)
 		_, err = gs.queue.Enqueue(ctx, nil, durablequeue.Item{
 			Kind:      usageGroupBudgetSeedQueueKind,
 			DedupKey:  dedupKey,
-			ProjectID: projectScopeID,
 			Payload:   raw,
 			NotBefore: p.notBefore,
 		})
@@ -228,6 +156,48 @@ func (gs *GroupBudgetSeeder) EnqueueForBindingActivation(
 		}
 	}
 	gs.queue.Wake(usageGroupBudgetSeedQueueKind)
+	return nil
+}
+
+// OnGroupBindingActivated opens a charging episode for groupID if none is
+// currently open, and enqueues the episode's immediate and +2m seed passes.
+// If an episode is already open for groupID, this is a no-op (D6a: bindings
+// activating inside an open episode trigger no seed).
+func (gs *GroupBudgetSeeder) OnGroupBindingActivated(ctx context.Context, groupID string, activatedAt time.Time) error {
+	if !gs.enabled() || groupID == "" {
+		return nil
+	}
+	if activatedAt.IsZero() {
+		activatedAt = gs.now()
+	}
+	activatedAt = activatedAt.UTC().Truncate(time.Microsecond)
+
+	ep, opened, err := gs.store.OpenUsageGroupChargingEpisode(ctx, groupID, activatedAt)
+	if err != nil {
+		return fmt.Errorf("open group charging episode: %w", err)
+	}
+	if !opened {
+		return nil
+	}
+	return gs.enqueueEpisodePasses(ctx, ep)
+}
+
+// OnGroupBindingDeactivated closes groupID's open charging episode if and only
+// if groupID now has zero active pooled bindings across all scopes and window
+// kinds (D6a).
+func (gs *GroupBudgetSeeder) OnGroupBindingDeactivated(ctx context.Context, groupID string, endedAt time.Time) error {
+	if !gs.enabled() || groupID == "" {
+		return nil
+	}
+	if endedAt.IsZero() {
+		endedAt = gs.now()
+	}
+	endedAt = endedAt.UTC().Truncate(time.Microsecond)
+
+	_, _, err := gs.store.CloseUsageGroupChargingEpisodeIfInactive(ctx, groupID, endedAt)
+	if err != nil {
+		return fmt.Errorf("close group charging episode: %w", err)
+	}
 	return nil
 }
 
@@ -246,36 +216,19 @@ func (gs *GroupBudgetSeeder) HandleQueueItem(ctx context.Context, item durablequ
 	return durablequeue.Result{Done: true}
 }
 
-// RunSeed executes one idempotent, atomically-locked D6 seed pass for payload.
+// RunSeed executes one idempotent, per-group-locked D6a episode seed pass.
 func (gs *GroupBudgetSeeder) RunSeed(ctx context.Context, payload GroupBudgetSeedPayload) error {
 	if !gs.enabled() {
 		return nil
 	}
-	if payload.GroupID == "" || !payload.WindowEndUTC.After(payload.WindowStartUTC) {
+	if payload.EpisodeID == "" || payload.GroupID == "" {
 		return fmt.Errorf("%w: invalid group budget seed payload", store.ErrInvalidInput)
 	}
-	winKind := payload.WindowKind
-	if winKind == "" {
-		if payload.WindowEndUTC.Sub(payload.WindowStartUTC) <= 25*time.Hour {
-			winKind = store.UsageBudgetWindowDay
-		} else {
-			winKind = store.UsageBudgetWindowMonth
-		}
-	}
 	now := gs.now().Truncate(time.Microsecond)
-	activatedAt := payload.ActivatedAt.UTC().Truncate(time.Microsecond)
-	if activatedAt.IsZero() {
-		activatedAt = now
-	}
 
-	_, didMutate, err := gs.store.ExecuteUsageGroupBudgetSeedPass(ctx, store.UsageGroupSeedPassInput{
+	res, err := gs.store.ExecuteUsageGroupEpisodeSeedPass(ctx, store.UsageGroupEpisodeSeedPassInput{
+		EpisodeID:             payload.EpisodeID,
 		GroupID:               payload.GroupID,
-		ProjectScopeID:        payload.ProjectScopeID,
-		WindowKind:            winKind,
-		WindowStartUTC:        payload.WindowStartUTC.UTC(),
-		WindowEndUTC:          payload.WindowEndUTC.UTC(),
-		ActivatedAt:           activatedAt,
-		CutoffAt:              activatedAt.Add(groupBudgetSeedTTLCoverDelay),
 		LedgerRetentionCutoff: gs.ledgerRetentionCutoff(now),
 		Now:                   now,
 		IsFinalPass:           payload.IsFinalPass,
@@ -284,26 +237,32 @@ func (gs *GroupBudgetSeeder) RunSeed(ctx context.Context, payload GroupBudgetSee
 		return err
 	}
 
-	// Re-evaluate group budget state immediately when the seed mutated rollups
-	// so newly seeded spend is reflected in usage_budget_state without waiting
-	// for the next ingest.
-	if didMutate && gs.evaluator != nil {
-		if evalErr := gs.evaluator.EvaluateGroupScope(ctx, payload.GroupID, payload.ProjectScopeID, now); evalErr != nil {
+	// Re-evaluate group budget state immediately for both system scope and any
+	// touched project scopes when the seed mutated rollups.
+	if res.DidMutate && gs.evaluator != nil {
+		if evalErr := gs.evaluator.EvaluateGroupScope(ctx, payload.GroupID, "", now); evalErr != nil {
 			gs.logger.Warn("post-seed group budget evaluation failed",
-				"group_id", payload.GroupID, "project_scope_id", payload.ProjectScopeID, "error", evalErr)
+				"group_id", payload.GroupID, "project_scope_id", "", "error", evalErr)
+		}
+		for _, projID := range res.TouchedProjectScope {
+			if evalErr := gs.evaluator.EvaluateGroupScope(ctx, payload.GroupID, projID, now); evalErr != nil {
+				gs.logger.Warn("post-seed group budget evaluation failed",
+					"group_id", payload.GroupID, "project_scope_id", projID, "error", evalErr)
+			}
 		}
 	}
 	return nil
 }
 
-// ReconcileMissingSeeds enqueues seed items ONLY for:
-//  1. Existing non-finalized usage_group_budget_seeds records whose window is
-//     still open (recovering lost queue items).
-//  2. Active pooled bindings whose CreatedAt fell inside the current window and
-//     have NO usage_group_budget_seeds record at all.
+// ReconcileMissingSeeds enqueues seed passes ONLY for:
+//  1. Existing non-finalized usage_group_budget_seeds episodes (recovering lost
+//     queue items).
+//  2. Groups that currently hold at least one active pooled binding created in
+//     the current UTC month but have NO open charging episode (recovering a
+//     direct store write or failed activation write).
 //
-// It NEVER inspects binding.UpdatedAt and NEVER re-enqueues a finalized seed
-// (R1, D6).
+// It NEVER inspects binding.UpdatedAt and NEVER re-enqueues a finalized
+// episode (D6a, R1).
 func (gs *GroupBudgetSeeder) ReconcileMissingSeeds(ctx context.Context) (int, error) {
 	if !gs.enabled() || gs.queue == nil {
 		return 0, nil
@@ -311,33 +270,24 @@ func (gs *GroupBudgetSeeder) ReconcileMissingSeeds(ctx context.Context) (int, er
 	now := gs.now().Truncate(time.Microsecond)
 	enqueued := 0
 
-	enqueueRec := func(rec *store.UsageGroupSeedRecord) error {
+	enqueueEp := func(ep *store.UsageGroupSeedEpisode) error {
 		notBefore := now
-		isFinal := !now.Before(rec.CutoffAt)
-		if !isFinal {
-			notBefore = rec.CutoffAt
-			isFinal = true
+		if now.Before(ep.CutoffAt) {
+			notBefore = ep.CutoffAt.UTC()
 		}
 		payload := GroupBudgetSeedPayload{
-			GroupID:        rec.GroupID,
-			ProjectScopeID: rec.ProjectScopeID,
-			WindowKind:     rec.WindowKind,
-			WindowStartUTC: rec.WindowStartUTC,
-			WindowEndUTC:   rec.WindowEndUTC,
-			ActivatedAt:    rec.ActivatedAt,
-			IsFinalPass:    isFinal,
+			EpisodeID:   ep.ID,
+			GroupID:     ep.GroupID,
+			IsFinalPass: true,
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		dedupKey := fmt.Sprintf("%s:%s:%s:%s:act-%d:reconcile-%s",
-			rec.GroupID, rec.ProjectScopeID, rec.WindowKind,
-			rec.WindowStartUTC.Format("2006-01-02"), rec.ActivatedAt.UnixMicro(), now.Format("2006-01-02"))
+		dedupKey := fmt.Sprintf("ep:%s:reconcile-%s", ep.ID, now.UTC().Format("2006-01-02"))
 		_, err = gs.queue.Enqueue(ctx, nil, durablequeue.Item{
 			Kind:      usageGroupBudgetSeedQueueKind,
 			DedupKey:  dedupKey,
-			ProjectID: rec.ProjectScopeID,
 			Payload:   raw,
 			NotBefore: notBefore,
 		})
@@ -351,84 +301,75 @@ func (gs *GroupBudgetSeeder) ReconcileMissingSeeds(ctx context.Context) (int, er
 		return nil
 	}
 
-	// 1. Recover any existing incomplete seed records for open windows.
-	incomplete, err := gs.store.ListIncompleteUsageGroupSeeds(ctx, now)
+	// 1. Recover any existing incomplete charging episodes.
+	incomplete, err := gs.store.ListIncompleteUsageGroupSeedEpisodes(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list incomplete group seeds: %w", err)
+		return 0, fmt.Errorf("list incomplete group seed episodes: %w", err)
 	}
-	for _, rec := range incomplete {
-		if err := enqueueRec(rec); err != nil {
+	for _, ep := range incomplete {
+		if err := enqueueEp(ep); err != nil {
 			return enqueued, err
 		}
 	}
 
-	// 2. Recover any active pooled bindings created in the current window that
-	//    have no seed record at all (e.g. direct store creation or failed
-	//    activation recording). Never compare against binding.UpdatedAt.
-	limitWindows := []struct {
-		name  string
-		kind  string
-		start time.Time
-		end   time.Time
-	}{
-		{name: store.LimitLLMTokensPerGroupDay, kind: store.UsageBudgetWindowDay},
-		{name: store.LimitLLMTokensPerGroupMonth, kind: store.UsageBudgetWindowMonth},
-	}
-	limitWindows[0].start, limitWindows[0].end = utcDayWindow(now)
-	limitWindows[1].start, limitWindows[1].end = utcMonthWindow(now)
-
-	for _, lw := range limitWindows {
-		def, err := gs.store.GetLimitDefinitionByName(ctx, lw.name)
+	// 2. Recover any group with an active pooled binding created in the current
+	//    UTC month that has no open charging episode (e.g. direct store write
+	//    or lost activation write).
+	//
+	//    Note (O6): Using binding.CreatedAt as the fallback activation timestamp
+	//    avoids ever inferring activation from binding.UpdatedAt (which would
+	//    re-seed on cap/action edits). If a binding was originally created with
+	//    value=0 and later raised to >0 while its admin-API activation write
+	//    failed, CreatedAt is a conservative lower bound; in normal operation
+	//    OnGroupBindingActivated records the exact activation timestamp at the
+	//    admin API.
+	monthStart, monthEnd := utcMonthWindow(now)
+	earliestCreatedByGroup := make(map[string]time.Time)
+	for _, limitName := range []string{store.LimitLLMTokensPerGroupDay, store.LimitLLMTokensPerGroupMonth} {
+		def, err := gs.store.GetLimitDefinitionByName(ctx, limitName)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				continue
 			}
-			return enqueued, fmt.Errorf("lookup limit definition %q: %w", lw.name, err)
+			return enqueued, fmt.Errorf("lookup limit definition %q: %w", limitName, err)
 		}
 		if def == nil {
 			continue
 		}
 		bindings, err := gs.store.ListEntitlementBindings(ctx, def.ID)
 		if err != nil {
-			return enqueued, fmt.Errorf("list bindings for %q: %w", lw.name, err)
+			return enqueued, fmt.Errorf("list bindings for %q: %w", limitName, err)
 		}
 		for _, b := range bindings {
 			if b == nil || b.SubjectType != store.EntitlementSubjectGroup || b.SubjectID == "" || b.Value <= 0 {
 				continue
 			}
 			createdAt := b.CreatedAt.UTC().Truncate(time.Microsecond)
-			// New windows after binding creation need no seed (D6).
-			if createdAt.Before(lw.start) || !createdAt.Before(lw.end) {
+			if createdAt.Before(monthStart) || !createdAt.Before(monthEnd) {
 				continue
 			}
-			projectScopeID := ""
-			if b.ScopeType == store.QuotaScopeProject {
-				projectScopeID = b.ScopeID
+			if prev, ok := earliestCreatedByGroup[b.SubjectID]; !ok || createdAt.Before(prev) {
+				earliestCreatedByGroup[b.SubjectID] = createdAt
 			}
-			_, err := gs.store.GetUsageGroupSeedRecord(ctx, b.SubjectID, projectScopeID, lw.kind, lw.start)
-			if err == nil {
-				// Record exists (either already finalized, or already handled in step 1).
-				continue
-			}
-			if !errors.Is(err, store.ErrNotFound) {
+		}
+	}
+
+	for groupID, actAt := range earliestCreatedByGroup {
+		_, err := gs.store.GetOpenUsageGroupChargingEpisode(ctx, groupID)
+		if err == nil {
+			// Open episode exists (either already finalized, or handled in step 1).
+			continue
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return enqueued, err
+		}
+		ep, opened, err := gs.store.OpenUsageGroupChargingEpisode(ctx, groupID, actAt)
+		if err != nil {
+			return enqueued, err
+		}
+		if opened && !ep.Finalized {
+			if err := enqueueEp(ep); err != nil {
 				return enqueued, err
-			}
-			rec, err := gs.store.RecordUsageGroupSeedActivation(ctx, &store.UsageGroupSeedRecord{
-				GroupID:        b.SubjectID,
-				ProjectScopeID: projectScopeID,
-				WindowKind:     lw.kind,
-				WindowStartUTC: lw.start,
-				WindowEndUTC:   lw.end,
-				ActivatedAt:    createdAt,
-				CutoffAt:       createdAt.Add(groupBudgetSeedTTLCoverDelay),
-			})
-			if err != nil {
-				return enqueued, err
-			}
-			if !rec.Finalized {
-				if err := enqueueRec(rec); err != nil {
-					return enqueued, err
-				}
 			}
 		}
 	}
@@ -508,7 +449,7 @@ func (s *Server) NewGroupBudgetSeedDrainer() (*durablequeue.Drainer, error) {
 }
 
 // usageGroupSeedReconcileHandler returns the recurring singleton handler that
-// enqueues any missing/incomplete pooled-group seeds (D6).
+// enqueues any missing/incomplete pooled-group episode seeds (D6a).
 func (s *Server) usageGroupSeedReconcileHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		if !s.experimentEnabled(experiments.TokenomicsUsageLedger) ||
