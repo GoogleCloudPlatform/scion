@@ -214,6 +214,7 @@ type ResolvedSkill struct {
 	Deprecated         bool              `json:"deprecated,omitempty"`
 	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
 	ReplacementURI     string            `json:"replacementUri,omitempty"`
+	DownloadToken      string            `json:"downloadToken,omitempty"`
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.

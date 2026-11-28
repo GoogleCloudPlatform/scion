@@ -134,6 +134,13 @@ type ResolvedSkillResponse struct {
 	Deprecated         bool              `json:"deprecated,omitempty"`
 	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
 	ReplacementURI     string            `json:"replacementUri,omitempty"`
+	// DownloadToken is the credential the Hub used to resolve a gh:// skill
+	// (such as the project's GitHub App installation token), carried so the
+	// broker downloads the skill's files with the same credential rather than
+	// falling back to the creating user's credential (ptone/scion#5028).
+	// Omitted when resolved anonymously or for non-gh:// skills; never stored
+	// in the resolution cache.
+	DownloadToken string `json:"downloadToken,omitempty"`
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
@@ -1882,6 +1889,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		resolved = append(resolved, *entry)
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, ResolveSkillsResponse{
 		Resolved: resolved,
 		Errors:   resolveErrors,
@@ -2378,7 +2386,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		} else if hit {
 			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
 				"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
-			return buildResolvedSkillResponse(ghRef, entry), nil
+			return buildResolvedSkillResponse(ghRef, entry, token), nil
 		} else if isBranchRef {
 			stale, ok, staleErr := s.ghResolutionStore.GetStale(ctx, cacheKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
 			if staleErr != nil {
@@ -2399,7 +2407,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 					go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, installID, isBranchRef)
 				}
 				injectGHStaleServe(cacheKey, refreshStarted)
-				return buildResolvedSkillResponse(ghRef, stale), nil
+				return buildResolvedSkillResponse(ghRef, stale, token), nil
 			}
 		}
 	}
@@ -2419,7 +2427,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		}
 		slog.WarnContext(ctx, "github_resolution_cache: re-resolve failed; serving an entry from before file modes were recorded, so its files may lack executable bits",
 			"uri", rawURI, "commit_sha", safeShortSHA(legacy.CommitSHA), "error", err)
-		return buildResolvedSkillResponse(ghRef, legacy), nil
+		return buildResolvedSkillResponse(ghRef, legacy, token), nil
 	}
 
 	// A ref GitHub reported as not found for this cache key within the last
@@ -2513,7 +2521,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		// the same cacheKey with different raw URI text (a bare ref vs
 		// "@HEAD", or different owner/repo letter case) — the entry carries
 		// none of that, so each caller supplies it from its own parsed ghRef.
-		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry)), nil
+		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry), token), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -2704,7 +2712,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 // sha256 digest is not available to it. The client recognises the format and
 // verifies accordingly (see hashFileAs in pkg/agent/skill_resolver.go).
 // ContentHash is likewise a digest over the git blob IDs.
-func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry) *ResolvedSkillResponse {
+func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry, downloadToken string) *ResolvedSkillResponse {
 	files := make([]DownloadURLInfo, len(entry.FileEntries))
 	for i, f := range entry.FileEntries {
 		files[i] = DownloadURLInfo{
@@ -2725,6 +2733,7 @@ func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheE
 		ResolvedVersion: safeShortSHA(entry.CommitSHA), // Short SHA for display
 		ContentHash:     entry.BundleHash,
 		Files:           files,
+		DownloadToken:   downloadToken,
 	}
 }
 

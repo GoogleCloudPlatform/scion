@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // fakeGitHub stands in for api.github.com for the two endpoints the gh://
@@ -1805,4 +1806,170 @@ func TestResolveGitHubSkill_BackgroundRefreshBoundsConcurrency(t *testing.T) {
 
 	assert.Equal(t, int64(hubGHRefreshConcurrency), maxInFlight.Load(),
 		"concurrent background refreshes must be bounded by hubGHRefreshConcurrency")
+}
+
+// TestSkillsResolve_GHCarriesResolvingCredential verifies that when the Hub
+// resolves a gh:// skill with a project's GitHub App credential, the response
+// carries that credential in DownloadToken on both cache misses and cache hits
+// (with Cache-Control: no-store), while anonymous resolutions omit it
+// (ptone/scion#5028).
+func TestSkillsResolve_GHCarriesResolvingCredential(t *testing.T) {
+	const (
+		owner        = "acme"
+		repo         = "private-skills"
+		uri          = "gh://" + owner + "/" + repo + "/secret@main"
+		commitSHA    = "dddddddddddddddddddddddddddddddddddddddd"
+		mintedToken  = "ghs_project_app_resolving_token_5028"
+		installIDVal = int64(5028)
+	)
+
+	srv, st, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	ctx := context.Background()
+
+	var treeCalls atomic.Int64
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":          1,
+				"slug":        "fake-scion-app",
+				"permissions": map[string]string{"contents": "read", "metadata": "read"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == fmt.Sprintf("/app/installations/%d/access_tokens", installIDVal):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"token":      mintedToken,
+				"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			})
+		case strings.HasPrefix(r.URL.Path, "/repos/"+owner+"/"+repo+"/commits/"):
+			if r.Header.Get("Authorization") != "Bearer "+mintedToken {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(commitSHA))
+		case strings.HasPrefix(r.URL.Path, "/repos/"+owner+"/"+repo+"/git/trees/"):
+			if r.Header.Get("Authorization") != "Bearer "+mintedToken {
+				http.NotFound(w, r)
+				return
+			}
+			treeCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sha":"t","truncated":false,"tree":[{
+				"path": "SKILL.md",
+				"mode": "100644",
+				"type": "blob",
+				"sha": "ce013625030ba8dba906f756967f9e9ca394464a",
+				"size": 6
+			}]}`))
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ghSrv.Close)
+
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.APIBaseURL = ghSrv.URL
+	srv.config.GitHubAppConfig.RawBaseURL = ghSrv.URL
+	srv.config.GitHubAppConfig.AppID = 1
+	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+	srv.mu.Unlock()
+
+	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installIDVal,
+		AccountLogin:   owner,
+		AccountType:    "Organization",
+		AppID:          1,
+		Repositories:   []string{owner + "/" + repo},
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+
+	// Bind the installation to the project via a super-admin user so
+	// authorizeGitHubAppAssociation authorizes token minting.
+	admin := &store.User{
+		ID:          tid("admin-5028"),
+		Email:       "admin-5028@test.com",
+		DisplayName: "admin-5028",
+		Role:        store.UserRoleAdmin,
+		Status:      store.UserStatusActive,
+		Created:     time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, admin))
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	remote := ghSrv.URL + "/" + owner + "/" + repo
+	bindingRaw, err := json.Marshal(githubInstallationBinding{
+		InstallationID: installIDVal,
+		Remote:         util.NormalizeGitRemote(remote),
+		BoundBy:        admin.ID,
+		BoundAt:        time.Now(),
+	})
+	require.NoError(t, err)
+
+	installID := installIDVal
+	storedProj, err := st.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	storedProj.GitRemote = remote
+	storedProj.GitHubInstallationID = &installID
+	if storedProj.Annotations == nil {
+		storedProj.Annotations = map[string]string{}
+	}
+	storedProj.Annotations[githubInstallationBindingAnnotation] = string(bindingRaw)
+	require.NoError(t, st.UpdateProject(ctx, storedProj))
+
+	reqBody := ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: uri}},
+		ProjectID: project.ID,
+	}
+
+	// 1. Cache miss: Hub mints project App token, resolves via GitHub, and
+	// returns DownloadToken with Cache-Control: no-store.
+	rec1 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", reqBody)
+	require.Equal(t, http.StatusOK, rec1.Code, "body: %s", rec1.Body.String())
+	assert.Equal(t, "no-store", rec1.Header().Get("Cache-Control"))
+
+	var resp1 ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&resp1))
+	require.Empty(t, resp1.Errors)
+	require.Len(t, resp1.Resolved, 1)
+	assert.Equal(t, mintedToken, resp1.Resolved[0].DownloadToken)
+	assert.Equal(t, int64(1), treeCalls.Load())
+
+	// 2. Cache hit: Hub serves tree from DB cache (no second tree call) and
+	// still returns the project's resolving credential in DownloadToken.
+	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", reqBody)
+	require.Equal(t, http.StatusOK, rec2.Code, "body: %s", rec2.Body.String())
+	assert.Equal(t, "no-store", rec2.Header().Get("Cache-Control"))
+
+	var resp2 ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+	require.Empty(t, resp2.Errors)
+	require.Len(t, resp2.Resolved, 1)
+	assert.Equal(t, mintedToken, resp2.Resolved[0].DownloadToken)
+	assert.Equal(t, int64(1), treeCalls.Load(), "second resolve must be served from cache")
+
+	// 3. Anonymous resolution (no GitHub App on project): DownloadToken is
+	// omitted from JSON.
+	pubGH := newFakeGitHub(t, owner, "public-repo", "skills/pub", commitSHA)
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.APIBaseURL = pubGH.URL
+	srv.config.GitHubAppConfig.RawBaseURL = pubGH.URL
+	srv.mu.Unlock()
+
+	recPub := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: "gh://" + owner + "/public-repo/pub@main"}},
+	})
+	require.Equal(t, http.StatusOK, recPub.Code, "body: %s", recPub.Body.String())
+	assert.NotContains(t, recPub.Body.String(), "downloadToken")
 }
