@@ -26,6 +26,7 @@ type TerminalPaneInternal = ScionTerminalPane & {
   loading: boolean;
   ownedSession: { state: { generation: number }; setFrontmost(front: boolean): void } | null;
   uploadEnabled: boolean;
+  uploadDisabledReason: string;
   uploadTargetDir: string;
   uploadBasePath: string;
   isUploading: boolean;
@@ -298,5 +299,69 @@ describe('ScionTerminalPane drag-drop upload routing', () => {
     expect(pane.isUploading).toBe(false);
     expect(pane.uploadStatus).toBe('Large uploads were disabled.');
     expect(sent).toEqual([]);
+  });
+
+  it('disables drop upload on 409 conflict for both small single-request and chunked drops when hub.large_uploads is on', async () => {
+    setFeatureFlag('hub.large_uploads', true);
+    const conflictBody = JSON.stringify({
+      error: {
+        code: 'conflict',
+        message: 'shared directory file browsing requires a co-located runtime broker',
+      },
+    });
+
+    // Case 1: small file (single-request POST .../files inside uploadWorkspaceFiles).
+    const smallCalls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        smallCalls.push(`${(init?.method ?? 'GET').toUpperCase()} ${requestUrl(input)}`);
+        return Promise.resolve(
+          new Response(conflictBody, {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    const { pane: smallPane, sent: smallSent } = mountPane();
+    await smallPane.updateComplete;
+    const small = new File(['hello'], 'small.txt');
+    await smallPane._handleFileDrop(makeFileList([small]));
+
+    expect(smallCalls).toEqual(['POST /api/v1/projects/proj-1/shared-dirs/scratchpad/files']);
+    expect(smallPane.uploadEnabled).toBe(false);
+    expect(smallPane.uploadDisabledReason).toBe('File upload requires a co-located runtime broker');
+    expect(smallPane.uploadStatus).toBe('File upload requires a co-located runtime broker');
+    expect(smallSent).toEqual([]);
+
+    // Case 2: >chunkBytes file (chunked POST .../uploads).
+    const chunkedCalls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        chunkedCalls.push(`${(init?.method ?? 'GET').toUpperCase()} ${requestUrl(input)}`);
+        return Promise.resolve(
+          new Response(conflictBody, {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    const { pane: chunkedPane, sent: chunkedSent } = mountPane();
+    await chunkedPane.updateComplete;
+    const big = makeFakeLargeFile('big.bin', 9 * 1024 * 1024);
+    await chunkedPane._handleFileDrop(makeFileList([big]));
+
+    expect(chunkedCalls).toEqual(['POST /api/v1/projects/proj-1/shared-dirs/scratchpad/uploads']);
+    expect(chunkedPane.uploadEnabled).toBe(false);
+    expect(chunkedPane.uploadDisabledReason).toBe(
+      'File upload requires a co-located runtime broker'
+    );
+    expect(chunkedPane.uploadStatus).toBe('File upload requires a co-located runtime broker');
+    expect(chunkedSent).toEqual([]);
   });
 });

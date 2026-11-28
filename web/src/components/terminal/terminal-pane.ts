@@ -2547,7 +2547,7 @@ export class ScionTerminalPane extends LitElement {
           this._showUploadError('Large uploads were disabled.');
           return;
         }
-        if (err.status === 409 && !err.code) {
+        if (err.status === 409 && (err.code === 'conflict' || !err.code)) {
           this._showUploadError('File upload requires a co-located runtime broker');
           this.uploadEnabled = false;
           this.uploadDisabledReason = 'File upload requires a co-located runtime broker';
