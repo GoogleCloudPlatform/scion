@@ -128,6 +128,9 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 func ExtractTarGz(r io.Reader, dst *os.Root, opts TarExtractOptions) (ExtractResult, error) {
 	l := opts.Limits.withDefaults()
 	repo := opts.Repo
+	if opts.Select != nil && (opts.Tree != nil || opts.SubPath != "") {
+		return ExtractResult{}, &Error{Kind: KindInvalidSource, Repo: repo, Hint: "Select cannot be combined with SubPath or Tree"}
+	}
 	dirMode := opts.DirMode
 	if dirMode == 0 {
 		dirMode = 0o755

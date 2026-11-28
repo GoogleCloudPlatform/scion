@@ -279,4 +279,158 @@ func TestExtractTarGz_SelectorMode(t *testing.T) {
 		_, err = ExtractTarGz(bytes.NewReader(buf.Bytes()), root, baseOpts(&ExtractBudget{}))
 		assertErrorKind(t, err, KindUnsupportedContent)
 	})
+
+	t.Run("Select(rel+/x) probe refuses link standing in for a selected subdirectory", func(t *testing.T) {
+		// Mirror the production welcome template selector: takes only files
+		// inside templates/<name>/..., with Roots=["templates"]. For
+		// "templates/a", both selectTemplates("templates/a") and
+		// onRootPath(["templates"], "templates/a") are false, so the
+		// Select(rel+"/x") probe is the sole guard refusing a link there.
+		selectTemplates := func(rel string) []string {
+			rest, ok := strings.CutPrefix(rel, "templates/")
+			if !ok || !strings.Contains(rest, "/") {
+				return nil
+			}
+			return []string{rest}
+		}
+		makeOpts := func() TarExtractOptions {
+			return TarExtractOptions{
+				Repo:              "acme/agent-team",
+				ExpectedSHA:       sha,
+				RequireLeadingPAX: true,
+				Select:            selectTemplates,
+				Roots:             []string{"templates"},
+				SkipEmptyDirs:     true,
+				DirMode:           0o700,
+				Limits: Limits{
+					MaxFiles:     10,
+					MaxFileBytes: 1024,
+					MaxTotal:     2048,
+					MaxUnpacked:  1 << 20,
+					OnSymlink:    PolicyReject,
+				},
+			}
+		}
+
+		for _, tc := range []struct {
+			name  string
+			entry tarTestEntry
+		}{
+			{
+				name:  "symlink at templates/a",
+				entry: tarTestEntry{name: "repo-sha/templates/a", typeflag: tar.TypeSymlink, linkname: "/tmp"},
+			},
+			{
+				name:  "hardlink at templates/a",
+				entry: tarTestEntry{name: "repo-sha/templates/a", typeflag: tar.TypeLink, linkname: "repo-sha/README.md"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tarData := buildTestTarGz(t, sha, []tarTestEntry{
+					{name: "repo-sha/", typeflag: tar.TypeDir},
+					{name: "repo-sha/README.md", body: []byte("r")},
+					tc.entry,
+					{name: "repo-sha/templates/b/f.txt", body: []byte("ok")},
+				})
+				root, err := os.OpenRoot(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = root.Close() }()
+
+				_, err = ExtractTarGz(bytes.NewReader(tarData), root, makeOpts())
+				assertErrorKind(t, err, KindUnsupportedContent)
+			})
+		}
+
+		t.Run("link outside templates is skipped", func(t *testing.T) {
+			tarData := buildTestTarGz(t, sha, []tarTestEntry{
+				{name: "repo-sha/", typeflag: tar.TypeDir},
+				{name: "repo-sha/outside-link", typeflag: tar.TypeSymlink, linkname: "README.md"},
+				{name: "repo-sha/templates/b/f.txt", body: []byte("ok")},
+			})
+			root, err := os.OpenRoot(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = root.Close() }()
+
+			res, err := ExtractTarGz(bytes.NewReader(tarData), root, makeOpts())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Files != 1 || res.Skipped.Symlinks != 1 {
+				t.Fatalf("got files=%d skipped=%+v, want files=1 symlinks=1", res.Files, res.Skipped)
+			}
+		})
+	})
+
+	t.Run("Select combined with SubPath or Tree fails closed", func(t *testing.T) {
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/skills/tdd/SKILL.md", body: []byte("x")},
+		})
+		for _, tc := range []struct {
+			name    string
+			subPath string
+			tree    *Tree
+		}{
+			{name: "Select with SubPath", subPath: "skills/tdd"},
+			{name: "Select with Tree", tree: &Tree{TreeSHA: sha}},
+			{name: "Select with both", subPath: "skills/tdd", tree: &Tree{TreeSHA: sha}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, err := os.OpenRoot(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = root.Close() }()
+
+				opts := baseOpts(&ExtractBudget{})
+				opts.SubPath = tc.subPath
+				opts.Tree = tc.tree
+				_, err = ExtractTarGz(bytes.NewReader(tarData), root, opts)
+				assertErrorKind(t, err, KindInvalidSource)
+			})
+		}
+	})
+
+	t.Run("validateDestPath rejects unsafe and oversized destinations", func(t *testing.T) {
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/", typeflag: tar.TypeDir},
+			{name: "repo-sha/a.txt", body: []byte("hello")},
+		})
+		for _, tc := range []struct {
+			name     string
+			dest     string
+			wantKind Kind
+		}{
+			{name: "empty dest", dest: "", wantKind: KindUnsupportedContent},
+			{name: "absolute dest", dest: "/etc/passwd", wantKind: KindUnsupportedContent},
+			{name: "traversal dest", dest: "../escape.txt", wantKind: KindUnsupportedContent},
+			{name: "unclean interior dot-dot", dest: "a/../b.txt", wantKind: KindUnsupportedContent},
+			{name: "backslash dest", dest: "a\\b.txt", wantKind: KindUnsupportedContent},
+			{name: "NUL byte dest", dest: "a\x00b.txt", wantKind: KindUnsupportedContent},
+			{name: "exceeds MaxNameBytes", dest: strings.Repeat("a", 40), wantKind: KindTooLarge},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, err := os.OpenRoot(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = root.Close() }()
+
+				opts := baseOpts(&ExtractBudget{})
+				opts.Roots = nil
+				opts.Limits.MaxNameBytes = 32
+				opts.Select = func(rel string) []string {
+					if rel == "a.txt" {
+						return []string{tc.dest}
+					}
+					return nil
+				}
+				_, err = ExtractTarGz(bytes.NewReader(tarData), root, opts)
+				assertErrorKind(t, err, tc.wantKind)
+			})
+		}
+	})
 }
