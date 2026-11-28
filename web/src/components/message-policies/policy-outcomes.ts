@@ -738,7 +738,7 @@ export class ScionMessagePolicyOutcomes extends LitElement {
           <h3>Access Denied</h3>
           <p>
             You do not have permission to view policy outcomes for this project (<code
-              >project.read_message_policies</code
+              >project.manage_message_policies</code
             >
             required).
           </p>

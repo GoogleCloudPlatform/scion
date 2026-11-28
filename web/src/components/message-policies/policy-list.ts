@@ -730,16 +730,20 @@ ${p.system_one_rule}</pre
                   </div>
                 </div>
 
-                <div slot="footer">
-                  <sl-button
-                    size="small"
-                    data-view-policy-outcomes
-                    @click=${() => this.handleViewOutcomes(p.id)}
-                  >
-                    <sl-icon slot="prefix" name="clock-history"></sl-icon>
-                    View policy outcomes
-                  </sl-button>
-                </div>
+                ${this.canManage
+                  ? html`
+                      <div slot="footer">
+                        <sl-button
+                          size="small"
+                          data-view-policy-outcomes
+                          @click=${() => this.handleViewOutcomes(p.id)}
+                        >
+                          <sl-icon slot="prefix" name="clock-history"></sl-icon>
+                          View policy outcomes
+                        </sl-button>
+                      </div>
+                    `
+                  : nothing}
               `
             : nothing}
       </sl-drawer>

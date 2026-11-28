@@ -22,7 +22,7 @@
  * System One columns and fields.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { can, canAny, type Capabilities, type PageData } from '../../shared/types.js';
@@ -70,8 +70,10 @@ export class ScionPageProjectMessagePolicies extends LitElement {
   @state() private forbidden = false;
 
   @state() private activeTab: MessagePoliciesTab = 'policies';
+  @state() private requestedOutcomesTab = false;
   @state() private outcomePolicyFilter = '';
   @state() private policies: MessagePolicy[] = [];
+  @state() private allPolicies: MessagePolicy[] = [];
   @state() private agents: ProjectAgentSummary[] = [];
 
   private boundOnFeatureFlagsChanged = (): void => {
@@ -210,6 +212,9 @@ export class ScionPageProjectMessagePolicies extends LitElement {
     const tabParam = params.get('tab') as MessagePoliciesTab | null;
     if (tabParam && VALID_TABS.has(tabParam)) {
       this.activeTab = tabParam;
+      if (tabParam === 'outcomes') {
+        this.requestedOutcomesTab = true;
+      }
     }
     const policyParam = params.get('policy');
     if (policyParam) {
@@ -251,8 +256,15 @@ export class ScionPageProjectMessagePolicies extends LitElement {
         return;
       }
 
+      if (!can(proj._capabilities, 'manage_message_policies') && this.activeTab === 'outcomes') {
+        this.activeTab = 'policies';
+      }
+
       dispatchPageTitle(this, 'Message Policies', proj.name || this.projectId);
       void this.loadAgents();
+      if (can(proj._capabilities, 'manage_message_policies')) {
+        void this.loadAllPoliciesForFilter();
+      }
     } catch (err) {
       if (!this.isConnected) return;
       this.error = err instanceof Error ? err.message : 'Failed to load project';
@@ -288,11 +300,35 @@ export class ScionPageProjectMessagePolicies extends LitElement {
     }
   }
 
+  private async loadAllPoliciesForFilter(): Promise<void> {
+    try {
+      const items = await paginateAll<MessagePolicy>({
+        path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/message-policies`,
+        pageSize: 200,
+        parsePage: (raw) => {
+          const data = raw as {
+            policies?: MessagePolicy[];
+            next_cursor?: string;
+          };
+          const pageItems = Array.isArray(data.policies) ? data.policies : [];
+          return data.next_cursor
+            ? { items: pageItems, nextCursor: data.next_cursor }
+            : { items: pageItems };
+        },
+      });
+      if (!this.isConnected) return;
+      this.allPolicies = items;
+    } catch {
+      // Non-blocking: outcomes filter falls back to loaded page policies + active value.
+    }
+  }
+
   private get canManagePolicies(): boolean {
     return can(this.project?._capabilities, 'manage_message_policies');
   }
 
   private handleViewPolicyOutcomes(policyId: string): void {
+    if (!this.canManagePolicies) return;
     this.outcomePolicyFilter = policyId;
     this.activeTab = 'outcomes';
     const tabGroup = this.shadowRoot?.querySelector('sl-tab-group') as
@@ -382,11 +418,24 @@ export class ScionPageProjectMessagePolicies extends LitElement {
         ${this.project?.name || this.projectId}.
       </p>
 
+      ${this.requestedOutcomesTab && !this.canManagePolicies
+        ? html`
+            <div style="margin-bottom: 1rem;" data-outcomes-manage-required>
+              <sl-alert variant="warning" open>
+                <sl-icon slot="icon" name="shield-x"></sl-icon>
+                Policy outcomes require project owner or admin permissions
+                (<code>project.manage_message_policies</code>).
+              </sl-alert>
+            </div>
+          `
+        : nothing}
+
       <sl-tab-group
         @sl-tab-show=${(e: CustomEvent<{ name: string }>) => {
           if (e.target !== e.currentTarget) return;
           const name = e.detail?.name as MessagePoliciesTab | undefined;
           if (name && VALID_TABS.has(name)) {
+            if (name === 'outcomes' && !this.canManagePolicies) return;
             this.activeTab = name;
           }
         }}
@@ -394,9 +443,18 @@ export class ScionPageProjectMessagePolicies extends LitElement {
         <sl-tab slot="nav" panel="policies" ?active=${this.activeTab === 'policies'}>
           Policies
         </sl-tab>
-        <sl-tab slot="nav" panel="outcomes" ?active=${this.activeTab === 'outcomes'}>
-          Policy outcomes
-        </sl-tab>
+        ${this.canManagePolicies
+          ? html`
+              <sl-tab
+                slot="nav"
+                panel="outcomes"
+                data-tab-outcomes
+                ?active=${this.activeTab === 'outcomes'}
+              >
+                Policy outcomes
+              </sl-tab>
+            `
+          : nothing}
 
         <sl-tab-panel name="policies" ?active=${this.activeTab === 'policies'}>
           <div class="tab-panel-body">
@@ -419,17 +477,21 @@ export class ScionPageProjectMessagePolicies extends LitElement {
           </div>
         </sl-tab-panel>
 
-        <sl-tab-panel name="outcomes" ?active=${this.activeTab === 'outcomes'}>
-          <div class="tab-panel-body">
-            <scion-message-policy-outcomes
-              .projectId=${this.projectId}
-              .systemOneEnabled=${this.systemOneOn}
-              .policies=${this.policies}
-              .agents=${this.agents}
-              .initialPolicyId=${this.outcomePolicyFilter}
-            ></scion-message-policy-outcomes>
-          </div>
-        </sl-tab-panel>
+        ${this.canManagePolicies
+          ? html`
+              <sl-tab-panel name="outcomes" ?active=${this.activeTab === 'outcomes'}>
+                <div class="tab-panel-body">
+                  <scion-message-policy-outcomes
+                    .projectId=${this.projectId}
+                    .systemOneEnabled=${this.systemOneOn}
+                    .policies=${this.allPolicies.length > 0 ? this.allPolicies : this.policies}
+                    .agents=${this.agents}
+                    .initialPolicyId=${this.outcomePolicyFilter}
+                  ></scion-message-policy-outcomes>
+                </div>
+              </sl-tab-panel>
+            `
+          : nothing}
       </sl-tab-group>
     `;
   }

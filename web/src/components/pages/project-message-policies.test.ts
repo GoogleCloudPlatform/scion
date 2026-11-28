@@ -326,14 +326,21 @@ describe('scion-page-project-message-policies', () => {
     ).toContain('system_one');
   });
 
-  it('shows read-only indicator for viewer capability and renders no edit controls', async () => {
+  it('shows read-only indicator for viewer capability, makes zero /decisions calls, hides Outcomes tab and drawer link, and renders no edit controls (R1)', async () => {
     setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
 
+    const requestedUrls: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
+        requestedUrls.push(url);
         if (url.includes('/message-policies/decisions')) {
-          return Promise.resolve(jsonResponse({ decisions: [], total_count: 0 }));
+          return Promise.resolve(jsonResponse({ error: { message: 'Forbidden' } }, 403));
+        }
+        if (url.includes('/message-policies/pol-1')) {
+          return Promise.resolve(
+            jsonResponse({ ...SAMPLE_POLICIES[0], coverage: SAMPLE_COVERAGE })
+          );
         }
         if (url.includes('/message-policies')) {
           return Promise.resolve(
@@ -370,8 +377,21 @@ describe('scion-page-project-message-policies', () => {
       expect(listEl?.shadowRoot?.querySelector('[data-readonly-indicator]')).toBeTruthy();
     });
 
+    expect(el.shadowRoot?.querySelector('[data-tab-outcomes]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-message-policy-outcomes')).toBeNull();
+    expect(requestedUrls.some((u) => u.includes('/decisions'))).toBe(false);
     expect(listEl!.shadowRoot!.textContent).not.toContain('New policy');
     expect(listEl!.shadowRoot!.textContent).not.toContain('Delete');
+
+    // Open policy detail drawer -> "View policy outcomes" button must be absent for read-only callers.
+    const polBtn = listEl!.shadowRoot!.querySelector(
+      '[data-policy-name="no-prose-choices"]'
+    ) as HTMLButtonElement;
+    polBtn.click();
+    await vi.waitFor(() => {
+      expect(listEl!.shadowRoot!.querySelector('[data-detail-violation-rule]')).toBeTruthy();
+    });
+    expect(listEl!.shadowRoot!.querySelector('[data-view-policy-outcomes]')).toBeNull();
   });
 
   it('blocks access when project capabilities lack read_message_policies', async () => {
@@ -506,7 +526,7 @@ describe('scion-page-project-message-policies', () => {
           jsonResponse({
             id: 'proj-1',
             name: 'Billing',
-            _capabilities: { actions: ['read_message_policies'] },
+            _capabilities: { actions: ['read_message_policies', 'manage_message_policies'] },
           })
         );
       })
@@ -724,6 +744,11 @@ describe('scion-page-project-message-policies', () => {
             resolveSecondDecisions = resolve;
           });
         }
+        if (url.includes('/message-policies') && url.includes('limit=200')) {
+          return Promise.resolve(
+            jsonResponse({ policies: SAMPLE_POLICIES, coverage: SAMPLE_COVERAGE, total_count: 2 })
+          );
+        }
         if (url.includes('/message-policies')) {
           policyCall += 1;
           if (policyCall === 1) {
@@ -742,7 +767,7 @@ describe('scion-page-project-message-policies', () => {
           jsonResponse({
             id: 'proj-1',
             name: 'Billing',
-            _capabilities: { actions: ['read_message_policies'] },
+            _capabilities: { actions: ['read_message_policies', 'manage_message_policies'] },
           })
         );
       })
@@ -891,7 +916,7 @@ describe('scion-page-project-message-policies', () => {
           jsonResponse({
             id: 'proj-1',
             name: 'Billing',
-            _capabilities: { actions: ['read_message_policies'] },
+            _capabilities: { actions: ['read_message_policies', 'manage_message_policies'] },
           })
         );
       })
@@ -950,5 +975,208 @@ describe('scion-page-project-message-policies', () => {
     expect(drawer.textContent).not.toContain('SECRET_PROMPT_TEXT');
     expect(drawer.textContent).not.toContain('SECRET_COPY_FACT');
     expect(drawer.textContent).not.toContain('SECRET_NOTE_TEXT');
+  });
+
+  it('shows manage-required notice and makes zero /decisions calls when read-only caller deep-links ?tab=outcomes (R1)', async () => {
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
+    window.history.replaceState({}, '', '/projects/proj-1/message-policies?tab=outcomes');
+
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        requestedUrls.push(url);
+        if (url.includes('/message-policies/decisions')) {
+          return Promise.resolve(jsonResponse({ error: { message: 'Forbidden' } }, 403));
+        }
+        if (url.includes('/message-policies')) {
+          return Promise.resolve(
+            jsonResponse({
+              policies: SAMPLE_POLICIES,
+              coverage: SAMPLE_COVERAGE,
+              total_count: 2,
+            })
+          );
+        }
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [] }));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            id: 'proj-1',
+            name: 'Billing',
+            _capabilities: { actions: ['read_message_policies'] },
+          })
+        );
+      })
+    );
+
+    const el = document.createElement(
+      'scion-page-project-message-policies'
+    ) as ScionPageProjectMessagePolicies;
+    document.body.appendChild(el);
+
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('[data-outcomes-manage-required]')).toBeTruthy();
+    });
+
+    const notice = el.shadowRoot!.querySelector('[data-outcomes-manage-required]')!;
+    expect(notice.textContent).toContain('project.manage_message_policies');
+    expect(el.shadowRoot?.querySelector('[data-tab-outcomes]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-message-policy-outcomes')).toBeNull();
+    expect(requestedUrls.some((u) => u.includes('/decisions'))).toBe(false);
+  });
+
+  it('paginates all policies into the Outcomes Policy filter dropdown without truncating at 50 (O1)', async () => {
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
+    window.history.replaceState({}, '', '/projects/proj-1/message-policies?tab=outcomes');
+
+    const pol51 = {
+      ...SAMPLE_POLICIES[0],
+      id: 'pol-51',
+      name: 'policy-51',
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/message-policies/decisions')) {
+          return Promise.resolve(jsonResponse({ decisions: [], total_count: 0 }));
+        }
+        if (url.includes('/message-policies') && url.includes('limit=200')) {
+          if (url.includes('cursor=all-p2')) {
+            return Promise.resolve(
+              jsonResponse({ policies: [pol51], coverage: SAMPLE_COVERAGE, total_count: 51 })
+            );
+          }
+          return Promise.resolve(
+            jsonResponse({
+              policies: SAMPLE_POLICIES,
+              coverage: SAMPLE_COVERAGE,
+              next_cursor: 'all-p2',
+              total_count: 51,
+            })
+          );
+        }
+        if (url.includes('/message-policies')) {
+          return Promise.resolve(
+            jsonResponse({
+              policies: SAMPLE_POLICIES,
+              coverage: SAMPLE_COVERAGE,
+              next_cursor: 'list-p2',
+              total_count: 51,
+            })
+          );
+        }
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [] }));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            id: 'proj-1',
+            name: 'Billing',
+            _capabilities: { actions: ['read_message_policies', 'manage_message_policies'] },
+          })
+        );
+      })
+    );
+
+    const el = document.createElement(
+      'scion-page-project-message-policies'
+    ) as ScionPageProjectMessagePolicies;
+    document.body.appendChild(el);
+
+    await vi.waitFor(() => {
+      const outcomesEl = el.shadowRoot?.querySelector(
+        'scion-message-policy-outcomes'
+      ) as ScionMessagePolicyOutcomes | null;
+      expect(
+        outcomesEl?.shadowRoot?.querySelector(
+          '[data-outcome-filter-policy] sl-option[value="pol-51"]'
+        )
+      ).toBeTruthy();
+    });
+  });
+
+  it('supports policy list Prev/Next cursor paging and resets cursor on filter change (O2)', async () => {
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
+
+    const listRequests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/message-policies') && !url.includes('/decisions')) {
+          listRequests.push(url);
+          if (url.includes('cursor=pol-cur-2')) {
+            return Promise.resolve(
+              jsonResponse({
+                policies: [{ ...SAMPLE_POLICIES[1], id: 'pol-page-2', name: 'page-2-policy' }],
+                coverage: SAMPLE_COVERAGE,
+                total_count: 3,
+              })
+            );
+          }
+          return Promise.resolve(
+            jsonResponse({
+              policies: [SAMPLE_POLICIES[0]],
+              coverage: SAMPLE_COVERAGE,
+              next_cursor: 'pol-cur-2',
+              total_count: 3,
+            })
+          );
+        }
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [] }));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            id: 'proj-1',
+            name: 'Billing',
+            _capabilities: { actions: ['read_message_policies'] },
+          })
+        );
+      })
+    );
+
+    const el = document.createElement(
+      'scion-page-project-message-policies'
+    ) as ScionPageProjectMessagePolicies;
+    document.body.appendChild(el);
+
+    let listEl: ScionMessagePolicyList | null = null;
+    await vi.waitFor(() => {
+      listEl = el.shadowRoot?.querySelector(
+        'scion-message-policy-list'
+      ) as ScionMessagePolicyList | null;
+      expect(listEl?.shadowRoot?.querySelector('[data-policy-row="pol-1"]')).toBeTruthy();
+    });
+
+    // Click Next -> requests cursor=pol-cur-2 and renders page 2.
+    (listEl!.shadowRoot!.querySelector('[data-next-page]') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(listEl!.shadowRoot!.querySelector('[data-policy-row="pol-page-2"]')).toBeTruthy();
+    });
+    expect(listRequests.at(-1)).toContain('cursor=pol-cur-2');
+
+    // Click Previous -> requests page 0 with no cursor param and renders page 1.
+    (listEl!.shadowRoot!.querySelector('[data-prev-page]') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(listEl!.shadowRoot!.querySelector('[data-policy-row="pol-1"]')).toBeTruthy();
+    });
+    expect(listRequests.at(-1)).not.toContain('cursor=');
+
+    // Navigate to page 2 again, then change mode filter -> resets cursor and passes mode=enforce.
+    (listEl!.shadowRoot!.querySelector('[data-next-page]') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(listEl!.shadowRoot!.querySelector('[data-policy-row="pol-page-2"]')).toBeTruthy();
+    });
+
+    const modeSel = listEl!.shadowRoot!.querySelector('[data-filter-mode]') as HTMLSelectElement;
+    modeSel.value = 'enforce';
+    modeSel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await vi.waitFor(() => {
+      expect(listRequests.at(-1)).toContain('mode=enforce');
+    });
+    expect(listRequests.at(-1)).not.toContain('cursor=');
   });
 });
