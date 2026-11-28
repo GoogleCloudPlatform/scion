@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -524,4 +525,71 @@ func TestSharedDirUploads_WriteGateRevocationStopsNextChunk(t *testing.T) {
 	// Status GET is a read and remains allowed.
 	statusRec := doRequest(t, srv, http.MethodGet, u, nil)
 	assert.Equal(t, http.StatusOK, statusRec.Code, "body: %s", statusRec.Body.String())
+}
+
+type sdProviderFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (w *sdProviderFaultStore) GetProjectProviders(ctx context.Context, projectID string) ([]store.ProjectProvider, error) {
+	if w.fault.Active() {
+		return nil, errors.New("injected transient GetProjectProviders error")
+	}
+	return w.Store.GetProjectProviders(ctx, projectID)
+}
+
+func TestSharedDirUploads_SweeperRetriesOnGetProjectProvidersFault(t *testing.T) {
+	srv, st, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *sdProviderFaultStore {
+		return &sdProviderFaultStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID:         tid("proj-sd-sweep-fault"),
+		Slug:       "proj-sd-sweep-fault",
+		Name:       "SD Sweep Fault",
+		GitRemote:  "https://github.com/example/repo.git",
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	sess := &store.UploadSession{
+		ID:             "upl_sd_provider_fault",
+		HubID:          "local",
+		OwnerKind:      "user",
+		OwnerID:        "u1",
+		TargetKind:     store.UploadTargetSharedDir,
+		ScopeProjectID: proj.ID,
+		ScopeSharedDir: "scratchpad",
+		DestPath:       "orphan.bin",
+		Overwrite:      true,
+		FileName:       "orphan.bin",
+		MediaType:      "application/octet-stream",
+		DeclaredSize:   1024,
+		StagingRef:     uploadPartialName("upl_sd_provider_fault"),
+		IdleExpiresAt:  now.Add(time.Hour),
+		HardExpiresAt:  now.Add(24 * time.Hour),
+	}
+	require.NoError(t, st.CreateUploadSession(ctx, sess, store.UploadQuota{}))
+	require.NoError(t, st.TransitionUploadSession(ctx, sess.ID, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateAborted, "", nil))
+
+	// With a transient GetProjectProviders fault, sweeping past the 15m terminal
+	// retention window must keep the row (backing it off) rather than deleting it.
+	fault.Arm()
+	srv.sweepUploadSessions(ctx, now.Add(20*time.Minute))
+
+	kept, err := st.GetUploadSession(ctx, sess.ID)
+	require.NoError(t, err, "terminal row must be retained when GetProjectProviders fails")
+	assert.Equal(t, store.UploadStateAborted, kept.State)
+
+	// Once the fault clears, resolveSharedDirPath returns
+	// errSharedDirRequiresColocatedBroker (nothing to clean on this hub), so the
+	// next sweep past retention deletes the terminal row.
+	fault.Disarm()
+	srv.sweepUploadSessions(ctx, now.Add(40*time.Minute))
+
+	_, err = st.GetUploadSession(ctx, sess.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "terminal row should be deleted once resolve returns co-located broker sentinel")
 }

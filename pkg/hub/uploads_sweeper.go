@@ -163,11 +163,10 @@ func (s *Server) cleanupUploadSessionStaging(ctx context.Context, sess *store.Up
 		}
 		resolution, err := s.resolveSharedDirPath(ctx, project, sess.ScopeSharedDir)
 		if err != nil {
-			var nfsErr *sharedDirStorageResolveError
-			if errors.As(err, &nfsErr) {
-				return err
+			if errors.Is(err, errSharedDirNotDeclared) || errors.Is(err, errSharedDirRequiresColocatedBroker) {
+				return nil
 			}
-			return nil
+			return err
 		}
 		root, err := s.openSharedDirRoot(resolution, false)
 		if err != nil {
