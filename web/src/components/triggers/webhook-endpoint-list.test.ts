@@ -16,6 +16,8 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import './webhook-endpoint-list.js';
 import {
   buildScionV1CurlExample,
@@ -437,6 +439,26 @@ describe('scion-webhook-endpoint-list', () => {
 
       document.body.innerHTML = '';
       vi.restoreAllMocks();
+    }
+  });
+
+  it('matches the shared golden sender snippets fixture byte-for-byte for every supported mode (R1)', () => {
+    const fixturePath = resolve(
+      __dirname,
+      '../../../../pkg/hub/trigger/testdata/webhook-sender-snippets.json'
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      url: string;
+      secret: string;
+      snippets: Record<string, string[]>;
+    };
+
+    expect(Object.keys(fixture.snippets)).toEqual([...SUPPORTED_SIGNATURE_MODES]);
+
+    for (const mode of SUPPORTED_SIGNATURE_MODES) {
+      const expected = fixture.snippets[mode].join('\n');
+      const actual = buildWebhookCurlExample(mode, fixture.url, fixture.secret);
+      expect(actual, `mode=${mode} drifted from shared golden fixture`).toBe(expected);
     }
   });
 });

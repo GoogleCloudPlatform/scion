@@ -703,13 +703,10 @@ export class ScionWebhookEndpointList extends LitElement {
                       this.formSignatureMode = (e.target as HTMLSelectElement).value;
                     }}
                   >
-                    <sl-option value="scion_v1">scion_v1 (replay protected)</sl-option>
-                    <sl-option value="github_v1"
-                      >github_v1 (GitHub webhooks, message rules only)</sl-option
-                    >
-                    <sl-option value="stripe_v1"
-                      >stripe_v1 (Stripe webhooks, replay protected)</sl-option
-                    >
+                    ${SUPPORTED_SIGNATURE_MODES.map(
+                      (mode) =>
+                        html`<sl-option value=${mode}>${SIGNATURE_MODE_LABELS[mode]}</sl-option>`
+                    )}
                   </sl-select>
                 `
               : html`
@@ -1004,6 +1001,12 @@ export class ScionWebhookEndpointList extends LitElement {
 
 /** Hub-supported HMAC webhook signature modes (`pkg/hub/handlers_webhook_endpoints.go`). */
 export const SUPPORTED_SIGNATURE_MODES = ['scion_v1', 'github_v1', 'stripe_v1'] as const;
+
+const SIGNATURE_MODE_LABELS: Record<(typeof SUPPORTED_SIGNATURE_MODES)[number], string> = {
+  scion_v1: 'scion_v1 (replay protected)',
+  github_v1: 'github_v1 (GitHub webhooks, message rules only)',
+  stripe_v1: 'stripe_v1 (Stripe webhooks, replay protected)',
+};
 
 /**
  * Builds the scion_v1 curl + openssl sender example matching `cmd/trigger_webhook.go`

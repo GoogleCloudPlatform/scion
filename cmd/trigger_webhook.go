@@ -119,7 +119,7 @@ Sender signing contracts and examples:
        HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
        SECRET="<one-time-secret>"
        TS="$(date +%s)"
-       DELIVERY="$(uuidgen)"
+       DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"
        # X-Scion-Event: <name> sets event.type=webhook.<name> (default webhook.received rules then stop matching; use --type webhook.<name>)
        EVENT=""
        # X-Scion-Subject is stored as event.subject=webhook:<endpoint-id>/<subject>
@@ -143,7 +143,7 @@ Sender signing contracts and examples:
      Example (curl + openssl):
        HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
        SECRET="<one-time-secret>"
-       DELIVERY="$(uuidgen)"
+       DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"
        BODY='{"action":"opened","repository":{"full_name":"org/repo"}}'
        SIG="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')"
        curl -fsS -X POST "$HOOK_URL" \
