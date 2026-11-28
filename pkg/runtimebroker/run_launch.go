@@ -1076,8 +1076,8 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	if pe, ok := agentPolicyErrorFrom(err); ok {
 		return api.LaunchCodeAgentPolicyRefused, pe.PublicMessage()
 	}
-	if emptyGenericCommandFrom(err) {
-		return ErrCodeHarnessConfigUnusable, emptyGenericCommandMessage()
+	if genericCmdMsg, ok := genericCommandErrorFrom(err); ok {
+		return ErrCodeHarnessConfigUnusable, genericCmdMsg
 	}
 	if se, ok := storageMigrationRequiredFrom(err); ok {
 		return ErrCodeStorageMigrationRequired, se.PublicMessage()

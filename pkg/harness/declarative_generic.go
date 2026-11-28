@@ -145,13 +145,7 @@ func (d *DeclarativeGenericHarness) GetCommand(task string, resume bool, baseArg
 }
 
 func (d *DeclarativeGenericHarness) validateCommand(task string, resume bool, baseArgs []string) error {
-	if !d.builtin {
-		return nil
-	}
-	if len(d.GetCommand(task, resume, baseArgs)) == 0 {
-		return ErrEmptyGenericCommand
-	}
-	return nil
+	return validateGenericCommand(d.builtin, d.GetCommand(task, resume, baseArgs), resume)
 }
 
 func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {

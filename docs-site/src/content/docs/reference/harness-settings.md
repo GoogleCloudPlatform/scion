@@ -479,7 +479,7 @@ With `sh -c`, **any** task text passed to the agent — including trigger-render
 
 Unlike container-script harnesses (and non-generic declarative harnesses with a non-shell `command.base`), the built-in `generic` harness, any declarative harness with `harness: generic` (even with a non-shell `command.base`), and any declarative harness without `command.base` or with a shell `command.base` do not have `--model <name>` prepended to their command arguments; the resolved model is still available in the `SCION_MODEL` environment variable.
 
-Session resume (`scion resume`) is not supported for shell-form generic tasks: resuming without an explicit task runs `sh -c` with no command string (which exits with status `2`). Start the agent fresh or pass a task explicitly instead.
+Session resume (`scion resume`) is not supported for shell-form generic tasks: resuming without an explicit task is refused before the container starts. A shell-form generic harness started fresh with no task and no command string is likewise refused. Start the agent fresh or pass a task explicitly instead.
 
 #### Launcher harnesses and live-work detection
 

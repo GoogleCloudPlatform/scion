@@ -266,6 +266,187 @@ func TestGeneric_ValidateCommand(t *testing.T) {
 	}
 }
 
+func TestGeneric_ValidateCommand_ShellForm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	resolvedBuiltin, err := Resolve(context.Background(), ResolveOptions{Name: "generic"})
+	if err != nil {
+		t.Fatalf("Resolve(generic): %v", err)
+	}
+
+	declShell := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+	})
+	declBashLC := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"/bin/bash", "-lc"}},
+	})
+	declExec := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"python3", "worker.py"}},
+	})
+	declInteractiveShell := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"bash", "-l"}},
+	})
+
+	cases := []struct {
+		name     string
+		h        api.Harness
+		task     string
+		resume   bool
+		baseArgs []string
+		wantErr  error
+	}{
+		{
+			name:     "built-in generic sh -c resume without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -c fresh start without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   false,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  ErrGenericShellCommandMissingScript,
+		},
+		{
+			name:     "built-in generic sh -c resume with explicit task allowed",
+			h:        resolvedBuiltin.Harness,
+			task:     "echo hi",
+			resume:   true,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic sh -c fresh start with task allowed",
+			h:        resolvedBuiltin.Harness,
+			task:     "echo hi",
+			resume:   false,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic /bin/sh -eu -c resume without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"/bin/sh", "-eu", "-c"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -o errexit -c without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"sh", "-o", "errexit", "-c"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -c -- without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"sh", "-c", "--"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -c -- with task allowed",
+			h:        resolvedBuiltin.Harness,
+			task:     "echo hi",
+			resume:   true,
+			baseArgs: []string{"sh", "-c", "--"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic bash -lc with inline script resume allowed",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"bash", "-lc", "sleep 30"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic exec-form resume without task allowed",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"python3", "agent.py"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic python3 -c not treated as POSIX shell",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"python3", "-c"},
+			wantErr:  nil,
+		},
+		{
+			name:    "on-disk declarative generic sh -c resume without task refused",
+			h:       declShell,
+			resume:  true,
+			wantErr: ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:    "on-disk declarative generic sh -c fresh start without task refused",
+			h:       declShell,
+			resume:  false,
+			wantErr: ErrGenericShellCommandMissingScript,
+		},
+		{
+			name:    "on-disk declarative generic sh -c with task allowed",
+			h:       declShell,
+			task:    "npm test && echo ok",
+			resume:  true,
+			wantErr: nil,
+		},
+		{
+			name:    "on-disk declarative generic /bin/bash -lc resume without task refused",
+			h:       declBashLC,
+			resume:  true,
+			wantErr: ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:    "on-disk declarative generic exec-form resume without task allowed",
+			h:       declExec,
+			resume:  true,
+			wantErr: nil,
+		},
+		{
+			name:    "on-disk declarative generic interactive bash -l resume allowed",
+			h:       declInteractiveShell,
+			resume:  true,
+			wantErr: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateCommand(tc.h, tc.task, tc.resume, tc.baseArgs)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("ValidateCommand() = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+
+	// ValidateEntryCommand must match for both built-in and on-disk declarative entries.
+	shEntry := config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, shEntry, "", true, nil); !errors.Is(err, ErrGenericShellResumeUnsupported) {
+		t.Errorf("ValidateEntryCommand(broker-local sh -c resume) = %v, want ErrGenericShellResumeUnsupported", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, shEntry, "", false, nil); !errors.Is(err, ErrGenericShellCommandMissingScript) {
+		t.Errorf("ValidateEntryCommand(broker-local sh -c start) = %v, want ErrGenericShellCommandMissingScript", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, shEntry, "echo ok", true, nil); err != nil {
+		t.Errorf("ValidateEntryCommand(broker-local sh -c with task) = %v, want nil", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBuiltin, config.HarnessConfigEntry{Harness: "generic"}, "", true, []string{"sh", "-c"}); !errors.Is(err, ErrGenericShellResumeUnsupported) {
+		t.Errorf("ValidateEntryCommand(builtin sh -c resume) = %v, want ErrGenericShellResumeUnsupported", err)
+	}
+}
+
 func TestGeneric_DefaultConfigDir(t *testing.T) {
 	g := &Generic{}
 	if g.DefaultConfigDir() != ".scion" {

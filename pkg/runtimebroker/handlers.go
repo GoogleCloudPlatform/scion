@@ -2364,7 +2364,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isWorkspaceNotPermitted := workspaceNotPermittedFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
-		isEmptyGenericCmd := emptyGenericCommandFrom(err)
+		genericCmdMsg, isGenericCmdErr := genericCommandErrorFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
@@ -2380,8 +2380,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
 			markAttemptFailed(resourceLimitsStatus, resourceErr.PublicMessage())
-		case isEmptyGenericCmd:
-			markAttemptFailed(emptyGenericCommandStatus, emptyGenericCommandMessage())
+		case isGenericCmdErr:
+			markAttemptFailed(emptyGenericCommandStatus, genericCmdMsg)
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2482,8 +2482,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// The runtime refused the resource spec before creating
 			// anything (ptone/scion#7103). The full error is logged above.
 			writeResourceLimitsRefused(w, resourceErr, opCreateAgent, nil)
-		case isEmptyGenericCmd:
-			writeEmptyGenericCommandRefused(w, opCreateAgent, nil)
+		case isGenericCmdErr:
+			writeGenericCommandRefused(w, opCreateAgent, genericCmdMsg, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -4613,6 +4613,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
+		genericCmdMsg, isGenericCmdErr := genericCommandErrorFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
@@ -4627,8 +4628,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		case isResourceRefusal:
 			// As on create (ptone/scion#7103); logged above.
 			writeResourceLimitsRefused(w, resourceErr, "start agent", details)
-		case emptyGenericCommandFrom(err):
-			writeEmptyGenericCommandRefused(w, "start agent", details)
+		case isGenericCmdErr:
+			writeGenericCommandRefused(w, "start agent", genericCmdMsg, details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -5894,8 +5895,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			writeResourceLimitsRefused(w, re, "restart agent", details)
 			return
 		}
-		if emptyGenericCommandFrom(err) {
-			writeEmptyGenericCommandRefused(w, "restart agent", details)
+		if genericCmdMsg, ok := genericCommandErrorFrom(err); ok {
+			writeGenericCommandRefused(w, "restart agent", genericCmdMsg, details)
 			return
 		}
 		// Start can re-provision the agent: a required skill reference that
