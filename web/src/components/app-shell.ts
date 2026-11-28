@@ -40,6 +40,7 @@ import {
   commandRequestsEnabled,
   decisionsEnabled,
   isFeatureEnabled,
+  messagePoliciesEnabled,
   triggersEnabled,
 } from '../utils/feature-flags.js';
 import { ARTIFACTS_FLAG } from '../client/artifacts-flag.js';
@@ -433,6 +434,9 @@ export class ScionApp extends LitElement {
     }
     if (path.match(/^\/projects\/[^/]+\/triggers$/)) {
       return triggersEnabled() ? 'Triggers' : 'Page Not Found';
+    }
+    if (path.match(/^\/projects\/[^/]+\/message-policies$/)) {
+      return messagePoliciesEnabled() ? 'Message Policies' : 'Page Not Found';
     }
     if (path.match(/^\/projects\/[^/]+\/decisions$/)) {
       return decisionsEnabled() ? 'Decisions' : 'Page Not Found';

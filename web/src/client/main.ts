@@ -809,6 +809,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/project-triggers.js'),
   },
   {
+    // Project Message Policies page (experiment hub.message_policies; renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/message-policies$/,
+    tag: 'scion-page-project-message-policies',
+    load: () => import('../components/pages/project-message-policies.js'),
+  },
+  {
     // Project Decisions page (experiment web.decisions; renders 404 when off).
     pattern: /^\/projects\/[^/]+\/decisions$/,
     tag: 'scion-page-project-decisions',
