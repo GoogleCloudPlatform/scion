@@ -72,21 +72,16 @@ The step-by-step order is in [docs/gcp-setup.md](../docs/gcp-setup.md) and the
 
 ## Static checks
 
-Every cr-ci shell file must pass two shellcheck runs, because they disagree on
-some codes (0.9.0 reports a trap-invoked function's body as SC2317, 0.11.0 as
-SC2329; a directive must name both):
+Every cr-ci shell file must pass shellcheck 0.11.0 (the version shipped by both
+`ubuntu-latest` on Ubuntu 26.04 and the `cr-ci` runner image) under both
+invocations:
 
-- **Upstream CI's invocation**, which is what blocks a PR: ubuntu-latest's apt
-  shellcheck (0.9.0), from the repository root, on every `*.sh` file:
+- **Upstream CI's invocation**, which is what blocks a PR, from the repository
+  root on every `*.sh` file:
   `shellcheck -x --source-path=SCRIPTDIR ./cr-ci/scripts/deploy-job.sh` (no
-  `--norc`, so a repository `.shellcheckrc` would apply). Outside Ubuntu, the
-  same 0.9.0 binary comes in the PyPI wheel `shellcheck-py` 0.9.0.6
-  (`shellcheck_py-0.9.0.6-py2.py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl`,
-  sha256 `730235c4f92657884f8b343d5426e4dc28e9a6ba9ad54d469cd038e340ea5be0`;
-  the binary is `shellcheck_py-0.9.0.6.data/scripts/shellcheck` inside it).
-- **A current release** (0.11.0) with `shellcheck --norc -x`, on the `*.sh` files
-  and the extension-less test stubs in [`testdata/stubs/`](testdata/stubs/),
-  which upstream CI does not check.
+  `--norc`, so a repository `.shellcheckrc` applies).
+- **Strict `--norc` check** with `shellcheck --norc -x`, on the `*.sh` files
+  and the extension-less test stubs in [`testdata/stubs/`](testdata/stubs/).
 
 ## Tests
 

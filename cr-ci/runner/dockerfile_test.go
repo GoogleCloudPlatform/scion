@@ -99,3 +99,65 @@ func TestDockerfileGitStage(t *testing.T) {
 		}
 	}
 }
+
+// TestDockerfileShellcheck: shellcheck is installed from its pinned release tarball
+// (not Ubuntu 24.04's apt package, which ships 0.9.0 and breaks on SC2329 directives
+// accepted by ubuntu-latest's 0.11.0), verified with sha256sum, and version-checked
+// at build time.
+func TestDockerfileShellcheck(t *testing.T) {
+	raw, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	top := string(raw)
+	if idx := strings.Index(top, "\nFROM "); idx >= 0 {
+		top = top[:idx]
+	}
+	if !regexp.MustCompile(`(?m)^ARG SHELLCHECK_VERSION=\d+\.\d+\.\d+$`).MatchString(top) {
+		t.Error("top ARG block lacks pinned SHELLCHECK_VERSION")
+	}
+	if !regexp.MustCompile(`(?m)^ARG SHELLCHECK_SHA256=[0-9a-f]{64}$`).MatchString(top) {
+		t.Error("top ARG block lacks 64-hex SHELLCHECK_SHA256")
+	}
+
+	finalLines := dockerfileStage(t, "FROM ${UBUNTU_IMAGE}")
+	for _, arg := range []string{"ARG SHELLCHECK_VERSION", "ARG SHELLCHECK_SHA256"} {
+		found := false
+		for _, l := range finalLines {
+			if strings.TrimSpace(l) == arg {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("final stage lacks %q", arg)
+		}
+	}
+
+	var installRun string
+	for _, l := range finalLines {
+		if strings.HasPrefix(l, "RUN ") && strings.Contains(l, "apt-get install") {
+			if regexp.MustCompile(`\bshellcheck\b`).MatchString(l) {
+				t.Errorf("final stage installs shellcheck via apt-get: %q", l)
+			}
+		}
+		if strings.HasPrefix(l, "RUN ") && strings.Contains(l, "/usr/local/bin/shellcheck") {
+			installRun = l
+		}
+	}
+	if installRun == "" {
+		t.Fatal("final stage lacks RUN step installing /usr/local/bin/shellcheck")
+	}
+	for _, want := range []string{
+		`echo "${SHELLCHECK_SHA256}  /tmp/shellcheck.tgz" | sha256sum -c -`,
+		`install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck`,
+	} {
+		if !strings.Contains(installRun, want) {
+			t.Errorf("shellcheck RUN step lacks %q: %q", want, installRun)
+		}
+	}
+	const versionAssert = ` && shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION}"`
+	if !strings.HasSuffix(strings.TrimRight(installRun, " \t"), versionAssert) {
+		t.Errorf("shellcheck RUN step does not end with %q: %q", versionAssert, installRun)
+	}
+}
