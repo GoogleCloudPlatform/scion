@@ -31,8 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
 const maxConsecutiveFailures = 3
