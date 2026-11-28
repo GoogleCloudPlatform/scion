@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -4248,8 +4249,8 @@ func TestPutAndGetServerConfigDB_UploadsChunkAndQuotaSettings(t *testing.T) {
 	if rr3.Code != http.StatusOK {
 		t.Fatalf("null PUT: expected 200, got %d: %s", rr3.Code, rr3.Body.String())
 	}
-	if got3 := ops.Uploads(); got3.ChunkBytes != opsettings.DefaultUploadChunkBytes {
-		t.Errorf("chunk_bytes after null clear = %d, want default %d", got3.ChunkBytes, opsettings.DefaultUploadChunkBytes)
+	if got3 := ops.Uploads(); got3.ChunkBytes != opsettings.UploadsDefaultChunkBytes {
+		t.Errorf("chunk_bytes after null clear = %d, want default %d", got3.ChunkBytes, opsettings.UploadsDefaultChunkBytes)
 	}
 
 	// 5. Setting max_pending_bytes_per_user below the per-file limit emits a warning.
