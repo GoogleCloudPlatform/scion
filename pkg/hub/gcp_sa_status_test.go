@@ -440,7 +440,7 @@ func TestListGCPServiceAccounts_MappingSummary(t *testing.T) {
 // An agent token without project:read is refused by the status route and
 // receives no agents from gcpServiceAccountAgents; an agent token carrying
 // project:read is admitted.
-func TestGCPSAStatus_AgentWithoutProjectReadSeesNoAgents(t *testing.T) {
+func TestGCPSAStatus_AgentRequiresProjectReadScope(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
 	sa := mappingTestSA(t, s, projectID, mappedGSA)
 	agent := createSAStatusAgent(t, s, projectID, "no-read", sa.ID)

@@ -578,9 +578,10 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 	if identity == nil {
 		return out
 	}
-	// The same token-scope gate listAgents applies (checkAgentReadScope): an
-	// agent token without project:read sees no agents. Here the section is
-	// left empty rather than failing the whole view.
+	// Defense-in-depth scope check matching checkAgentReadScope: the status
+	// route refuses agent tokens lacking project:read before calling this
+	// helper, and the helper itself returns an empty section for any agent
+	// context without project:read.
 	if agent := GetAgentIdentityFromContext(ctx); agent != nil && !agent.HasScope(ScopeProjectRead) {
 		return out
 	}
