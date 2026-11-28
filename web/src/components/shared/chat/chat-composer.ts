@@ -1532,14 +1532,14 @@ export class ScionChatComposer extends LitElement {
         >
         ${agentMembers.map(
           (m) => html`
-            <sl-menu-item value=${m.name} ?checked=${current === m}>
+            <sl-menu-item type="checkbox" value=${m.name} ?checked=${current === m}>
               <span slot="prefix" style="font-size: 1.1em;">🤖</span>
               ${m.name}
             </sl-menu-item>
           `
         )}
         <sl-divider></sl-divider>
-        <sl-menu-item value="__clear__" ?checked=${!this.defaultAgent}>
+        <sl-menu-item type="checkbox" value="__clear__" ?checked=${!this.defaultAgent}>
           <sl-icon slot="prefix" name="x-circle"></sl-icon>
           No agent
         </sl-menu-item>

@@ -1297,13 +1297,13 @@ export class ScionHeader extends LitElement {
           @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void =>
             this.handleModeSelect(e)}
         >
-          <sl-menu-item value="dashboard" ?checked=${!isChat && !isTerminal}>
+          <sl-menu-item type="checkbox" value="dashboard" ?checked=${!isChat && !isTerminal}>
             <sl-icon slot="prefix" name="grid-1x2"></sl-icon>
             Console ${this.renderMenuShortcutHint('dashboard')}
           </sl-menu-item>
           ${chatEnabled
             ? html`
-                <sl-menu-item value="chat" ?checked=${isChat}>
+                <sl-menu-item type="checkbox" value="chat" ?checked=${isChat}>
                   <sl-icon slot="prefix" name="chat-dots"></sl-icon>
                   Chat
                   ${this.chatUnreadShown() > 0
@@ -1318,7 +1318,7 @@ export class ScionHeader extends LitElement {
                 </sl-menu-item>
               `
             : ''}
-          <sl-menu-item value="terminals" ?checked=${isTerminal}>
+          <sl-menu-item type="checkbox" value="terminals" ?checked=${isTerminal}>
             <sl-icon slot="prefix" name="terminal"></sl-icon>
             Terminals
             ${this.terminalSessionCount > 0
