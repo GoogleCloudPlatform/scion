@@ -30,6 +30,7 @@ func TestProgram_MapKeyAccesses(t *testing.T) {
 		Variables: []celengine.Variable{
 			{Name: "chain", Type: celengine.Map(celengine.String(), celengine.Dyn())},
 			{Name: "key", Type: celengine.String()},
+			{Name: "tags", Type: celengine.List(celengine.String())},
 		},
 		Extensions: []celengine.Extension{celengine.ExtensionStrings},
 		Macros:     celengine.MacrosStandard,
@@ -95,6 +96,48 @@ func TestProgram_MapKeyAccesses(t *testing.T) {
 		{
 			name:        "bare chain equality",
 			expr:        `chain == {}`,
+			wantKeys:    []string{},
+			wantDynamic: true,
+		},
+		{
+			name:        "comprehension shadows chain inside loop body",
+			expr:        `tags.exists(chain, chain == "x")`,
+			wantKeys:    []string{},
+			wantDynamic: false,
+		},
+		{
+			name:        "comprehension shadows chain but free access outside is still detected",
+			expr:        `tags.exists(chain, chain == "x") && chain.foo == true`,
+			wantKeys:    []string{"foo"},
+			wantDynamic: false,
+		},
+		{
+			name:        "nested comprehension: outer binds x, inner rebinds chain",
+			expr:        `tags.exists(x, tags.exists(chain, chain == x))`,
+			wantKeys:    []string{},
+			wantDynamic: false,
+		},
+		{
+			name:        "nested comprehension: outer binds chain, inner binds x",
+			expr:        `tags.exists(chain, tags.exists(x, chain == x))`,
+			wantKeys:    []string{},
+			wantDynamic: false,
+		},
+		{
+			name:        "nested comprehension: outer binds x, inner range uses free chain.foo",
+			expr:        `tags.exists(x, chain.foo.exists(chain, chain == x))`,
+			wantKeys:    []string{"foo"},
+			wantDynamic: false,
+		},
+		{
+			name:        "shadowing var used in range expression (range chain is free)",
+			expr:        `chain.items.exists(chain, chain == "x")`,
+			wantKeys:    []string{"items"},
+			wantDynamic: false,
+		},
+		{
+			name:        "bare chain iterated in range expression is dynamic",
+			expr:        `chain.exists(chain, chain == "x")`,
 			wantKeys:    []string{},
 			wantDynamic: true,
 		},

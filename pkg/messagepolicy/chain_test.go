@@ -116,15 +116,25 @@ func TestChainAuthoring_Validation(t *testing.T) {
 	ctx := context.Background()
 	ev := newTestChainEvaluator(t)
 
-	// Happy path: valid CEL-only guard + violation on enforce + E1/E2 surfaces.
+	// Happy path: valid CEL-only guard + violation on enforce + E1/E2 surfaces,
+	// including a comprehension whose local iteration variable is named `chain`
+	// (lexically shadowed, not a free `chain.*` reference).
 	okSpec := validChainAuthoringSpec()
 	okSpec.Scope.Surfaces = []string{
 		messagepolicy.SurfaceAgentToUser,
 		messagepolicy.SurfaceAgentToConversation,
 	}
+	okSpec.Steps[0].Expr = `mentioned_agent_ids.exists(chain, chain == "a1") || surface == "agent_to_user"`
 	mode, err := ev.ValidateAuthoring(ctx, okSpec)
 	require.NoError(t, err)
 	assert.Equal(t, messagepolicy.ModeEnforce, mode)
+
+	// Nested shadowing comprehensions (outer binds x, inner binds chain; and vice versa) are accepted.
+	nestedShadowSpec := validChainAuthoringSpec()
+	nestedShadowSpec.Steps[0].Expr = `mentioned_agent_ids.exists(x, mentioned_user_ids.exists(chain, chain == x))`
+	nestedShadowSpec.Steps[1].Expr = `mentioned_agent_ids.exists(chain, mentioned_user_ids.exists(x, chain == x))`
+	_, err = ev.ValidateAuthoring(ctx, nestedShadowSpec)
+	require.NoError(t, err)
 
 	cases := []struct {
 		name     string
@@ -336,6 +346,22 @@ func TestChainAuthoring_Validation(t *testing.T) {
 				s.Steps[1].Expr = `size(chain) > 0`
 			},
 			wantCode: messagepolicy.ErrCodeDynamicStepReference,
+			wantFld:  "steps[1].expr",
+		},
+		{
+			name: "free chain access outside shadowing comprehension still rejected",
+			mutate: func(s *messagepolicy.AuthoringSpec) {
+				s.Steps[1].Expr = `mentioned_agent_ids.exists(chain, chain == "x") && chain.foo == true`
+			},
+			wantCode: messagepolicy.ErrCodeForwardReference,
+			wantFld:  "steps[1].expr",
+		},
+		{
+			name: "free chain access in comprehension range expression still rejected",
+			mutate: func(s *messagepolicy.AuthoringSpec) {
+				s.Steps[1].Expr = `chain.items.exists(chain, chain == "x")`
+			},
+			wantCode: messagepolicy.ErrCodeForwardReference,
 			wantFld:  "steps[1].expr",
 		},
 		{
