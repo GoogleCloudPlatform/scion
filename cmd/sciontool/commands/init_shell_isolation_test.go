@@ -37,7 +37,11 @@ type parsedSeedContext struct {
 	Version    int    `yaml:"version"`
 	CurrentHub string `yaml:"current_hub"`
 	Hubs       map[string]*struct {
-		Endpoint string `yaml:"endpoint"`
+		Endpoint  string `yaml:"endpoint"`
+		Transport *struct {
+			Mode     string `yaml:"mode"`
+			Audience string `yaml:"audience"`
+		} `yaml:"transport"`
 	} `yaml:"hubs"`
 }
 
@@ -286,21 +290,98 @@ func TestSeedShellCLIContext(t *testing.T) {
 		}
 	})
 
-	for _, mode := range []string{"iap", "cloudrun_invoker"} {
-		t.Run("skips in proxy transport mode "+mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mode         string
+		audEnvKey    string
+		audience     string
+		wantAudience string
+	}{
+		{
+			name:         "iap with SCION_TRANSPORT_AUDIENCE",
+			mode:         "iap",
+			audEnvKey:    transportauth.EnvTransportAudience,
+			audience:     "12345.apps.googleusercontent.com",
+			wantAudience: "12345.apps.googleusercontent.com",
+		},
+		{
+			name:         "cloudrun_invoker with SCION_TRANSPORT_AUDIENCE",
+			mode:         "cloudrun_invoker",
+			audEnvKey:    transportauth.EnvTransportAudience,
+			audience:     "https://hub.example.com",
+			wantAudience: "https://hub.example.com",
+		},
+		{
+			name:         "iap with legacy SCION_HUB_OIDC_AUDIENCE fallback",
+			mode:         "iap",
+			audEnvKey:    transportauth.EnvHubOIDCAudience,
+			audience:     "legacy-aud.apps.googleusercontent.com",
+			wantAudience: "legacy-aud.apps.googleusercontent.com",
+		},
+		{
+			name:         "iap without audience",
+			mode:         "iap",
+			audEnvKey:    "",
+			audience:     "",
+			wantAudience: "",
+		},
+	} {
+		t.Run("seeds transport block in proxy mode "+tc.name, func(t *testing.T) {
 			home := t.TempDir()
+			const secretTransportToken = "eyJhbGciOiJSUzI1NiJ9.pid1-transport-secret.sig"
 			env := map[string]string{
-				"SCION_HUB_ENDPOINT":           "https://hub.example.com",
-				transportauth.EnvTransportMode: mode,
+				"SCION_HUB_ENDPOINT":                  "HTTPS://Hub.Example.COM:443/",
+				transportauth.EnvTransportMode:        tc.mode,
+				transportauth.EnvTransportToken:       secretTransportToken,
+				transportauth.EnvTransportTokenExpiry: "2099-01-01T00:00:00Z",
+			}
+			if tc.audEnvKey != "" {
+				env[tc.audEnvKey] = tc.audience
 			}
 			if err := seedShellCLIContext(home, 0, 0, func(k string) string { return env[k] }); err != nil {
-				t.Fatalf("seedShellCLIContext(%s): %v", mode, err)
+				t.Fatalf("seedShellCLIContext(%s): %v", tc.mode, err)
 			}
-			if _, err := os.Stat(filepath.Join(home, ".scion", "context.yaml")); !os.IsNotExist(err) {
-				t.Fatalf("expected no context.yaml in proxy mode %s, stat err=%v", mode, err)
+			data, err := os.ReadFile(filepath.Join(home, ".scion", "context.yaml"))
+			if err != nil {
+				t.Fatalf("read seeded context.yaml: %v", err)
+			}
+			if strings.Contains(string(data), secretTransportToken) || strings.Contains(string(data), "token") {
+				t.Fatalf("seeded context.yaml must never contain PID 1 transport token:\n%s", data)
+			}
+			var parsed parsedSeedContext
+			if err := yaml.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("unmarshal seeded context.yaml: %v", err)
+			}
+			entry := parsed.Hubs["hub"]
+			if parsed.Version != 1 || parsed.CurrentHub != "hub" || entry == nil || entry.Endpoint != "https://hub.example.com" {
+				t.Fatalf("parsed = %+v", parsed)
+			}
+			if entry.Transport == nil {
+				t.Fatalf("expected transport block in proxy mode %s:\n%s", tc.mode, data)
+			}
+			if entry.Transport.Mode != tc.mode || entry.Transport.Audience != tc.wantAudience {
+				t.Errorf("transport = %+v, want {Mode:%q Audience:%q}", *entry.Transport, tc.mode, tc.wantAudience)
 			}
 		})
 	}
+
+	t.Run("non-proxy mode omits transport even when audience is set", func(t *testing.T) {
+		home := t.TempDir()
+		env := map[string]string{
+			"SCION_HUB_ENDPOINT":               "https://hub.example.com",
+			transportauth.EnvTransportAudience: "unused-audience",
+		}
+		if err := seedShellCLIContext(home, 0, 0, func(k string) string { return env[k] }); err != nil {
+			t.Fatalf("seedShellCLIContext: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, ".scion", "context.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "transport") || strings.Contains(string(data), "unused-audience") {
+			t.Fatalf("non-proxy seed must omit transport block:\n%s", data)
+		}
+	})
 
 	t.Run("never overwrites an existing context.yaml (byte-identical)", func(t *testing.T) {
 		home := t.TempDir()

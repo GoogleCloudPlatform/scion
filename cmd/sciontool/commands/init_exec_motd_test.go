@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,6 +81,7 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 			"login block must appear above the registration line")
 		assert.Contains(t, got, "Home persistence: enabled")
 		assert.NotContains(t, got, "WARNING: $HOME is NOT persistent")
+		assert.NotContains(t, got, "transport auth")
 		assert.LessOrEqual(t, strings.Count(got, "\n"), 20, "MOTD must fit on one screen")
 
 		scriptData, err := os.ReadFile(scriptPath)
@@ -127,6 +130,43 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 		assert.NotContains(t, got, "ops\n")
 		assert.Contains(t, got, "scion exec-container set 'ops[31m;rm -rf /'")
 	})
+}
+
+func TestBuildExecContainerMOTD_ProxyTransportLine(t *testing.T) {
+	baseEnv := func(mode, persistent string) func(string) string {
+		env := map[string]string{
+			"SCION_HARNESS":                "shell",
+			"SCION_AGENT_NAME":             "ops-box",
+			"SCION_HOME_PERSISTENT":        persistent,
+			transportauth.EnvTransportMode: mode,
+		}
+		return func(k string) string { return env[k] }
+	}
+
+	for _, mode := range []string{"iap", "cloudrun_invoker"} {
+		t.Run("proxy_mode_"+mode, func(t *testing.T) {
+			for _, persistent := range []string{"true", "false"} {
+				got := buildExecContainerMOTD(baseEnv(mode, persistent))
+				assert.Contains(t, got, "Hub requires transport auth: log in with your own credentials first.")
+				// Worst case (persistent=false + login block + proxy transport line)
+				// must stay within the 20-line one-screen budget.
+				assert.LessOrEqual(t, strings.Count(got, "\n"), 20,
+					"MOTD in proxy mode (persistent=%s) must fit within 20-line budget", persistent)
+				for _, line := range strings.Split(got, "\n") {
+					assert.LessOrEqual(t, utf8.RuneCountInString(line), 70,
+						"MOTD line exceeds 70 runes (mode=%s persistent=%s): %q", mode, persistent, line)
+				}
+			}
+		})
+	}
+
+	for _, mode := range []string{"", "none", "unknown"} {
+		t.Run("non_proxy_mode_"+mode, func(t *testing.T) {
+			got := buildExecContainerMOTD(baseEnv(mode, "true"))
+			assert.NotContains(t, got, "transport auth")
+			assert.NotContains(t, got, "your own credentials")
+		})
+	}
 }
 
 func TestExecContainerProfileScript_SilentInNonInteractiveShell(t *testing.T) {

@@ -327,15 +327,14 @@ func removeEnvFileNoFollow(agentHome string) error {
 
 // seedShellCLIContext writes <agentHome>/.scion/context.yaml with the
 // container's hub endpoint (SCION_HUB_ENDPOINT, falling back to SCION_HUB_URL)
-// if and only if the file does not already exist. Writes use dirfd no-follow +
-// O_EXCL with mode 0600 and owner uid:gid so a pre-existing file (on a
-// persistent home) or planted symlink is never overwritten or followed.
+// if and only if the file does not already exist. In proxy transport mode
+// (SCION_TRANSPORT_MODE in {iap, cloudrun_invoker}), it also seeds
+// hubs.<nick>.transport {mode, audience} from PID 1's environment without ever
+// copying PID 1's transport token. Writes use dirfd no-follow + O_EXCL with
+// mode 0600 and owner uid:gid so a pre-existing file (on a persistent home) or
+// planted symlink is never overwritten or followed.
 func seedShellCLIContext(agentHome string, uid, gid int, getenv func(string) string) error {
 	if getenv == nil {
-		return nil
-	}
-	if mode := strings.TrimSpace(getenv(transportauth.EnvTransportMode)); transportauth.IsProxyMode(mode) {
-		log.Debug("Skipping plain-endpoint CLI context seed in proxy transport mode %q", mode)
 		return nil
 	}
 	rawEndpoint := strings.TrimSpace(getenv("SCION_HUB_ENDPOINT"))
@@ -347,7 +346,19 @@ func seedShellCLIContext(agentHome string, uid, gid int, getenv func(string) str
 		return nil
 	}
 
-	data, err := clicontextseed.Render(clicontextseed.Options{Endpoint: rawEndpoint})
+	opts := clicontextseed.Options{Endpoint: rawEndpoint}
+	if mode := strings.TrimSpace(getenv(transportauth.EnvTransportMode)); transportauth.IsProxyMode(mode) {
+		audience := strings.TrimSpace(getenv(transportauth.EnvTransportAudience))
+		if audience == "" {
+			audience = strings.TrimSpace(getenv(transportauth.EnvHubOIDCAudience))
+		}
+		opts.Transport = &clicontextseed.TransportOptions{
+			Mode:     mode,
+			Audience: audience,
+		}
+	}
+
+	data, err := clicontextseed.Render(opts)
 	if err != nil {
 		return err
 	}
