@@ -156,6 +156,34 @@ describe('scion-review-note-dialog', () => {
     slDialog.dispatchEvent(new CustomEvent('sl-request-close'));
     await expect(pending).resolves.toBeNull();
   });
+
+  it('cancels on Escape from the textarea unless composing', async () => {
+    const el = await mount();
+    const pending = el.ask({ note: 'Draft', number: 1, quote: '', context: '' });
+    await el.updateComplete;
+
+    const slDialog = el.shadowRoot!.querySelector('sl-dialog')!;
+    const textarea = el.shadowRoot!.querySelector('textarea')!;
+
+    // IME composition Escape must not dismiss the dialog.
+    const composingEsc = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      isComposing: true,
+      cancelable: true,
+    });
+    textarea.dispatchEvent(composingEsc);
+    expect(composingEsc.defaultPrevented).toBe(false);
+    await el.updateComplete;
+    expect(slDialog.hasAttribute('open')).toBe(true);
+
+    // Normal Escape cancels and closes.
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    textarea.dispatchEvent(esc);
+    expect(esc.defaultPrevented).toBe(true);
+    await expect(pending).resolves.toBeNull();
+    await el.updateComplete;
+    expect(slDialog.hasAttribute('open')).toBe(false);
+  });
 });
 
 describe('scion-review-note-dialog: visualViewport mobile keyboard tracking', () => {

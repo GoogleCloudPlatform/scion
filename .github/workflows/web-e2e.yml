@@ -14,9 +14,9 @@
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
 # check. PRs and main pushes run only when web/ (or this file) changes,
-# or one of the few Go paths the page-policy, chat-decisions, inbox and
-# port-proxy suites exercise (listed under on:, below); the nightly run covers
-# everything else, such as browser drift.
+# or one of the few Go paths the page-policy, chat-decisions, inbox,
+# port-proxy and artifacts suites exercise (listed under on:, below); the
+# nightly run covers everything else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
 # all in full Chromium (except artifacts-review, which runs Chromium, Firefox
@@ -70,21 +70,24 @@
 # webServer start timeout, globalTimeout) live in each suite config, gated
 # on CI, so local runs are unchanged.
 #
-# Runtime and cost: about 23 minutes of test time per full run (most of it
-# terminal-workspace, chat-palette, terminal-entrypoints and
-# terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
-# 50-60 runner-minutes across the 16 mocked-hub jobs; retries of failing
-# tests add to that. The terminal-workspace job also runs a Vite production
-# build first, which adds about 1 minute (that job takes about 4 minutes in
-# total). The five real-hub jobs, test-identity-session, page-policy,
-# chat-decisions, inbox and port-proxy, each add setup-go, a Go build (make
-# build; a few minutes on a cold Go cache, less with the setup-go cache) and a
-# Vite production build before a short suite; port-proxy also builds the helper
-# and runs a second suite (the page view journeys, ptone/scion#5569) on a
-# second hub, which adds a few minutes; its job timeout is 35 minutes, the
-# others' 20.
-# iap-driver is the 22nd job (22 jobs in total).
-# Wall clock is bounded by the slowest job, about 8-10 minutes.
+# Runtime and cost: 29 jobs in total (20 mocked-hub jobs, 8 real-hub jobs, and
+# iap-driver). The mocked-hub jobs take roughly 2-3 minutes of setup each plus
+# test time (terminal-workspace also runs a Vite production build, ~4 minutes
+# total). The eight real-hub jobs (test-identity-session, page-policy,
+# chat-decisions, inbox, port-proxy, artifacts-review, artifacts-access and
+# artifacts-agent-owned) each add setup-go, a Go build (make build; a few
+# minutes on a cold Go cache, less with the setup-go cache) and a Vite
+# production build before running their suite(s):
+# - port-proxy also builds the fake agent helper and runs a second suite (the
+#   page view journeys, ptone/scion#5569) on a second hub; timeout is 35 min.
+# - artifacts-review runs across Chromium, Firefox and WebKit (~10.6 minutes of
+#   test time across the 3 engines plus Go/Vite build and browser setup;
+#   timeout is 35 min) and is the slowest, wall-clock-bounding job (~13-15 min).
+# - artifacts-access runs R1 (~1.2 min) followed by the render R2 suite
+#   (~1.9 min) sharing the same Go/Vite build; timeout is 20 min.
+# - artifacts-agent-owned runs the no-runtime tier (~0.7 min); timeout is 20 min.
+# - The remaining jobs use a 20-minute timeout. Retries of failing tests add to
+#   runner-minutes.
 
 name: Web E2E (advisory)
 
@@ -336,9 +339,10 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          # Read only by test-identity-session, page-policy, chat-decisions,
-          # inbox and port-proxy: the binaries and web assets were built in the
-          # steps above.
+          # Read only by real-hub suites (test-identity-session, page-policy,
+          # chat-decisions, inbox, port-proxy, artifacts-review,
+          # artifacts-access and artifacts-agent-owned): the binaries and web
+          # assets were built in the steps above.
           E2E_PREBUILT: '1'
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
@@ -385,13 +389,14 @@ jobs:
       #
       # Upload policy (ptone/scion#6142):
       # - Restricted-evidence / no-capture artifacts suites (artifacts-review,
-      #   artifacts-access, artifacts-agent-owned) never upload public CI
-      #   artifacts so restricted isolation/non-disclosure evidence and failure
-      #   details stay out of public workflow downloads.
-      # - Playwright 1.62+ still writes error-context.md on test failure even
-      #   with PLAYWRIGHT_NO_COPY_PROMPT=1 (containing unredacted error text and
-      #   call logs), so error-context.md and *-evidence.json are excluded from
-      #   all uploads as defense in depth.
+      #   artifacts-access, artifacts-agent-owned) skip artifact upload
+      #   entirely so restricted isolation/non-disclosure evidence and failure
+      #   context stay out of public workflow downloads. Note that
+      #   PLAYWRIGHT_NO_COPY_PROMPT=1 (set in those suite configs) only drops
+      #   the page snapshot from error-context.md (the file is still written
+      #   with error text and call log), so skipping upload is the control.
+      # - Traces and HTML reports of the remaining suites carry page content
+      #   by design.
       - name: Upload traces and report
         if: ${{ !cancelled() && matrix.suite != 'artifacts-review' && matrix.suite != 'artifacts-access' && matrix.suite != 'artifacts-agent-owned' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -400,7 +405,5 @@ jobs:
           path: |
             web/playwright-report/
             web/test-results/
-            !web/test-results/**/error-context.md
-            !web/test-results/**/*-evidence.json
           if-no-files-found: ignore
           retention-days: 14

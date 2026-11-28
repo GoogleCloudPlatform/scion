@@ -18,8 +18,8 @@ import { chromiumLaunchOptions } from '../../playwright-chromium.js';
 
 const CI = !!process.env.CI;
 
-// Suppress Playwright's failure page snapshot (error-context.md) so page
-// content is not captured on failure. Inherited by workers.
+// Drop the page snapshot from Playwright's failure context (error-context.md
+// is still written with error text and call log). Inherited by workers.
 process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1';
 
 // Access to an artifact owned by an agent (R1-B), end to end against the
