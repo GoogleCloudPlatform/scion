@@ -242,6 +242,8 @@ type Tx struct {
 	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
+	// UsageGroupBudgetSeed is the client for interacting with the UsageGroupBudgetSeed builders.
+	UsageGroupBudgetSeed *UsageGroupBudgetSeedClient
 	// UsageGroupRollupDaily is the client for interacting with the UsageGroupRollupDaily builders.
 	UsageGroupRollupDaily *UsageGroupRollupDailyClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
@@ -512,6 +514,7 @@ func (tx *Tx) init() {
 	tx.UploadSession = NewUploadSessionClient(tx.config)
 	tx.UsageBudgetState = NewUsageBudgetStateClient(tx.config)
 	tx.UsageEvent = NewUsageEventClient(tx.config)
+	tx.UsageGroupBudgetSeed = NewUsageGroupBudgetSeedClient(tx.config)
 	tx.UsageGroupRollupDaily = NewUsageGroupRollupDailyClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.UsageRollupDaily = NewUsageRollupDailyClient(tx.config)

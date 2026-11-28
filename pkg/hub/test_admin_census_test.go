@@ -302,7 +302,10 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"seed.go:warnOwnerOnlyLegacyProject:ListRoleBindingsForScope":                     "startup: legacy owner warning",
 
 	// Tokenomics pooled-group billing read (never grants authorization).
-	"token_budget_groups.go:ResolveForUsers:GetEffectiveGroupsForUsers": "billing: billing user's effective groups for pooled-group token budget charging; never grants authorization",
+	"token_budget_groups.go:ResolveForUsers:GetEffectiveGroupsForUsers":                      "billing: billing user's effective groups for pooled-group token budget charging; never grants authorization",
+	"handlers_group_usage_budgets.go:handleGroupUsageBudgets:QueryGroupMemberUsageBreakdown": "display: per-member token usage breakdown for group budgets response; never decides authority",
+	"handlers_group_usage_budgets.go:authorizeGroupUsageBudgets:GetGroupMembership":          "decision: group owner/admin membership for pooled-group budget breakdown; enforces scoped-UAT quota.read ceiling/boundary and testAdminPrincipalLive clamp",
+	"handlers_group_usage_budgets.go:authorizeGroupUsageBudgets:GetEffectiveGroups":          "decision: effective group membership for pooled-group budget pool totals; enforces scoped-UAT quota.read ceiling/boundary and testAdminPrincipalLive clamp",
 }
 
 // testAdminAdminEmailsCensus classifies every function that reads the

@@ -622,12 +622,8 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		if created.Value > 0 {
 			_ = s.TokenBudgetEvaluator()
 			if seeder := s.GroupBudgetSeeder(); seeder != nil {
-				actAt := created.UpdatedAt
-				if actAt.IsZero() {
-					actAt = created.CreatedAt
-				}
 				if seedErr := seeder.EnqueueForBindingActivation(
-					r.Context(), limitDef.Name, created.SubjectID, created.ScopeType, created.ScopeID, actAt,
+					r.Context(), limitDef.Name, created.SubjectID, created.ScopeType, created.ScopeID, time.Time{},
 				); seedErr != nil {
 					slog.Warn("failed to enqueue pooled group budget seed on binding create",
 						"binding_id", created.ID, "group_id", created.SubjectID, "error", seedErr)
@@ -771,7 +767,7 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 			_ = s.TokenBudgetEvaluator()
 			if seeder := s.GroupBudgetSeeder(); seeder != nil {
 				if seedErr := seeder.EnqueueForBindingActivation(
-					r.Context(), limitDef.Name, updated.SubjectID, updated.ScopeType, updated.ScopeID, updated.UpdatedAt,
+					r.Context(), limitDef.Name, updated.SubjectID, updated.ScopeType, updated.ScopeID, time.Time{},
 				); seedErr != nil {
 					slog.Warn("failed to enqueue pooled group budget seed on binding update",
 						"binding_id", updated.ID, "group_id", updated.SubjectID, "error", seedErr)

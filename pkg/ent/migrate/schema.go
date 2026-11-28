@@ -4865,6 +4865,41 @@ var (
 			},
 		},
 	}
+	// UsageGroupBudgetSeedsColumns holds the columns for the "usage_group_budget_seeds" table.
+	UsageGroupBudgetSeedsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "group_id", Type: field.TypeString},
+		{Name: "project_scope_id", Type: field.TypeString, Default: ""},
+		{Name: "window_kind", Type: field.TypeString},
+		{Name: "window_start_utc", Type: field.TypeTime},
+		{Name: "window_end_utc", Type: field.TypeTime},
+		{Name: "activated_at", Type: field.TypeTime},
+		{Name: "cutoff_at", Type: field.TypeTime},
+		{Name: "frozen_member_ids", Type: field.TypeJSON, Nullable: true},
+		{Name: "member_snapshot_set", Type: field.TypeBool, Default: false},
+		{Name: "finalized", Type: field.TypeBool, Default: false},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// UsageGroupBudgetSeedsTable holds the schema information for the "usage_group_budget_seeds" table.
+	UsageGroupBudgetSeedsTable = &schema.Table{
+		Name:       "usage_group_budget_seeds",
+		Columns:    UsageGroupBudgetSeedsColumns,
+		PrimaryKey: []*schema.Column{UsageGroupBudgetSeedsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_group_budget_seeds_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[1], UsageGroupBudgetSeedsColumns[2], UsageGroupBudgetSeedsColumns[3], UsageGroupBudgetSeedsColumns[4]},
+			},
+			{
+				Name:    "usagegroupbudgetseed_finalized_window_end_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[10], UsageGroupBudgetSeedsColumns[5]},
+			},
+		},
+	}
 	// UsageGroupRollupsDailyColumns holds the columns for the "usage_group_rollups_daily" table.
 	UsageGroupRollupsDailyColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -5507,6 +5542,7 @@ var (
 		UploadSessionsTable,
 		UsageBudgetStateTable,
 		UsageEventsTable,
+		UsageGroupBudgetSeedsTable,
 		UsageGroupRollupsDailyTable,
 		UsageReservationsTable,
 		UsageRollupsDailyTable,
@@ -5832,6 +5868,9 @@ func init() {
 	UsageEventsTable.ForeignKeys[0].RefTable = RunAttributionTable
 	UsageEventsTable.Annotation = &entsql.Annotation{
 		Table: "usage_events",
+	}
+	UsageGroupBudgetSeedsTable.Annotation = &entsql.Annotation{
+		Table: "usage_group_budget_seeds",
 	}
 	UsageGroupRollupsDailyTable.Annotation = &entsql.Annotation{
 		Table: "usage_group_rollups_daily",

@@ -127,6 +127,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegroupbudgetseed"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
@@ -314,6 +315,7 @@ func checkColumn(t, c string) error {
 			uploadsession.Table:                 uploadsession.ValidColumn,
 			usagebudgetstate.Table:              usagebudgetstate.ValidColumn,
 			usageevent.Table:                    usageevent.ValidColumn,
+			usagegroupbudgetseed.Table:          usagegroupbudgetseed.ValidColumn,
 			usagegrouprollupdaily.Table:         usagegrouprollupdaily.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
 			usagerollupdaily.Table:              usagerollupdaily.ValidColumn,

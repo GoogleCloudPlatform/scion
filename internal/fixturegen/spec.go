@@ -1735,6 +1735,24 @@ func Spec() []TableFixture {
 				"events":           int64(1),
 			},
 		}},
+		{Table: "usage_group_budget_seeds", Rows: []row{
+			{
+				"id":                  "c7000000-0000-0000-0000-000000000001",
+				"group_id":            groupID,
+				"project_scope_id":    "",
+				"window_kind":         "month",
+				"window_start_utc":    time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+				"window_end_utc":      time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC),
+				"activated_at":        baseTime,
+				"cutoff_at":           baseTime.Add(2 * time.Minute),
+				"frozen_member_ids":   `["` + userID + `"]`,
+				"member_snapshot_set": true,
+				"finalized":           true,
+				"state_version":       int64(2),
+				"created_at":          baseTime,
+				"updated_at":          baseTime,
+			},
+		}},
 		{Table: "usage_budget_state", Rows: []row{
 			{
 				"id":                  "c5000000-0000-0000-0000-000000000001",

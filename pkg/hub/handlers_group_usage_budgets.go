@@ -160,7 +160,8 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Group bindings by (limitDefID, projectScopeID) and resolve effective cap/action.
+	// Group bindings by (limitDefID, projectScopeID), including explicit
+	// unlimited (value == 0) bindings so they are emitted with cap: null (O4).
 	type poolKey struct {
 		limitDefID     string
 		projectScopeID string
@@ -168,7 +169,7 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 	seenPools := make(map[poolKey]struct{})
 	poolOrder := make([]poolKey, 0)
 	for _, b := range bindings {
-		if b == nil || b.Value <= 0 {
+		if b == nil {
 			continue
 		}
 		if _, ok := defsByID[b.LimitDefinitionID]; !ok {
@@ -196,15 +197,6 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 		}
 		return poolOrder[i].projectScopeID < poolOrder[j].projectScopeID
 	})
-
-	var seedState *store.UsageGroupSeedState
-	if includeBreakdown && len(poolOrder) > 0 {
-		seedState, err = s.store.GetUsageGroupSeedState(ctx)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-	}
 
 	userCache := make(map[string]*store.User)
 	lookupUser := func(uid string) *store.User {
@@ -236,9 +228,6 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if capVal <= 0 {
-			continue
-		}
 
 		var winStart, winEnd time.Time
 		if info.window == "day" {
@@ -265,8 +254,13 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
-		stateStr := computeBudgetState(consumed, capVal)
-		capCopy := capVal
+		var capPtr *int64
+		stateStr := store.UsageBudgetStateOK
+		if capVal > 0 {
+			capCopy := capVal
+			capPtr = &capCopy
+			stateStr = computeBudgetState(consumed, capVal)
+		}
 		item := GroupBudgetItem{
 			LimitDefinitionID: info.def.ID,
 			LimitName:         info.def.Name,
@@ -275,7 +269,7 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 			ProjectScopeID:    pk.projectScopeID,
 			WindowStartUTC:    winStart,
 			WindowEndUTC:      winEnd,
-			Cap:               &capCopy,
+			Cap:               capPtr,
 			TokenAction:       action,
 			Consumed:          consumed,
 			State:             stateStr,
@@ -293,12 +287,15 @@ func (s *Server) handleGroupUsageBudgets(w http.ResponseWriter, r *http.Request,
 		if includeBreakdown {
 			var seededMembers []string
 			var seedFrom, seedTo time.Time
-			if seedState != nil {
-				if rec := seedState.Records[groupSeedRecordKey(group.ID, pk.projectScopeID, winStart)]; rec != nil {
-					seededMembers = rec.FrozenMemberIDs
-					seedFrom = rec.WindowStartUTC
-					seedTo = rec.CutoffAt
-				}
+			seedRec, seedErr := s.store.GetUsageGroupSeedRecord(ctx, group.ID, pk.projectScopeID, info.window, winStart)
+			if seedErr != nil && !errors.Is(seedErr, store.ErrNotFound) {
+				writeErrorFromErr(w, seedErr, "")
+				return
+			}
+			if seedRec != nil {
+				seededMembers = seedRec.FrozenMemberIDs
+				seedFrom = seedRec.WindowStartUTC
+				seedTo = seedRec.CutoffAt
 			}
 			rawMembers, err := s.store.QueryGroupMemberUsageBreakdown(
 				ctx, group.ID, pk.projectScopeID, seededMembers, seedFrom, seedTo, winStart, winEnd,
@@ -365,6 +362,28 @@ func (s *Server) authorizeGroupUsageBudgets(
 	// 2. Callers with group.update on this group get full breakdown.
 	if updDec := s.authzService.CheckAccess(ctx, identity, groupResource(group), ActionUpdate); updDec.Allowed {
 		return true, true, nil
+	}
+
+	// R4: Membership-based branches below must honor the scoped-UAT ceiling
+	// and boundary (mirroring projectCloneTokenDenial / uatListPermitted).
+	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		if scoped == nil || !scoped.Ceiling().Allows("quota.read") {
+			return false, false, nil
+		}
+		boundary := scoped.Boundary()
+		if !boundary.Valid() || !permissionEligibleForBoundary("quota.read", boundary.Kind) {
+			return false, false, nil
+		}
+	}
+
+	// R3: Apply the admin-kind test-identity decide-time clamp before trusting
+	// direct or effective group membership.
+	live, err := s.authzService.testAdminPrincipalLive(ctx, user.ID())
+	if err != nil {
+		return false, false, err
+	}
+	if !live {
+		return false, false, nil
 	}
 
 	// 3. Direct group owner/admin membership gets full breakdown.

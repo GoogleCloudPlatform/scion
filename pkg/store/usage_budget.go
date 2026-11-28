@@ -63,10 +63,11 @@ type UsageBudgetState struct {
 	UpdatedAt           time.Time  `json:"updatedAt"`
 }
 
-// UsageGroupSeedStateSection is the internal hub_settings section that
-// persists D6 pooled-group seeder activation/finalization records across
-// replicas and restarts.
-const UsageGroupSeedStateSection = "system.usage_group_budget_seeds"
+// Window kinds for pooled-group seed records.
+const (
+	UsageBudgetWindowDay   = "day"
+	UsageBudgetWindowMonth = "month"
+)
 
 // UsageGroupRollupDay holds one daily bucket computed for
 // usage_group_rollups_daily (origin="seed").
@@ -81,10 +82,13 @@ type UsageGroupRollupDay struct {
 	Events         int64
 }
 
-// UsageGroupSeedRecord tracks D6 seed state for one (group, project_scope, window).
+// UsageGroupSeedRecord tracks per-key D6 seed state in usage_group_budget_seeds
+// for one (group_id, project_scope_id, window_kind, window_start_utc).
 type UsageGroupSeedRecord struct {
+	ID                string    `json:"id"`
 	GroupID           string    `json:"group_id"`
 	ProjectScopeID    string    `json:"project_scope_id"`
+	WindowKind        string    `json:"window_kind"` // "day" | "month"
 	WindowStartUTC    time.Time `json:"window_start_utc"`
 	WindowEndUTC      time.Time `json:"window_end_utc"`
 	ActivatedAt       time.Time `json:"activated_at"`
@@ -92,13 +96,23 @@ type UsageGroupSeedRecord struct {
 	FrozenMemberIDs   []string  `json:"frozen_member_ids,omitempty"`
 	MemberSnapshotSet bool      `json:"member_snapshot_set"`
 	Finalized         bool      `json:"finalized"`
+	StateVersion      int64     `json:"state_version"`
+	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
-// UsageGroupSeedState holds all tracked D6 seed records keyed by
-// "<group_id>|<project_scope_id>|<YYYY-MM-DD>".
-type UsageGroupSeedState struct {
-	Records map[string]*UsageGroupSeedRecord `json:"records"`
+// UsageGroupSeedPassInput carries parameters for ExecuteUsageGroupBudgetSeedPass.
+type UsageGroupSeedPassInput struct {
+	GroupID               string
+	ProjectScopeID        string
+	WindowKind            string // "day" | "month"
+	WindowStartUTC        time.Time
+	WindowEndUTC          time.Time
+	ActivatedAt           time.Time
+	CutoffAt              time.Time
+	LedgerRetentionCutoff time.Time // zero means no retention clamp
+	Now                   time.Time
+	IsFinalPass           bool
 }
 
 // UsageGroupMemberBreakdown holds one user's attributed consumption within a
@@ -127,8 +141,8 @@ type UsageBudgetStore interface {
 
 	// ComputeUnchargedGroupRollupSeed aggregates usage_events in [fromTS, toTS)
 	// for memberUserIDs (optionally restricted to projectScopeID when non-empty)
-	// where groupID is NOT present in usage_events.charged_group_ids.
-	// Anomalous events are excluded from token counters identically to ingest.
+	// where groupID is NOT present in usage_events.charged_group_ids, using SQL
+	// GROUP BY per UTC day. Anomalous events are excluded from token counters.
 	ComputeUnchargedGroupRollupSeed(ctx context.Context, groupID, projectScopeID string, memberUserIDs []string, fromTS, toTS time.Time) ([]UsageGroupRollupDay, error)
 
 	// ReplaceUsageGroupRollupSeed idempotently replaces (SET, never adds) all
@@ -136,17 +150,32 @@ type UsageBudgetStore interface {
 	// windowEndUTC) in a single transaction, never touching origin="ingest" rows.
 	ReplaceUsageGroupRollupSeed(ctx context.Context, groupID, projectScopeID string, windowStartUTC, windowEndUTC time.Time, rows []UsageGroupRollupDay) error
 
-	// GetUsageGroupSeedState loads the persisted D6 pooled-group seed state.
-	GetUsageGroupSeedState(ctx context.Context) (*UsageGroupSeedState, error)
+	// RecordUsageGroupSeedActivation records an explicit binding activation
+	// (create with value>0, update 0->positive, or scope/subject change) for
+	// (group_id, project_scope_id, window_kind, window_start_utc). Creates the
+	// seed record if absent, or resets snapshot/finalized only when the new
+	// ActivatedAt is strictly after the stored ActivatedAt.
+	RecordUsageGroupSeedActivation(ctx context.Context, rec *UsageGroupSeedRecord) (*UsageGroupSeedRecord, error)
 
-	// SaveUsageGroupSeedState persists the D6 pooled-group seed state.
-	SaveUsageGroupSeedState(ctx context.Context, state *UsageGroupSeedState) error
+	// ExecuteUsageGroupBudgetSeedPass atomically executes one D6 seed pass
+	// (load record -> snapshot effective members if unset -> compute uncharged
+	// events -> SET origin="seed" rollups -> finalize if activatedAt matches
+	// and pass is final or past cutoff -> save record) inside a single per-key
+	// locked transaction. Returns (record, didMutate, err).
+	ExecuteUsageGroupBudgetSeedPass(ctx context.Context, in UsageGroupSeedPassInput) (*UsageGroupSeedRecord, bool, error)
 
-	// QueryGroupMemberUsageBreakdown aggregates per-member consumption from
-	// usage_events over [windowStartUTC, windowEndUTC) for (groupID,
-	// projectScopeID), covering both ingest-charged events (groupID in
-	// charged_group_ids) and pre-activation seeded events (uncharged events in
-	// [seedFromTS, seedToTS) by seededMemberUserIDs).
+	// GetUsageGroupSeedRecord returns the per-key seed record or ErrNotFound.
+	GetUsageGroupSeedRecord(ctx context.Context, groupID, projectScopeID, windowKind string, windowStartUTC time.Time) (*UsageGroupSeedRecord, error)
+
+	// ListIncompleteUsageGroupSeeds returns all non-finalized seed records
+	// whose window is still open (window_end_utc > activeAt).
+	ListIncompleteUsageGroupSeeds(ctx context.Context, activeAt time.Time) ([]*UsageGroupSeedRecord, error)
+
+	// QueryGroupMemberUsageBreakdown aggregates per-member consumption in SQL
+	// (GROUP BY billing_user_id) from usage_events over [windowStartUTC,
+	// windowEndUTC) for (groupID, projectScopeID), covering both ingest-charged
+	// events (groupID in charged_group_ids) and pre-activation seeded events
+	// (uncharged events in [seedFromTS, seedToTS) by seededMemberUserIDs).
 	QueryGroupMemberUsageBreakdown(ctx context.Context, groupID, projectScopeID string, seededMemberUserIDs []string, seedFromTS, seedToTS, windowStartUTC, windowEndUTC time.Time) ([]UsageGroupMemberBreakdown, error)
 
 	// GetUsageBudgetState returns the usage_budget_state row for key, or

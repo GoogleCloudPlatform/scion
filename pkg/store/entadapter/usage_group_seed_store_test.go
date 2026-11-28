@@ -135,6 +135,14 @@ func TestUsageGroupSeedStore_ComputeAndReplaceIdempotent(t *testing.T) {
 				TokenStatus: telemetrycontract.TokenStatusReported, EventTS: d1, ProducerEpoch: "ep-1", ProducerSeq: 4,
 				Anomalous: true,
 			},
+			// NULL token columns event -> SQL GROUP BY must coalesce cleanly to 0 without error.
+			{
+				HubID: "hub-1", EventID: "seed-ev-null", RunID: runID, ProjectID: proj1, AgentID: agentID,
+				BillingUserID: &userB, Harness: "claude", Model: "claude-sonnet-4-6",
+				ModelSource: telemetrycontract.ModelSourceEvent, UsageSource: telemetrycontract.UsageSourceNative,
+				Status: telemetrycontract.StatusSuccess, Calls: 1,
+				TokenStatus: telemetrycontract.TokenStatusNotReported, EventTS: d1, ProducerEpoch: "ep-1", ProducerSeq: 5,
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -186,39 +194,122 @@ func TestUsageGroupSeedStore_ComputeAndReplaceIdempotent(t *testing.T) {
 	assert.Equal(t, int64(250), breakdown[1].TokensSummable)
 }
 
-func TestUsageGroupSeedStore_SeedStateRoundTrip(t *testing.T) {
+func TestUsageGroupSeedStore_ActivationPassAndConcurrency(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
 
-	empty, err := cs.GetUsageGroupSeedState(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, empty.Records)
+	// Create two groups with distinct members.
+	g1 := &store.Group{ID: uuid.NewString(), Name: "g1", Slug: "g1-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+	g2 := &store.Group{ID: uuid.NewString(), Name: "g2", Slug: "g2-" + uuid.NewString()[:8], GroupType: store.GroupTypeExplicit}
+	require.NoError(t, cs.CreateGroup(ctx, g1))
+	require.NoError(t, cs.CreateGroup(ctx, g2))
 
-	t0 := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
-	st := &store.UsageGroupSeedState{
-		Records: map[string]*store.UsageGroupSeedRecord{
-			"g1||2026-11-01": {
-				GroupID:           "g1",
-				ProjectScopeID:    "",
-				WindowStartUTC:    time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
-				WindowEndUTC:      time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC),
-				ActivatedAt:       t0,
-				CutoffAt:          t0.Add(2 * time.Minute),
-				FrozenMemberIDs:   []string{"u1", "u2"},
-				MemberSnapshotSet: true,
-				Finalized:         true,
-				UpdatedAt:         t0.Add(2 * time.Minute),
-			},
-		},
+	u1 := &store.User{ID: uuid.NewString(), Email: "u1-seed@example.com", Role: store.UserRoleMember, Status: "active"}
+	u2 := &store.User{ID: uuid.NewString(), Email: "u2-seed@example.com", Role: store.UserRoleMember, Status: "active"}
+	require.NoError(t, cs.CreateUser(ctx, u1))
+	require.NoError(t, cs.CreateUser(ctx, u2))
+	require.NoError(t, cs.AddGroupMember(ctx, &store.GroupMember{GroupID: g1.ID, MemberType: store.GroupMemberTypeUser, MemberID: u1.ID, Role: store.GroupMemberRoleMember}))
+	require.NoError(t, cs.AddGroupMember(ctx, &store.GroupMember{GroupID: g2.ID, MemberType: store.GroupMemberTypeUser, MemberID: u2.ID, Role: store.GroupMemberRoleMember}))
+
+	// 1. O1: Day and Month records starting on the 1st of a month do NOT collide.
+	nov01 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	nov02 := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	dec01 := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	tAct := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+
+	_, err := cs.GetUsageGroupSeedRecord(ctx, g1.ID, "", store.UsageBudgetWindowDay, nov01)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	dayRec, err := cs.RecordUsageGroupSeedActivation(ctx, &store.UsageGroupSeedRecord{
+		GroupID: g1.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowDay,
+		WindowStartUTC: nov01, WindowEndUTC: nov02, ActivatedAt: tAct, CutoffAt: tAct.Add(2 * time.Minute),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetWindowDay, dayRec.WindowKind)
+	assert.False(t, dayRec.Finalized)
+
+	monthRec, err := cs.RecordUsageGroupSeedActivation(ctx, &store.UsageGroupSeedRecord{
+		GroupID: g1.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowMonth,
+		WindowStartUTC: nov01, WindowEndUTC: dec01, ActivatedAt: tAct, CutoffAt: tAct.Add(2 * time.Minute),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetWindowMonth, monthRec.WindowKind)
+	assert.False(t, monthRec.Finalized)
+
+	incomplete, err := cs.ListIncompleteUsageGroupSeeds(ctx, tAct)
+	require.NoError(t, err)
+	assert.Len(t, incomplete, 2, "day and month records on 2026-11-01 must coexist as separate keys")
+
+	// 2. O2: An older activation pass must NOT finalize a record that has been re-activated at a newer timestamp.
+	tAct2 := tAct.Add(10 * time.Minute)
+	_, err = cs.RecordUsageGroupSeedActivation(ctx, &store.UsageGroupSeedRecord{
+		GroupID: g1.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowDay,
+		WindowStartUTC: nov01, WindowEndUTC: nov02, ActivatedAt: tAct2, CutoffAt: tAct2.Add(2 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	// Stale final pass with old tAct must NOT finalize the tAct2 record.
+	recAfterStale, _, err := cs.ExecuteUsageGroupBudgetSeedPass(ctx, store.UsageGroupSeedPassInput{
+		GroupID: g1.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowDay,
+		WindowStartUTC: nov01, WindowEndUTC: nov02,
+		ActivatedAt: tAct, CutoffAt: tAct.Add(2 * time.Minute),
+		Now: tAct.Add(3 * time.Minute), IsFinalPass: true,
+	})
+	require.NoError(t, err)
+	assert.False(t, recAfterStale.Finalized, "stale activation pass must not finalize a newer activation")
+	assert.Equal(t, tAct2, recAfterStale.ActivatedAt)
+
+	// Matching final pass with tAct2 DOES finalize.
+	recAfterMatch, _, err := cs.ExecuteUsageGroupBudgetSeedPass(ctx, store.UsageGroupSeedPassInput{
+		GroupID: g1.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowDay,
+		WindowStartUTC: nov01, WindowEndUTC: nov02,
+		ActivatedAt: tAct2, CutoffAt: tAct2.Add(2 * time.Minute),
+		Now: tAct2.Add(2 * time.Minute), IsFinalPass: true,
+	})
+	require.NoError(t, err)
+	assert.True(t, recAfterMatch.Finalized)
+
+	// 3. R2: Concurrent passes across different keys and same key never drop records.
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	for i := 0; i < 3; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _, e := cs.ExecuteUsageGroupBudgetSeedPass(ctx, store.UsageGroupSeedPassInput{
+				GroupID: g1.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowMonth,
+				WindowStartUTC: nov01, WindowEndUTC: dec01,
+				ActivatedAt: tAct, CutoffAt: tAct.Add(2 * time.Minute),
+				Now: tAct.Add(2 * time.Minute), IsFinalPass: true,
+			})
+			errs <- e
+		}()
+		go func() {
+			defer wg.Done()
+			_, _, e := cs.ExecuteUsageGroupBudgetSeedPass(ctx, store.UsageGroupSeedPassInput{
+				GroupID: g2.ID, ProjectScopeID: "", WindowKind: store.UsageBudgetWindowMonth,
+				WindowStartUTC: nov01, WindowEndUTC: dec01,
+				ActivatedAt: tAct, CutoffAt: tAct.Add(2 * time.Minute),
+				Now: tAct.Add(2 * time.Minute), IsFinalPass: true,
+			})
+			errs <- e
+		}()
 	}
-	require.NoError(t, cs.SaveUsageGroupSeedState(ctx, st))
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		require.NoError(t, e)
+	}
 
-	got, err := cs.GetUsageGroupSeedState(ctx)
+	r1, err := cs.GetUsageGroupSeedRecord(ctx, g1.ID, "", store.UsageBudgetWindowMonth, nov01)
 	require.NoError(t, err)
-	rec := got.Records["g1||2026-11-01"]
-	require.NotNil(t, rec)
-	assert.True(t, rec.Finalized)
-	assert.Equal(t, []string{"u1", "u2"}, rec.FrozenMemberIDs)
+	assert.True(t, r1.Finalized)
+	assert.Equal(t, []string{u1.ID}, r1.FrozenMemberIDs)
+
+	r2, err := cs.GetUsageGroupSeedRecord(ctx, g2.ID, "", store.UsageBudgetWindowMonth, nov01)
+	require.NoError(t, err)
+	assert.True(t, r2.Finalized)
+	assert.Equal(t, []string{u2.ID}, r2.FrozenMemberIDs)
 }
