@@ -795,3 +795,45 @@ describe('scion-page-skills project filter and URL persistence (ptone/scion#8738
     expect(picker?.values).toEqual(['proj-2']);
   });
 });
+
+describe('skills page icon', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    await import('./skills.js');
+  }, 30_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it('uses the book icon in empty state, grid cards, and table rows', async () => {
+    const empty = await mountSkillsPage(() => Promise.resolve(jsonResponse({ skills: [] })));
+    element = empty.el;
+    expect(empty.el.shadowRoot?.querySelector('.empty-state sl-icon')?.getAttribute('name')).toBe(
+      'book'
+    );
+    empty.el.remove();
+
+    const populated = await mountSkillsPage(() =>
+      Promise.resolve(jsonResponse({ skills: [skill('s1')] }))
+    );
+    element = populated.el;
+    expect(
+      populated.el.shadowRoot
+        ?.querySelector('.skill-card .resource-name sl-icon')
+        ?.getAttribute('name')
+    ).toBe('book');
+
+    // Switch to table view and verify row icon
+    (populated.el as unknown as { viewMode: 'grid' | 'table' }).viewMode = 'table';
+    await populated.el.updateComplete;
+    expect(
+      populated.el.shadowRoot?.querySelector('tbody .name-cell sl-icon')?.getAttribute('name')
+    ).toBe('book');
+  });
+});

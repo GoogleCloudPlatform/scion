@@ -58,6 +58,7 @@ const USED_ICONS = [
   'at',
   'bar-chart',
   'bell',
+  'book',
   'box-arrow-in-down-left',
   'box-arrow-in-right',
   'box-arrow-right',

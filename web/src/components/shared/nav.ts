@@ -89,7 +89,7 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/projects', label: 'Projects', icon: 'folder' },
       { path: '/agents', label: 'Agents', icon: 'cpu' },
       { path: '/brokers', label: 'Brokers', icon: 'hdd-rack' },
-      { path: '/skills', label: 'Skills', icon: 'lightning-charge' },
+      { path: '/skills', label: 'Skills', icon: 'book' },
       {
         path: '/artifacts',
         label: 'Artifacts',

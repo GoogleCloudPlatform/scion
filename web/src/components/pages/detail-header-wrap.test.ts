@@ -129,7 +129,7 @@ const cases: Array<[string, PageCase]> = [
         skill: { id: 's-1', name: LONG_NAME, status: 'active', scope: 'global', ...CAPS },
       },
       method: 'renderHeader',
-      icon: 'sl-icon.[lightning-charge]',
+      icon: 'sl-icon.[book]',
       crumbs: [
         ['Skills', '/skills'],
         [LONG_NAME, undefined],

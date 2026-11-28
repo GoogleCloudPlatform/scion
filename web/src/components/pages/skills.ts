@@ -691,7 +691,7 @@ export class ScionPageSkills extends LitElement {
   private renderEmptyState() {
     return html`
       <div class="empty-state">
-        <sl-icon name="lightning-charge"></sl-icon>
+        <sl-icon name="book"></sl-icon>
         <h2>No Skills Found</h2>
         <p>
           Skills are reusable capabilities for
@@ -727,7 +727,7 @@ export class ScionPageSkills extends LitElement {
         <div class="skill-header">
           <div>
             <h3 class="resource-name">
-              <sl-icon name="lightning-charge"></sl-icon>
+              <sl-icon name="book"></sl-icon>
               <span>${skill.name}</span>
             </h3>
             <div class="skill-meta">
@@ -792,7 +792,7 @@ export class ScionPageSkills extends LitElement {
       >
         <td>
           <span class="name-cell">
-            <sl-icon name="lightning-charge"></sl-icon>
+            <sl-icon name="book"></sl-icon>
             <a href="/skills/${skill.id}">${skill.name}</a>
           </span>
         </td>
