@@ -418,7 +418,9 @@ describe('agent detail header labels', () => {
     (el as unknown as { agent: Agent }).agent = makeAgent({
       labels: { env: 'prod', team: 'core' },
     });
-    const tpl = (el as unknown as { renderConfigurationTab(): TemplateResult }).renderConfigurationTab();
+    const tpl = (
+      el as unknown as { renderConfigurationTab(): TemplateResult }
+    ).renderConfigurationTab();
     const host = document.createElement('div');
     render(tpl, host);
     const titles = Array.from(host.querySelectorAll('.card-title')).map((h) =>
