@@ -342,6 +342,10 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	// Verify the project exists.
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {

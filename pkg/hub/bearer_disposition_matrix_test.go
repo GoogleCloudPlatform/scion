@@ -1285,3 +1285,145 @@ func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 		}
 	}
 }
+
+// agentRequiresProjectReadScope reports whether permissionID declares
+// ScopeProjectRead ("project:read") in its AgentScopes mapping in the
+// permission registry.
+func agentRequiresProjectReadScope(permissionID string) bool {
+	for _, p := range permissions.Registry {
+		if p.ID == permissionID {
+			for _, sc := range p.AgentScopes {
+				if sc == string(ScopeProjectRead) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
+func specAdmitsAgentJWT(spec authzop.OperationSpec) bool {
+	hasPrincipal := false
+	for _, p := range spec.Principals {
+		if p == authzop.PrincipalAgent {
+			hasPrincipal = true
+			break
+		}
+	}
+	if !hasPrincipal {
+		return false
+	}
+	for _, c := range spec.Credentials {
+		if c == authzop.CredentialAgentJWT {
+			return true
+		}
+	}
+	return false
+}
+
+// mintAgentTokenWithScopes signs and records a real agent JWT for agentID in
+// projectID carrying the exact scopes given (bypassing dev-auth role upgrades
+// so tests can exercise tokens lacking ScopeProjectRead).
+func (m *bearerMatrixFixture) mintAgentTokenWithScopes(t *testing.T, agentID, projectID string, scopes []AgentTokenScope) string {
+	t.Helper()
+	tok, cred, err := m.srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   agentID,
+		ProjectID: projectID,
+		Scopes:    scopes,
+	}, "")
+	require.NoError(t, err, "sign agent token with scopes %v", scopes)
+	require.NoError(t, m.store.CreateAgentCredential(t.Context(), cred), "record agent credential")
+	return tok
+}
+
+// TestAgentProjectReadScopeMatrix_CatalogEntryPoints drives real agent JWTs
+// through every catalogued GET entry point that admits PrincipalAgent with
+// CredentialAgentJWT and whose BasePermission maps to project:read in the
+// permission registry. An agent token belonging to the fixture project but
+// lacking ScopeProjectRead must be refused (403 or 404) on every such route,
+// and an agent token carrying ScopeProjectRead must not be refused on routes
+// whose only required agent scope is project:read.
+func TestAgentProjectReadScopeMatrix_CatalogEntryPoints(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+
+	// Operations that require an additional agent scope beyond project:read
+	// (e.g. project:secret:read for project secrets) are still expected to
+	// refuse a token lacking project:read, and are not expected to succeed
+	// with only project:read.
+	requiresExtraAgentScope := map[authzop.OperationID]bool{
+		"project.secret.read": true,
+	}
+
+	checked := 0
+	for _, e := range bearerMatrixEntries() {
+		ep := e.EntryPoint
+		if ep.Method != http.MethodGet {
+			continue
+		}
+		if !specAdmitsAgentJWT(e.Spec) || !agentRequiresProjectReadScope(e.Spec.BasePermission) {
+			continue
+		}
+		label := string(e.Spec.ID) + " " + ep.Method + " " + ep.Pattern
+		recWithout := m.request(t, e, withoutScope)
+		recWith := m.request(t, e, withScope)
+		t.Logf("agent project:read row %s: without=%d with=%d", label, recWithout.Code, recWith.Code)
+		if !bearerMatrixRefused(ep.Method, recWithout.Code) {
+			t.Errorf("%s: agent token without %s got %d, want %s: %s",
+				label, ScopeProjectRead, recWithout.Code, bearerMatrixRefusal(ep.Method), recWithout.Body.String())
+		}
+		if !requiresExtraAgentScope[e.Spec.ID] {
+			if recWith.Code == http.StatusUnauthorized || recWith.Code == http.StatusForbidden || recWith.Code == http.StatusNotFound {
+				t.Errorf("%s: agent token with %s got %d, want admitted (not 401/403/404): %s",
+					label, ScopeProjectRead, recWith.Code, recWith.Body.String())
+			}
+		}
+		checked++
+	}
+
+	if checked == 0 {
+		t.Fatal("matrix exercised no catalog entry points requiring agent project:read")
+	}
+	t.Logf("agent project:read scope matrix checked %d entry points", checked)
+}
+
+// TestProjectMetricsRoutes_AgentProjectReadScope verifies that the three
+// project metrics routes refuse same-project agent tokens lacking project:read,
+// continue admitting same-project agent tokens carrying project:read and
+// authorized user callers, and keep refusing cross-project agent tokens.
+func TestProjectMetricsRoutes_AgentProjectReadScope(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+
+	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
+	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+	otherProjectAgent := m.mintAgentTokenWithScopes(t, tid("other-proj-agent"), m.otherProject, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
+
+	paths := []string{
+		"/api/v1/projects/" + m.ids.project + "/metrics-summary",
+		"/api/v1/projects/" + m.ids.project + "/metrics/summary",
+		"/api/v1/projects/" + m.ids.project + "/metrics",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			recNoScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, path, nil, withoutScope)
+			require.Equal(t, http.StatusForbidden, recNoScope.Code,
+				"same-project agent without project:read must be refused: %s", recNoScope.Body.String())
+
+			recWithScope := doRequestWithAgentToken(t, m.srv, http.MethodGet, path, nil, withScope)
+			require.Equal(t, http.StatusOK, recWithScope.Code,
+				"same-project agent with project:read must succeed: %s", recWithScope.Body.String())
+
+			recOtherProj := doRequestWithAgentToken(t, m.srv, http.MethodGet, path, nil, otherProjectAgent)
+			require.Equal(t, http.StatusForbidden, recOtherProj.Code,
+				"cross-project agent with project:read must be refused: %s", recOtherProj.Body.String())
+
+			recUser := doRequest(t, m.srv, http.MethodGet, path, nil)
+			require.Equal(t, http.StatusOK, recUser.Code,
+				"authorized user caller must remain unaffected: %s", recUser.Body.String())
+		})
+	}
+}
