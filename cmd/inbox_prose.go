@@ -99,6 +99,15 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 			breakdown[hubclient.InboxBreakdownAgents],
 			breakdown[hubclient.InboxBreakdownProjects],
 		)
+	case hubclient.InboxCategoryAgentExecutions:
+		if count <= 0 {
+			return nil
+		}
+		return primaryWithAgentsProjects(
+			formatCountNoun(count, capped, "execution request", "execution requests"),
+			breakdown[hubclient.InboxBreakdownAgents],
+			breakdown[hubclient.InboxBreakdownProjects],
+		)
 	case hubclient.InboxCategoryWaiting:
 		if count <= 0 {
 			return nil

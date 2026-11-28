@@ -391,9 +391,10 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 // that adds a role scope from breaking delegation for pre-deploy agent JWTs,
 // frozen bounded agent chains, or existing UAT selector sets (ptone/scion#8324).
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
-	ScopeProjectArtifactRead:  true,
-	ScopeProjectArtifactWrite: true,
-	ScopeProjectSkillWrite:    true,
+	ScopeProjectArtifactRead:          true,
+	ScopeProjectArtifactWrite:         true,
+	ScopeProjectArtifactRequestReview: true,
+	ScopeProjectSkillWrite:            true,
 }
 
 // roleFitsCeiling reports whether every scope of role, other than the
@@ -913,7 +914,9 @@ func filterScopes(candidates []AgentTokenScope, chain store.EffectCeiling, sc Sc
 // mintCandidateScopes returns the scopes a mint starts from: the role scopes
 // plus the config-derived scopes from agentRoleAndScopes, de-duplicated.
 // When mintDevAuthOverride is set, a role below full (including none) is
-// raised to full before its scopes are taken.
+// raised to full before its scopes are taken. As the final step, shell
+// execution containers are capped to scopes ∩ shellRuntimeScopes
+// (ptone/scion#9743).
 func (a *AuthzService) mintCandidateScopes(agent *store.Agent) []AgentTokenScope {
 	role, additional := agentRoleAndScopes(agent)
 	if a != nil && a.mintDevAuthOverride && CompareRoles(role, AgentRoleFull) < 0 {
@@ -930,7 +933,7 @@ func (a *AuthzService) mintCandidateScopes(agent *store.Agent) []AgentTokenScope
 			seen[s] = true
 		}
 	}
-	return scopes
+	return capShellRuntimeScopes(agent, scopes)
 }
 
 // ceilingFilteredAgentScopes returns the agent-token scopes a mint or refresh

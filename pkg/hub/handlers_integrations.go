@@ -1758,7 +1758,7 @@ func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map
 		if err := s.ensurePluginBroker(ctx, name, brokerID); err != nil {
 			credsErr = fmt.Errorf("hmac key: %w", err)
 		} else if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
-			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
+			slog.ErrorContext(ctx, "Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
 			credsErr = fmt.Errorf("hmac key: %w", err)
 		} else {
 			creds["hmac_key"] = secretKey

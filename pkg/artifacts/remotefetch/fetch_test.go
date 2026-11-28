@@ -910,3 +910,49 @@ func TestFetchDisableRedirects(t *testing.T) {
 		t.Fatalf("expected 1 request (redirect not followed), got %d", hits)
 	}
 }
+
+func TestFetchBytes_GitHubArchiveRedirectPolicy(t *testing.T) {
+	var seenAuth []string
+	var env *testEnv
+	env = newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		_, port, _ := net.SplitHostPort(env.srv.Listener.Addr().String())
+		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		switch r.URL.Path {
+		case "/acme/repo/archive/main.tar.gz":
+			w.Header().Set("Location", "https://127.0.0.1:"+port+"/acme/repo/tar.gz/refs/heads/main")
+			w.WriteHeader(http.StatusFound)
+		case "/acme/repo/tar.gz/refs/heads/main":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("tarball-bytes"))
+		case "/acme/repo/archive/evil.tar.gz":
+			w.Header().Set("Location", "https://evil.example:"+port+"/payload.tar.gz")
+			w.WriteHeader(http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}, Config{
+		MaxRedirects: 3,
+		AllowedHosts: []string{"example.com", "127.0.0.1"},
+		Network:      NetworkVetted,
+	})
+
+	// Redirect to an allowlisted codeload-like host succeeds with no Authorization.
+	res, err := env.fetcher.FetchBytes(context.Background(), env.url("example.com", "/acme/repo/archive/main.tar.gz"))
+	if err != nil {
+		t.Fatalf("expected redirect to allowlisted host to succeed: %v", err)
+	}
+	if string(res.Body) != "tarball-bytes" {
+		t.Fatalf("body = %q, want %q", string(res.Body), "tarball-bytes")
+	}
+	for i, auth := range seenAuth {
+		if auth != "" {
+			t.Fatalf("hop %d sent Authorization %q, want empty", i, auth)
+		}
+	}
+
+	// Redirect to an off-allowlist host is refused.
+	_, err = env.fetcher.FetchBytes(context.Background(), env.url("example.com", "/acme/repo/archive/evil.tar.gz"))
+	if got := reasonOf(t, err); got != ReasonHostNotAllowed {
+		t.Fatalf("reason = %q, want %q (%v)", got, ReasonHostNotAllowed, err)
+	}
+}

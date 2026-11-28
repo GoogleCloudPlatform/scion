@@ -49,6 +49,11 @@ import {
   type StatusVariant,
 } from '../../shared/agent-state-display.js';
 import {
+  accumulateWheelZoom,
+  flushWheelZoom,
+  type PendingWheelZoom,
+} from '../../shared/graph-zoom.js';
+import {
   buildLineageForest,
   computeStableLayout,
   descendantCounts,
@@ -293,6 +298,9 @@ export class ScionAgentTreeView extends LitElement {
   private dragPanY = 0;
   /** True once the initial fit-to-view / center-on-focus has fired. */
   private didAutoFit = false;
+  /** Coalesced wheel-zoom accumulator flushed once per animation frame. */
+  private pendingWheelZoom: PendingWheelZoom | null = null;
+  private wheelZoomFrame = 0;
   /** Node {@link revealAgent} still has to center on, once it is laid out. */
   private pendingRevealId: string | null = null;
   private pendingRevealFrame = 0;
@@ -805,10 +813,17 @@ export class ScionAgentTreeView extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.showUsers = localStorage.getItem('scion-graph-show-users') === 'true';
+    // Register listeners before reading optional storage so a restricted-storage
+    // environment (sandboxed iframe, strict privacy mode) can never disable
+    // pan/zoom or keyboard controls.
     // Wheel needs passive:false so we can preventDefault (prevent page zoom/scroll).
     this.addEventListener('wheel', this.boundOnWheel, { passive: false });
     window.addEventListener('keydown', this.boundOnKeyDown);
+    try {
+      this.showUsers = localStorage.getItem('scion-graph-show-users') === 'true';
+    } catch {
+      this.showUsers = false;
+    }
   }
 
   override disconnectedCallback(): void {
@@ -816,6 +831,9 @@ export class ScionAgentTreeView extends LitElement {
     this.removeEventListener('wheel', this.boundOnWheel);
     window.removeEventListener('keydown', this.boundOnKeyDown);
     this.endPan();
+    cancelAnimationFrame(this.wheelZoomFrame);
+    this.wheelZoomFrame = 0;
+    this.pendingWheelZoom = null;
     cancelAnimationFrame(this.pendingRevealFrame);
     this.dropPendingReveal();
     clearTimeout(this.highlightTimer);
@@ -958,8 +976,21 @@ export class ScionAgentTreeView extends LitElement {
     const path = e.composedPath();
     if (!path.includes(canvas)) return;
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-    this.zoomAround(e.clientX, e.clientY, factor);
+    const next = accumulateWheelZoom(this.pendingWheelZoom, e);
+    if (next === this.pendingWheelZoom) return;
+    this.pendingWheelZoom = next;
+    if (!this.wheelZoomFrame) {
+      this.wheelZoomFrame = requestAnimationFrame(() => this.flushPendingWheelZoom());
+    }
+  }
+
+  private flushPendingWheelZoom(): void {
+    this.wheelZoomFrame = 0;
+    const zoom = flushWheelZoom(this.pendingWheelZoom);
+    this.pendingWheelZoom = null;
+    if (zoom) {
+      this.zoomAround(zoom.clientX, zoom.clientY, zoom.factor);
+    }
   }
 
   private zoomAround(clientX: number, clientY: number, factor: number): void {
@@ -1088,7 +1119,11 @@ export class ScionAgentTreeView extends LitElement {
 
   private onShowUsersChange(e: Event): void {
     this.showUsers = (e.target as HTMLInputElement & { checked: boolean }).checked;
-    localStorage.setItem('scion-graph-show-users', String(this.showUsers));
+    try {
+      localStorage.setItem('scion-graph-show-users', String(this.showUsers));
+    } catch {
+      // Storage unavailable (e.g. sandboxed iframe or privacy-restricted context).
+    }
     // Toggling user nodes changes the canvas dimensions significantly; re-fit
     // so newly added user nodes (or freed space after hiding them) are visible.
     this.didAutoFit = false;
@@ -1416,10 +1451,16 @@ export class ScionAgentTreeView extends LitElement {
           )}
         </div>
         <div class="zoom-controls">
-          <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in (+)"
+          <sl-button
+            size="small"
+            @click=${() => this.zoomButtons(1.25)}
+            title="Zoom in (+) — hold Alt/Option while scrolling for fine zoom"
             >+</sl-button
           >
-          <sl-button size="small" @click=${() => this.zoomButtons(1 / 1.25)} title="Zoom out (−)"
+          <sl-button
+            size="small"
+            @click=${() => this.zoomButtons(1 / 1.25)}
+            title="Zoom out (−) — hold Alt/Option while scrolling for fine zoom"
             >−</sl-button
           >
           <sl-button

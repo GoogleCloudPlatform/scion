@@ -36,12 +36,13 @@ const (
 	InboxSummaryMaxPreviews     = 10
 
 	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
-	InboxCategoryDecisions      = "decisions"
-	InboxCategoryAgentSecrets   = "agent_secrets"
-	InboxCategoryWaiting        = "waiting"
-	InboxCategoryReviews        = "reviews"
-	InboxCategoryPendingSecrets = "pending_secrets"
-	InboxCategoryChat           = "chat"
+	InboxCategoryDecisions       = "decisions"
+	InboxCategoryAgentSecrets    = "agent_secrets"
+	InboxCategoryAgentExecutions = "agent_executions"
+	InboxCategoryWaiting         = "waiting"
+	InboxCategoryReviews         = "reviews"
+	InboxCategoryPendingSecrets  = "pending_secrets"
+	InboxCategoryChat            = "chat"
 
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
 	InboxBreakdownAgents                = "agents"

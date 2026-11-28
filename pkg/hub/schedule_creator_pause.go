@@ -465,25 +465,34 @@ func (s *Server) pauseTriggersWithAuthority(ctx context.Context, projectID strin
 	}
 }
 
-// triggerTargetsAgent reports whether a trigger's action payload targets
+// triggerTargetsAgent reports whether any of a trigger's actions targets
 // agentID strictly by resolved agentId (never by agentName/slug).
 func triggerTargetsAgent(tr store.Trigger, agentID string) bool {
 	if agentID == "" {
 		return false
 	}
-	switch tr.ActionType {
-	case store.TriggerActionMessage:
-		var p MessageEventPayload
-		if err := json.Unmarshal([]byte(tr.ActionPayload), &p); err != nil {
-			return false
-		}
-		return p.AgentID != "" && p.AgentID == agentID
-	case store.TriggerActionExec:
-		targetID := execPayloadTarget(tr.ActionPayload)
-		return targetID != "" && targetID == agentID
-	default:
+	actions, err := triggerActions(tr)
+	if err != nil {
 		return false
 	}
+	for _, act := range actions {
+		switch act.Type {
+		case store.TriggerActionMessage:
+			var p MessageEventPayload
+			if err := json.Unmarshal([]byte(act.Payload), &p); err != nil {
+				continue
+			}
+			if p.AgentID != "" && p.AgentID == agentID {
+				return true
+			}
+		case store.TriggerActionExec:
+			targetID := execPayloadTarget(act.Payload)
+			if targetID != "" && targetID == agentID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pauseTriggersTargetingAgent pauses, with status reason target_deleted, every

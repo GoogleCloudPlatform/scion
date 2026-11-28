@@ -151,4 +151,13 @@ func TestRefreshRuntimeBrokerState_Version(t *testing.T) {
 	assert.Equal(t, "1.5.0", got.Version, "a refresh that does not set the version keeps the concurrent one")
 	require.NotNil(t, got.Capabilities)
 	assert.True(t, got.Capabilities.Attach)
+
+	// Clearing Version to "" inside refresh must persist the empty string.
+	require.NoError(t, s.RefreshRuntimeBrokerState(ctx, b.ID, func(cur *store.RuntimeBroker) bool {
+		cur.Version = ""
+		return true
+	}))
+	got, err = s.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Version, "the refresh clears a stored version to empty")
 }

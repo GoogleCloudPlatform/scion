@@ -422,13 +422,16 @@ func writeHumanLine(w io.Writer, topic string, msg *messages.StructuredMessage, 
 
 	target := plugin.ResolveConversationTarget(msg)
 	if includeField(fields, "conversation") &&
-		(target.ConversationID != "" || target.Surface != "" || target.ExternalRef != "" || target.ParentRef != "" || target.DisplayName != "") {
+		(target.ConversationID != "" || target.Surface != "" || target.Kind != "" || target.ExternalRef != "" || target.ParentRef != "" || target.DisplayName != "") {
 		var parts []string
 		if target.ConversationID != "" {
 			parts = append(parts, "conversation="+target.ConversationID)
 		}
 		if target.Surface != "" {
 			parts = append(parts, "surface="+target.Surface)
+		}
+		if target.Kind != "" {
+			parts = append(parts, "kind="+target.Kind)
 		}
 		if target.ExternalRef != "" {
 			parts = append(parts, "external_ref="+target.ExternalRef)
@@ -473,6 +476,7 @@ type jsonEntry struct {
 	Status         string   `json:"status,omitempty"`
 	ConversationID string   `json:"conversation_id,omitempty"`
 	Surface        string   `json:"surface,omitempty"`
+	Kind           string   `json:"kind,omitempty"`
 	ExternalRef    string   `json:"external_ref,omitempty"`
 	ParentRef      string   `json:"parent_ref,omitempty"`
 	DisplayName    string   `json:"display_name,omitempty"`
@@ -510,6 +514,7 @@ func writeJSONLine(w io.Writer, topic string, msg *messages.StructuredMessage, f
 		target := plugin.ResolveConversationTarget(msg)
 		e.ConversationID = target.ConversationID
 		e.Surface = target.Surface
+		e.Kind = target.Kind
 		e.ExternalRef = target.ExternalRef
 		e.ParentRef = target.ParentRef
 		e.DisplayName = target.DisplayName

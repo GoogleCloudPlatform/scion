@@ -66,6 +66,9 @@ func warnRemovedMode(source string) {
 // Deliberately absent: "label". Human-mode only (ptone/scion#9521): agent
 // identities are refused label edits on the Hub, and only human callers with
 // agent.update may curate agent labels.
+//
+// Deliberately absent: "login". Human-mode only (ptone/scion#9744): top-level
+// alias for 'scion hub auth login', which performs interactive user OAuth.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
@@ -163,33 +166,38 @@ var agentAllowed = map[string]bool{
 	// (add, mint, verify, remove) and list stay out (ptone, ptone/scion#4018).
 	"project.service-accounts":      true,
 	"project.service-accounts.show": true,
-	"set-message-mode":              true,
-	"conversation":                  true,
-	"conversation.list":             true,
-	"conversation.messages":         true,
-	"conversation.get":              true,
-	"conversation.get-message":      true,
-	"conversation.create":           true,
-	"conversation.set-default":      true,
-	"conversation.participants":     true,
-	"conversation.join":             true,
-	"conversation.leave":            true,
-	"conversation.catch-up":         true,
-	"artifact":                      true,
-	"artifact.publish":              true,
-	"artifact.get":                  true,
-	"artifact.versions":             true,
-	"artifact.list":                 true,
-	"artifact.view":                 true,
-	"artifact.comments":             true,
-	"artifact.review-requests":      true,
+	// Read-only GitHub App status for the project (ptone/scion#9327).
+	// project.github.bind and project.github.unbind are deliberately absent:
+	// binding and unbinding are human/admin operations.
+	"project.github":            true,
+	"project.github.status":     true,
+	"set-message-mode":          true,
+	"conversation":              true,
+	"conversation.list":         true,
+	"conversation.messages":     true,
+	"conversation.get":          true,
+	"conversation.get-message":  true,
+	"conversation.create":       true,
+	"conversation.set-default":  true,
+	"conversation.participants": true,
+	"conversation.join":         true,
+	"conversation.leave":        true,
+	"conversation.catch-up":     true,
+	"artifact":                  true,
+	"artifact.publish":          true,
+	"artifact.get":              true,
+	"artifact.versions":         true,
+	"artifact.list":             true,
+	"artifact.view":             true,
+	"artifact.comments":         true,
+	"artifact.request-review":   true,
+	"artifact.review-requests":  true,
 	// artifact share, artifact grants, artifact transfer and artifact delete
 	// are human-only and deliberately absent (ptone/scion#4529, ptone/scion#4579,
 	// ptone/scion#9337): agents may not share, transfer or delete artifacts, or
 	// manage their grants.
-	// artifact request-review and artifact dismiss-review are also human-only
-	// in Phase 1 (ptone/scion#9306): agents are never requested reviewers, and
-	// agent requesters arrive in Phase 4.
+	// artifact dismiss-review is human-only: agents are never requested reviewers
+	// (ptone/scion#9296).
 	// Target-hub profiles and test identities (ptone/scion#4240).
 	// These run in agent mode only against a target-hub profile whose
 	// endpoint is not the agent's own hub; the run-time refusal is in

@@ -232,7 +232,12 @@ func TestTriggerPresetCLI_ParityWithDirectCompileAndCreate(t *testing.T) {
 	assert.Equal(t, directStored.MatchRules, cliStored.MatchRules)
 	assert.JSONEq(t, directStored.MatchForm, cliStored.MatchForm)
 	assert.Equal(t, directStored.ActionType, cliStored.ActionType)
-	assert.JSONEq(t, directStored.ActionPayload, cliStored.ActionPayload)
+	assert.Equal(t, directStored.ActionPayload, cliStored.ActionPayload)
+	require.Len(t, cliStored.Actions, len(directStored.Actions))
+	for i := range directStored.Actions {
+		assert.Equal(t, directStored.Actions[i].Type, cliStored.Actions[i].Type)
+		assert.JSONEq(t, directStored.Actions[i].Payload, cliStored.Actions[i].Payload)
+	}
 	assert.Equal(t, directStored.SubjectDialect, cliStored.SubjectDialect)
 	assert.Equal(t, directStored.SubjectRule, cliStored.SubjectRule)
 	assert.Equal(t, directStored.SubjectMode, cliStored.SubjectMode)

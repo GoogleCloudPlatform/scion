@@ -306,7 +306,7 @@ func TestGitHubSkillResolver_ModelessExpiredSHAEntryNotServed(t *testing.T) {
 		CachedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute), IsBranchRef: false,
 	}
 	r.resolutionCache.mu.Unlock()
-	r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+	r.cooldown.RecordUntil(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
 
 	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
 	if err != nil {
@@ -363,7 +363,7 @@ func TestGitHubSkillResolver_ModelessCacheEntry(t *testing.T) {
 			}
 			r.resolutionCache.mu.Unlock()
 			if tc.cooldown {
-				r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+				r.cooldown.RecordUntil(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
 			}
 
 			res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})

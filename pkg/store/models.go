@@ -2996,6 +2996,12 @@ const (
 	// NotificationResourceDecisions and ResourceID stores the previous
 	// waiting count P as a decimal string ("0" when cleared).
 	NotificationKindDecisionsWaiting = "decisions_waiting"
+	// NotificationKindTriggerFireFailed: a trigger fire reached a failing
+	// outcome (failed, refused, expired, or opt-in skipped / project cap)
+	// and notified the definition's creator or delegating user (Stage 2 §10).
+	// ResourceType is NotificationResourceTrigger and ResourceID is the
+	// trigger UUID.
+	NotificationKindTriggerFireFailed = "trigger_fire_failed"
 )
 
 // Notification.ResourceType values.
@@ -3007,6 +3013,8 @@ const (
 	// NotificationResourceDecisions: ResourceID is the coalesced waiting
 	// decision count string for NotificationKindDecisionsWaiting.
 	NotificationResourceDecisions = "decisions"
+	// NotificationResourceTrigger: ResourceID is a trigger id.
+	NotificationResourceTrigger = "trigger"
 )
 
 // Notification.Status values of NotificationKindArtifactGrant rows.
@@ -3034,6 +3042,10 @@ const NotificationStatusSecretPending = "SECRET_PENDING"
 // NotificationStatusDecisionsWaiting is the Status of a
 // NotificationKindDecisionsWaiting row.
 const NotificationStatusDecisionsWaiting = "DECISIONS_WAITING"
+
+// NotificationStatusTriggerFireFailed is the Status of a
+// NotificationKindTriggerFireFailed row (Stage 2 §10).
+const NotificationStatusTriggerFireFailed = "TRIGGER_FIRE_FAILED"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -4221,7 +4233,7 @@ type ScheduledExecRun struct {
 	EventID       string // non-empty for schedule-owned runs; empty for trigger-owned runs
 	FireID        string // non-empty for trigger-owned runs; empty for schedule-owned runs
 	ScheduleID    string // empty for a one-shot event or a trigger-owned run
-	OverlapKey    string // overlap scope ("schedule:<id>" or "trigger:<id>")
+	OverlapKey    string // overlap scope ("schedule:<id>" or "trigger:<id>:<action_index>")
 	ProjectID     string
 	TargetAgentID string
 
@@ -5943,9 +5955,37 @@ type EntitlementBinding struct {
 	ScopeType         string    `json:"scopeType"` // "system" or "project"
 	ScopeID           string    `json:"scopeId"`   // "" for system, project ID for project
 	Value             int64     `json:"value"`
+	TokenAction       *string   `json:"tokenAction,omitempty"` // NULL = "pause_new"; valid only for llm_tokens limits
 	CreatedBy         string    `json:"createdBy"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+// Token budget breach action values for EntitlementBinding.TokenAction
+// (Tokenomics design §4.4). NULL is equivalent to TokenActionPauseNew.
+const (
+	TokenActionPauseNew        = "pause_new"
+	TokenActionSuspendAndPause = "suspend_and_pause"
+	TokenActionNotifyOnly      = "notify_only"
+)
+
+// ValidTokenAction reports whether action is a recognized token budget breach action.
+func ValidTokenAction(action string) bool {
+	switch action {
+	case TokenActionPauseNew, TokenActionSuspendAndPause, TokenActionNotifyOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// EffectiveTokenAction returns the effective breach action for a nullable
+// TokenAction pointer, defaulting NULL or empty to TokenActionPauseNew.
+func EffectiveTokenAction(action *string) string {
+	if action == nil || *action == "" {
+		return TokenActionPauseNew
+	}
+	return *action
 }
 
 // UsageReservation tracks a single unit of quota consumption.
@@ -6005,6 +6045,20 @@ const (
 	// them, regardless of which project or user created them. It is seeded
 	// with a non-zero default rather than 0/unlimited. See seedLimitDefinitions.
 	LimitMaxAgentsPerBroker = "max_agents_per_broker"
+
+	// Raw-token budget limit definitions (Tokenomics P3, §4.4).
+	// All use resource_type = "llm_tokens", unit = "tokens", DefaultValue = 0 (unlimited).
+	LimitResourceTypeLLMTokens = "llm_tokens"
+	LimitUnitTokens            = "tokens"
+
+	LimitLLMTokensPerProjectDay       = "llm_tokens_per_project_day"
+	LimitLLMTokensPerProjectMonth     = "llm_tokens_per_project_month"
+	LimitLLMTokensPerUserDay          = "llm_tokens_per_user_day"
+	LimitLLMTokensPerUserMonth        = "llm_tokens_per_user_month"
+	LimitLLMTokensPerUserProjectDay   = "llm_tokens_per_user_project_day"
+	LimitLLMTokensPerUserProjectMonth = "llm_tokens_per_user_project_month"
+	LimitLLMTokensPerGroupDay         = "llm_tokens_per_group_day"
+	LimitLLMTokensPerGroupMonth       = "llm_tokens_per_group_month"
 )
 
 // =============================================================================

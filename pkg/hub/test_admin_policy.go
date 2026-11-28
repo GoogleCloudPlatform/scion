@@ -132,6 +132,11 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	// Posting into a project's chat threads, held by the built-in
 	// project roles.
 	"project.chat_post": testAdminPolicyAllow,
+	// Reading unredacted Track 2 raw trajectory segments (ptone/scion#9250):
+	// deny, consistent with tokenomics.trajectory_capture. Still grantable at
+	// project scope (testAdminGrantableAtProjectScope) so built-in
+	// project-owner and project-admin roles remain assignable by test admins.
+	"project.trajectory.read": testAdminPolicyDeny,
 	// Visitor access for federated accounts (ptone/scion#4603): deny. A
 	// test hub is not federated (A0 gate), like federation.project_visitors.
 	// Still grantable at project scope (testAdminGrantableAtProjectScope):
@@ -355,6 +360,7 @@ var testAdminGrantableAtProjectScope = map[string]bool{
 	"agent.delegation.read":               true,
 	"project.manage_visitors":             true,
 	"project.manage_system_one_instances": true,
+	"project.trajectory.read":             true,
 	"github_trigger.configure":            true,
 }
 
@@ -581,6 +587,12 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.hub.observability.tracing_enabled":         testAdminPolicyDeny,
 	"server.hub.uploads.max_attachment_size":           testAdminPolicyDeny,
 	"server.hub.uploads.max_workspace_file_size":       testAdminPolicyDeny,
+	"server.hub.uploads.chunk_bytes":                   testAdminPolicyDeny,
+	"server.hub.uploads.session_idle_ttl":              testAdminPolicyDeny,
+	"server.hub.uploads.session_max_lifetime":          testAdminPolicyDeny,
+	"server.hub.uploads.max_sessions_per_user":         testAdminPolicyDeny,
+	"server.hub.uploads.max_pending_bytes_per_user":    testAdminPolicyDeny,
+	"server.hub.uploads.max_pending_bytes_hub":         testAdminPolicyDeny,
 	"server.hub.branding":                              testAdminPolicyDeny,
 	"server.hub.branding.name":                         testAdminPolicyDeny,
 	"server.hub.branding.short_name":                   testAdminPolicyDeny,
@@ -657,6 +669,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.retention.hourly_rollups_days":          testAdminPolicyDeny,
 	"telemetry.retention.daily_rollups_days":           testAdminPolicyDeny,
 	"telemetry.retention.scope_counters_days":          testAdminPolicyDeny,
+	"telemetry.retention.group_rollups_days":           testAdminPolicyDeny,
+	"telemetry.retention.budget_state_days":            testAdminPolicyDeny,
 	"telemetry.retention.meter_health_days":            testAdminPolicyDeny,
 	"telemetry.retention.sweep_interval":               testAdminPolicyDeny,
 	"telemetry.retention.batch_size":                   testAdminPolicyDeny,
@@ -746,6 +760,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentBadges:                     testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:               testAdminPolicyDeny,
 	experiments.TerminalKeyBar:                  testAdminPolicyDeny,
+	experiments.AgentsColumnPicker:              testAdminPolicyDeny,
 	experiments.SecretRotation:                  testAdminPolicyDeny,
 	experiments.ContentHashV2:                   testAdminPolicyDeny,
 	experiments.LifecycleEvents:                 testAdminPolicyDeny,
@@ -790,6 +805,10 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentPolicyLimitCeilings:        testAdminPolicyDeny,
 	experiments.AgentPolicyTelemetryEnforcement: testAdminPolicyDeny,
 	experiments.AgentPolicyDurationBackstop:     testAdminPolicyDeny,
+	experiments.LargeUploads:                    testAdminPolicyDeny,
+	// All experiments are deny for test identities (admin tier design §3.6.1);
+	// a human admin enables hub.mcp_server for live E2E.
+	experiments.MCPServer: testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

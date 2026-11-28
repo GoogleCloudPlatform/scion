@@ -113,6 +113,13 @@ func (d *DeclarativeGenericHarness) AdvancedCapabilities() api.HarnessAdvancedCa
 	return caps
 }
 
+func (d *DeclarativeGenericHarness) supportsModelFlag() bool {
+	if d.entry.Harness == "generic" || d.entry.Command == nil || len(d.entry.Command.Base) == 0 {
+		return false
+	}
+	return !isShellCommandBase(d.entry.Command.Base)
+}
+
 func (d *DeclarativeGenericHarness) GetCommand(task string, resume bool, baseArgs []string) []string {
 	if d.entry.Command == nil {
 		args := append([]string{}, baseArgs...)
@@ -138,13 +145,7 @@ func (d *DeclarativeGenericHarness) GetCommand(task string, resume bool, baseArg
 }
 
 func (d *DeclarativeGenericHarness) validateCommand(task string, resume bool, baseArgs []string) error {
-	if !d.builtin {
-		return nil
-	}
-	if len(d.GetCommand(task, resume, baseArgs)) == 0 {
-		return ErrEmptyGenericCommand
-	}
-	return nil
+	return validateGenericCommand(d.builtin, d.GetCommand(task, resume, baseArgs), resume)
 }
 
 func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {

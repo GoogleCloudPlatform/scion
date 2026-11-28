@@ -24,6 +24,9 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 // TestTmuxAgentWindowCmd_UsesFixedPaths pins the production wrapper to the
@@ -270,4 +273,162 @@ func TestTmuxAgentWindowCmdForConfig_ShellSkipsPaneTail(t *testing.T) {
 	if _, err := os.Stat(tmuxCalled); err == nil {
 		t.Error("fake tmux was invoked despite empty tailFile")
 	}
+}
+
+// TestGenericHarness_ExplicitShellOptInAndExecForm verifies end-to-end
+// execution through harnessCmdLine -> harnessWrapperLine -> POSIX sh:
+//   - explicit opt-in (command.base: ["sh", "-c"] or command_args: ["sh", "-c"])
+//     executes shell-form tasks with proper quoting, exit-code propagation, and
+//     outer-wrapper isolation;
+//   - default exec form (no opt-in) never shell-interprets task text, exits 127
+//     on shell-form strings, and prints the opt-in hint to stderr;
+//   - plain single-word missing commands and succeeding paths with spaces do
+//     not print the opt-in hint.
+func TestGenericHarness_ExplicitShellOptInAndExecForm(t *testing.T) {
+	declShellOptIn := harness.NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+	})
+	declExecDefault := harness.NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+	})
+
+	t.Run("explicit shell opt-in executes shell-form tasks", func(t *testing.T) {
+		optIns := []struct {
+			name        string
+			h           api.Harness
+			commandArgs []string
+		}{
+			{"declarative command.base sh -c", declShellOptIn, nil},
+			{"generic command_args sh -c", &harness.Generic{}, []string{"sh", "-c"}},
+		}
+		cases := []struct {
+			name    string
+			task    string
+			wantRC  string
+			wantOut string
+		}{
+			{"&& chaining", "true && echo ok", "0", "ok"},
+			{"single quotes", `printf '%s\n' 'hello world'`, "0", "hello world"},
+			{"double quotes and semicolon", `echo "a;b"; echo "c'd"`, "0", "a;b\nc'd"},
+			{"non-zero exit code", "echo failing && exit 42", "42", "failing"},
+			{"quoting cannot break outer wrapper", `echo 'safe'\''quote'; exit 7`, "7", "safe'quote"},
+		}
+		for _, opt := range optIns {
+			t.Run(opt.name, func(t *testing.T) {
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						cmdLine, ok := harnessCmdLine(RunConfig{
+							Harness:     opt.h,
+							Task:        tc.task,
+							CommandArgs: opt.commandArgs,
+						}, harnessCmdLineOptions{})
+						if !ok {
+							t.Fatal("harnessCmdLine returned ok=false")
+						}
+						r := runWrapper(t, cmdLine, "")
+						if r.rc != tc.wantRC {
+							t.Errorf("exit code = %q, want %q (output=%q)", r.rc, tc.wantRC, r.output)
+						}
+						if !strings.Contains(r.output, tc.wantOut) {
+							t.Errorf("output = %q, want substring %q", r.output, tc.wantOut)
+						}
+						if strings.Contains(r.output, genericExecForm127Hint) {
+							t.Errorf("opt-in shell task must not emit exec-form hint: %q", r.output)
+						}
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("default exec form never shell-interprets and hints on exit 127", func(t *testing.T) {
+		harnesses := []struct {
+			name string
+			h    api.Harness
+		}{
+			{"Generic", &harness.Generic{}},
+			{"DeclarativeGenericHarness", declExecDefault},
+		}
+		for _, hh := range harnesses {
+			t.Run(hh.name, func(t *testing.T) {
+				sentinel := filepath.Join(t.TempDir(), "pwned")
+				cases := []struct {
+					name     string
+					task     string
+					wantHint bool
+				}{
+					{"shell chaining", "true && echo ok", true},
+					{"command with args", "sleep infinity", true},
+					{"hostile semicolon", "; touch " + sentinel, true},
+					{"hostile command substitution", "$(touch " + sentinel + ")", true},
+					{"single-word missing program has no hint", "nonexistent_scion_cmd_6386", false},
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						cmdLine, ok := harnessCmdLine(RunConfig{
+							Harness: hh.h,
+							Task:    tc.task,
+						}, harnessCmdLineOptions{})
+						if !ok {
+							t.Fatal("harnessCmdLine returned ok=false")
+						}
+						r := runWrapper(t, cmdLine, "")
+						if r.rc != "127" {
+							t.Errorf("exit code = %q, want 127 (output=%q)", r.rc, r.output)
+						}
+						if gotHint := strings.Contains(r.output, genericExecForm127Hint); gotHint != tc.wantHint {
+							t.Errorf("hint present = %v, want %v (output=%q)", gotHint, tc.wantHint, r.output)
+						}
+						if _, err := os.Stat(sentinel); err == nil {
+							t.Fatalf("exec-form task executed shell and created %s", sentinel)
+						}
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("exec form succeeding executable path with spaces emits no hint", func(t *testing.T) {
+		dir := t.TempDir()
+		script := filepath.Join(dir, "run script.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\necho ran-ok\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmdLine, ok := harnessCmdLine(RunConfig{
+			Harness: &harness.Generic{},
+			Task:    script,
+		}, harnessCmdLineOptions{})
+		if !ok {
+			t.Fatal("harnessCmdLine returned ok=false")
+		}
+		r := runWrapper(t, cmdLine, "")
+		if r.rc != "0" {
+			t.Errorf("exit code = %q, want 0 (output=%q)", r.rc, r.output)
+		}
+		if !strings.Contains(r.output, "ran-ok") {
+			t.Errorf("output = %q, want ran-ok", r.output)
+		}
+		if strings.Contains(r.output, genericExecForm127Hint) {
+			t.Errorf("succeeding script must not emit exit-127 hint: %q", r.output)
+		}
+	})
+
+	t.Run("exec form with command_args passes task as literal data", func(t *testing.T) {
+		cmdLine, ok := harnessCmdLine(RunConfig{
+			Harness:     &harness.Generic{},
+			Task:        "literal && echo INJECTED",
+			CommandArgs: []string{"printf", "%s\n"},
+		}, harnessCmdLineOptions{})
+		if !ok {
+			t.Fatal("harnessCmdLine returned ok=false")
+		}
+		r := runWrapper(t, cmdLine, "")
+		if r.rc != "0" {
+			t.Errorf("exit code = %q, want 0 (output=%q)", r.rc, r.output)
+		}
+		if !strings.Contains(r.output, "literal && echo INJECTED") || strings.Contains(r.output, "\nINJECTED") {
+			t.Errorf("output = %q, want literal task without shell execution", r.output)
+		}
+	})
 }

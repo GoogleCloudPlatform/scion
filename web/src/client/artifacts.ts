@@ -23,6 +23,7 @@
 import { apiFetch, extractApiError } from './api.js';
 import { wakeOfferFromErrorBody } from './wake-offer.js';
 import type { WakeOffer } from './wake-offer.js';
+import { withDownloadParam } from '../utils/download-url.js';
 
 export { ARTIFACTS_FLAG, ATTACHMENT_ARTIFACTS_FLAG } from './artifacts-flag.js';
 
@@ -279,8 +280,6 @@ export function reviewRequestRefusalText(code?: string): string {
       return 'Artifact has reached the maximum number of grants';
     case 'unavailable':
       return 'Temporarily unavailable — try again';
-    case 'agent_cannot_request_review':
-      return 'Only users can request reviews';
     case CODE_USE_REVIEW_REQUESTS:
       return 'Use Request review instead of Share with notify';
     default:
@@ -471,7 +470,7 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
  * ignored (ptone/scion#8958).
  */
 export function artifactDownloadUrl(id: string, seq: number, path: string): string {
-  return `${artifactFileUrl(id, seq, path)}?download=1`;
+  return withDownloadParam(artifactFileUrl(id, seq, path));
 }
 
 /** The zip of every file of version seq (ptone/scion#7106). */
@@ -1566,6 +1565,21 @@ export interface CreateLinkResponse {
  * ptone/scion#5145).
  */
 export type GrantPermission = 'read' | 'review' | 'write' | 'admin';
+
+/** CreatedBy marker for a role-gated bounded review grant (agent review request, ptone/scion#5548). */
+export const BOUNDED_REVIEW_CREATOR = 'system:review_request';
+
+/** CreatedBy marker for an automatic role-gated sponsor review grant (ptone/scion#7134). */
+export const SPONSOR_REVIEW_CREATOR = 'system:sponsor_review';
+
+/**
+ * Whether a grant's createdBy marker denotes a role-gated review grant that
+ * counts only while the subject holds a read role in the home project
+ * (mirrors pkg/artifacts/read.go isRoleGatedCreator).
+ */
+export function isRoleGatedCreator(createdBy?: string): boolean {
+  return createdBy === BOUNDED_REVIEW_CREATOR || createdBy === SPONSOR_REVIEW_CREATOR;
+}
 
 /** A grant to a user or agent ("principal") or a project ("scope"). */
 export interface ArtifactGrant {

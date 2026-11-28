@@ -250,10 +250,11 @@ func runForceCascade(t *testing.T, f *forceDelFixture) (userDeletionView, []*sto
 	require.NoError(t, json.Unmarshal([]byte(completion[0].AfterSummary), &after))
 	assert.Equal(t, 3, after.Stopped)
 	assert.Equal(t, 0, after.Removed)
-	sec, ev := userScopedCounts(t, f.s, f.dave.ID)
-	assert.Zero(t, sec, "afterUserDeleted removed the user-scope secrets")
-	assert.Zero(t, ev, "afterUserDeleted removed the user-scope env vars")
 	// afterUserDeleted runs after the completion commits.
+	require.Eventually(t, func() bool {
+		sec, ev := userScopedCounts(t, f.s, f.dave.ID)
+		return sec == 0 && ev == 0
+	}, 15*time.Second, 20*time.Millisecond, "afterUserDeleted removed the user-scope secrets and env vars")
 	require.Eventually(t, func() bool {
 		g, err := f.s.GetAgentDelegationGrant(ctx, grant.grant.ID)
 		return err == nil && g.RevokedAt != nil

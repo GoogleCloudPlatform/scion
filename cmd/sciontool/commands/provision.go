@@ -244,13 +244,27 @@ func runProvision(ctx context.Context) error {
 		// still written.
 		RequireChownSuccess: provisionRequireChownSuccess(os.Getenv),
 	}
-	if worktree {
-		setWorktreeInput(&in, agentSlug, os.Getenv("SCION_AGENT_BRANCH"), provisionTimeout)
-		for key, value := range worktreeSafeDirectoryEnv(os.Getenv, provisionWorkspace, agentSlug) {
+	if !agentDir {
+		for key, value := range provisionSafeDirectoryEnv(os.Getenv, provisionWorkspace) {
 			if err := os.Setenv(key, value); err != nil {
 				return fmt.Errorf("provision: set %s: %w", key, err)
 			}
 		}
+		// util.HostGitEnv (used by provision.SafeGitCommand) scrubs
+		// GIT_CONFIG_COUNT/KEY/VALUE but preserves GIT_CONFIG_GLOBAL, so also
+		// point GIT_CONFIG_GLOBAL at a temporary config containing only the
+		// scoped safe.directory entries for the duration of this run.
+		if cfgPath, err := writeProvisionSafeDirectoryConfig(provisionWorkspace); err != nil {
+			return fmt.Errorf("provision: write safe.directory gitconfig: %w", err)
+		} else if cfgPath != "" {
+			defer func() { _ = os.Remove(cfgPath) }()
+			if err := os.Setenv("GIT_CONFIG_GLOBAL", cfgPath); err != nil {
+				return fmt.Errorf("provision: set GIT_CONFIG_GLOBAL: %w", err)
+			}
+		}
+	}
+	if worktree {
+		setWorktreeInput(&in, agentSlug, os.Getenv("SCION_AGENT_BRANCH"), provisionTimeout)
 	}
 	if agentDir {
 		branch := os.Getenv("SCION_AGENT_BRANCH")
@@ -310,27 +324,63 @@ func setWorktreeInput(in *provision.ProvisionInput, agentSlug, branch string, ti
 	in.LockWait = time.Duration(timeoutSeconds) * time.Second
 }
 
-// worktreeSafeDirectoryEnv returns the environment entries that list the
-// shared checkout and the agent's worktree, and only those two paths, as
-// git safe.directory entries for the git commands this process runs.
-// The init container runs as root while both directories belong to the
-// agents' user, and git does not work in a repository owned by another
-// user unless it is listed. The entries are appended to any GIT_CONFIG_*
-// entries already in the environment.
-func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug string) map[string]string {
+// provisionSafeDirectoryEnv returns the environment entries that trust the
+// project-storage workspace root and its subtree (<workspace> and
+// <workspace>/*) as git safe.directory entries for the git commands this
+// process runs. The init container runs as root while the workspace and its
+// worktrees may belong to another user (for example, an NFS project store
+// written by a broker with a different UID), and git refuses to operate in a
+// repository owned by another user unless it is listed. The trust is scoped
+// to the workspace root and never uses "*". The entries are appended to any
+// GIT_CONFIG_* entries already in the environment.
+func provisionSafeDirectoryEnv(getenv func(string) string, workspace string) map[string]string {
+	paths := scopedSafeDirectoryEntries(workspace)
+	if len(paths) == 0 {
+		return nil
+	}
 	base := 0
 	if raw := getenv("GIT_CONFIG_COUNT"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			base = n
 		}
 	}
-	paths := []string{workspace, provision.WorktreePath(workspace, agentSlug)}
 	env := map[string]string{"GIT_CONFIG_COUNT": strconv.Itoa(base + len(paths))}
 	for i, p := range paths {
 		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", base+i)] = "safe.directory"
 		env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", base+i)] = p
 	}
 	return env
+}
+
+// writeProvisionSafeDirectoryConfig writes a temporary gitconfig file holding
+// only the scoped safe.directory entries for workspace (<workspace> and
+// <workspace>/*). Callers set GIT_CONFIG_GLOBAL to the returned path (which
+// util.HostGitEnv preserves) and remove the file on return.
+func writeProvisionSafeDirectoryConfig(workspace string) (string, error) {
+	paths := scopedSafeDirectoryEntries(workspace)
+	if len(paths) == 0 {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", "scion-provision-gitconfig-*")
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("[safe]\n")
+	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	for _, p := range paths {
+		fmt.Fprintf(&b, "\tdirectory = \"%s\"\n", esc.Replace(p))
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // provisionCloneToken returns the git token to offer to the clone gc, or ""

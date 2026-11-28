@@ -186,11 +186,12 @@ func TestModelCommandArgs(t *testing.T) {
 	}
 }
 
-// TestHarnessArgvModelMatchesSCIONModel: for claude, codex and gemini, the
-// --model value in the harness command line equals SCION_MODEL, including
-// when the broker's own config carries a different (default) model.
+// TestHarnessArgvModelMatchesSCIONModel: for claude, codex, gemini-cli and
+// antigravity, the --model value in the harness command line equals
+// SCION_MODEL, including when the broker's own config carries a different
+// (default) model.
 func TestHarnessArgvModelMatchesSCIONModel(t *testing.T) {
-	for _, name := range []string{"claude", "codex", "gemini-cli"} {
+	for _, name := range []string{"claude", "codex", "gemini-cli", "antigravity"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			if err := config.SeedHarnessConfigFromDir(dir, harnessesEmbed.FS, name, false); err != nil {
@@ -250,7 +251,9 @@ func argvModel(argv []string) (string, bool) {
 
 // modelTestHC is a project harness-config whose own model (the broker's
 // harness-config default) differs from every hub-resolved model below.
-const modelTestHC = policyTestDecl + "model: broker-default-model\nmodel_aliases:\n  large: hc-large-model\n"
+// It uses a non-generic declarative CLI with command.base so --model is passed
+// on argv (generic/shell harnesses do not take --model).
+const modelTestHC = "harness: custom-cli\nimage: scion-base:test\nuser: scion\ncommand:\n  base: [\"custom-cli\"]\nmodel: broker-default-model\nmodel_aliases:\n  large: hc-large-model\n"
 
 // TestStart_ArgvModelAndSCIONModelAgree runs Start and captures the
 // runtime.RunConfig it launches: the harness argv --model (CommandArgs) and
@@ -331,6 +334,113 @@ func TestStart_ArgvModelAndSCIONModelAgree(t *testing.T) {
 				if stored.Model == tc.want {
 					t.Errorf("scion-agent.json model = %q: the effective model was persisted", stored.Model)
 				}
+			}
+		})
+	}
+}
+
+// TestStart_AntigravityDefaultModelAndPrecedence guards ptone/scion#9679:
+// starting an Antigravity agent with the embedded harness-config passes
+// --model <medium alias> on argv even when no --model is supplied, while an
+// explicit model (SCION_MODEL) still wins over template and harness defaults.
+func TestStart_AntigravityDefaultModelAndPrecedence(t *testing.T) {
+	wantMedium := builtinAlias(t, "antigravity", "medium")
+	wantLarge := builtinAlias(t, "antigravity", "large")
+
+	cases := []struct {
+		name      string
+		env       map[string]string
+		template  string
+		wantModel string
+	}{
+		{
+			name:      "default passes medium alias via --model",
+			wantModel: wantMedium,
+		},
+		{
+			name:      "explicit SCION_MODEL alias wins over default",
+			env:       map[string]string{"SCION_MODEL": "large"},
+			wantModel: wantLarge,
+		},
+		{
+			name:      "explicit SCION_MODEL concrete ID wins over default",
+			env:       map[string]string{"SCION_MODEL": "gemini-custom-model"},
+			wantModel: "gemini-custom-model",
+		},
+		{
+			name:      "template model wins over harness default",
+			template:  "model: large\n",
+			wantModel: wantLarge,
+		},
+		{
+			name:      "explicit SCION_MODEL wins over template model",
+			env:       map[string]string{"SCION_MODEL": "gemini-explicit-model"},
+			template:  "model: large\n",
+			wantModel: "gemini-explicit-model",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPolicyTestEnv(t)
+			hcDir := filepath.Join(e.scion, "harness-configs", "antigravity")
+			if err := config.SeedHarnessConfigFromDir(hcDir, harnessesEmbed.FS, "antigravity", false); err != nil {
+				t.Fatalf("SeedHarnessConfigFromDir(antigravity): %v", err)
+			}
+			tplName := ""
+			if tc.template != "" {
+				tplName = "custom-tpl"
+				tplDir := filepath.Join(e.scion, "templates", tplName)
+				if err := os.MkdirAll(tplDir, 0755); err != nil {
+					t.Fatalf("mkdir template: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tc.template), 0644); err != nil {
+					t.Fatalf("write scion-agent.yaml: %v", err)
+				}
+			}
+
+			var runCfg runtime.RunConfig
+			runs := 0
+			mgr := NewManager(&runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					runs++
+					runCfg = cfg
+					return "mock-id", nil
+				},
+			})
+			env := map[string]string{}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			if _, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:          "agy-model-agent",
+				ProjectPath:   e.scion,
+				HarnessConfig: "antigravity",
+				Template:      tplName,
+				NoAuth:        true,
+				Env:           env,
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if runs != 1 {
+				t.Fatalf("runtime Run called %d times, want 1", runs)
+			}
+			gotArgv, ok := argvModel(runCfg.CommandArgs)
+			if !ok {
+				t.Fatalf("no single --model in CommandArgs %v", runCfg.CommandArgs)
+			}
+			gotEnv := ""
+			for _, kv := range runCfg.Env {
+				if v, ok := strings.CutPrefix(kv, "SCION_MODEL="); ok {
+					gotEnv = v
+				}
+			}
+			if gotArgv != tc.wantModel || gotEnv != tc.wantModel {
+				t.Errorf("argv --model = %q, SCION_MODEL = %q; want both %q (CommandArgs=%v)",
+					gotArgv, gotEnv, tc.wantModel, runCfg.CommandArgs)
 			}
 		})
 	}

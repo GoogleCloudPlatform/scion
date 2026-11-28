@@ -1356,6 +1356,9 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
       ['components/pages/profile-discord.ts', '.result-message', 'border-radius', [6]],
       ['components/pages/profile-settings.ts', '.settings-card', 'border-radius', [12]],
       ['components/pages/profile-settings.ts', '.permission-status', 'border-radius', [6]],
+      ['components/pages/profile-slack.ts', '.settings-card', 'border-radius', [12]],
+      ['components/pages/profile-slack.ts', '.confirm-notice', 'border-radius', [6]],
+      ['components/pages/profile-slack.ts', '.result-message', 'border-radius', [6]],
       ['components/pages/profile-teams.ts', '.settings-card', 'border-radius', [12]],
       ['components/pages/profile-teams.ts', '.result-message', 'border-radius', [6]],
       ['components/pages/profile-telegram.ts', '.settings-card', 'border-radius', [12]],
@@ -1476,12 +1479,6 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
       [
         'components/shared/chat/chat-space-rail.ts',
         '.space-header .unread-badge',
-        'border-radius',
-        [8],
-      ],
-      [
-        'components/shared/chat/chat-space-rail.ts',
-        '.space-header .mention-badge',
         'border-radius',
         [8],
       ],
@@ -1622,7 +1619,7 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
     // mobile while scaling cleanly under square (0) and rounded (12px).
     const railSrc = fileCache.get('components/shared/chat/chat-space-rail.ts')!;
     const coarseMatch =
-      /@media\s*\(pointer:\s*coarse\)\s*\{[\s\S]*?\.space-header\s+\.unread-badge,\s*\.space-header\s+\.mention-badge\s*\{([^{}]*)\}/.exec(
+      /@media\s*\(pointer:\s*coarse\)\s*\{[\s\S]*?\.space-header\s+\.unread-badge\s*\{([^{}]*)\}/.exec(
         railSrc
       );
     expect(coarseMatch, 'chat-space-rail.ts missing coarse-pointer badge rule').not.toBeNull();

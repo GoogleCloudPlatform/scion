@@ -64,6 +64,10 @@ const (
 	AuthorityCustodianProjectAdmin = "custodian_project_admin"
 	AuthorityRetention             = "retention"
 	AuthorityReconciler            = "reconciler"
+	// AuthorityAncestorSuccession is the hub's automatic transfer of a deleted
+	// agent's artifacts to its nearest live eligible ancestor agent
+	// (ptone/scion#9846).
+	AuthorityAncestorSuccession = "ancestor_succession"
 	// AuthorityMigration is a store migration's own change, such as
 	// 0014_review_ladder's conversions (see applyReviewLadder).
 	AuthorityMigration = "migration"
@@ -431,6 +435,34 @@ func (s *sqlStore) ListLiveOwners(ctx context.Context, after *Owner, limit int) 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("artifacts: list owners: %w", err)
+	}
+	return out, nil
+}
+
+// ListLiveOwnedArtifacts implements Store.
+func (s *sqlStore) ListLiveOwnedArtifacts(ctx context.Context, owner Owner, scopeKind, scopeRef, afterID string, limit int) ([]ArtifactRef, error) {
+	if limit <= 0 {
+		return nil, errors.New("artifacts: ListLiveOwnedArtifacts needs a positive limit")
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT id, scope_ref FROM artifact
+		WHERE owner_kind = ? AND owner_ref = ? AND scope_kind = ? AND scope_ref = ?
+		AND deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+` AND id > ?
+		ORDER BY id LIMIT `+strconv.Itoa(limit)),
+		owner.Kind, owner.Ref, scopeKind, scopeRef, afterID)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list live owned artifacts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ArtifactRef
+	for rows.Next() {
+		var ref ArtifactRef
+		if err := rows.Scan(&ref.ID, &ref.ScopeRef); err != nil {
+			return nil, fmt.Errorf("artifacts: scan owned artifact: %w", err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list live owned artifacts: %w", err)
 	}
 	return out, nil
 }

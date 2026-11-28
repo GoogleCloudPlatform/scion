@@ -105,14 +105,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    21, // R21: project.manage_pre_start_hooks (ptone/scion#9355); R20: project.manage_system_one_instances (ptone/scion#8045); R19: webhook_endpoint.send (ptone/scion#8061); R18: webhook_endpoint.update (ptone/scion#8060); R17: broker.manage (ptone/scion#7829); R16: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R15: trigger.*, webhook_endpoint.* (ptone/scion#8028); R14: github_trigger.{comment,configure} (ptone/scion#8090); R13: system_one_instance.{read,create,delete,execute} (ptone/scion#8044); R12: template.create_global, template.update_global, template.delete_global (ptone/scion#1713); R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    22, // R22: project.trajectory.read (ptone/scion#9250); R21: project.manage_pre_start_hooks (ptone/scion#9355); R20: project.manage_system_one_instances (ptone/scion#8045); R19: webhook_endpoint.send (ptone/scion#8061); R18: webhook_endpoint.update (ptone/scion#8060); R17: broker.manage (ptone/scion#7829); R16: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R15: trigger.*, webhook_endpoint.* (ptone/scion#8028); R14: github_trigger.{comment,configure} (ptone/scion#8090); R13: system_one_instance.{read,create,delete,execute} (ptone/scion#8044); R12: template.create_global, template.update_global, template.delete_global (ptone/scion#1713); R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    20, // R20: project.manage_pre_start_hooks (ptone/scion#9355); R19: project.manage_system_one_instances (ptone/scion#8045); R18: webhook_endpoint.send (ptone/scion#8061); R17: webhook_endpoint.update (ptone/scion#8060); R16: broker.manage (ptone/scion#7829); R15: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R14: trigger.*, webhook_endpoint.* (ptone/scion#8028); R13: system_one_instance.{read,create,delete,execute} (ptone/scion#8044); R12: template.create_global, template.update_global, template.delete_global (ptone/scion#1713); R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    21, // R21: project.trajectory.read (ptone/scion#9250); R20: project.manage_pre_start_hooks (ptone/scion#9355); R19: project.manage_system_one_instances (ptone/scion#8045); R18: webhook_endpoint.send (ptone/scion#8061); R17: webhook_endpoint.update (ptone/scion#8060); R16: broker.manage (ptone/scion#7829); R15: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R14: trigger.*, webhook_endpoint.* (ptone/scion#8028); R13: system_one_instance.{read,create,delete,execute} (ptone/scion#8044); R12: template.create_global, template.update_global, template.delete_global (ptone/scion#1713); R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -155,14 +155,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    18, // R18: artifact.request_review (ptone/scion#9296); R17: project.manage_system_one_instances (ptone/scion#8045); R16: webhook_endpoint.send (ptone/scion#8061); R15: webhook_endpoint.update (ptone/scion#8060); R14: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R13: trigger.*, webhook_endpoint.* (ptone/scion#8028); R12: github_trigger.{comment,configure} (ptone/scion#8090); R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    19, // R19: project.trajectory.read (ptone/scion#9250); R18: artifact.request_review (ptone/scion#9296); R17: project.manage_system_one_instances (ptone/scion#8045); R16: webhook_endpoint.send (ptone/scion#8061); R15: webhook_endpoint.update (ptone/scion#8060); R14: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R13: trigger.*, webhook_endpoint.* (ptone/scion#8028); R12: github_trigger.{comment,configure} (ptone/scion#8090); R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    16, // R16: artifact.request_review (ptone/scion#9296); R15: project.manage_system_one_instances (ptone/scion#8045); R14: webhook_endpoint.send (ptone/scion#8061); R13: webhook_endpoint.update (ptone/scion#8060); R12: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R11: trigger.{create,list,read,update}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R10: github_trigger.{comment,configure} (ptone/scion#8090); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    17, // R17: project.trajectory.read (ptone/scion#9250); R16: artifact.request_review (ptone/scion#9296); R15: project.manage_system_one_instances (ptone/scion#8045); R14: webhook_endpoint.send (ptone/scion#8061); R13: webhook_endpoint.update (ptone/scion#8060); R12: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R11: trigger.{create,list,read,update}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R10: github_trigger.{comment,configure} (ptone/scion#8090); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -406,6 +406,7 @@ func projectOwnerPermissionIDs() []string {
 		// Project owners hold project.set_messaging_policy; the messaging
 		// policy handler also applies the direct-owner rule.
 		"project.set_messaging_policy",
+		"project.trajectory.read",
 		"project.update",
 		// Scheduled event management
 		"scheduled_event.create",
@@ -509,6 +510,7 @@ func projectAdminPermissionIDs() []string {
 		"project.read",
 		"project.read_message_policies",
 		"project.secret_read",
+		"project.trajectory.read",
 		"project.update",
 		// Scheduled event management (no delete)
 		"scheduled_event.create",
@@ -1143,6 +1145,7 @@ func hubAdminPermissionIDs() []string {
 		"project.manage_message_policies":     true,
 		"project.manage_system_one_instances": true,
 		"project.read_message_policies":       true,
+		"project.trajectory.read":             true,
 		// Project visitor grants (ptone/scion#4603). Granting and changing
 		// a grant's window also need every permission of the
 		// project-visitor role on the project (non-amplification).
@@ -2184,6 +2187,32 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 
 	for _, lim := range systemLimits {
 		seedLimitDefinition(ctx, s, lim.name, lim.resourceType, lim.unit, lim.description, lim.defaultValue)
+	}
+}
+
+// seedTokenBudgetLimitDefinitions idempotently seeds the eight raw-token budget
+// limit definitions (six non-group + two pooled user-group limits; Tokenomics
+// P3.1/P3.3, §4.4). All default to 0 (unlimited). Invoked when
+// tokenomics.token_budgets is enabled (at startup and on live OFF->ON toggle
+// via ApplySnapshot) so Hubs with the experiment off see no schema/list
+// changes (D5).
+func seedTokenBudgetLimitDefinitions(ctx context.Context, s store.Store) {
+	tokenLimits := []struct {
+		name        string
+		description string
+	}{
+		{store.LimitLLMTokensPerProjectDay, "Maximum LLM tokens per project per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerProjectMonth, "Maximum LLM tokens per project per UTC calendar month (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserDay, "Maximum LLM tokens per user per UTC day across all projects (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserMonth, "Maximum LLM tokens per user per UTC calendar month across all projects (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserProjectDay, "Maximum LLM tokens per user within a project per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserProjectMonth, "Maximum LLM tokens per user within a project per UTC calendar month (0 = unlimited)"},
+		{store.LimitLLMTokensPerGroupDay, "Maximum pooled LLM tokens across all effective members of a group per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerGroupMonth, "Maximum pooled LLM tokens across all effective members of a group per UTC calendar month (0 = unlimited)"},
+	}
+
+	for _, lim := range tokenLimits {
+		seedLimitDefinition(ctx, s, lim.name, store.LimitResourceTypeLLMTokens, store.LimitUnitTokens, lim.description, 0)
 	}
 }
 

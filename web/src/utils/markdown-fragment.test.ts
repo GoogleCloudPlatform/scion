@@ -96,14 +96,18 @@ describe('renderFragment', () => {
     expect(a?.getAttribute('rel')).toBe('noopener noreferrer');
   });
 
-  it('keeps only same-origin images when asked, alt text in place of the rest', () => {
+  it('keeps only same-origin images when asked, linking off-origin http(s) images', () => {
     const fragment = renderer.renderFragment(
       '![remote alt](https://elsewhere.example/a.png) ![ok](/x.png) ![data](data:image/png;base64,AA==)',
       { sameOriginImagesOnly: true }
     );
     const srcs = Array.from(fragment.querySelectorAll('img')).map((img) => img.getAttribute('src'));
     expect(srcs).toEqual(['/x.png', 'data:image/png;base64,AA==']);
-    expect(fragment.textContent).toContain('remote alt');
+    const link = fragment.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://elsewhere.example/a.png');
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(link?.textContent).toBe('remote alt');
   });
 
   it('keeps remote images by default', () => {
@@ -113,12 +117,14 @@ describe('renderFragment', () => {
     expect(img?.getAttribute('src')).toBe('https://elsewhere.example/a.png');
   });
 
-  it('render with sameOriginImagesOnly still drops off-origin images', () => {
+  it('render with sameOriginImagesOnly links off-origin images without img tags', () => {
     const out = renderer.render('![remote alt](https://elsewhere.example/a.png) ![ok](/x.png)', {
       sameOriginImagesOnly: true,
     });
-    expect(out).not.toContain('elsewhere.example');
-    expect(out).toContain('remote alt');
+    expect(out).not.toContain('src="https://elsewhere.example/a.png"');
+    expect(out).toContain(
+      '<a href="https://elsewhere.example/a.png" target="_blank" rel="noopener noreferrer">remote alt</a>'
+    );
     expect(out).toContain('src="/x.png"');
   });
 

@@ -16,9 +16,12 @@
 
 /**
  * Reincarnate action in the agent detail Configuration tab
- * (ptone/scion#3707). The hub authorizes a user's reincarnate with the
- * `agent.lifecycle` permission (authorizeAgentReincarnate), so the button
- * follows the `lifecycle` capability like the header's lifecycle actions.
+ * (ptone/scion#3707, ptone/scion#9845). The hub authorizes a user's
+ * reincarnate with the `agent.lifecycle` permission
+ * (authorizeAgentReincarnate), so the card follows the `lifecycle` capability
+ * like the header's lifecycle actions. Clicking Reincarnate opens
+ * `<scion-reincarnate-dialog>` offering "Reincarnate now" or
+ * "Ask the agent to prepare".
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -64,7 +67,14 @@ const apiFetch = vi.fn();
 
 vi.mock('../../client/api.js', () => ({
   apiFetch: (...args: unknown[]): unknown => apiFetch(...args) as unknown,
-  extractApiError: (): Promise<string> => Promise.resolve('error'),
+  extractApiError: async (res: Response, fallback: string): Promise<string> => {
+    try {
+      const body = (await res.json()) as { error?: { message?: string } };
+      return body?.error?.message || fallback;
+    } catch {
+      return fallback;
+    }
+  },
 }));
 
 vi.mock('../../client/state.js', () => ({
@@ -83,23 +93,23 @@ vi.mock('../../client/main.js', async () => ({
   },
 }));
 
-vi.mock('../shared/confirm-dialog.js', () => ({
-  showConfirm: vi.fn(() => Promise.resolve(true)),
-}));
-
 vi.mock('../../utils/toast.js', () => ({
   showToast: vi.fn(),
 }));
 
 await import('./agent-detail.js');
-import { showConfirm } from '../shared/confirm-dialog.js';
-import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
+import {
+  REINCARNATE_CONFIRM_MESSAGE,
+  REINCARNATE_PREPARE_MESSAGE,
+} from '../../shared/agent-reincarnate.js';
+import type { ScionReincarnateDialog } from '../shared/reincarnate-dialog.js';
 type ScionPageAgentDetail = import('./agent-detail.js').ScionPageAgentDetail;
 type Agent = import('../../shared/types.js').Agent;
 
 const AGENT_ID = 'agent-1';
 const PROJECT_ID = 'proj-1';
 const REINCARNATE_URL = `/api/v1/agents/${AGENT_ID}/reincarnate`;
+const MESSAGE_URL = `/api/v1/agents/${AGENT_ID}/message`;
 
 function makeAgent(overrides: Partial<Agent> = {}): Agent {
   return {
@@ -108,26 +118,30 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     projectId: PROJECT_ID,
     template: 'default',
     phase: 'running',
-    _capabilities: { actions: ['read', 'lifecycle'] },
+    messageMode: 'project',
+    _capabilities: { actions: ['read', 'lifecycle', 'message'] },
     ...overrides,
   };
 }
 
 function jsonResponse(status: number, body: unknown): Response {
-  return {
+  const res = {
     ok: status >= 200 && status < 300,
     status,
     json: () => Promise.resolve(body),
-  } as unknown as Response;
+    clone: () => res,
+  };
+  return res as unknown as Response;
 }
 
-/** Answers for POST .../reincarnate; every other call degrades with a 404. */
 let reincarnateResponder: () => Promise<Response>;
+let messageResponder: () => Promise<Response>;
 
 async function mount(agent: Agent): Promise<ScionPageAgentDetail> {
   apiFetch.mockReset();
   apiFetch.mockImplementation((url: string) => {
     if (url.endsWith('/reincarnate')) return reincarnateResponder();
+    if (url.endsWith('/message')) return messageResponder();
     return Promise.resolve(jsonResponse(404, {}));
   });
 
@@ -162,28 +176,42 @@ function reincarnateButton(el: ScionPageAgentDetail): HTMLElement {
   return button!;
 }
 
+function reincarnateDialog(el: ScionPageAgentDetail): ScionReincarnateDialog {
+  const dialog = el.shadowRoot!.querySelector<ScionReincarnateDialog>('scion-reincarnate-dialog');
+  expect(dialog).toBeTruthy();
+  return dialog!;
+}
+
 function reincarnateCalls(): unknown[][] {
   return apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/reincarnate'));
 }
 
-/**
- * Lets the ended attempt settle, then clicks again: a second confirm proves
- * the in-flight guard was released and the action can be started again.
- */
-async function expectCanStartAgain(el: ScionPageAgentDetail): Promise<void> {
-  await new Promise((r) => setTimeout(r, 0));
-  await el.updateComplete;
-  expect(showConfirm).toHaveBeenCalledTimes(1);
-  reincarnateButton(el).click();
-  await vi.waitFor(() => expect(showConfirm).toHaveBeenCalledTimes(2));
+function messageCalls(): unknown[][] {
+  return apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/message'));
 }
 
-describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
+async function openAndConfirm(
+  el: ScionPageAgentDetail,
+  mode: 'now' | 'prepare' = 'now'
+): Promise<void> {
+  reincarnateButton(el).click();
+  await el.updateComplete;
+  const dialog = reincarnateDialog(el);
+  await dialog.updateComplete;
+  expect(dialog.open).toBe(true);
+  if (mode === 'prepare') {
+    dialog.shadowRoot!.querySelector<HTMLElement>('[data-testid="reincarnate-prepare"]')!.click();
+    await dialog.updateComplete;
+  }
+  dialog.shadowRoot!.querySelector<HTMLElement>('[data-testid="reincarnate-confirm"]')!.click();
+  await el.updateComplete;
+}
+
+describe('agent detail Reincarnate action (ptone/scion#3707, ptone/scion#9845)', () => {
   beforeEach(() => {
     fakeStateManager.reset();
-    vi.mocked(showConfirm).mockReset();
-    vi.mocked(showConfirm).mockResolvedValue(true);
     reincarnateResponder = (): Promise<Response> => Promise.resolve(jsonResponse(202, {}));
+    messageResponder = (): Promise<Response> => Promise.resolve(jsonResponse(200, {}));
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -211,7 +239,6 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
       })
     );
     expect(reincarnateCard(el)).toBeNull();
-    // The header hides its lifecycle actions on the same condition.
     const headerActions = el.shadowRoot!.querySelector('.header-actions');
     expect(headerActions?.textContent ?? '').not.toContain('Stop');
   });
@@ -228,31 +255,25 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     const button = reincarnateButton(el);
     expect(button.textContent).toContain('Reincarnate');
     expect(button.hasAttribute('disabled')).toBe(false);
-    // Control for the delete test: the header shows Stop when not deleting.
     expect(el.shadowRoot!.querySelector('.header-actions')?.textContent).toContain('Stop');
   });
 
-  it('confirms, then POSTs to the agent-scoped reincarnate route and refreshes', async () => {
+  it('opens the dialog, and Reincarnate now POSTs to /reincarnate and refreshes', async () => {
     const el = await mount(makeAgent());
-    reincarnateButton(el).click();
+    await openAndConfirm(el, 'now');
 
     await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
-    expect(showConfirm).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(showConfirm).mock.calls[0][0]).toBe(REINCARNATE_CONFIRM_MESSAGE);
+    expect(messageCalls()).toHaveLength(0);
     expect(REINCARNATE_CONFIRM_MESSAGE).toMatch(
       /stopped and re-provisioned with its current settings and template/
     );
 
     const [url, init] = reincarnateCalls()[0] as [string, RequestInit];
-    // The page addresses every lifecycle action by agent ID; the
-    // project-scoped form is not used here.
     expect(url).toBe(REINCARNATE_URL);
     expect(url).not.toContain(`/projects/${PROJECT_ID}/`);
     expect(init.method).toBe('POST');
-    // The hub decodes a JSON body; an empty body would be a 400.
     expect(init.body).toBe('{}');
 
-    // Success refreshes the agent the same way the other actions do.
     await vi.waitFor(() =>
       expect(apiFetch.mock.calls.some(([u]) => u === `/api/v1/agents/${AGENT_ID}`)).toBe(true)
     );
@@ -260,106 +281,112 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     expect(reincarnateCard(el)!.querySelector('sl-alert')).toBeNull();
   });
 
-  it('makes no call when the confirm is cancelled', async () => {
-    vi.mocked(showConfirm).mockResolvedValue(false);
+  it('makes no call when Cancel is clicked in the dialog', async () => {
     const el = await mount(makeAgent());
     reincarnateButton(el).click();
-
-    await vi.waitFor(() => expect(showConfirm).toHaveBeenCalledTimes(1));
     await el.updateComplete;
+    const dialog = reincarnateDialog(el);
+    await dialog.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    dialog.shadowRoot!.querySelector<HTMLElement>('[data-testid="reincarnate-cancel"]')!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(false);
     expect(reincarnateCalls()).toHaveLength(0);
+    expect(messageCalls()).toHaveLength(0);
     expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
-
-    await expectCanStartAgain(el);
-    expect(reincarnateCalls()).toHaveLength(0);
-  });
-
-  it('can be started again after the confirm dialog rejects', async () => {
-    vi.mocked(showConfirm).mockRejectedValueOnce(new Error('dialog failed'));
-    const el = await mount(makeAgent());
-    reincarnateButton(el).click();
-
-    await vi.waitFor(() => {
-      const alert = reincarnateCard(el)?.querySelector('sl-alert');
-      expect(alert?.textContent).toContain('dialog failed');
-    });
-    expect(reincarnateCalls()).toHaveLength(0);
-    expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
-
-    await expectCanStartAgain(el);
-    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
   });
 
   it.each([
     [403, 'forbidden', 'You do not have permission to reincarnate this agent'],
     [409, 'agent_launching', 'Agent is still launching; try again once it has started'],
-  ])('shows the hub error message on %i', async (status, code, message) => {
+  ])('shows the hub error message on %i for Reincarnate now', async (status, code, message) => {
     reincarnateResponder = (): Promise<Response> =>
       Promise.resolve(jsonResponse(status, { error: { code, message } }));
     const el = await mount(makeAgent());
-    reincarnateButton(el).click();
+    await openAndConfirm(el, 'now');
 
     await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
     await vi.waitFor(() => {
       const alert = reincarnateCard(el)?.querySelector('sl-alert');
       expect(alert?.textContent).toContain(message);
     });
-    // The button is usable again after the failure.
     expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
-
-    await expectCanStartAgain(el);
-    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(2));
   });
 
-  it('shows progress and ignores further clicks while the request runs', async () => {
+  it('shows progress and ignores further clicks while Reincarnate now is in flight', async () => {
     let resolve!: (r: Response) => void;
     reincarnateResponder = (): Promise<Response> =>
       new Promise<Response>((r) => {
         resolve = r;
       });
     const el = await mount(makeAgent());
-    const button = reincarnateButton(el);
-    button.click();
+    await openAndConfirm(el, 'now');
 
     await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
     await el.updateComplete;
     expect(reincarnateButton(el).hasAttribute('loading')).toBe(true);
     expect(reincarnateButton(el).hasAttribute('disabled')).toBe(true);
 
-    // A disabled sl-button blocks clicks natively; dispatching on the element
-    // bypasses that, so this also proves the handler's own guard.
-    reincarnateButton(el).click();
     reincarnateButton(el).click();
     await el.updateComplete;
-    expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(reincarnateDialog(el).open).toBe(false);
     expect(reincarnateCalls()).toHaveLength(1);
 
     resolve(jsonResponse(202, {}));
     await vi.waitFor(() => expect(reincarnateButton(el).hasAttribute('loading')).toBe(false));
-
-    // After the 202 the action can be started again.
-    await expectCanStartAgain(el);
-    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(2));
   });
 
-  it('ignores a second click while the confirm dialog is open', async () => {
-    let answer!: (v: boolean) => void;
-    vi.mocked(showConfirm).mockImplementation(
-      () =>
-        new Promise<boolean>((r) => {
-          answer = r;
+  it('Ask the agent to prepare sends the prepare message with wake: true and shows confirmation', async () => {
+    const el = await mount(makeAgent({ phase: 'suspended', suspendReason: 'user' }));
+    await openAndConfirm(el, 'prepare');
+
+    await vi.waitFor(() => expect(messageCalls()).toHaveLength(1));
+    expect(reincarnateCalls()).toHaveLength(0);
+
+    const [url, init] = messageCalls()[0] as [string, RequestInit];
+    expect(url).toBe(MESSAGE_URL);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({
+      structured_message: { msg: REINCARNATE_PREPARE_MESSAGE, plain: false },
+      interrupt: false,
+      wake: true,
+    });
+
+    await vi.waitFor(() => {
+      const sent = reincarnateCard(el)?.querySelector('[data-testid="reincarnate-prepare-sent"]');
+      expect(sent).not.toBeNull();
+      expect(sent?.textContent).toContain('Asked the agent to prepare');
+    });
+  });
+
+  it('surfaces message_denied errors from Ask the agent to prepare in the card', async () => {
+    messageResponder = (): Promise<Response> =>
+      Promise.resolve(
+        jsonResponse(403, {
+          error: { code: 'message_denied', details: { reason: 'missing_permission' } },
         })
-    );
+      );
     const el = await mount(makeAgent());
-    reincarnateButton(el).click();
+    await openAndConfirm(el, 'prepare');
+
+    await vi.waitFor(() => expect(messageCalls()).toHaveLength(1));
+    await vi.waitFor(() => {
+      const alert = reincarnateCard(el)?.querySelector('.reincarnate-error');
+      expect(alert?.textContent).toContain('permission');
+    });
+    expect(
+      reincarnateCard(el)?.querySelector('[data-testid="reincarnate-prepare-sent"]')
+    ).toBeNull();
+  });
+
+  it('disables Ask the agent to prepare in the dialog for stopped or shell agents', async () => {
+    const el = await mount(makeAgent({ phase: 'stopped' }));
     reincarnateButton(el).click();
     await el.updateComplete;
-    expect(showConfirm).toHaveBeenCalledTimes(1);
-    // No spinner behind the open dialog: progress shows only after confirm.
-    expect(reincarnateButton(el).hasAttribute('loading')).toBe(false);
-    expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
-
-    answer(true);
-    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
+    const dialog = reincarnateDialog(el);
+    await dialog.updateComplete;
+    expect(dialog.prepareAvailable).toBe(false);
+    expect(dialog.prepareUnavailableReason).toContain('must be running');
   });
 });

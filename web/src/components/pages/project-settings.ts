@@ -28,7 +28,8 @@ import type {
   Project,
   Template,
   GitHubAppProjectStatus,
-  GitHubTokenPermissions,
+  GitHubInstallation,
+  ProjectGitHubInfo,
   RuntimeBroker,
   BrokerProfile,
   GCPServiceAccount,
@@ -89,6 +90,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
+  trajectoryCaptureEnabled,
 } from '../../utils/feature-flags.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
@@ -134,11 +136,18 @@ interface ProjectResourceSpec {
   disk?: string;
 }
 
+interface TrajectoryCapturePolicyStatus {
+  policy: 'full' | 'metadata_only' | 'off';
+  enforced_by_hub: boolean;
+}
+
 interface ProjectSettings {
   defaultTemplate?: string | undefined;
   defaultHarnessConfig?: string | undefined;
   defaultHarnessAuth?: string | undefined;
   telemetryEnabled?: boolean | null | undefined;
+  trajectoryCapture?: string | undefined;
+  trajectory_capture?: TrajectoryCapturePolicyStatus | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
   /** null clears (inherit), 0 is Unlimited, n >= 1 a limit. */
@@ -229,6 +238,46 @@ export function parseCountLimitInput(text: string): { value: number | null; erro
   return { value: null, error: 'Must be a whole number greater than 0, or Unlimited.' };
 }
 
+/**
+ * Filter GitHub App installations client-side to active ones whose account
+ * login matches the project's remote owner (case-insensitively).
+ */
+export function filterBindableGitHubInstallations(
+  installations: GitHubInstallation[],
+  owner: string
+): GitHubInstallation[] {
+  const target = owner.trim().toLowerCase();
+  if (!target) return [];
+  return installations.filter(
+    (inst) => inst.status === 'active' && (inst.account_login || '').toLowerCase() === target
+  );
+}
+
+/**
+ * Human-readable explanation for a capped token permission row.
+ */
+export function formatGitHubCapReason(reason?: string, requested?: string): string {
+  switch (reason) {
+    case 'app_grant':
+      return requested
+        ? `App not granted ${requested} — update the App on GitHub`
+        : 'Capped by App grant — update the App on GitHub';
+    case 'association_read_only':
+      return 'Association is read-only — ask a hub admin to bind';
+    default:
+      return '';
+  }
+}
+
+const GITHUB_PERMISSION_ROWS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'contents', label: 'Contents' },
+  { key: 'pull_requests', label: 'Pull requests' },
+  { key: 'issues', label: 'Issues' },
+  { key: 'checks', label: 'Checks' },
+  { key: 'actions', label: 'Actions' },
+  { key: 'metadata', label: 'Metadata' },
+];
+
 @customElement('scion-page-project-settings')
 export class ScionPageProjectSettings extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -318,6 +367,12 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configTelemetryEnabled: boolean | null = null;
+
+  @state()
+  private configTrajectoryCapture = '';
+
+  @state()
+  private trajectoryCaptureStatus: TrajectoryCapturePolicyStatus | null = null;
 
   @state()
   private configAutoExposePortsEnabled: boolean | null = null;
@@ -447,13 +502,13 @@ export class ScionPageProjectSettings extends LitElement {
 
   // GitHub App integration
   @state()
+  private projectGitHub: ProjectGitHubInfo | null = null;
+
+  @state()
   private githubAppStatus: GitHubAppProjectStatus | null = null;
 
   @state()
   private githubAppInstallationId: number | null = null;
-
-  @state()
-  private githubAppPermissions: GitHubTokenPermissions | null = null;
 
   @state()
   private githubAppError: string | null = null;
@@ -462,10 +517,13 @@ export class ScionPageProjectSettings extends LitElement {
   private githubAppConfigured = false;
 
   @state()
-  private githubAppInstallationUrl = '';
+  private githubAppLoading = false;
 
   @state()
-  private githubAppLoading = false;
+  private githubBindBusy = false;
+
+  @state()
+  private githubBindCandidates: GitHubInstallation[] = [];
 
   // Runtime Brokers (providers)
   @state()
@@ -965,6 +1023,61 @@ export class ScionPageProjectSettings extends LitElement {
         color: var(--scion-success-text, #166534);
       }
 
+      .github-perm-badge.capped {
+        background: var(--scion-badge-warning-bg, #fef3c7);
+        border-color: var(--scion-warning-border, #fcd34d);
+        color: var(--scion-warning-text, #92400e);
+      }
+
+      .github-perm-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .github-perm-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8125rem;
+      }
+
+      .github-perm-table th,
+      .github-perm-table td {
+        text-align: left;
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .github-perm-table th {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .github-cap-reason {
+        font-size: 0.75rem;
+        color: var(--scion-warning-text, #92400e);
+      }
+
+      .github-bind-picker {
+        margin-top: 0.75rem;
+        padding: 0.75rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .github-bind-candidate {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+
       .status-message.warning {
         background: var(--scion-badge-warning-bg, #fef3c7);
         color: var(--scion-warning-text, #92400e);
@@ -1157,11 +1270,10 @@ export class ScionPageProjectSettings extends LitElement {
       // Populate GitHub App fields from project data
       this.githubAppInstallationId = this.project.githubInstallationId ?? null;
       this.githubAppStatus = this.project.githubAppStatus ?? null;
-      this.githubAppPermissions = this.project.githubPermissions ?? null;
 
-      // Check if the hub has a GitHub App configured (only on initial load)
+      // Load project GitHub App read model (only on initial load)
       if (!skipGitHubCheck && this.project.gitRemote) {
-        void this.checkGitHubAppConfigured();
+        void this.loadProjectGitHub();
       }
       // Load access boundaries affecting this project
       void this.loadBoundaries();
@@ -1445,25 +1557,21 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
-  private async checkGitHubAppConfigured(): Promise<void> {
+  private async loadProjectGitHub(): Promise<void> {
     this.githubAppLoading = true;
     try {
-      // suppressAccessDeniedToast: hub.github_app.read is admin-only; the
-      // section is hidden for everyone else (see the catch below).
-      const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github`, {
+        suppressAccessDeniedToast: true,
+      });
       if (res.ok) {
-        const data = (await res.json()) as { configured: boolean; installation_url?: string };
-        this.githubAppConfigured = data.configured;
-        this.githubAppInstallationUrl = data.installation_url || '';
-
-        // Auto-discover if configured and project has no installation yet
-        if (data.configured && this.githubAppInstallationId == null && this.project?.gitRemote) {
-          await this.discoverGitHubInstallation();
-          return; // discoverGitHubInstallation handles githubAppLoading
-        }
+        const data = (await res.json()) as ProjectGitHubInfo;
+        this.projectGitHub = data;
+        this.githubAppConfigured = data.app.configured;
+        this.githubAppInstallationId = data.association.installation_id ?? null;
+        this.githubAppStatus = data.status ?? null;
       }
     } catch {
-      // Non-critical — just don't show the section
+      // Non-critical — keep section hidden if unavailable
     } finally {
       this.githubAppLoading = false;
     }
@@ -1520,6 +1628,7 @@ export class ScionPageProjectSettings extends LitElement {
         // as GET /settings, so the PUT path is unchanged.
         this.settings = resolved.project || {};
         this.resolvedSettings = resolved.settings || {};
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture ?? null;
 
         // Extract telemetry hub default from the resolved response, replacing
         // the separate /api/v1/settings/public fetch.
@@ -1548,6 +1657,7 @@ export class ScionPageProjectSettings extends LitElement {
           this.settings = (await fallbackResponse.json()) as ProjectSettings;
         }
         this.resolvedSettings = {};
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture ?? null;
         // Also try loading telemetry default from public settings
         void this.loadHubTelemetryDefaultFallback();
       } else {
@@ -1564,6 +1674,10 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
       this.configDefaultHarnessAuth = this.settings.defaultHarnessAuth || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
+      this.configTrajectoryCapture = this.settings.trajectoryCapture || '';
+      if (!this.trajectoryCaptureStatus && this.settings.trajectory_capture) {
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture;
+      }
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
       this.configDefaultMaxTurns = countLimitOrNull(this.settings.defaultMaxTurns);
       this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
@@ -1618,6 +1732,23 @@ export class ScionPageProjectSettings extends LitElement {
     if (!this.isTelemetryLockedByHub()) return false;
     const entry = this.resolvedSettings?.['scion.io/telemetry-enabled'];
     return entry?.storedValue === false || this.configTelemetryEnabled === false;
+  }
+
+  /** Whether the Hub opt-out lock forces trajectory capture to full. */
+  private isTrajectoryCaptureLockedByHub(): boolean {
+    return (
+      this.trajectoryCaptureStatus?.enforced_by_hub === true ||
+      this.resolvedSettings?.['scion.io/trajectory-capture']?.lockedBy === 'hub'
+    );
+  }
+
+  /** Whether a stored project trajectory capture opt-out is overridden by Hub policy. */
+  private isTrajectoryCaptureShadowedOptOut(): boolean {
+    if (!this.isTrajectoryCaptureLockedByHub()) return false;
+    const entry = this.resolvedSettings?.['scion.io/trajectory-capture'];
+    const stored =
+      typeof entry?.storedValue === 'string' ? entry.storedValue : this.configTrajectoryCapture;
+    return stored === 'metadata_only' || stored === 'off';
   }
 
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
@@ -2646,6 +2777,9 @@ export class ScionPageProjectSettings extends LitElement {
       if (!this.isTelemetryLockedByHub()) {
         body.telemetryEnabled = this.configTelemetryEnabled;
       }
+      if (trajectoryCaptureEnabled() && !this.isTrajectoryCaptureLockedByHub()) {
+        body.trajectoryCapture = this.configTrajectoryCapture || '';
+      }
       if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
         body.defaultMaxTurns = this.configDefaultMaxTurns;
       }
@@ -2872,8 +3006,17 @@ export class ScionPageProjectSettings extends LitElement {
     if (!this.isGitHubRemote()) return '';
     if (!this.githubAppLoading && !this.githubAppConfigured) return '';
 
-    const status = this.githubAppStatus;
-    const hasInstallation = this.githubAppInstallationId != null;
+    const info = this.projectGitHub;
+    const status = info?.status ?? this.githubAppStatus;
+    const assoc = info?.association;
+    const installationId = assoc?.installation_id ?? this.githubAppInstallationId;
+    const hasInstallation = installationId != null;
+    const canBind = info?.can.bind === true;
+    const canUnbind = info?.can.unbind === true;
+    const canCheck = info?.can.check === true;
+    const canDiscover = info?.can.discover === true;
+    const webHost = info?.app.web_host || 'github.com';
+    const installationUrl = info?.app.installation_url || '';
 
     const stateIcon = (s: string | undefined) => {
       switch (s) {
@@ -2905,9 +3048,126 @@ export class ScionPageProjectSettings extends LitElement {
       }
     };
 
+    const renderAuthorizedBy = (): TemplateResult | string => {
+      if (!assoc) return '';
+      if (!assoc.authorized) {
+        if (assoc.verified === false) {
+          return html`<span data-testid="github-association-unverified"
+            >Unverified${assoc.reason ? ` — ${assoc.reason}` : ''}</span
+          >`;
+        }
+        return html`<span>Not authorized${assoc.reason ? ` — ${assoc.reason}` : ''}</span>`;
+      }
+      switch (assoc.basis) {
+        case 'admin_binding': {
+          const binder = assoc.bound_by_name || 'a hub admin';
+          return html`<span
+            >Bound by
+            ${binder}${assoc.bound_at ? ` on ${formatInstantWithZone(assoc.bound_at)}` : ''}</span
+          >`;
+        }
+        case 'creator_push':
+          return html`<span>Creator proof (write allowed)</span>`;
+        case 'creator_pull':
+          return html`<span>Creator proof (read-only)</span>`;
+        default:
+          return html`<span>${assoc.basis ?? 'Authorized'}</span>`;
+      }
+    };
+
+    const renderBindPicker = (): TemplateResult | string => {
+      if (this.githubBindCandidates.length <= 1) return '';
+      return html`
+        <div class="github-bind-picker" data-testid="github-bind-picker">
+          <span class="field-help">Select an active installation to bind:</span>
+          ${this.githubBindCandidates.map(
+            (inst) => html`
+              <div class="github-bind-candidate">
+                <span>
+                  <strong>${inst.account_login}</strong> (${inst.account_type}) ·
+                  <code>#${inst.installation_id}</code>
+                </span>
+                <sl-button
+                  variant="primary"
+                  size="small"
+                  ?loading=${this.githubBindBusy}
+                  ?disabled=${this.githubBindBusy}
+                  @click=${(): Promise<void> => this.confirmAndBindGitHubInstallation(inst)}
+                >
+                  Bind #${inst.installation_id}
+                </sl-button>
+              </div>
+            `
+          )}
+        </div>
+      `;
+    };
+
+    const renderPermissionsTable = (): TemplateResult | string => {
+      const perms = info?.permissions;
+      if (!perms) return '';
+      const cappedSet = new Set(perms.capped ?? []);
+      const appGrantKnown = perms.app_grant_known !== false && perms.app_granted != null;
+      return html`
+        <div class="github-permissions">
+          <div class="github-perm-header">
+            <span class="field-help">Token Permissions</span>
+            <span class="template-badge" data-testid="github-perm-mode">
+              ${perms.mode === 'custom' ? 'Custom' : 'Default'}
+            </span>
+          </div>
+          ${!appGrantKnown
+            ? html`<p class="field-help" data-testid="github-app-perms-unloaded">
+                App permissions not yet loaded.
+              </p>`
+            : ''}
+          <table class="github-perm-table" data-testid="github-permissions-table">
+            <thead>
+              <tr>
+                <th>Permission</th>
+                <th>Requested</th>
+                <th>App grant</th>
+                <th>Effective</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${GITHUB_PERMISSION_ROWS.map((row) => {
+                const requested = perms.requested?.[row.key] || '';
+                const appGrant = appGrantKnown ? perms.app_granted?.[row.key] || '' : '';
+                const effective = perms.effective?.[row.key] || '';
+                const isCapped = cappedSet.has(row.key);
+                const capReason = formatGitHubCapReason(perms.cap_reasons?.[row.key], requested);
+                return html`
+                  <tr data-permission=${row.key}>
+                    <td>${row.label}</td>
+                    <td>${requested || '—'}</td>
+                    <td>${appGrant || '—'}</td>
+                    <td>
+                      ${effective
+                        ? html`<span class="github-perm-badge ${isCapped ? 'capped' : effective}"
+                            >${effective}</span
+                          >`
+                        : '—'}
+                    </td>
+                    <td>
+                      ${capReason ? html`<span class="github-cap-reason">${capReason}</span>` : ''}
+                    </td>
+                  </tr>
+                `;
+              })}
+            </tbody>
+          </table>
+        </div>
+      `;
+    };
+
     return html`
-      <div class="section">
-        <h2>GitHub App Integration</h2>
+      <div class="section" data-testid="github-app-section">
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+          <h2 style="margin: 0;">GitHub App Integration</h2>
+          ${info?.app.slug ? html`<span class="template-badge">@${info.app.slug}</span>` : ''}
+        </div>
         <p>Automatic token management for GitHub operations via GitHub App installation tokens.</p>
 
         ${this.githubAppError
@@ -2922,45 +3182,56 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-icon>
                 ${this.githubAppLoading
                   ? html` <p>Checking for GitHub App installation…</p> `
-                  : !this.githubAppConfigured
-                    ? html`
-                        <p>No GitHub App has been configured on this Hub.</p>
-                        <p class="field-help">
-                          Ask your Hub admin to configure the GitHub App integration, then install
-                          it on your organization or account.
-                        </p>
-                      `
-                    : html`
-                        <p>No GitHub App installation found for this project's repository.</p>
-
-                        ${this.githubAppInstallationUrl
+                  : html`
+                      <p>No GitHub App installation is connected to this project.</p>
+                      ${canDiscover && installationUrl
+                        ? html`
+                            <p class="field-help">
+                              <a
+                                href=${installationUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                data-testid="github-install-link"
+                              >
+                                Install the GitHub App
+                              </a>
+                              on your organization or account, then bind or discover it here.
+                            </p>
+                          `
+                        : ''}
+                      <div
+                        style="margin-top: 0.75rem; display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap;"
+                      >
+                        ${canBind
                           ? html`
-                              <p class="field-help">
-                                <a
-                                  href=${this.githubAppInstallationUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  Install the GitHub App
-                                </a>
-                                on your organization or account, then click Discover.
-                              </p>
+                              <sl-button
+                                variant="primary"
+                                size="small"
+                                data-testid="github-bind-button"
+                                ?loading=${this.githubBindBusy}
+                                ?disabled=${this.githubBindBusy || this.githubAppLoading}
+                                @click=${(): Promise<void> => this.startBindGitHubInstallation()}
+                              >
+                                Bind installation
+                              </sl-button>
                             `
-                          : html`
-                              <p class="field-help">
-                                Install the GitHub App on your organization or account, then click
-                                Discover.
-                              </p>
-                            `}
-                        <sl-button
-                          variant="default"
-                          size="small"
-                          @click=${() => this.discoverGitHubInstallation()}
-                        >
-                          <sl-icon slot="prefix" name="search"></sl-icon>
-                          Discover Installation
-                        </sl-button>
-                      `}
+                          : ''}
+                        ${canDiscover
+                          ? html`
+                              <sl-button
+                                variant="default"
+                                size="small"
+                                ?disabled=${this.githubAppLoading}
+                                @click=${() => this.discoverGitHubInstallation()}
+                              >
+                                <sl-icon slot="prefix" name="search"></sl-icon>
+                                Discover Installation
+                              </sl-button>
+                            `
+                          : ''}
+                      </div>
+                      ${renderBindPicker()}
+                    `}
               </div>
             `
           : html`
@@ -2972,9 +3243,25 @@ export class ScionPageProjectSettings extends LitElement {
                     <strong>${stateLabel(status?.state)}</strong>
                   </div>
                 </div>
+                ${info?.remote.owner && info?.remote.repo
+                  ? html`
+                      <div class="github-status-item">
+                        <span class="field-help">Repository</span>
+                        <code>${info.remote.owner}/${info.remote.repo}</code>
+                      </div>
+                    `
+                  : ''}
                 <div class="github-status-item">
-                  <span class="field-help">Installation ID</span>
-                  <code>${this.githubAppInstallationId}</code>
+                  <span class="field-help">Installation</span>
+                  <span>
+                    ${assoc?.account_login ? `${assoc.account_login} · ` : ''}<code
+                      >#${installationId}</code
+                    >
+                  </span>
+                </div>
+                <div class="github-status-item">
+                  <span class="field-help">Authorized by</span>
+                  ${renderAuthorizedBy()}
                 </div>
                 ${status?.last_token_mint
                   ? html`
@@ -2997,58 +3284,138 @@ export class ScionPageProjectSettings extends LitElement {
                     </div>
                   `
                 : ''}
-
-              <div class="github-permissions">
-                <span class="field-help">Token Permissions</span>
-                <div class="github-perm-grid">
-                  ${this.renderPermBadge('Contents', this.githubAppPermissions?.contents)}
-                  ${this.renderPermBadge('Pull Requests', this.githubAppPermissions?.pull_requests)}
-                  ${this.renderPermBadge('Issues', this.githubAppPermissions?.issues)}
-                  ${this.renderPermBadge('Metadata', this.githubAppPermissions?.metadata)}
-                  ${this.renderPermBadge('Checks', this.githubAppPermissions?.checks)}
-                  ${this.renderPermBadge('Actions', this.githubAppPermissions?.actions)}
-                </div>
-              </div>
-
-              <div style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem;">
-                <sl-button
-                  variant="default"
-                  size="small"
-                  ?loading=${this.githubAppLoading}
-                  ?disabled=${this.githubAppLoading}
-                  @click=${() => this.checkGitHubStatus()}
-                >
-                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                  ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
-                </sl-button>
-                <a
-                  href=${`https://github.com/settings/installations/${this.githubAppInstallationId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style="text-decoration: none;"
-                >
-                  <sl-button variant="text" size="small">
-                    <sl-icon slot="prefix" name="gear"></sl-icon>
-                    Configure Installation
-                  </sl-button>
-                </a>
-                <sl-button
-                  variant="text"
-                  size="small"
-                  @click=${() => this.removeGitHubInstallation()}
-                >
-                  <sl-icon slot="prefix" name="x-circle"></sl-icon>
-                  Remove
-                </sl-button>
-              </div>
+              ${renderPermissionsTable()}
+              ${(canBind && assoc?.basis !== 'admin_binding') || canCheck || canUnbind
+                ? html`
+                    <div
+                      style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;"
+                    >
+                      ${canBind && assoc?.basis !== 'admin_binding'
+                        ? html`
+                            <sl-button
+                              variant="primary"
+                              size="small"
+                              data-testid="github-bind-button"
+                              ?loading=${this.githubBindBusy}
+                              ?disabled=${this.githubBindBusy || this.githubAppLoading}
+                              @click=${() => this.startBindGitHubInstallation()}
+                            >
+                              Bind installation
+                            </sl-button>
+                          `
+                        : ''}
+                      ${canCheck
+                        ? html`
+                            <sl-button
+                              variant="default"
+                              size="small"
+                              data-testid="github-check-button"
+                              ?loading=${this.githubAppLoading}
+                              ?disabled=${this.githubAppLoading}
+                              @click=${() => this.checkGitHubStatus()}
+                            >
+                              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                              ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
+                            </sl-button>
+                          `
+                        : ''}
+                      ${canCheck || canUnbind || canBind
+                        ? html`
+                            <a
+                              href=${`https://${webHost}/settings/installations/${installationId}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style="text-decoration: none;"
+                              data-testid="github-configure-link"
+                            >
+                              <sl-button variant="text" size="small">
+                                <sl-icon slot="prefix" name="gear"></sl-icon>
+                                Configure Installation
+                              </sl-button>
+                            </a>
+                          `
+                        : ''}
+                      ${canUnbind
+                        ? html`
+                            <sl-button
+                              variant="text"
+                              size="small"
+                              data-testid="github-remove-button"
+                              @click=${() => this.removeGitHubInstallation()}
+                            >
+                              <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                              Remove
+                            </sl-button>
+                          `
+                        : ''}
+                    </div>
+                  `
+                : ''}
+              ${renderBindPicker()}
             `}
       </div>
     `;
   }
 
-  private renderPermBadge(label: string, value: string | undefined) {
-    if (!value) return '';
-    return html` <span class="github-perm-badge ${value}"> ${label}: ${value} </span> `;
+  private async startBindGitHubInstallation(): Promise<void> {
+    this.githubAppError = null;
+    this.githubBindCandidates = [];
+    const owner = this.projectGitHub?.remote.owner || '';
+    if (!owner) {
+      this.githubAppError = 'Project remote is not on the configured GitHub host.';
+      return;
+    }
+
+    this.githubBindBusy = true;
+    try {
+      const res = await apiFetch('/api/v1/github-app/installations');
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
+        throw new Error(data.message || `Failed to list installations (${res.status})`);
+      }
+      const data = (await res.json()) as { installations?: GitHubInstallation[] };
+      const candidates = filterBindableGitHubInstallations(data.installations ?? [], owner);
+      if (candidates.length === 0) {
+        this.githubAppError = `No active GitHub App installation found for "${owner}".`;
+        return;
+      }
+      if (candidates.length === 1) {
+        await this.confirmAndBindGitHubInstallation(candidates[0]);
+        return;
+      }
+      this.githubBindCandidates = candidates;
+    } catch (err) {
+      this.githubAppError = err instanceof Error ? err.message : 'Failed to load installations';
+    } finally {
+      this.githubBindBusy = false;
+    }
+  }
+
+  private async confirmAndBindGitHubInstallation(inst: GitHubInstallation): Promise<void> {
+    const confirmed = await showConfirm(
+      `Bind installation ${inst.account_login} (#${inst.installation_id}) to this project? Tokens for this project will be authorized by your hub-admin binding, not the creator's GitHub access.`
+    );
+    if (!confirmed) return;
+
+    this.githubBindBusy = true;
+    this.githubAppError = null;
+    try {
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-installation`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ installation_id: inst.installation_id }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
+        throw new Error(data.message || `Failed to bind installation (${res.status})`);
+      }
+      this.githubBindCandidates = [];
+      await this.loadProjectGitHub();
+    } catch (err) {
+      this.githubAppError = err instanceof Error ? err.message : 'Bind failed';
+    } finally {
+      this.githubBindBusy = false;
+    }
   }
 
   private formatGitHubErrorCode(code?: string): string {
@@ -3067,6 +3434,10 @@ export class ScionPageProjectSettings extends LitElement {
         return 'Permission Denied';
       case 'token_mint_failed':
         return 'Token Mint Failed';
+      case 'association_unauthorized':
+        return 'Association Unauthorized';
+      case 'association_check_failed':
+        return 'Association Check Failed';
       default:
         return code ?? 'Error';
     }
@@ -3084,22 +3455,7 @@ export class ScionPageProjectSettings extends LitElement {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Check failed (${res.status})`);
       }
-      const result = (await res.json()) as {
-        status?: GitHubAppProjectStatus;
-        permissions?: GitHubTokenPermissions;
-        installation_id?: number;
-      };
-      // Update local state from the check response
-      this.githubAppStatus = result.status ?? null;
-      this.githubAppPermissions = result.permissions ?? null;
-      this.githubAppInstallationId = result.installation_id ?? this.githubAppInstallationId;
-      if (this.project) {
-        this.project = {
-          ...this.project,
-          githubAppStatus: result.status,
-          githubPermissions: result.permissions,
-        };
-      }
+      await this.loadProjectGitHub();
     } catch (err) {
       this.githubAppError = err instanceof Error ? err.message : 'Check failed';
     } finally {
@@ -3116,31 +3472,11 @@ export class ScionPageProjectSettings extends LitElement {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Failed to discover installations (${res.status})`);
       }
-      // Refresh just the project's GitHub App state without a full reload
-      await this.refreshGitHubAppState();
+      await this.loadProjectGitHub();
     } catch (err) {
       this.githubAppError = err instanceof Error ? err.message : 'Discovery failed';
     } finally {
       this.githubAppLoading = false;
-    }
-  }
-
-  private async refreshGitHubAppState(): Promise<void> {
-    const res = await apiFetch(`/api/v1/projects/${this.projectId}`);
-    if (res.ok) {
-      const project = (await res.json()) as Project;
-      this.githubAppInstallationId = project.githubInstallationId ?? null;
-      this.githubAppStatus = project.githubAppStatus ?? null;
-      this.githubAppPermissions = project.githubPermissions ?? null;
-      // Update the project object in place so renderProjectIcon and other parts reflect the change
-      if (this.project) {
-        this.project = {
-          ...this.project,
-          githubInstallationId: project.githubInstallationId,
-          githubAppStatus: project.githubAppStatus,
-          githubPermissions: project.githubPermissions,
-        };
-      }
     }
   }
 
@@ -3161,17 +3497,8 @@ export class ScionPageProjectSettings extends LitElement {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Failed to remove installation (${res.status})`);
       }
-      this.githubAppInstallationId = null;
-      this.githubAppStatus = null;
-      this.githubAppPermissions = null;
-      if (this.project) {
-        this.project = {
-          ...this.project,
-          githubInstallationId: undefined,
-          githubAppStatus: undefined,
-          githubPermissions: undefined,
-        };
-      }
+      this.githubBindCandidates = [];
+      await this.loadProjectGitHub();
     } catch (err) {
       this.githubAppError = err instanceof Error ? err.message : 'Remove failed';
     } finally {
@@ -3448,6 +3775,38 @@ export class ScionPageProjectSettings extends LitElement {
                       server-level setting.</span
                     >`}
               </div>
+
+              ${trajectoryCaptureEnabled()
+                ? html`<div class="config-field" data-testid="project-trajectory-capture-field">
+                    <label>Trajectory Capture</label>
+                    <sl-select
+                      data-testid="project-trajectory-capture-select"
+                      value=${this.isTrajectoryCaptureLockedByHub()
+                        ? 'full'
+                        : this.configTrajectoryCapture || 'full'}
+                      help-text=${this.isTrajectoryCaptureLockedByHub()
+                        ? this.isTrajectoryCaptureShadowedOptOut()
+                          ? 'Enforced by Hub policy. Stored project opt-out is overridden.'
+                          : 'Enforced by Hub policy'
+                        : nothing}
+                      ?disabled=${!canEdit || this.isTrajectoryCaptureLockedByHub()}
+                      @sl-change=${(e: Event) => {
+                        if (this.isTrajectoryCaptureLockedByHub()) return;
+                        this.configTrajectoryCapture = (e.target as HTMLSelectElement).value;
+                      }}
+                    >
+                      <sl-option value="full">Full (default)</sl-option>
+                      <sl-option value="metadata_only">Metadata only</sl-option>
+                      <sl-option value="off">Off</sl-option>
+                    </sl-select>
+                    ${this.isTrajectoryCaptureLockedByHub()
+                      ? nothing
+                      : html`<span class="field-help"
+                          >Controls raw harness trajectory capture for agents in this project.
+                          Defaults to Full.</span
+                        >`}
+                  </div>`
+                : nothing}
 
               <div
                 class="config-field ${this.isHubDefault('scion.io/auto-expose-ports-enabled')

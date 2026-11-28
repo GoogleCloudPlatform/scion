@@ -32,6 +32,7 @@ import {
   fireStatusBadgeVariant,
   formatRedactedExecSummary,
   getTriggerActions,
+  hasNonCelTriggerRules,
   parseTriggerRuleRowErrors,
   type ListTriggerEventsResponse,
   type ListTriggersResponse,
@@ -39,6 +40,7 @@ import {
   type TriggerActionSpec,
   type TriggerDefinition,
   type TriggerMatchRuleSpec,
+  type TriggerNotifySpec,
   type TriggerRenderResponse,
   type TriggerRenderSlotResult,
   type TriggerRuleRowError,
@@ -53,8 +55,10 @@ import {
   type SourceIdMode,
 } from './source-extensions.js';
 import { createDefaultMessageAction } from './action-editor.js';
+import { createDefaultNotifySpec, normalizeNotifySpec } from './notify-editor.js';
 import './where-editor.js';
 import './action-editor.js';
+import './notify-editor.js';
 
 @customElement('scion-trigger-list')
 export class ScionTriggerList extends LitElement {
@@ -78,11 +82,11 @@ export class ScionTriggerList extends LitElement {
   pendingCreatePreset = '';
 
   /**
-   * P9 HOOK (ptone/scion#9065): flip to true when the Hub accepts `actions[]`
-   * on POST /triggers and PATCH /triggers/{id}.
+   * Multi-action support (P9, ptone/scion#9065 / ptone/scion#9785): sends
+   * `actions[]` on POST /triggers and PATCH /triggers/{id}.
    */
   @property({ type: Boolean })
-  multiActionEnabled = false;
+  multiActionEnabled = true;
 
   @state() private triggers: TriggerDefinition[] = [];
   @state() private loading = true;
@@ -111,6 +115,7 @@ export class ScionTriggerList extends LitElement {
   @state() private formCoalesceWindow = '';
   @state() private formMaxFiresPerMinute = '';
   @state() private formMaxConcurrentDispatches = '';
+  @state() private formNotify: TriggerNotifySpec = createDefaultNotifySpec();
   @state() private formAuthoringPane: 'form' | 'cel' = 'cel';
   @state() private formAuthoringValid = true;
   @state() private formAuthoringErrors: string[] = [];
@@ -335,7 +340,7 @@ export class ScionTriggerList extends LitElement {
         });
     }
     const ext = getFormAuthoring(kind);
-    this.formAuthoringPane = ext ? 'form' : 'cel';
+    this.formAuthoringPane = ext && !this.hasNonCelRules ? 'form' : 'cel';
     this.formAuthoringValid = true;
     this.formAuthoringErrors = [];
     if (ext) {
@@ -371,6 +376,7 @@ export class ScionTriggerList extends LitElement {
     this.formCoalesceWindow = '';
     this.formMaxFiresPerMinute = '';
     this.formMaxConcurrentDispatches = '';
+    this.formNotify = createDefaultNotifySpec();
     this.formPresetId = presetId;
     this.formError = null;
     this.whereRowErrors = {};
@@ -417,6 +423,7 @@ export class ScionTriggerList extends LitElement {
     this.formMaxConcurrentDispatches = tr.maxConcurrentDispatches
       ? String(tr.maxConcurrentDispatches)
       : '';
+    this.formNotify = normalizeNotifySpec(tr.notify);
     this.formPresetId = '';
     this.formError = null;
     this.whereRowErrors = {};
@@ -424,7 +431,10 @@ export class ScionTriggerList extends LitElement {
     this.formAuthoringErrors = [];
 
     const formExt = getFormAuthoring(this.formSourceKind);
-    this.formAuthoringPane = formExt && tr.match.form ? 'form' : 'cel';
+    // J16c (mixed-rule-arrays §11.3): form pane is available only when every
+    // stored element is 'cel'. With any non-cel element, open the list editor
+    // and keep match.form intact unless a row is edited.
+    this.formAuthoringPane = formExt && tr.match.form && !this.hasNonCelRules ? 'form' : 'cel';
     if (formExt) {
       void ensureExtensionLoaded(formExt)
         .then(() => this.requestUpdate())
@@ -436,6 +446,11 @@ export class ScionTriggerList extends LitElement {
   }
 
   private handleFormAuthoringOutput(out: FormAuthoringOutput): void {
+    // J16c defense-in-depth: never let form authoring overwrite rules when
+    // non-cel elements are present.
+    if (this.hasNonCelRules) {
+      return;
+    }
     this.formAuthoringValid = out.valid !== false;
     this.formAuthoringErrors = Array.isArray(out.errors) ? [...out.errors] : [];
     // O-C: never apply types, rules, form, subject, or suggested actions from
@@ -481,6 +496,22 @@ export class ScionTriggerList extends LitElement {
 
   private isReadOnlyActionType(type: string | undefined): boolean {
     return type !== 'message' && type !== 'dispatch_agent';
+  }
+
+  private get hasReadOnlyActions(): boolean {
+    return this.formActions.some((a) => this.isReadOnlyActionType(a.type));
+  }
+
+  private get hasNonCelRules(): boolean {
+    return hasNonCelTriggerRules(this.formRules);
+  }
+
+  private get activeAuthoringPane(): 'form' | 'cel' {
+    return getFormAuthoring(this.formSourceKind) &&
+      this.formAuthoringPane === 'form' &&
+      !this.hasNonCelRules
+      ? 'form'
+      : 'cel';
   }
 
   private buildDiffPatchBody(
@@ -540,12 +571,11 @@ export class ScionTriggerList extends LitElement {
       // P9 HOOK (ptone/scion#9065): when multiActionEnabled is true, send `actions[]`,
       // preserving read-only/exec rows unchanged (O1 default-safety).
       if (this.multiActionEnabled) {
-        const hasReadOnly = this.formActions.some((a) => this.isReadOnlyActionType(a.type));
-        if (!hasReadOnly) {
-          body['actions'] = this.formActions;
+        if (!this.hasReadOnlyActions) {
+          body['actions'] = this.formActions.map((a) => this.sanitizeActionForSave(a));
         }
       } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
-        body['action'] = firstAction;
+        body['action'] = this.sanitizeActionForSave(firstAction);
       }
     }
 
@@ -556,18 +586,58 @@ export class ScionTriggerList extends LitElement {
       body['maxFiresPerMinute'] = nextFpm;
     }
 
+    const hasDispatchAction = this.formActions.some((a) => a.type === 'dispatch_agent');
     const rawConc = this.formMaxConcurrentDispatches.trim();
     const nextConc = rawConc === '' ? 0 : parseInt(rawConc, 10);
     if (
       Number.isFinite(nextConc) &&
       nextConc >= 0 &&
-      firstAction?.type === 'dispatch_agent' &&
+      hasDispatchAction &&
       nextConc !== (orig.maxConcurrentDispatches ?? 0)
     ) {
       body['maxConcurrentDispatches'] = nextConc;
     }
 
+    const nextNotify = normalizeNotifySpec(this.formNotify);
+    const origNotify = normalizeNotifySpec(orig.notify);
+    if (!canonicalDeepEqual(nextNotify, origNotify)) {
+      body['notify'] = this.buildNotifyPayload(this.formNotify, true);
+    }
+
     return body;
+  }
+
+  /**
+   * Builds a Hub-compatible TriggerNotifySpec / TriggerNotifyPatchSpec payload.
+   * On PATCH, explicit empty strings for agentId/agentName clear the stored agent sink.
+   */
+  private buildNotifyPayload(spec: TriggerNotifySpec, forPatch: boolean): Record<string, unknown> {
+    const normalized = normalizeNotifySpec(spec);
+    const payload: Record<string, unknown> = {
+      onOutcomes: [...normalized.onOutcomes],
+      userNotice: normalized.userNotice,
+    };
+    if (forPatch) {
+      payload['agentId'] = normalized.agentId;
+      payload['agentName'] = normalized.agentName;
+    } else {
+      if (normalized.agentId) payload['agentId'] = normalized.agentId;
+      if (normalized.agentName) payload['agentName'] = normalized.agentName;
+    }
+    return payload;
+  }
+
+  /**
+   * Omit untrustedVars on message and dispatch_agent payloads when saving so
+   * the hub derives and stores the list from the current templates (ptone/scion#9776).
+   */
+  private sanitizeActionForSave(action: TriggerActionSpec): TriggerActionSpec {
+    if (action.type === 'message' || action.type === 'dispatch_agent') {
+      const copy = { ...action };
+      delete copy.untrustedVars;
+      return copy;
+    }
+    return action;
   }
 
   private async submitTriggerForm(): Promise<void> {
@@ -582,8 +652,7 @@ export class ScionTriggerList extends LitElement {
       this.formError = 'Source endpoint is required.';
       return;
     }
-    const formExt = getFormAuthoring(this.formSourceKind);
-    if (formExt && this.formAuthoringPane === 'form' && !this.formAuthoringValid) {
+    if (this.activeAuthoringPane === 'form' && !this.formAuthoringValid) {
       this.formError = this.formAuthoringErrors.join('; ') || 'Fix the form errors before saving.';
       return;
     }
@@ -635,9 +704,11 @@ export class ScionTriggerList extends LitElement {
       // Until P9 merges on the Hub, send the single `action` object.
       const firstAction = this.formActions[0];
       if (this.multiActionEnabled) {
-        body['actions'] = this.formActions.filter((a) => !this.isReadOnlyActionType(a.type));
+        body['actions'] = this.formActions
+          .filter((a) => !this.isReadOnlyActionType(a.type))
+          .map((a) => this.sanitizeActionForSave(a));
       } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
-        body['action'] = firstAction;
+        body['action'] = this.sanitizeActionForSave(firstAction);
       }
 
       const maxFpm = parseInt(this.formMaxFiresPerMinute, 10);
@@ -645,9 +716,15 @@ export class ScionTriggerList extends LitElement {
         body['maxFiresPerMinute'] = maxFpm;
       }
       const maxConc = parseInt(this.formMaxConcurrentDispatches, 10);
-      if (Number.isFinite(maxConc) && maxConc > 0 && firstAction?.type === 'dispatch_agent') {
+      if (
+        Number.isFinite(maxConc) &&
+        maxConc > 0 &&
+        this.formActions.some((a) => a.type === 'dispatch_agent')
+      ) {
         body['maxConcurrentDispatches'] = maxConc;
       }
+
+      body['notify'] = this.buildNotifyPayload(this.formNotify, false);
     }
 
     this.saving = true;
@@ -804,6 +881,17 @@ export class ScionTriggerList extends LitElement {
       if (found) return `webhook: ${found.name}`;
     }
     return `${source.kind}: ${source.id}`;
+  }
+
+  private formatNotifySummary(notify?: TriggerNotifySpec): string {
+    const norm = normalizeNotifySpec(notify);
+    const parts: string[] = [];
+    parts.push(`User notice: ${norm.userNotice ? 'on' : 'off'}`);
+    if (norm.agentName || norm.agentId) {
+      parts.push(`Agent: ${norm.agentName || norm.agentId}`);
+    }
+    parts.push(`On: ${norm.onOutcomes.join(', ')}`);
+    return parts.join(' · ');
   }
 
   private renderSlotPreview(label: string, slot: TriggerRenderSlotResult | undefined) {
@@ -1013,6 +1101,12 @@ export class ScionTriggerList extends LitElement {
                                         : nothing}
                                     </div>
                                   </div>
+                                  <div>
+                                    <div class="detail-label">Notify on Failure</div>
+                                    <div class="rule-meta" data-trigger-notify-summary=${tr.id}>
+                                      ${this.formatNotifySummary(tr.notify)}
+                                    </div>
+                                  </div>
                                 </div>
                               </td>
                             </tr>
@@ -1047,7 +1141,7 @@ export class ScionTriggerList extends LitElement {
         <div class="dialog-form">
           ${this.formError
             ? html`
-                <sl-alert variant="danger" open>
+                <sl-alert variant="danger" open data-trigger-form-error>
                   <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
                   ${this.formError}
                 </sl-alert>
@@ -1137,19 +1231,36 @@ export class ScionTriggerList extends LitElement {
                 <sl-radio-group
                   label="Authoring mode"
                   size="small"
-                  .value=${this.formAuthoringPane}
+                  .value=${this.activeAuthoringPane}
                   data-authoring-mode
                   @sl-change=${(e: Event) => {
-                    this.formAuthoringPane =
-                      (e.target as HTMLInputElement).value === 'form' ? 'form' : 'cel';
+                    const group = e.target as HTMLInputElement;
+                    const next = group.value === 'form' ? 'form' : 'cel';
+                    if (next === 'form' && this.hasNonCelRules) {
+                      this.formAuthoringPane = 'cel';
+                      group.value = 'cel';
+                      return;
+                    }
+                    this.formAuthoringPane = next;
                   }}
                 >
-                  <sl-radio-button value="form">${formExt.label || 'Form'}</sl-radio-button>
+                  <sl-radio-button value="form" ?disabled=${this.hasNonCelRules}
+                    >${formExt.label || 'Form'}</sl-radio-button
+                  >
                   <sl-radio-button value="cel">Advanced (CEL)</sl-radio-button>
                 </sl-radio-group>
+                ${this.hasNonCelRules
+                  ? html`
+                      <sl-alert variant="neutral" open data-form-pane-disabled-notice>
+                        Form mode is disabled because this rule contains elements the form cannot
+                        represent. Edit CEL rules below, or use the CLI or API to edit other
+                        dialects.
+                      </sl-alert>
+                    `
+                  : nothing}
               `
             : nothing}
-          ${formExt && this.formAuthoringPane === 'form'
+          ${formExt && this.activeAuthoringPane === 'form'
             ? html`
                 <div data-form-authoring-pane>
                   ${formExt.render({
@@ -1206,12 +1317,21 @@ export class ScionTriggerList extends LitElement {
                 ></scion-trigger-where-editor>
               `}
 
-          <div class="section-divider">Action</div>
+          <div class="section-divider">${this.multiActionEnabled ? 'Actions' : 'Action'}</div>
+          ${this.hasReadOnlyActions
+            ? html`
+                <sl-alert variant="neutral" open data-readonly-actions-notice>
+                  This rule includes read-only action types; these actions can only be edited with
+                  the CLI or API. Other rule fields can still be updated here.
+                </sl-alert>
+              `
+            : nothing}
           <scion-trigger-action-editor
             .actions=${this.formActions}
             .agents=${this.agents}
             .subjectMode=${this.formSubjectMode}
             .multiActionEnabled=${this.multiActionEnabled}
+            .readonly=${this.hasReadOnlyActions}
             @actions-changed=${(e: CustomEvent<{ actions: TriggerActionSpec[] }>) => {
               this.formActions = e.detail.actions;
             }}
@@ -1284,8 +1404,16 @@ export class ScionTriggerList extends LitElement {
               }}
             ></sl-input>
           </div>
-          ${formExt &&
-          this.formAuthoringPane === 'form' &&
+
+          <div class="section-divider">Notify on Failure</div>
+          <scion-trigger-notify-editor
+            .notify=${this.formNotify}
+            .agents=${this.agents}
+            @notify-changed=${(e: CustomEvent<{ notify: TriggerNotifySpec }>) => {
+              this.formNotify = e.detail.notify;
+            }}
+          ></scion-trigger-notify-editor>
+          ${this.activeAuthoringPane === 'form' &&
           !this.formAuthoringValid &&
           this.formAuthoringErrors.length > 0
             ? html`
@@ -1310,7 +1438,7 @@ export class ScionTriggerList extends LitElement {
           variant="primary"
           ?loading=${this.saving}
           ?disabled=${this.saving ||
-          (Boolean(formExt) && this.formAuthoringPane === 'form' && !this.formAuthoringValid)}
+          (this.activeAuthoringPane === 'form' && !this.formAuthoringValid)}
           data-submit-trigger
           @click=${() => this.submitTriggerForm()}
         >

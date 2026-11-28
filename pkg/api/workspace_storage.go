@@ -95,6 +95,12 @@ type BrokerVolumeWorkspaceStorage struct {
 // under the NFS sub-path root of a broker's workspace share.
 const ExportIDMarkerName = ".scion-export-id"
 
+// ExportOwnerMarkerName is the canonical project-storage owner marker's file
+// name, stored beside ExportIDMarkerName directly under the shared sub-path
+// root. It records the canonical agent "uid:gid" for the tree so brokers can
+// warn when their effective agent uid/gid differs (ptone/scion#6657).
+const ExportOwnerMarkerName = ".scion-export-owner"
+
 // Workspace placements reported for an agent (AgentInfo.WorkspacePlacement).
 // The set may grow; a reader must treat any value it does not recognise as
 // "not on the shared export".

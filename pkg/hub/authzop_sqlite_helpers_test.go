@@ -166,6 +166,8 @@ type idFixtures struct {
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
 	delegation liveInventoryDelegation
+	// trajectorySegment is a committed Track 2 raw trajectory segment for agent.
+	trajectorySegment string
 	// testIdentity is a live hub test identity (handlers_test_identities.go).
 	testIdentity string
 	// testIdentityDel is a disposable live test identity for the delete
@@ -205,6 +207,9 @@ type chatRecords struct {
 	topicMessageEdit   string
 	topicMessageDelete string
 	dmMessage          string
+	scheduledCancel    string
+	scheduledSendNow   string
+	scheduledDismiss   string
 }
 
 // seedChatRecords creates chatRecords for userID: topicID is the fixture
@@ -246,6 +251,30 @@ func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebCh
 	r.topicMessageDelete = message(topicID, topicConvID, projectID, 2*time.Second)
 	r.topicMessage = message(topicID, topicConvID, projectID, 3*time.Second)
 	r.dmMessage = message(r.dmAgent, dmAgentConvID, projectID, 4*time.Second)
+
+	if sms := scheduledMessageStoreFrom(wcs); sms != nil {
+		seedScheduled := func(status, failureReason string, fireAt time.Time) string {
+			id := uuid.NewString()
+			_, _, err := sms.CreateScheduledMessage(ctx, &ScheduledChatMessage{
+				ID:              id,
+				SenderUserID:    userID,
+				ConversationKey: topicID,
+				ProjectID:       projectID,
+				Content:         "scheduled " + id[:8],
+				IdempotencyKey:  "idem-" + id,
+				FireAt:          fireAt,
+				Status:          status,
+				FailureReason:   failureReason,
+				CreatedAt:       at,
+				UpdatedAt:       at,
+			})
+			require.NoError(t, err)
+			return id
+		}
+		r.scheduledCancel = seedScheduled(ScheduledMessagePending, "", at.Add(time.Hour))
+		r.scheduledSendNow = seedScheduled(ScheduledMessageFailed, ScheduledFailureMissed, at.Add(-2*time.Hour))
+		r.scheduledDismiss = seedScheduled(ScheduledMessageFailed, ScheduledFailureMissed, at.Add(-2*time.Hour))
+	}
 	return r
 }
 
@@ -849,6 +878,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			e.Name == experiments.ArtifactsTransfer || e.Name == experiments.ArtifactsReviewRequests ||
 			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
 			e.Name == experiments.Triggers || e.Name == experiments.TokenomicsUsageLedger ||
+			e.Name == experiments.TokenomicsTokenBudgets ||
 			e.Name == experiments.TokenomicsTrajectoryCapture ||
 			e.Name == experiments.AccessConstraints {
 			e.Default = true
@@ -873,6 +903,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.RuntimeOrphanReconcile))
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsUsageLedger))
+	require.True(t, srv.experimentEnabled(experiments.TokenomicsTokenBudgets))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture))
 	require.True(t, srv.experimentEnabled(experiments.AccessConstraints))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
@@ -897,6 +928,38 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			Scope: store.HarnessConfigScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
 	}
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
+
+	// Seed one committed Track 2 raw trajectory segment for f.agent so the
+	// signed-download entry point reaches 200 for admitting bearer tokens.
+	trajObjPath := "li-hub/trajectories/v1/raw/project=" + f.project + "/agent=" + f.agent + "/run=li-run/claude/.claude/projects/-workspace/sess.jsonl/g0-0000000000000000.seg.gz"
+	trajSeg, err := s.PrepareTrajectorySegment(ctx, &store.TrajectorySegment{
+		HubID:              "li-hub",
+		OriginHubID:        "li-hub",
+		ProjectID:          f.project,
+		AgentID:            f.agent,
+		RunID:              "li-run",
+		Harness:            "claude",
+		NativeRelativePath: ".claude/projects/-workspace/sess.jsonl",
+		ArtifactKind:       "jsonl_append",
+		Generation:         0,
+		ByteStart:          0,
+		ByteEnd:            16,
+		RawSHA256:          strings.Repeat("a", 64),
+		CompressedSize:     32,
+		CompressedSHA256:   strings.Repeat("b", 64),
+		ObjectPath:         trajObjPath,
+		CreatedAt:          now,
+		PrepareExpiresAt:   now.Add(15 * time.Minute),
+	})
+	require.NoError(t, err)
+	trajCommitted, err := s.CommitTrajectorySegment(ctx, trajSeg.ID, trajObjPath+".manifest.json", now, store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          16,
+		RawSHA256:        strings.Repeat("a", 64),
+		CompressedSize:   32,
+		CompressedSHA256: strings.Repeat("b", 64),
+	})
+	require.NoError(t, err)
+	f.trajectorySegment = trajCommitted.ID
 
 	// Hub test identities: turn the feature on (--test-mode=member)
 	// and seed one live identity. Its issuer is the bearer matrix's
@@ -1186,16 +1249,18 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
-		"/api/v1/agents/{id}/token/refresh":                           {"id": f.agent},
-		"/api/v1/agents/{id}/refresh-token":                           {"id": f.agent},
-		"/api/v1/agents/{id}/outbound-message":                        {"id": f.agent},
-		"/api/v1/agents/{id}/metrics":                                 {"id": f.agent},
-		"/api/v1/agents/{id}/usage/events":                            {"id": f.agent},
-		"/api/v1/agents/{id}/usage/capabilities":                      {"id": f.agent},
-		"/api/v1/agents/{id}/trajectory/segments:prepare":             {"id": f.agent},
-		"/api/v1/agents/{id}/trajectory/segments:commit":              {"id": f.agent},
-		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/content": {"id": f.agent, "segmentId": "seg-1"},
-		"/api/v1/projects/{projectId}/agents/{id}/outbound-message":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/token/refresh":                            {"id": f.agent},
+		"/api/v1/agents/{id}/refresh-token":                            {"id": f.agent},
+		"/api/v1/agents/{id}/outbound-message":                         {"id": f.agent},
+		"/api/v1/agents/{id}/metrics":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/usage/events":                             {"id": f.agent},
+		"/api/v1/agents/{id}/usage/capabilities":                       {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments:prepare":              {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments:commit":               {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments":                      {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/download": {"id": f.agent, "segmentId": f.trajectorySegment},
+		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/content":  {"id": f.agent, "segmentId": f.trajectorySegment},
+		"/api/v1/projects/{projectId}/agents/{id}/outbound-message":    {"projectId": f.project, "id": f.agent},
 
 		// --- agent lifecycle family ---
 		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},
@@ -1275,6 +1340,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/workspace/files":                   {"id": f.project},
 		"/api/v1/projects/{id}/workspace/files/{path}":            {"id": f.project, "path": "li-files.txt"},
 		"/api/v1/projects/{id}/workspace/pull":                    {"id": f.project},
+		"/api/v1/projects/{id}/github":                            {"id": f.project},
 		"/api/v1/projects/{id}/github-installation":               {"id": f.project},
 		"/api/v1/projects/{id}/github-status":                     {"id": f.project},
 		"/api/v1/projects/{id}/github-permissions":                {"id": f.project},
@@ -1284,6 +1350,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- group family ---
 		"/api/v1/groups/{id}":                                 {"id": f.group},
+		"/api/v1/groups/{id}/usage/budgets":                   {"id": f.group},
 		"/api/v1/groups/{id}/members":                         {"id": f.group},
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
@@ -1434,20 +1501,24 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads":                     {"id": f.project},
-		"/api/v1/chat/spaces/{id}/members":                     {"id": f.project},
-		"/api/v1/chat/spaces/{id}/read":                        {"id": f.project},
-		"/api/v1/chat/spaces/{id}/emoji":                       {"id": f.project},
-		"/api/v1/chat/topics/{id}":                             {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages":             {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages/{messageId}": {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
-		"/api/v1/chat/conversations/{id}/read":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/unread":               {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/mute":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/pin":                  {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
-		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
+		"/api/v1/chat/spaces/{id}/threads":                                 {"id": f.project},
+		"/api/v1/chat/spaces/{id}/members":                                 {"id": f.project},
+		"/api/v1/chat/spaces/{id}/read":                                    {"id": f.project},
+		"/api/v1/chat/spaces/{id}/emoji":                                   {"id": f.project},
+		"/api/v1/chat/topics/{id}":                                         {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages":                         {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages/{messageId}":             {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
+		"/api/v1/chat/conversations/{id}/read":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/unread":                           {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/mute":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/pin":                              {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/typing":                           {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/interagent":                       {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/promote":                          {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/scheduled":                        {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/scheduled/{scheduledId}":          {"id": f.chatTopic, "scheduledId": f.chat.scheduledCancel},
+		"/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/send-now": {"id": f.chatTopic, "scheduledId": f.chat.scheduledSendNow},
+		"/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/dismiss":  {"id": f.chatTopic, "scheduledId": f.chat.scheduledDismiss},
 		// Starred messages: the fixture thread's message (the PUT entry
 		// stars it before the read entries, the DELETE entry removes it).
 		"/api/v1/chat/stars/{messageId}": {"messageId": f.chat.topicMessage},

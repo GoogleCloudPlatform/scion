@@ -30,6 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/apierr"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -641,6 +643,10 @@ func (s *Server) resolveOutboundRouting(
 				return nil, fmt.Errorf("group post refused: %s", decision.Reason)
 			}
 
+			if err := s.checkGroupThreadIDNotDMKey(w, conv.ID, req.ThreadID); err != nil {
+				return nil, err
+			}
+
 			// Auto-register sender as participant (listing concern, non-fatal)
 			// when its message mode allows joining by posting.
 			if authKind, authID := authenticatedSender(ctx); authID != "" && decision.MayJoin {
@@ -695,8 +701,13 @@ func (s *Server) resolveOutboundRouting(
 			// The sender's message mode is checked before the thread
 			// conversation is resolved, so a refused post writes no row
 			// (group_message_mode.go).
-			if kind == "group" && !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
-				return nil, fmt.Errorf("group post refused by message mode")
+			if kind == "group" {
+				if err := s.checkGroupThreadIDNotDMKey(w, "", req.ThreadID); err != nil {
+					return nil, err
+				}
+				if !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
+					return nil, fmt.Errorf("group post refused by message mode")
+				}
 			}
 			var keyOpts []messaging.ConversationByKeyOption
 			s.mu.RLock()
@@ -1181,13 +1192,13 @@ func (s *Server) resolveAssertedDirectUserRecipient(ctx context.Context, w http.
 // checkDirectThreadIDMatchesDMKey applies the ptone/scion#2211 direct-conversation
 // thread_id check: when the caller supplied a dm:-prefixed thread_id
 // alongside an asserted direct conversation, that thread_id must equal the
-// conversation's own DM key (ExternalRef) — a mismatched dm: thread_id names
-// a different conversation than the one the caller just asserted. A no-op
-// when thread_id is empty (still backfilled elsewhere) or not dm:-prefixed
-// (some other addressing scheme). Shared by both the conversation_ref and
-// the raw conversation_id paths, so the two behave identically.
+// conversation's own DM key (ExternalRef) — a mismatched or whitespace-padded
+// dm: thread_id is rejected. A no-op when thread_id is empty (still backfilled
+// elsewhere) or not dm:-prefixed after trimming whitespace. Shared by both the
+// conversation_ref and the raw conversation_id paths, so the two behave
+// identically.
 func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, threadID string) error {
-	if !strings.HasPrefix(threadID, "dm:") {
+	if !strings.HasPrefix(strings.TrimSpace(threadID), "dm:") {
 		return nil
 	}
 	if threadID != externalRef {
@@ -1199,6 +1210,21 @@ func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversa
 		return fmt.Errorf("thread_id does not match DM key")
 	}
 	return nil
+}
+
+// checkGroupThreadIDNotDMKey rejects a dm:-prefixed thread_id when routing to
+// a group conversation. A caller-supplied dm: thread_id is only valid for a
+// matching direct conversation, so rejecting it here ensures plain messages,
+// decisions, secret requests, and command requests all enforce the same rule.
+func (s *Server) checkGroupThreadIDNotDMKey(w http.ResponseWriter, conversationID, threadID string) error {
+	if !strings.HasPrefix(strings.TrimSpace(threadID), "dm:") {
+		return nil
+	}
+	s.messageLog.Warn("supplied dm: thread_id cannot be used with a group conversation",
+		"thread_id", threadID, "conversation_id", conversationID)
+	ValidationError(w, "a dm: thread_id cannot be used with a non-DM conversation",
+		map[string]interface{}{"field": "thread_id"})
+	return fmt.Errorf("dm: thread_id cannot be used with a group conversation")
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -2275,6 +2301,7 @@ type MessageRequest struct {
 	Surface     string `json:"surface,omitempty"`
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
+	LegacyRef   string `json:"legacy_ref,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -2298,8 +2325,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}()
 
 	var req MessageRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedAgentJSON(w, r, maxSettingsBodySize, &req) {
 		return
 	}
 	messaging.RecordStep(ctx, "request_parsed")
@@ -2352,9 +2378,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// External chat references name conversations owned by chat
 	// integrations, which authenticate as brokers. Any other caller is
 	// refused before anything is looked up or written.
-	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
+	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "" || req.LegacyRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
 		logReferenceRefused(ctx, logging.RequestPath(r), "external chat reference from a caller that is not a chat integration", GetIdentityFromContext(ctx))
-		ValidationError(w, "surface and external_ref are set by chat integrations", nil)
+		ValidationError(w, "surface, external_ref, parent_ref and legacy_ref are set by chat integrations", nil)
 		return
 	}
 
@@ -2715,6 +2741,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	var phase11ConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
 		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
 			messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
@@ -2724,7 +2751,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		convResult, convErr := s.resolveBrokerInboundConversation(
 			ctx, s.messageLog, agent.ProjectID,
 			req.Surface, req.ExternalRef, req.ParentRef, "", agent.ID,
-			structuredMsg.Channel, structuredMsg.ThreadID,
+			structuredMsg.Channel, req.LegacyRef, structuredMsg.ThreadID,
 		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
@@ -2737,6 +2764,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 			return
 		} else {
+			phase11ConvResult = convResult
 			if structuredMsg.Metadata == nil {
 				structuredMsg.Metadata = make(map[string]string)
 			}
@@ -2834,11 +2862,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	autoWakeUser := s.autoWakeModeOf(agent) != autoWakeNone
 	userWake := req.Wake || autoWakeUser
 	if autoWakeUser && !senderIsAgent && !delegatedSender && !deferDelivery {
+		if ctx.Err() != nil {
+			WriteAgentDMError(w, requestEndedRefusal().dmError())
+			return
+		}
 		// The hub's own wakes are routine and the sender cannot know about
 		// them: a start already in progress is waited for and delivered
 		// to, instead of keeping the message deferred (wakeOrAwaitStart).
 		// The wait fits in the same write budget as a resume.
 		s.extendWriteDeadlineForDMWake(ctx, w)
+		// Detach from client cancellation so a sender that disconnects during
+		// a slow resume does not drop the message after the agent wakes
+		// (ptone/scion#9757).
+		var cancelWakeSend context.CancelFunc
+		ctx, cancelWakeSend = detachDMWakeSend(ctx)
+		defer cancelWakeSend()
 		dmErr, awaitErr := s.wakeOrAwaitStart(ctx, agent)
 		if dmErr != nil {
 			WriteAgentDMError(w, dmErr)
@@ -2849,9 +2887,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 	} else if userWake && !senderIsAgent && !delegatedSender && !deferDelivery {
+		if ctx.Err() != nil {
+			WriteAgentDMError(w, requestEndedRefusal().dmError())
+			return
+		}
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
+		// Detach from client cancellation so a sender that disconnects during
+		// a slow resume does not drop the message after the agent wakes
+		// (ptone/scion#9757).
+		var cancelWakeSend context.CancelFunc
+		ctx, cancelWakeSend = detachDMWakeSend(ctx)
+		defer cancelWakeSend()
 		wakeResult, wakeErr := s.wakeAgentForDMAuthorized(ctx, agent, s.explicitWakeAuthorize(ctx, GetIdentityFromContext(ctx)))
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
@@ -2951,6 +2999,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// persistedConversationID is the conversation the persisted message
 	// landed in; the response reports it to every sender.
 	var persistedConversationID string
+	// persistedCursor is the opaque eventfeed cursor positioned at the
+	// persisted message's conversation_seq, allocated atomically on insert.
+	var persistedCursor string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
 	var artifactWarning string
@@ -3107,6 +3158,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
+				if err := s.checkDirectThreadIDMatchesDMKey(w, conv.ID, conv.ExternalRef, structuredMsg.ThreadID); err != nil {
+					return
+				}
 			case "group":
 				// Deny when either project ID is unset (empty or zero UUID).
 				// Two unset IDs comparing equal would authorize a request
@@ -3141,6 +3195,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						return
 					}
 					senderMayJoin = decision.MayJoin
+				}
+
+				if err := s.checkGroupThreadIDNotDMKey(w, conv.ID, structuredMsg.ThreadID); err != nil {
+					return
 				}
 
 				// Auto-register the sender (when its mode allows joining by
@@ -3198,6 +3256,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Surface:        conv.Surface,
 				DisplayName:    conv.DisplayName,
 			}
+		} else if phase11ConvResult != nil {
+			// Broker-authenticated Phase 11 resolution already resolved or created
+			// the project-scoped external thread conversation (new key or read-only
+			// legacy_ref/thread_id fallback); persist that conversation_id directly
+			// instead of falling through to Phase-5 derivation.
+			convResult = phase11ConvResult
+			storeMsg.ConversationID = phase11ConvResult.ConversationID
 		} else {
 			// B5 SECURITY: derive sender identity for the conversation key
 			// from the authenticated context, never from the message payload.
@@ -3224,14 +3289,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				// thread conversation is resolved, so a refused post writes
 				// no row (group_message_mode.go). Every other sender of a
 				// thread post was decided by decideKeyedPostSender.
-				if kind == "group" && authKind == "agent" {
-					sender, ok := s.loadGroupPostSender(ctx, w, authID)
-					if !ok {
+				if kind == "group" {
+					if err := s.checkGroupThreadIDNotDMKey(w, "", structuredMsg.ThreadID); err != nil {
 						return
 					}
-					threadPostSender = sender
-					if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
-						return
+					if authKind == "agent" {
+						sender, ok := s.loadGroupPostSender(ctx, w, authID)
+						if !ok {
+							return
+						}
+						threadPostSender = sender
+						if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
+							return
+						}
 					}
 				}
 				var keyOpts []messaging.ConversationByKeyOption
@@ -3494,6 +3564,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID
+			if storeMsg.ConversationID != "" && storeMsg.ConversationSeq > 0 {
+				persistedCursor = string(eventfeed.EncodeCursor(storeMsg.ConversationID, storeMsg.ConversationSeq))
+			}
 			if delegatedSender {
 				s.recordAdmittedH2PolicyDecisions(ctx, &delegatedPolicyRes, persistedMsgID)
 			}
@@ -3651,12 +3724,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			if !delegatedSender {
 				retryOpts = append(retryOpts, withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
 					s.extendWriteDeadlineForDMWake(ctx, w)
-					wctx, wcancel := context.WithTimeout(ctx, scheduledWakeBudget)
+					wctx, wcancel := dispatchContext(ctx, scheduledWakeBudget)
 					defer wcancel()
 					if err := s.syncWakeForDM(wctx, target, req.Wake, GetIdentityFromContext(ctx)); err != nil {
 						return nil, nil, err
 					}
-					newCtx, newCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
+					newCtx, newCancel := dispatchContext(dispatchCtx, 30*time.Second)
 					if err := s.refreshHoldLaunchAfterWake(newCtx, target, persistedMsgID, nil); err != nil {
 						newCancel()
 						return nil, nil, err
@@ -3810,6 +3883,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Deferred:        s.deferredReason(agent),
 			ArtifactWarning: artifactWarning,
 			ConversationID:  persistedConversationID,
+			Cursor:          persistedCursor,
 			ConversationKey: visitorConvKey,
 		})
 		return
@@ -3825,6 +3899,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
 		ConversationID:  persistedConversationID,
+		Cursor:          persistedCursor,
 		ConversationKey: visitorConvKey,
 	})
 }
@@ -3852,6 +3927,9 @@ type MessageDeliveryResponse struct {
 	// the sender can reply into it. Omitted only when the message was not
 	// recorded in a conversation.
 	ConversationID string `json:"conversation_id,omitempty"`
+	// Cursor is the opaque eventfeed cursor positioned at this message's
+	// conversation_seq, allocated atomically with persistence.
+	Cursor string `json:"cursor,omitempty"`
 	// ConversationKey is set only for a project visitor sender
 	// (ptone/scion#4603): the visitor's DM key with the agent
 	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read
@@ -4457,13 +4535,12 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// before decoding, so no sender is stamped, no target is computed and
 	// nothing is published.
 	if s.rejectRetiredRawMessageBody(w, r, rawIngressBroadcast,
-		agentKeysAuditTarget{ProjectID: projectID}, "", rawTombstonePreAuthMaxBodyBytes, "structured_message") {
+		agentKeysAuditTarget{ProjectID: projectID}, "", apierr.DefaultMaxJSONBodyBytes, "structured_message") {
 		return
 	}
 
 	var req BroadcastMessageRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if len(req.AttachmentIDs) > 0 {

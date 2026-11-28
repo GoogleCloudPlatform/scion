@@ -148,7 +148,7 @@ SQLITE_NONHUB_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... \
 	./pkg/brokerregistration/... ./pkg/ent/entc/... ./pkg/secret/... \
 	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/... \
 	./pkg/observability/txdiag ./pkg/agent/tmuxdeliver ./pkg/durablequeue/... \
-	./pkg/trajectory/e2e
+	./pkg/trajectory/e2e ./pkg/mcpserver/...
 SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
 
 # SQLITE_CI_PKGS are the package patterns that blocking CI jobs test with
@@ -1069,9 +1069,10 @@ check-extras-go-images:
 	@./hack/check-extras-go-images.sh --self-test
 	@./hack/check-extras-go-images.sh
 
-## check-downgrade-floor-selftest: Test scripts/release/check-downgrade-floor.sh
+## check-downgrade-floor-selftest: Test scripts/release/check-downgrade-floor.sh and check-downgrade-floor-cut.sh
 check-downgrade-floor-selftest:
 	@./scripts/release/test-check-downgrade-floor.sh
+	@./scripts/release/test-check-downgrade-floor-cut.sh
 
 ## check-docs-links: Check docs-site internal links, #heading anchors, /scion/ base prefixes, and legacy redirects
 # NOTE: same caveat as check-authz-guards above -- make collapses the

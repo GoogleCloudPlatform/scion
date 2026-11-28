@@ -33,7 +33,10 @@ import (
 )
 
 var (
-	hubAuthHubURL    string
+	hubAuthHubURL string
+	// hubAuthNoBrowser is a test seam for forcing device-flow login when
+	// --no-browser is not explicitly set on cmd (including commands without
+	// that flag, such as 'scion use').
 	hubAuthNoBrowser bool
 )
 
@@ -72,10 +75,17 @@ Commands for logging in and logging out. Use 'scion hub status' to check authent
 }
 
 // hubAuthLoginCmd authenticates with the Hub
-var hubAuthLoginCmd = &cobra.Command{
-	Use:   "login",
-	Short: "Authenticate with Hub server",
-	Long: `Authenticate with a Scion Hub server using browser-based OAuth.
+var hubAuthLoginCmd = newHubLoginCommand("login")
+
+// newHubLoginCommand builds a login command ('scion hub auth login' or the
+// top-level 'scion login' alias) sharing runHubAuthLogin and the --no-browser
+// and --provider flags. The deprecated --hub-url flag is attached only to
+// hubAuthLoginCmd.
+func newHubLoginCommand(use string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   use,
+		Short: "Authenticate with Hub server",
+		Long: `Authenticate with a Scion Hub server using browser-based OAuth.
 
 This command will:
 1. Start a local callback server
@@ -101,12 +111,17 @@ A login never switches a hub that is already current.
 To make hub <name> the current hub, run 'scion use --hub <name>'.
 
 Example:
+  scion login
   scion hub auth login
-  scion --hub https://hub.example.com hub auth login
-  scion --hub prod hub auth login
-  scion hub auth login --no-browser
-  scion hub auth login --provider github`,
-	RunE: runHubAuthLogin,
+  scion --hub https://hub.example.com login
+  scion --hub prod login
+  scion login --no-browser
+  scion login --provider github`,
+		RunE: runHubAuthLogin,
+	}
+	c.Flags().Bool("no-browser", false, "Use device flow instead of opening a browser")
+	c.Flags().String("provider", "", "OAuth provider to use (google or github)")
+	return c
 }
 
 // hubAuthLogoutCmd clears stored credentials
@@ -122,19 +137,50 @@ func init() {
 	hubAuthCmd.AddCommand(hubAuthLoginCmd)
 	hubAuthCmd.AddCommand(hubAuthLogoutCmd)
 
-	// Flags for login command
+	// Hidden deprecated --hub-url stays only on 'scion hub auth login' (not
+	// carried onto the top-level 'scion login' alias); pflag prints the
+	// deprecation on stderr when it is used.
+	hubAuthLoginCmd.Long = strings.Replace(
+		hubAuthLoginCmd.Long,
+		hubAuthURLPrecedence,
+		hubAuthURLPrecedence+" --hub-url is a deprecated alias of --hub.",
+		1,
+	)
 	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Deprecated alias of --hub")
-	// --hub-url is kept for one release as a hidden alias of --hub; pflag
-	// prints the deprecation on stderr when it is used.
 	_ = hubAuthLoginCmd.Flags().MarkDeprecated("hub-url", "use --hub")
-	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
-	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
+}
+
+// loginHubURLFlagValue returns the deprecated --hub-url flag value when cmd
+// defines it (i.e. 'scion hub auth login'), and "" otherwise (e.g. top-level
+// 'scion login').
+func loginHubURLFlagValue(cmd *cobra.Command) string {
+	if cmd == nil {
+		return ""
+	}
+	v, _ := cmd.Flags().GetString("hub-url")
+	return v
+}
+
+// loginNoBrowser reports whether the login flow should skip opening a browser.
+// If cmd defines --no-browser and the caller explicitly set it, that flag value
+// wins; otherwise it falls back to the hubAuthNoBrowser default (used by tests
+// and by callers whose command has no --no-browser flag, such as 'scion use').
+func loginNoBrowser(cmd *cobra.Command) bool {
+	if cmd != nil {
+		if f := cmd.Flags().Lookup("no-browser"); f != nil && f.Changed {
+			if v, err := cmd.Flags().GetBool("no-browser"); err == nil {
+				return v
+			}
+		}
+	}
+	return hubAuthNoBrowser
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	// The hub of this invocation (see hubAuthURLPrecedence); the
-	// deprecated --hub-url wins, and like --hub accepts a nickname.
-	hubURL, err := hubAuthURL(hubAuthHubURL)
+	// deprecated --hub-url wins when present on this command, and like
+	// --hub accepts a nickname.
+	hubURL, err := hubAuthURL(loginHubURLFlagValue(cmd))
 	if err != nil {
 		return err
 	}
@@ -169,7 +215,7 @@ func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubc
 		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}
 
-	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
+	if loginNoBrowser(cmd) || util.IsHeadlessEnvironment() {
 		provider, err := resolveExplicitDeviceFlowProvider(cmd.Context(), client.Auth(), provider)
 		if err != nil {
 			return nil, err
@@ -193,17 +239,19 @@ func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.
 	if err := storeTokenAndPrintResult(cmd.OutOrStdout(), hubURL, tokenResp); err != nil {
 		return err
 	}
-	recordLoginHub(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubURL)
+	recordLoginHubWithFlag(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubURL, loginHubURLFlagValue(cmd))
 	return nil
 }
 
-// loginHubURLGivenExplicitly reports whether 'hub auth login' got its hub
-// as a URL in --hub-url or --hub (not as a nickname, and not from the
-// environment, a link entry or the current context). Only such a URL is
-// added to the hub list.
+// loginHubURLGivenExplicitly is a test seam delegating to
+// loginHubURLGivenExplicitlyFor with the package-level hubAuthHubURL.
 func loginHubURLGivenExplicitly() bool {
-	if hubAuthHubURL != "" {
-		return !isHubNickname(hubAuthHubURL)
+	return loginHubURLGivenExplicitlyFor(hubAuthHubURL)
+}
+
+func loginHubURLGivenExplicitlyFor(hubURLFlag string) bool {
+	if hubURLFlag != "" {
+		return !isHubNickname(hubURLFlag)
 	}
 	return hubFlagEndpoint() != "" && hubFlagName == ""
 }
@@ -258,22 +306,29 @@ var errHubAlreadyListed = errors.New("hub already registered")
 //     and one line says so. A current hub is never switched; when the hub
 //     is not the current hub, a hint says how to select it.
 //   - A hub from the environment: nothing (it is a one-off override).
+//
+// recordLoginHub is a test seam delegating to recordLoginHubWithFlag with the
+// package-level hubAuthHubURL.
 func recordLoginHub(out, stderr io.Writer, hubURL string) {
+	recordLoginHubWithFlag(out, stderr, hubURL, hubAuthHubURL)
+}
+
+func recordLoginHubWithFlag(out, stderr io.Writer, hubURL, hubURLFlag string) {
 	if contextDisabled(resolveMode()) {
 		return
 	}
 	switch {
-	case hubAuthHubURL == "" && hubSource == targetSourceContext:
+	case hubURLFlag == "" && hubSource == targetSourceContext:
 		_, _ = fmt.Fprintf(out, "Logged in to %s (current hub, selected with 'scion use').\n", config.RedactURL(hubURL))
 		return
-	case hubAuthHubURL == "" && hubSource == targetSourceDirectory:
+	case hubURLFlag == "" && hubSource == targetSourceDirectory:
 		_, _ = fmt.Fprintf(out, "Logged in to %s (the hub this directory is linked to).\n", config.RedactURL(hubURL))
 		printLoginHubSelected(out, stderr, hubURL)
 		return
-	case hubAuthHubURL == "" && hubFlagEndpoint() == "":
+	case hubURLFlag == "" && hubFlagEndpoint() == "":
 		return
 	}
-	if loginHubURLGivenExplicitly() {
+	if loginHubURLGivenExplicitlyFor(hubURLFlag) {
 		registerHubInList(out, stderr, hubURL)
 	}
 	if printLoginHubSelected(out, stderr, hubURL) {

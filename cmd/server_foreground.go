@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/mcpserver"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
@@ -84,6 +85,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/knadh/koanf/v2"
 	"github.com/spf13/cobra"
@@ -326,8 +328,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Check if at least one server is enabled
-	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb {
-		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
+	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb && !cfg.MCP.Enabled {
+		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, --enable-web, or --enable-mcp")
+	}
+	if err := validateMCPStartup(cfg, enableHub); err != nil {
+		return err
 	}
 
 	validateHostedBasic(cfg)
@@ -428,7 +433,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 8)
 
 	// Server boot hook: warn about legacy environment variables scion no
 	// longer reads, before project discovery and storage init. This is the
@@ -734,22 +739,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetObservabilityExportStatus(obs)
 		wireLifecycleEventsSink(hubSrv, cfg, devAuthToken != "")
 
-		// Wire command bus for cross-node dispatch (B2-4).
-		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
-		if err != nil {
-			return shutdownSeq.startupErr(ctx, err)
-		}
-		hubSrv.SetCommandBus(cmdBus)
-
-		// Conduit relay (hub.conduit): after operational settings are
-		// loaded (initHubServer) and before the background services start,
-		// which register the registry singleton only when a relay runs.
-		// Mark the hub shutting down first when the shutdown begins
-		// (/readyz 503, new work refused, streams ended).
-		shutdownSeq.addStep(shutdownPhaseMark, hubSrv.BeginShutdown)
-		hubSrv.SetShutdownHooks(frontShutdownHooks)
-
-		if err := startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
+		if err := startHubCommandBusAndConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), frontShutdownHooks, &wg, errCh); err != nil {
 			return shutdownSeq.startupErr(ctx, err)
 		}
 
@@ -782,6 +772,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			// MountHubAPI); the audit writer closes after every server
 			// has drained (awaitServerExit).
 			log.Printf("Hub API will be mounted on Web server (port %d)", webPort)
+		}
+
+		// 11b. Start embedded MCP server listener if configured (server.mcp.enabled / --enable-mcp).
+		if cfg.MCP.Enabled {
+			if err := startEmbeddedMCPServer(ctx, shutdownSeq, cfg, hubSrv, &wg, errCh); err != nil {
+				return shutdownSeq.startupErr(ctx, err)
+			}
 		}
 	}
 
@@ -1124,6 +1121,29 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 		} else if err != nil {
 			log.Printf("Warning: failed to load settings; message broker is not started: %v", err)
+		}
+
+		// Prune stale integration records (runtime_brokers rows with
+		// scion.io/plugin) once on startup: any record not reported by a live
+		// hub instance, not loaded locally, not configured in
+		// server.plugins.broker, and without a valid executable binary on disk
+		// is removed so doctor/health summary no longer shows orphaned entries.
+		if vs, vsErr := loadServerVersionedSettings(); vsErr == nil {
+			configuredPlugins := make(map[string]bool)
+			if vs != nil && vs.Server != nil && vs.Server.Plugins != nil {
+				for name := range vs.Server.Plugins.Broker {
+					configuredPlugins[name] = true
+				}
+			}
+			if pluginsDir, dirErr := scionplugin.DefaultPluginsDir(); dirErr != nil {
+				log.Printf("Warning: skipping stale integration record prune: failed to resolve plugins directory: %v", dirErr)
+			} else if pruned, pruneErr := hubSrv.PruneStalePluginRecords(ctx, configuredPlugins, pluginsDir); pruneErr != nil {
+				log.Printf("Warning: stale integration record prune encountered errors: %v", pruneErr)
+			} else if len(pruned) > 0 {
+				log.Printf("Pruned %d stale integration record(s): %v", len(pruned), pruned)
+			}
+		} else {
+			log.Printf("Warning: skipping stale integration record prune: failed to load settings: %v", vsErr)
 		}
 
 		// Watch the broker plugin sessions: a lost session is respawned
@@ -1652,6 +1672,9 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("enable-runtime-broker") {
 		cfg.RuntimeBroker.Enabled = enableRuntimeBroker
 	}
+	if cmd.Flags().Changed("enable-mcp") {
+		cfg.MCP.Enabled = enableMCP
+	}
 	if cmd.Flags().Changed("runtime-broker-port") {
 		cfg.RuntimeBroker.Port = runtimeBrokerPort
 	}
@@ -2087,6 +2110,110 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			return fmt.Errorf("web frontend port %d is already in use by another process", webPort)
 		}
 	}
+	if cfg.MCP.Enabled {
+		mcpHost := cfg.MCP.Host
+		if mcpHost == "" {
+			mcpHost = cfg.Hub.Host
+		}
+		if mcpHost == "" {
+			mcpHost = "0.0.0.0"
+		}
+		mcpPort := cfg.MCP.Port
+		if mcpPort == 0 {
+			mcpPort = mcpserver.DefaultPort
+		}
+		status := checkPort(mcpHost, mcpPort)
+		if status.inUse {
+			if status.isScionServer {
+				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", mcpPort)
+			}
+			return fmt.Errorf("MCP server port %d is already in use by another process", mcpPort)
+		}
+	}
+	return nil
+}
+
+// validateMCPStartup rejects standalone MCP mode in P1 (standalone mode against
+// a remote hub_endpoint is implemented in P4).
+func validateMCPStartup(cfg *config.GlobalConfig, hubEnabled bool) error {
+	if cfg == nil || !cfg.MCP.Enabled {
+		return nil
+	}
+	if !hubEnabled {
+		return fmt.Errorf("--enable-mcp (server.mcp.enabled) requires --enable-hub in this phase; standalone MCP mode is not yet implemented")
+	}
+	return nil
+}
+
+// startEmbeddedMCPServer builds and starts the embedded MCP HTTP listener
+// backed by an in-process RoundTripper into hubSrv.Handler(), registering its
+// BeginShutdown hook in shutdownPhaseMark.
+func startEmbeddedMCPServer(
+	ctx context.Context,
+	shutdownSeq *serverShutdownSequence,
+	cfg *config.GlobalConfig,
+	hubSrv *hub.Server,
+	wg *sync.WaitGroup,
+	errCh chan<- error,
+) error {
+	if cfg == nil || !cfg.MCP.Enabled {
+		return nil
+	}
+	mcpHost := cfg.MCP.Host
+	if mcpHost == "" {
+		mcpHost = cfg.Hub.Host
+	}
+	mcpPort := cfg.MCP.Port
+	if mcpPort == 0 {
+		mcpPort = mcpserver.DefaultPort
+	}
+	mcpPath := cfg.MCP.Path
+	if mcpPath == "" {
+		mcpPath = mcpserver.DefaultPath
+	}
+
+	ver := version.Short()
+	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport: &mcpserver.InProcessTransport{
+			Handler: hubSrv.Handler(),
+		},
+		Version: ver,
+		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, name string) (bool, error) {
+			return hubSrv.ExperimentEnabled(name), nil
+		},
+		DisableTransportAuth: true,
+	})
+
+	mcpSrv, err := mcpserver.New(mcpserver.Options{
+		Host:           mcpHost,
+		Port:           mcpPort,
+		Path:           mcpPath,
+		PublicURL:      cfg.MCP.PublicURL,
+		AllowedOrigins: cfg.MCP.AllowedOrigins,
+		Version:        ver,
+		Backend:        backend,
+		Logger:         slog.Default().With("component", "mcp"),
+	})
+	if err != nil {
+		return fmt.Errorf("initializing MCP server: %w", err)
+	}
+
+	shutdownSeq.addStep(shutdownPhaseMark, mcpSrv.BeginShutdown)
+
+	if cfg.MCP.PublicURL != "" {
+		log.Printf("Starting MCP server on %s:%d (path=%s, public_url=%s)", mcpHost, mcpPort, mcpPath, cfg.MCP.PublicURL)
+	} else {
+		log.Printf("Starting MCP server on %s:%d (path=%s)", mcpHost, mcpPort, mcpPath)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := mcpSrv.Start(ctx); err != nil {
+			errCh <- fmt.Errorf("mcp server error: %w", err)
+		}
+	}()
 	return nil
 }
 
@@ -3617,7 +3744,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// sessions unavailable; it never stops startup.
 	hubCfg.TestIdentityWebSessionKey = loadTestIdentityWebSessionKey(ctx, entClient, hubCfg.HubID, hubCfg.EnableTestIdentities)
 
-	hubSrv, err := hub.New(hubCfg, s)
+	hubSrv, err := hubNewFn(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
 	}
@@ -4150,14 +4277,15 @@ func syncHubSettingsBeforeMeta(ctx context.Context, s store.HubSettingStore, boo
 // enabled in hub_settings when server.hub.conduit.relay_mode is "external" and
 // no explicit "hub.conduit" override (true or false) has been recorded yet.
 //
-// Why: "experiments" is DB-only (KoanfPaths nil) and "hub.conduit" defaults to
-// false so single-binary / Cloud Run deployments do not implicitly start an
-// in-process relay. On a fresh database in external relay mode, however, both
-// Hub (errConduitExternalNeedsExperiment) and --role relay (ErrExperimentOff)
-// refuse to start before binding an HTTP listener if hub.conduit is off.
-// Seeding hub.conduit=true only when absent breaks the fresh-DB deadlock while
-// preserving explicit admin overrides ("hub.conduit": false) and leaving
-// malformed documents untouched (fail-closed).
+// Why: "experiments" is DB-only (KoanfPaths nil) and although "hub.conduit"
+// compiles to default-on, hosted HA deployments override it to default-off via
+// SetConduitDeploymentDefault (ptone/scion#9491). On a fresh database in
+// external relay mode, both Hub (errConduitExternalNeedsExperiment) and
+// --role relay (ErrExperimentOff) refuse to start before binding an HTTP
+// listener if hub.conduit is off. Seeding hub.conduit=true only when absent
+// breaks the fresh-DB deadlock while preserving explicit admin overrides
+// ("hub.conduit": false) and leaving malformed documents untouched
+// (fail-closed).
 func seedExternalRelayConduitExperiment(ctx context.Context, s store.HubSettingStore) error {
 	const (
 		sectionName    = "experiments"
@@ -4333,9 +4461,11 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbme
 // a no-op bus (single-process SQLite always owns all brokers locally).
 //
 // If the Postgres bus cannot start, the hub normally falls back to the
-// no-op bus. In hosted HA with hub.conduit on that is a startup error
-// instead (C8): cross-replica conduit routing and dispatch depend on the
-// listener, so a replica without it must not serve.
+// no-op bus. In hosted HA with hub.conduit explicitly overridden on, that is
+// a startup error instead (C8): cross-replica conduit routing and dispatch
+// depend on the listener, so a replica without it must not serve. When
+// hub.conduit is not an explicit override, startup falls back to the no-op
+// bus and configureConduitDeploymentDefault sets the deployment default off.
 func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) (hub.CommandBus, error) {
 	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
 		return hub.NoopCommandBus{}, nil
@@ -4349,7 +4479,8 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	}
 	bus, err := startPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, hubSrv.ReconcileBroker, logging.Subsystem("hub.commandbus"))
 	if err != nil {
-		if hubSrv.ConduitEnabled() && hostedHAGuardsRequired(cfg) {
+		overrideVal, explicit, _ := hubSrv.ConduitOverrideState()
+		if explicit && overrideVal && hostedHAGuardsRequired(cfg) {
 			return nil, fmt.Errorf("postgres command bus startup failed (hosted HA with hub.conduit on): %w", err)
 		}
 		log.Printf("WARNING: failed to start Postgres command bus (%v); falling back to no-op. Cross-replica dispatch signals will not work.", err)
@@ -4362,6 +4493,39 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 // startPostgresCommandBus starts the Postgres command bus (a test seam).
 var startPostgresCommandBus = func(ctx context.Context, dsn string, ownsLocally func(string) bool, reconcile func(context.Context, string), logger *slog.Logger) (hub.CommandBus, error) {
 	return hub.NewPostgresCommandBus(ctx, dsn, ownsLocally, reconcile, logger)
+}
+
+// hubNewFn constructs the hub.Server inside initHubServer (a test seam so
+// startup-ordering tests can arm guards on ServerConfig before hub.New runs).
+var hubNewFn = hub.New
+
+// startHubCommandBusAndConduit runs the hub's command-bus, deployment-default,
+// shutdown-mark, and Conduit startup sequence in the required order:
+// newCommandBus → SetCommandBus → configureConduitDeploymentDefault →
+// startConduit. Extracted from runServerStart so tests can drive the exact
+// production sequence with the early-resolution guard armed.
+func startHubCommandBusAndConduit(ctx context.Context, shutdownSeq *serverShutdownSequence, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, frontShutdownHooks hub.ShutdownHooks, wg *sync.WaitGroup, errCh chan<- error) error {
+	// Wire command bus for cross-node dispatch (B2-4).
+	cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
+	if err != nil {
+		return err
+	}
+	hubSrv.SetCommandBus(cmdBus)
+
+	// Decide the hub.conduit deployment default once, after newCommandBus
+	// and before startConduit (ptone/scion#9491).
+	_, cmdBusNoop := cmdBus.(hub.NoopCommandBus)
+	configureConduitDeploymentDefault(cfg, hubSrv, hubEndpoint, !cmdBusNoop)
+
+	// Conduit relay (hub.conduit): after operational settings are
+	// loaded (initHubServer) and before the background services start,
+	// which register the registry singleton only when a relay runs.
+	// Mark the hub shutting down first when the shutdown begins
+	// (/readyz 503, new work refused, streams ended).
+	shutdownSeq.addStep(shutdownPhaseMark, hubSrv.BeginShutdown)
+	hubSrv.SetShutdownHooks(frontShutdownHooks)
+
+	return startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoint, wg, errCh)
 }
 
 // initWebServer creates and configures the Web server. The provided context is

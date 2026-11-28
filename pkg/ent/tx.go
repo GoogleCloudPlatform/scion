@@ -236,8 +236,16 @@ type Tx struct {
 	TriggerFire *TriggerFireClient
 	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
 	TriggerSubjectClaim *TriggerSubjectClaimClient
+	// UploadSession is the client for interacting with the UploadSession builders.
+	UploadSession *UploadSessionClient
+	// UsageBudgetState is the client for interacting with the UsageBudgetState builders.
+	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
+	// UsageGroupBudgetSeed is the client for interacting with the UsageGroupBudgetSeed builders.
+	UsageGroupBudgetSeed *UsageGroupBudgetSeedClient
+	// UsageGroupRollupDaily is the client for interacting with the UsageGroupRollupDaily builders.
+	UsageGroupRollupDaily *UsageGroupRollupDailyClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// UsageRollupDaily is the client for interacting with the UsageRollupDaily builders.
@@ -503,7 +511,11 @@ func (tx *Tx) init() {
 	tx.TriggerEvent = NewTriggerEventClient(tx.config)
 	tx.TriggerFire = NewTriggerFireClient(tx.config)
 	tx.TriggerSubjectClaim = NewTriggerSubjectClaimClient(tx.config)
+	tx.UploadSession = NewUploadSessionClient(tx.config)
+	tx.UsageBudgetState = NewUsageBudgetStateClient(tx.config)
 	tx.UsageEvent = NewUsageEventClient(tx.config)
+	tx.UsageGroupBudgetSeed = NewUsageGroupBudgetSeedClient(tx.config)
+	tx.UsageGroupRollupDaily = NewUsageGroupRollupDailyClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.UsageRollupDaily = NewUsageRollupDailyClient(tx.config)
 	tx.UsageRollupHourly = NewUsageRollupHourlyClient(tx.config)

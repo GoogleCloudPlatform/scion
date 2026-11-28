@@ -92,14 +92,16 @@ func marshalAppliedConfigNative(cfg *store.AgentAppliedConfig, native bool) stri
 // it applies only while the row still holds it. A missing row reads as not
 // native; the write then matches no row and reports that.
 //
-// prior is the same read's phase and activity (nil for a missing row), so a
-// whole-row write can maintain activity_since without a second read.
+// prior is the same read's phase, activity, harness_config, owner_id and
+// last_activity_event (nil for a missing row), so a whole-row write can
+// maintain activity_since, enforce owner immutability, and keep
+// last_activity_event monotonic without a second read.
 func appliedConfigForWrite(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, cfg *store.AgentAppliedConfig, lock bool) (raw string, native bool, keep predicate.Agent, prior *ent.Agent, err error) {
 	q := ac.Query().Where(agent.IDEQ(uid))
 	if lock {
 		q = q.ForUpdate()
 	}
-	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldPhase, agent.FieldActivity, agent.FieldHarnessConfig, agent.FieldOwnerID).Only(ctx)
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldPhase, agent.FieldActivity, agent.FieldHarnessConfig, agent.FieldOwnerID, agent.FieldLastActivityEvent).Only(ctx)
 	stored := ""
 	switch {
 	case err == nil:

@@ -21,8 +21,8 @@
  *   non-resumable harness warnings, and graceful 403 handling
  * - Agent detail badge, Suspend policy row, force-suspend confirm dialog,
  *   and hiding Suspend for callers who cannot force
- * - Hub-wide agents view Policy filter, Suspend Policy column, badge, and
- *   force-suspend confirm dialog
+ * - Hub-wide agents view Traits column, Never suspend pill, and
+ *   force-suspend confirm dialog (suspendPolicy filtering via filter box)
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -522,7 +522,7 @@ describe('Never-suspend hub-wide agents view (scion-page-agents)', () => {
     return el;
   }
 
-  it('hides Policy filter and Never suspend pill in Traits when experiment is off, while keeping Traits column', async () => {
+  it('hides Never suspend pill in Traits when experiment is off, while keeping Traits column', async () => {
     const el = await mountAgents();
     expect(el.shadowRoot?.querySelector('[data-testid="suspend-policy-filter"]')).toBeNull();
     expect(el.shadowRoot?.querySelector('[data-testid="traits-col-header"]')).not.toBeNull();
@@ -533,11 +533,11 @@ describe('Never-suspend hub-wide agents view (scion-page-agents)', () => {
     expect(cells[1].textContent?.trim()).toBe('');
   });
 
-  it('shows Policy filter and Never suspend pill in Traits when experiment is on, leaving default agent empty', async () => {
+  it('shows Never suspend pill in Traits when experiment is on without a separate Policy selector, leaving default agent empty', async () => {
     setFeatureFlag(NEVER_SUSPEND_FLAG, true);
     const el = await mountAgents();
 
-    expect(el.shadowRoot?.querySelector('[data-testid="suspend-policy-filter"]')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-testid="suspend-policy-filter"]')).toBeNull();
     expect(el.shadowRoot?.querySelector('[data-testid="traits-col-header"]')).not.toBeNull();
 
     const cells = Array.from(el.shadowRoot!.querySelectorAll('[data-testid="traits-cell"]'));

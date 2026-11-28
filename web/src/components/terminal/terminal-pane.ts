@@ -54,7 +54,17 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { projectDisplayName } from '../../client/project-label.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
-import { getUploadLimits, validateWorkspaceUploadFiles } from '../../client/upload-limits.js';
+import {
+  getUploadLimits,
+  legacyWorkspaceMaxFileSize,
+  validateWorkspaceUploadFiles,
+} from '../../client/upload-limits.js';
+import {
+  UploadCancelledError,
+  UploadHttpError,
+  uploadWorkspaceFiles,
+  type WorkspaceUploadEntry,
+} from '../../client/chunked-upload.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { dragAxis, wheelNotches } from '../../shared/terminal-wheel.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
@@ -329,6 +339,7 @@ export class ScionTerminalPane extends LitElement {
   @state() private isDragOver = false;
   @state() private isUploading = false;
   @state() private uploadStatus = ''; // progress/error message in overlay
+  private _uploadAbortController: AbortController | null = null;
 
   // --- Touch key bar state ---
   /** The key bar shows only where the primary pointer is touch; see input-modality.ts. */
@@ -937,6 +948,10 @@ export class ScionTerminalPane extends LitElement {
 
     .drop-overlay sl-icon {
       font-size: 2rem;
+    }
+
+    .drop-overlay .upload-cancel-btn {
+      pointer-events: auto;
     }
 
     .loading-state,
@@ -1574,7 +1589,9 @@ export class ScionTerminalPane extends LitElement {
       if (this.measurable()) {
         this.fitAddon?.fit();
         this.sendResize();
-        if (this.shouldAutoFocusTerminal()) this.terminal?.focus();
+        if (this.shouldAutoFocusTerminal()) {
+          this.terminal?.focus();
+        }
       }
     }
   }
@@ -2365,13 +2382,23 @@ export class ScionTerminalPane extends LitElement {
     await this._handleFileDrop(e.dataTransfer.files);
   }
 
+  private _cancelUpload(): void {
+    this._uploadAbortController?.abort();
+  }
+
   private async _handleFileDrop(files: FileList): Promise<void> {
-    // Client-side size validation using hub-published limits.
-    const limits = await getUploadLimits();
-    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
-    if (sizeErr) {
-      this._showUploadError(sizeErr);
-      return;
+    const useChunked = isFeatureEnabled('hub.large_uploads');
+    if (!useChunked) {
+      // Client-side size validation using hub-published limits (clamped to legacy 100 MiB cap).
+      const limits = await getUploadLimits();
+      const sizeErr = validateWorkspaceUploadFiles(
+        files,
+        legacyWorkspaceMaxFileSize(limits.maxWorkspaceFileSize)
+      );
+      if (sizeErr) {
+        this._showUploadError(sizeErr);
+        return;
+      }
     }
 
     this.isUploading = true;
@@ -2382,32 +2409,49 @@ export class ScionTerminalPane extends LitElement {
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
-    const formData = new FormData();
+    const entries: WorkspaceUploadEntry[] = [];
     const paths: string[] = [];
 
     for (const file of files) {
       const relPath = `.attachments/_web/${batchId}/${file.name}`;
-      formData.append(relPath, file);
+      entries.push({ path: relPath, file });
       paths.push(`${this.uploadBasePath}/.attachments/_web/${batchId}/${file.name}`);
     }
 
     this.uploadStatus = `Uploading ${files.length} file${files.length > 1 ? 's' : ''}...`;
+    const controller = new AbortController();
+    this._uploadAbortController = controller;
+
+    const encodedDir = encodeURIComponent(this.uploadTargetDir);
+    const filesUrl = `/api/v1/projects/${this.projectId}/shared-dirs/${encodedDir}/files`;
+    const uploadsUrl = `/api/v1/projects/${this.projectId}/shared-dirs/${encodedDir}/uploads`;
 
     try {
-      const resp = await apiFetch(
-        `/api/v1/projects/${this.projectId}/shared-dirs/${this.uploadTargetDir}/files`,
-        { method: 'POST', body: formData }
-      );
-      if (!resp.ok) {
-        if (resp.status === 409) {
-          this._showUploadError('File upload requires a co-located runtime broker');
-          this.uploadEnabled = false;
-          this.uploadDisabledReason = 'File upload requires a co-located runtime broker';
+      if (useChunked) {
+        await uploadWorkspaceFiles(filesUrl, uploadsUrl, entries, {
+          onProgress: (sent, total) => {
+            const pct = total > 0 ? Math.min(100, Math.floor((sent / total) * 100)) : 100;
+            this.uploadStatus = `Uploading ${pct}%`;
+          },
+          signal: controller.signal,
+        });
+      } else {
+        const formData = new FormData();
+        for (const entry of entries) {
+          formData.append(entry.path, entry.file);
+        }
+        const resp = await apiFetch(filesUrl, { method: 'POST', body: formData });
+        if (!resp.ok) {
+          if (resp.status === 409) {
+            this._showUploadError('File upload requires a co-located runtime broker');
+            this.uploadEnabled = false;
+            this.uploadDisabledReason = 'File upload requires a co-located runtime broker';
+            return;
+          }
+          const err = await extractApiError(resp, 'Upload failed');
+          this._showUploadError(err);
           return;
         }
-        const err = await extractApiError(resp, 'Upload failed');
-        this._showUploadError(err);
-        return;
       }
 
       // Guard: do not inject paths if pane lost focus, was hidden, disposed
@@ -2424,10 +2468,30 @@ export class ScionTerminalPane extends LitElement {
       const quoted = paths.map((p) => this._quoteForShell(p));
       this.sendData(quoted.join(' ') + ' ');
       this.terminal?.focus();
-    } catch {
+    } catch (err) {
+      if (err instanceof UploadCancelledError) {
+        return;
+      }
+      if (err instanceof UploadHttpError) {
+        if (err.code === 'experiment_disabled') {
+          this._showUploadError('Large uploads were disabled.');
+          return;
+        }
+        if (err.status === 409 && (err.code === 'conflict' || !err.code)) {
+          this._showUploadError('File upload requires a co-located runtime broker');
+          this.uploadEnabled = false;
+          this.uploadDisabledReason = 'File upload requires a co-located runtime broker';
+          return;
+        }
+        this._showUploadError(err.message);
+        return;
+      }
       this._showUploadError('Upload failed: network error');
     } finally {
-      // Only clear on success — error paths use _showUploadError which manages its own state
+      if (this._uploadAbortController === controller) {
+        this._uploadAbortController = null;
+      }
+      // Only clear on success or cancel — error paths use _showUploadError which manages its own state
       if (this.isUploading) {
         this.isUploading = false;
         this.uploadStatus = '';
@@ -2455,6 +2519,8 @@ export class ScionTerminalPane extends LitElement {
   private cleanup(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this._uploadAbortController?.abort();
+    this._uploadAbortController = null;
     this.resumeRequestSeq++;
     this.resumeState = 'idle';
     this.resumeSawTransition = false;
@@ -3531,7 +3597,15 @@ export class ScionTerminalPane extends LitElement {
             : ''}"
         >
           ${this.isUploading
-            ? html`<sl-spinner></sl-spinner><span>${this.uploadStatus}</span>`
+            ? html`<sl-spinner></sl-spinner><span>${this.uploadStatus}</span>
+                <sl-button
+                  class="upload-cancel-btn"
+                  size="small"
+                  variant="default"
+                  @click=${() => this._cancelUpload()}
+                >
+                  Cancel
+                </sl-button>`
             : this.uploadStatus
               ? html`<sl-icon name="x-circle"></sl-icon><span>${this.uploadStatus}</span>`
               : this.uploadEnabled

@@ -72,6 +72,12 @@ export const EARLIER_COMMENT_HINT = 'Earlier comment: read-only';
 export class ScionReviewEditor extends LitElement {
   /** The review text to open (Markdown with CriticMarkup, LF line ends). */
   @property({ type: String }) content = '';
+  /**
+   * The unmodified base version text (LF line ends). When provided, marks
+   * absent from baseContent are restored as this reviewer's own (editable)
+   * while marks present in baseContent stay earlier (read-only).
+   */
+  @property({ type: String }) baseContent?: string;
   @property({ type: String }) artifactId = '';
   /** Version whose files links and images resolve in. */
   @property({ type: Number }) seq = 0;
@@ -124,7 +130,11 @@ export class ScionReviewEditor extends LitElement {
   }
 
   override updated(changed: PropertyValues<this>): void {
-    if (changed.has('content') && this.controller && this.content !== this.known) {
+    if (
+      (changed.has('content') || changed.has('baseContent')) &&
+      this.controller &&
+      (this.content !== this.known || changed.has('baseContent'))
+    ) {
       this.open(this.content);
     }
     if (changed.has('scrollInset')) this.applyScrollInset();
@@ -206,8 +216,11 @@ export class ScionReviewEditor extends LitElement {
     if (!this.controller) return;
     this.clearTimer();
     this.known = text;
-    if (this.controller.load(text)) {
+    if (this.controller.load(text, this.baseContent)) {
       this.emit('review-ready', {});
+      if (this.controller.baseFailClosed) {
+        this.emit('review-hint', { kind: 'unmarked-source' });
+      }
     } else {
       this.emit('review-load-failed', {});
     }

@@ -128,7 +128,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegroupbudgetseed"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
@@ -371,8 +375,16 @@ type Client struct {
 	TriggerFire *TriggerFireClient
 	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
 	TriggerSubjectClaim *TriggerSubjectClaimClient
+	// UploadSession is the client for interacting with the UploadSession builders.
+	UploadSession *UploadSessionClient
+	// UsageBudgetState is the client for interacting with the UsageBudgetState builders.
+	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
+	// UsageGroupBudgetSeed is the client for interacting with the UsageGroupBudgetSeed builders.
+	UsageGroupBudgetSeed *UsageGroupBudgetSeedClient
+	// UsageGroupRollupDaily is the client for interacting with the UsageGroupRollupDaily builders.
+	UsageGroupRollupDaily *UsageGroupRollupDailyClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// UsageRollupDaily is the client for interacting with the UsageRollupDaily builders.
@@ -518,7 +530,11 @@ func (c *Client) init() {
 	c.TriggerEvent = NewTriggerEventClient(c.config)
 	c.TriggerFire = NewTriggerFireClient(c.config)
 	c.TriggerSubjectClaim = NewTriggerSubjectClaimClient(c.config)
+	c.UploadSession = NewUploadSessionClient(c.config)
+	c.UsageBudgetState = NewUsageBudgetStateClient(c.config)
 	c.UsageEvent = NewUsageEventClient(c.config)
+	c.UsageGroupBudgetSeed = NewUsageGroupBudgetSeedClient(c.config)
+	c.UsageGroupRollupDaily = NewUsageGroupRollupDailyClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.UsageRollupDaily = NewUsageRollupDailyClient(c.config)
 	c.UsageRollupHourly = NewUsageRollupHourlyClient(c.config)
@@ -734,7 +750,11 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
 		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
+		UploadSession:                 NewUploadSessionClient(cfg),
+		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
+		UsageGroupBudgetSeed:          NewUsageGroupBudgetSeedClient(cfg),
+		UsageGroupRollupDaily:         NewUsageGroupRollupDailyClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
 		UsageRollupHourly:             NewUsageRollupHourlyClient(cfg),
@@ -877,7 +897,11 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
 		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
+		UploadSession:                 NewUploadSessionClient(cfg),
+		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
+		UsageGroupBudgetSeed:          NewUsageGroupBudgetSeedClient(cfg),
+		UsageGroupRollupDaily:         NewUsageGroupRollupDailyClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
 		UsageRollupHourly:             NewUsageRollupHourlyClient(cfg),
@@ -947,11 +971,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
-		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
+		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
+		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
+		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -990,11 +1015,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
-		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
+		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
+		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
+		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1227,8 +1253,16 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.TriggerFire.mutate(ctx, m)
 	case *TriggerSubjectClaimMutation:
 		return c.TriggerSubjectClaim.mutate(ctx, m)
+	case *UploadSessionMutation:
+		return c.UploadSession.mutate(ctx, m)
+	case *UsageBudgetStateMutation:
+		return c.UsageBudgetState.mutate(ctx, m)
 	case *UsageEventMutation:
 		return c.UsageEvent.mutate(ctx, m)
+	case *UsageGroupBudgetSeedMutation:
+		return c.UsageGroupBudgetSeed.mutate(ctx, m)
+	case *UsageGroupRollupDailyMutation:
+		return c.UsageGroupRollupDaily.mutate(ctx, m)
 	case *UsageReservationMutation:
 		return c.UsageReservation.mutate(ctx, m)
 	case *UsageRollupDailyMutation:
@@ -16776,6 +16810,272 @@ func (c *TriggerSubjectClaimClient) mutate(ctx context.Context, m *TriggerSubjec
 	}
 }
 
+// UploadSessionClient is a client for the UploadSession schema.
+type UploadSessionClient struct {
+	config
+}
+
+// NewUploadSessionClient returns a client for the UploadSession from the given config.
+func NewUploadSessionClient(c config) *UploadSessionClient {
+	return &UploadSessionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `uploadsession.Hooks(f(g(h())))`.
+func (c *UploadSessionClient) Use(hooks ...Hook) {
+	c.hooks.UploadSession = append(c.hooks.UploadSession, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `uploadsession.Intercept(f(g(h())))`.
+func (c *UploadSessionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UploadSession = append(c.inters.UploadSession, interceptors...)
+}
+
+// Create returns a builder for creating a UploadSession entity.
+func (c *UploadSessionClient) Create() *UploadSessionCreate {
+	mutation := newUploadSessionMutation(c.config, OpCreate)
+	return &UploadSessionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UploadSession entities.
+func (c *UploadSessionClient) CreateBulk(builders ...*UploadSessionCreate) *UploadSessionCreateBulk {
+	return &UploadSessionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UploadSessionClient) MapCreateBulk(slice any, setFunc func(*UploadSessionCreate, int)) *UploadSessionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UploadSessionCreateBulk{err: fmt.Errorf("calling to UploadSessionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UploadSessionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UploadSessionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UploadSession.
+func (c *UploadSessionClient) Update() *UploadSessionUpdate {
+	mutation := newUploadSessionMutation(c.config, OpUpdate)
+	return &UploadSessionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UploadSessionClient) UpdateOne(_m *UploadSession) *UploadSessionUpdateOne {
+	mutation := newUploadSessionMutation(c.config, OpUpdateOne, withUploadSession(_m))
+	return &UploadSessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UploadSessionClient) UpdateOneID(id string) *UploadSessionUpdateOne {
+	mutation := newUploadSessionMutation(c.config, OpUpdateOne, withUploadSessionID(id))
+	return &UploadSessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UploadSession.
+func (c *UploadSessionClient) Delete() *UploadSessionDelete {
+	mutation := newUploadSessionMutation(c.config, OpDelete)
+	return &UploadSessionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UploadSessionClient) DeleteOne(_m *UploadSession) *UploadSessionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UploadSessionClient) DeleteOneID(id string) *UploadSessionDeleteOne {
+	builder := c.Delete().Where(uploadsession.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UploadSessionDeleteOne{builder}
+}
+
+// Query returns a query builder for UploadSession.
+func (c *UploadSessionClient) Query() *UploadSessionQuery {
+	return &UploadSessionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUploadSession},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UploadSession entity by its id.
+func (c *UploadSessionClient) Get(ctx context.Context, id string) (*UploadSession, error) {
+	return c.Query().Where(uploadsession.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UploadSessionClient) GetX(ctx context.Context, id string) *UploadSession {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UploadSessionClient) Hooks() []Hook {
+	return c.hooks.UploadSession
+}
+
+// Interceptors returns the client interceptors.
+func (c *UploadSessionClient) Interceptors() []Interceptor {
+	return c.inters.UploadSession
+}
+
+func (c *UploadSessionClient) mutate(ctx context.Context, m *UploadSessionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UploadSessionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UploadSessionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UploadSessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UploadSessionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UploadSession mutation op: %q", m.Op())
+	}
+}
+
+// UsageBudgetStateClient is a client for the UsageBudgetState schema.
+type UsageBudgetStateClient struct {
+	config
+}
+
+// NewUsageBudgetStateClient returns a client for the UsageBudgetState from the given config.
+func NewUsageBudgetStateClient(c config) *UsageBudgetStateClient {
+	return &UsageBudgetStateClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usagebudgetstate.Hooks(f(g(h())))`.
+func (c *UsageBudgetStateClient) Use(hooks ...Hook) {
+	c.hooks.UsageBudgetState = append(c.hooks.UsageBudgetState, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usagebudgetstate.Intercept(f(g(h())))`.
+func (c *UsageBudgetStateClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageBudgetState = append(c.inters.UsageBudgetState, interceptors...)
+}
+
+// Create returns a builder for creating a UsageBudgetState entity.
+func (c *UsageBudgetStateClient) Create() *UsageBudgetStateCreate {
+	mutation := newUsageBudgetStateMutation(c.config, OpCreate)
+	return &UsageBudgetStateCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageBudgetState entities.
+func (c *UsageBudgetStateClient) CreateBulk(builders ...*UsageBudgetStateCreate) *UsageBudgetStateCreateBulk {
+	return &UsageBudgetStateCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageBudgetStateClient) MapCreateBulk(slice any, setFunc func(*UsageBudgetStateCreate, int)) *UsageBudgetStateCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageBudgetStateCreateBulk{err: fmt.Errorf("calling to UsageBudgetStateClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageBudgetStateCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageBudgetStateCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageBudgetState.
+func (c *UsageBudgetStateClient) Update() *UsageBudgetStateUpdate {
+	mutation := newUsageBudgetStateMutation(c.config, OpUpdate)
+	return &UsageBudgetStateUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageBudgetStateClient) UpdateOne(_m *UsageBudgetState) *UsageBudgetStateUpdateOne {
+	mutation := newUsageBudgetStateMutation(c.config, OpUpdateOne, withUsageBudgetState(_m))
+	return &UsageBudgetStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageBudgetStateClient) UpdateOneID(id uuid.UUID) *UsageBudgetStateUpdateOne {
+	mutation := newUsageBudgetStateMutation(c.config, OpUpdateOne, withUsageBudgetStateID(id))
+	return &UsageBudgetStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageBudgetState.
+func (c *UsageBudgetStateClient) Delete() *UsageBudgetStateDelete {
+	mutation := newUsageBudgetStateMutation(c.config, OpDelete)
+	return &UsageBudgetStateDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageBudgetStateClient) DeleteOne(_m *UsageBudgetState) *UsageBudgetStateDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageBudgetStateClient) DeleteOneID(id uuid.UUID) *UsageBudgetStateDeleteOne {
+	builder := c.Delete().Where(usagebudgetstate.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageBudgetStateDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageBudgetState.
+func (c *UsageBudgetStateClient) Query() *UsageBudgetStateQuery {
+	return &UsageBudgetStateQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageBudgetState},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageBudgetState entity by its id.
+func (c *UsageBudgetStateClient) Get(ctx context.Context, id uuid.UUID) (*UsageBudgetState, error) {
+	return c.Query().Where(usagebudgetstate.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageBudgetStateClient) GetX(ctx context.Context, id uuid.UUID) *UsageBudgetState {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageBudgetStateClient) Hooks() []Hook {
+	return c.hooks.UsageBudgetState
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageBudgetStateClient) Interceptors() []Interceptor {
+	return c.inters.UsageBudgetState
+}
+
+func (c *UsageBudgetStateClient) mutate(ctx context.Context, m *UsageBudgetStateMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageBudgetStateCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageBudgetStateUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageBudgetStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageBudgetStateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageBudgetState mutation op: %q", m.Op())
+	}
+}
+
 // UsageEventClient is a client for the UsageEvent schema.
 type UsageEventClient struct {
 	config
@@ -16922,6 +17222,272 @@ func (c *UsageEventClient) mutate(ctx context.Context, m *UsageEventMutation) (V
 		return (&UsageEventDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown UsageEvent mutation op: %q", m.Op())
+	}
+}
+
+// UsageGroupBudgetSeedClient is a client for the UsageGroupBudgetSeed schema.
+type UsageGroupBudgetSeedClient struct {
+	config
+}
+
+// NewUsageGroupBudgetSeedClient returns a client for the UsageGroupBudgetSeed from the given config.
+func NewUsageGroupBudgetSeedClient(c config) *UsageGroupBudgetSeedClient {
+	return &UsageGroupBudgetSeedClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usagegroupbudgetseed.Hooks(f(g(h())))`.
+func (c *UsageGroupBudgetSeedClient) Use(hooks ...Hook) {
+	c.hooks.UsageGroupBudgetSeed = append(c.hooks.UsageGroupBudgetSeed, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usagegroupbudgetseed.Intercept(f(g(h())))`.
+func (c *UsageGroupBudgetSeedClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageGroupBudgetSeed = append(c.inters.UsageGroupBudgetSeed, interceptors...)
+}
+
+// Create returns a builder for creating a UsageGroupBudgetSeed entity.
+func (c *UsageGroupBudgetSeedClient) Create() *UsageGroupBudgetSeedCreate {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpCreate)
+	return &UsageGroupBudgetSeedCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageGroupBudgetSeed entities.
+func (c *UsageGroupBudgetSeedClient) CreateBulk(builders ...*UsageGroupBudgetSeedCreate) *UsageGroupBudgetSeedCreateBulk {
+	return &UsageGroupBudgetSeedCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageGroupBudgetSeedClient) MapCreateBulk(slice any, setFunc func(*UsageGroupBudgetSeedCreate, int)) *UsageGroupBudgetSeedCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageGroupBudgetSeedCreateBulk{err: fmt.Errorf("calling to UsageGroupBudgetSeedClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageGroupBudgetSeedCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageGroupBudgetSeedCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageGroupBudgetSeed.
+func (c *UsageGroupBudgetSeedClient) Update() *UsageGroupBudgetSeedUpdate {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpUpdate)
+	return &UsageGroupBudgetSeedUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageGroupBudgetSeedClient) UpdateOne(_m *UsageGroupBudgetSeed) *UsageGroupBudgetSeedUpdateOne {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpUpdateOne, withUsageGroupBudgetSeed(_m))
+	return &UsageGroupBudgetSeedUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageGroupBudgetSeedClient) UpdateOneID(id uuid.UUID) *UsageGroupBudgetSeedUpdateOne {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpUpdateOne, withUsageGroupBudgetSeedID(id))
+	return &UsageGroupBudgetSeedUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageGroupBudgetSeed.
+func (c *UsageGroupBudgetSeedClient) Delete() *UsageGroupBudgetSeedDelete {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpDelete)
+	return &UsageGroupBudgetSeedDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageGroupBudgetSeedClient) DeleteOne(_m *UsageGroupBudgetSeed) *UsageGroupBudgetSeedDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageGroupBudgetSeedClient) DeleteOneID(id uuid.UUID) *UsageGroupBudgetSeedDeleteOne {
+	builder := c.Delete().Where(usagegroupbudgetseed.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageGroupBudgetSeedDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageGroupBudgetSeed.
+func (c *UsageGroupBudgetSeedClient) Query() *UsageGroupBudgetSeedQuery {
+	return &UsageGroupBudgetSeedQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageGroupBudgetSeed},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageGroupBudgetSeed entity by its id.
+func (c *UsageGroupBudgetSeedClient) Get(ctx context.Context, id uuid.UUID) (*UsageGroupBudgetSeed, error) {
+	return c.Query().Where(usagegroupbudgetseed.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageGroupBudgetSeedClient) GetX(ctx context.Context, id uuid.UUID) *UsageGroupBudgetSeed {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageGroupBudgetSeedClient) Hooks() []Hook {
+	return c.hooks.UsageGroupBudgetSeed
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageGroupBudgetSeedClient) Interceptors() []Interceptor {
+	return c.inters.UsageGroupBudgetSeed
+}
+
+func (c *UsageGroupBudgetSeedClient) mutate(ctx context.Context, m *UsageGroupBudgetSeedMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageGroupBudgetSeedCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageGroupBudgetSeedUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageGroupBudgetSeedUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageGroupBudgetSeedDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageGroupBudgetSeed mutation op: %q", m.Op())
+	}
+}
+
+// UsageGroupRollupDailyClient is a client for the UsageGroupRollupDaily schema.
+type UsageGroupRollupDailyClient struct {
+	config
+}
+
+// NewUsageGroupRollupDailyClient returns a client for the UsageGroupRollupDaily from the given config.
+func NewUsageGroupRollupDailyClient(c config) *UsageGroupRollupDailyClient {
+	return &UsageGroupRollupDailyClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usagegrouprollupdaily.Hooks(f(g(h())))`.
+func (c *UsageGroupRollupDailyClient) Use(hooks ...Hook) {
+	c.hooks.UsageGroupRollupDaily = append(c.hooks.UsageGroupRollupDaily, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usagegrouprollupdaily.Intercept(f(g(h())))`.
+func (c *UsageGroupRollupDailyClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageGroupRollupDaily = append(c.inters.UsageGroupRollupDaily, interceptors...)
+}
+
+// Create returns a builder for creating a UsageGroupRollupDaily entity.
+func (c *UsageGroupRollupDailyClient) Create() *UsageGroupRollupDailyCreate {
+	mutation := newUsageGroupRollupDailyMutation(c.config, OpCreate)
+	return &UsageGroupRollupDailyCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageGroupRollupDaily entities.
+func (c *UsageGroupRollupDailyClient) CreateBulk(builders ...*UsageGroupRollupDailyCreate) *UsageGroupRollupDailyCreateBulk {
+	return &UsageGroupRollupDailyCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageGroupRollupDailyClient) MapCreateBulk(slice any, setFunc func(*UsageGroupRollupDailyCreate, int)) *UsageGroupRollupDailyCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageGroupRollupDailyCreateBulk{err: fmt.Errorf("calling to UsageGroupRollupDailyClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageGroupRollupDailyCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageGroupRollupDailyCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageGroupRollupDaily.
+func (c *UsageGroupRollupDailyClient) Update() *UsageGroupRollupDailyUpdate {
+	mutation := newUsageGroupRollupDailyMutation(c.config, OpUpdate)
+	return &UsageGroupRollupDailyUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageGroupRollupDailyClient) UpdateOne(_m *UsageGroupRollupDaily) *UsageGroupRollupDailyUpdateOne {
+	mutation := newUsageGroupRollupDailyMutation(c.config, OpUpdateOne, withUsageGroupRollupDaily(_m))
+	return &UsageGroupRollupDailyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageGroupRollupDailyClient) UpdateOneID(id uuid.UUID) *UsageGroupRollupDailyUpdateOne {
+	mutation := newUsageGroupRollupDailyMutation(c.config, OpUpdateOne, withUsageGroupRollupDailyID(id))
+	return &UsageGroupRollupDailyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageGroupRollupDaily.
+func (c *UsageGroupRollupDailyClient) Delete() *UsageGroupRollupDailyDelete {
+	mutation := newUsageGroupRollupDailyMutation(c.config, OpDelete)
+	return &UsageGroupRollupDailyDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageGroupRollupDailyClient) DeleteOne(_m *UsageGroupRollupDaily) *UsageGroupRollupDailyDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageGroupRollupDailyClient) DeleteOneID(id uuid.UUID) *UsageGroupRollupDailyDeleteOne {
+	builder := c.Delete().Where(usagegrouprollupdaily.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageGroupRollupDailyDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageGroupRollupDaily.
+func (c *UsageGroupRollupDailyClient) Query() *UsageGroupRollupDailyQuery {
+	return &UsageGroupRollupDailyQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageGroupRollupDaily},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageGroupRollupDaily entity by its id.
+func (c *UsageGroupRollupDailyClient) Get(ctx context.Context, id uuid.UUID) (*UsageGroupRollupDaily, error) {
+	return c.Query().Where(usagegrouprollupdaily.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageGroupRollupDailyClient) GetX(ctx context.Context, id uuid.UUID) *UsageGroupRollupDaily {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageGroupRollupDailyClient) Hooks() []Hook {
+	return c.hooks.UsageGroupRollupDaily
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageGroupRollupDailyClient) Interceptors() []Interceptor {
+	return c.inters.UsageGroupRollupDaily
+}
+
+func (c *UsageGroupRollupDailyClient) mutate(ctx context.Context, m *UsageGroupRollupDailyMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageGroupRollupDailyCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageGroupRollupDailyUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageGroupRollupDailyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageGroupRollupDailyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageGroupRollupDaily mutation op: %q", m.Op())
 	}
 }
 
@@ -18609,7 +19175,8 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UsageEvent, UsageReservation, UsageRollupDaily, UsageRollupHourly,
+		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
+		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
 		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
 		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
@@ -18640,7 +19207,8 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UsageEvent, UsageReservation, UsageRollupDaily, UsageRollupHourly,
+		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
+		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
 		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
 		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}

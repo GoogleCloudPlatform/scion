@@ -85,6 +85,9 @@ func TestBrokerVersionStatus(t *testing.T) {
 	assert.Equal(t, "match", brokerVersionStatus("v1.2.0", "v1.2.0"))
 	assert.Equal(t, "mismatch", brokerVersionStatus("v1.3.0", "v1.2.0"))
 	assert.Equal(t, "unknown", brokerVersionStatus("v1.2.0", ""))
+	assert.Equal(t, "unknown", brokerVersionStatus("v1.2.0", "dev"))
+	assert.Equal(t, "unknown", brokerVersionStatus("v1.2.0", "DEV"))
+	assert.Equal(t, "unknown", brokerVersionStatus("v1.2.0", "   "))
 	assert.Equal(t, "unknown", brokerVersionStatus("", "v1.2.0"), "no live hub instance")
 	assert.Equal(t, "unknown", brokerVersionStatus(HubVersionMixed, "v1.2.0"), "no single hub version during a rolling upgrade")
 	assert.Equal(t, "unknown", brokerVersionStatus(HubVersionMixed, HubVersionMixed))
@@ -97,6 +100,12 @@ func TestBrokerVersionToken_Bounded(t *testing.T) {
 	assert.Equal(t, strings.Repeat("v", hubInstanceMaxVersionBytes), brokerVersionToken(strings.Repeat("v", 200)))
 	assert.Equal(t, "v1.2.0", brokerVersionToken("v1.\n2.\x000"))
 	assert.Equal(t, "", brokerVersionToken(""))
+	assert.Equal(t, "", brokerVersionToken("   "))
+	assert.Equal(t, "", brokerVersionToken("\n\x00"))
+	assert.Equal(t, "", brokerVersionToken("dev"))
+	assert.Equal(t, "", brokerVersionToken("DEV"))
+	assert.Equal(t, "", brokerVersionToken("  dev  "))
+	assert.Equal(t, "unknown", brokerVersionToken("unknown"))
 	assert.Equal(t, hubBuildToken(), HubBuildToken())
 }
 
@@ -154,6 +163,7 @@ func TestHealthSummary_BrokerVersionUnknown(t *testing.T) {
 
 	createSummaryBroker(t, s, versionTestBroker("ver-unk-str", "unknown"))
 	createSummaryBroker(t, s, versionTestBroker("ver-unk-empty", ""))
+	createSummaryBroker(t, s, versionTestBroker("ver-unk-dev", "dev"))
 
 	offUnknown := versionTestBroker("ver-off-unk", "unknown")
 	offUnknown.Status = store.BrokerStatusOffline
@@ -166,7 +176,7 @@ func TestHealthSummary_BrokerVersionUnknown(t *testing.T) {
 	assert.Empty(t, versionItems(resp))
 
 	unknownItems := versionUnknownItems(resp)
-	require.Len(t, unknownItems, 2, "only the two online brokers with empty/unknown version get items: %+v", resp.Attention)
+	require.Len(t, unknownItems, 3, "only the three online brokers with empty/unknown/dev version get items: %+v", resp.Attention)
 	byID := map[string]HealthAttentionItem{}
 	for _, it := range unknownItems {
 		byID[it.Subject.ID] = it
@@ -181,6 +191,11 @@ func TestHealthSummary_BrokerVersionUnknown(t *testing.T) {
 		Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: tid("ver-unk-empty"), Name: "ver-unk-empty"},
 		Message: "Runtime broker ver-unk-empty reports no version; cannot verify it matches the hub (v1.3.0)",
 	}, byID[tid("ver-unk-empty")])
+	assert.Equal(t, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionUnknown,
+		Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: tid("ver-unk-dev"), Name: "ver-unk-dev"},
+		Message: "Runtime broker ver-unk-dev reports no version; cannot verify it matches the hub (v1.3.0)",
+	}, byID[tid("ver-unk-dev")])
 	assert.NotContains(t, byID, tid("ver-off-unk"))
 	assert.NotContains(t, byID, tid("ver-pre-hb"))
 }
@@ -564,8 +579,9 @@ func TestHealthSummary_BrokerVersionBoundedOnRead(t *testing.T) {
 
 // The heartbeat refreshes the stored version only from the broker itself:
 // a self heartbeat replaces a stale join value, a version-only heartbeat is
-// enough, an omitted or empty version keeps it, a user heartbeat never sets
-// it, and the value is bounded.
+// enough, an omitted, empty, non-printable or "dev" version clears the stored
+// value (ptone/scion#6382), "unknown" replaces it with "unknown", a user
+// heartbeat never sets or clears it, and the value is bounded.
 func TestBrokerHeartbeat_Version(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -582,34 +598,87 @@ func TestBrokerHeartbeat_Version(t *testing.T) {
 	assert.Equal(t, "v1.3.0", stored(), "a version-only self heartbeat replaces the stale value")
 
 	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online"})
-	assert.Equal(t, "v1.3.0", stored(), "an omitted version keeps the stored one")
-	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": ""})
-	assert.Equal(t, "v1.3.0", stored(), "an empty version keeps the stored one")
+	assert.Equal(t, "", stored(), "an omitted version clears the stored one")
 
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
+	assert.Equal(t, "v1.3.0", stored(), "a usable version replaces the cleared value")
+
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": ""})
+	assert.Equal(t, "", stored(), "an empty version clears the stored one")
+
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "dev"})
+	assert.Equal(t, "", stored(), "a dev version clears the stored one")
+
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "\n\x00"})
+	assert.Equal(t, "", stored(), "a version normalizing to empty clears the stored one")
+
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "unknown"})
+	assert.Equal(t, "unknown", stored(), "an explicit unknown version replaces the stale value")
+
+	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+id+"/heartbeat",
 		map[string]interface{}{"status": "online", "version": "v9.9.9"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, "v1.3.0", stored(), "a user heartbeat never sets the version")
 
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+id+"/heartbeat",
+		map[string]interface{}{"status": "online"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "v1.3.0", stored(), "a user heartbeat never clears the version")
+
 	sendAsBroker(t, srv, id, map[string]interface{}{"status": "online", "version": "v2\n" + strings.Repeat("z", 200)})
 	assert.Equal(t, "v2"+strings.Repeat("z", hubInstanceMaxVersionBytes-2), stored(), "bounded before it is stored")
 }
 
-// Rollback: a broker rolled back to a build without the heartbeat version
-// keeps its last heartbeat-written token (omitted keeps); a re-join by that
-// older build clears it to "" (unknown). Documented limitation.
-func TestBrokerVersion_RollbackKeepsUntilRejoin(t *testing.T) {
-	f := newOwnedBrokerFixture(t, false, "ver-rollback")
-	setHubFleet(t, f.s, "v1.3.0")
-	sendAsBroker(t, f.srv, f.id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
-	sendAsBroker(t, f.srv, f.id, map[string]interface{}{"status": "online"})
-	assert.Equal(t, "v1.3.0", f.row(t).Version, "an older heartbeat keeps the token")
+// A stored old tag followed by a self heartbeat whose version is omitted,
+// empty, or "dev" clears the stored value, turning a false
+// broker_version_mismatch warning into a truthful broker_version_unknown
+// warning (ptone/scion#6382, ptone/scion#7430). A subsequent heartbeat with a
+// usable matching version restores match with no attention items.
+func TestBrokerVersion_StaleClearedOnEmptyOrDevHeartbeat(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body map[string]interface{}
+	}{
+		{"omitted", map[string]interface{}{"status": "online"}},
+		{"empty", map[string]interface{}{"status": "online", "version": ""}},
+		{"dev", map[string]interface{}{"status": "online", "version": "dev"}},
+		{"non-printable", map[string]interface{}{"status": "online", "version": "\n\x00"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOwnedBrokerFixture(t, false, "ver-stale-"+tc.name)
+			setHubFleet(t, f.s, "v1.3.0")
 
-	resp := f.reregister(t, func(r *CreateBrokerRegistrationRequest) { r.Force = true })
-	rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join",
-		BrokerJoinRequest{BrokerID: f.id, JoinToken: resp.JoinToken, Hostname: "ver-rollback", Version: ""})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, "", f.row(t).Version)
+			// Start with a stale old tag: surfaces broker_version_mismatch.
+			sendAsBroker(t, f.srv, f.id, map[string]interface{}{"status": "online", "version": "nightly-20260928"})
+			assert.Equal(t, "nightly-20260928", f.row(t).Version)
+			resp, _ := getHealthSummary(t, f.srv)
+			require.Len(t, versionItems(resp), 1)
+			assert.Empty(t, versionUnknownItems(resp))
+
+			// Heartbeat with empty/omitted/dev clears the stored value.
+			sendAsBroker(t, f.srv, f.id, tc.body)
+			assert.Equal(t, "", f.row(t).Version)
+			resp, _ = getHealthSummary(t, f.srv)
+			rows := summaryBrokerByID(resp)
+			assert.Equal(t, "", rows[f.id].Version)
+			assert.Equal(t, "unknown", rows[f.id].VersionStatus)
+			assert.Empty(t, versionItems(resp), "no false mismatch item after clearing stale version")
+			require.Len(t, versionUnknownItems(resp), 1, "surfaces truthful broker_version_unknown warning")
+
+			// A usable version on a later heartbeat replaces the cleared value.
+			sendAsBroker(t, f.srv, f.id, map[string]interface{}{"status": "online", "version": "v1.3.0"})
+			assert.Equal(t, "v1.3.0", f.row(t).Version)
+			resp, _ = getHealthSummary(t, f.srv)
+			rows = summaryBrokerByID(resp)
+			assert.Equal(t, "match", rows[f.id].VersionStatus)
+			assert.Empty(t, versionItems(resp))
+			assert.Empty(t, versionUnknownItems(resp))
+		})
+	}
 }
 
 // Join always stores the sent version: an older untagged broker re-joining
@@ -640,6 +709,16 @@ func TestBrokerJoin_AlwaysStoresVersion(t *testing.T) {
 		assert.Equal(t, "", f.row(t).Version, "an empty version is stored, not the stale token")
 		resp, _ := getHealthSummary(t, f.srv)
 		rows := summaryBrokerByID(resp)
+		assert.Equal(t, "unknown", rows[f.id].VersionStatus)
+		assert.Empty(t, versionItems(resp))
+		require.Len(t, versionUnknownItems(resp), 1)
+
+		join("v1.2.0")
+		assert.Equal(t, "v1.2.0", f.row(t).Version)
+		join("dev")
+		assert.Equal(t, "", f.row(t).Version, "a dev version clears the stale token")
+		resp, _ = getHealthSummary(t, f.srv)
+		rows = summaryBrokerByID(resp)
 		assert.Equal(t, "unknown", rows[f.id].VersionStatus)
 		assert.Empty(t, versionItems(resp))
 		require.Len(t, versionUnknownItems(resp), 1)
@@ -694,6 +773,8 @@ func TestRegisterProjectBroker_Version(t *testing.T) {
 	assert.Equal(t, "v1.2.0", stored())
 	register("3", "")
 	assert.Equal(t, "v1.2.0", stored(), "an empty version keeps the stored one")
+	register("4", "dev")
+	assert.Equal(t, "", stored(), "a dev version clears the stored one")
 }
 
 // The projectId-filtered list carries hubVersion and each broker's

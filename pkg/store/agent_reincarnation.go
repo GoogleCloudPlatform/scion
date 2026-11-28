@@ -238,4 +238,14 @@ type AgentReincarnationStore interface {
 	// source-broker cleanup on the record with ID id (a narrow
 	// single-column write). Returns ErrNotFound if no row matched.
 	SetAgentReincarnationSourceCleanup(ctx context.Context, id, outcome string) error
+
+	// LatestCompletedAgentReincarnationAt returns CompletedAt of the agent's most
+	// recent reincarnation in state "completed", or (nil, nil) when it has none.
+	LatestCompletedAgentReincarnationAt(ctx context.Context, agentID string) (*time.Time, error)
+
+	// LatestCompletedAgentReincarnationsAt returns a map from agentID to the
+	// newest CompletedAt among "completed" reincarnation rows for each agentID
+	// in agentIDs that has one. Agents with no completed reincarnation are
+	// omitted from the returned map.
+	LatestCompletedAgentReincarnationsAt(ctx context.Context, agentIDs []string) (map[string]time.Time, error)
 }

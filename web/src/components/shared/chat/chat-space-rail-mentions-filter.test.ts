@@ -15,9 +15,9 @@
  */
 
 /**
- * Tests for the left-rail "Mentions only" sub-filter (design §14.4, AC-8):
+ * Tests for the left-rail Unread/Mentions dropdown filter (ptone/scion#9659):
  * - RailFilter 'mentions' state, persistence, and applyUrlFilter hydration
- * - "@ Mentions only" chip visibility, aria-pressed, toggling, and Unread/All/Starred interaction
+ * - Unread/Mentions dropdown trigger label, aria-pressed, aria-haspopup, aria-expanded, menu selection
  * - Client-side space and thread filtering (unmuted mentions + selected thread)
  * - Unread DMs hidden under mentions
  * - Empty state "No unread mentions"
@@ -115,8 +115,19 @@ function filterButton(el: any, label: string): HTMLButtonElement | null {
   return btns.find((b) => b.textContent?.trim() === label) ?? null;
 }
 
-function mentionsChip(el: any): HTMLButtonElement | null {
-  return el.shadowRoot.querySelector('[data-mentions-chip]') as HTMLButtonElement | null;
+function unreadDropdownTrigger(el: any): HTMLButtonElement | null {
+  return el.shadowRoot.querySelector('[data-unread-dropdown-trigger]') as HTMLButtonElement | null;
+}
+
+function unreadMainButton(el: any): HTMLButtonElement | null {
+  return el.shadowRoot.querySelector('[data-unread-filter-main]') as HTMLButtonElement | null;
+}
+
+function selectUnreadMenuItem(el: any, value: 'unread' | 'mentions'): void {
+  const menu = el.shadowRoot.querySelector('[data-unread-filter-menu]') as HTMLElement | null;
+  const item = menu?.querySelector(`sl-menu-item[value="${value}"]`) as HTMLElement | null;
+  if (!menu || !item) throw new Error(`missing unread dropdown menu item: ${value}`);
+  menu.dispatchEvent(new CustomEvent('sl-select', { detail: { item }, bubbles: true }));
 }
 
 beforeAll(async () => {
@@ -198,64 +209,122 @@ describe('hydrateRailFilterFromSearch (design §7.1, §14.4)', () => {
   });
 });
 
-describe('space rail — mentions sub-filter (design §14.4, AC-8)', () => {
-  it('shows @ Mentions only chip only while Unread is active and toggles unread <-> mentions', async () => {
+describe('space rail — Unread/Mentions split-button filter (ptone/scion#9659, #9710)', () => {
+  it('places sort in the rail header and renders the split button with chevron left of icon+label', async () => {
     const el = await mountRail([SPACE_WITH_MENTION], new Map());
 
-    // Hidden under All.
-    expect(mentionsChip(el)).toBeNull();
+    // Sort button lives in the Projects header row, not the filter toolbar.
+    expect(el.shadowRoot.querySelector('.rail-header .sort-btn')).not.toBeNull();
+    expect(el.shadowRoot.querySelector('.rail-toolbar .sort-btn')).toBeNull();
+
+    // No separate sub-filter chip row.
+    expect(el.shadowRoot.querySelector('[data-mentions-chip]')).toBeNull();
+    expect(el.shadowRoot.querySelector('[data-rail-subfilter]')).toBeNull();
+
+    const split = el.shadowRoot.querySelector('.filter-split') as HTMLElement | null;
+    expect(split).not.toBeNull();
+    const chevronTrigger = unreadDropdownTrigger(el);
+    const mainBtn = unreadMainButton(el);
+    expect(chevronTrigger).not.toBeNull();
+    expect(mainBtn).not.toBeNull();
+
+    // Chevron trigger is to the left of the main icon+label button inside .filter-split.
+    const splitChildren = Array.from(split!.children);
+    expect(splitChildren[0]?.contains(chevronTrigger)).toBe(true);
+    expect(splitChildren[1]).toBe(mainBtn);
+
+    // Chevron trigger owns dropdown ARIA; main button owns pressed state and envelope icon.
+    expect(chevronTrigger?.getAttribute('aria-haspopup')).toBe('menu');
+    expect(chevronTrigger?.getAttribute('aria-expanded')).toBe('false');
+    expect(chevronTrigger?.querySelector('sl-icon')?.getAttribute('name')).toBe('chevron-down');
+    expect(mainBtn?.textContent?.trim()).toBe('Unread');
+    expect(mainBtn?.getAttribute('aria-pressed')).toBe('false');
+    expect(mainBtn?.querySelector('sl-icon')?.getAttribute('name')).toBe('envelope');
+
+    const dropdown = el.shadowRoot.querySelector('.filter-dropdown') as HTMLElement;
+    dropdown.dispatchEvent(new CustomEvent('sl-show'));
+    await el.updateComplete;
+    expect(unreadDropdownTrigger(el)?.getAttribute('aria-expanded')).toBe('true');
+    dropdown.dispatchEvent(new CustomEvent('sl-hide'));
+    await el.updateComplete;
+    expect(unreadDropdownTrigger(el)?.getAttribute('aria-expanded')).toBe('false');
 
     const events: RailFilterChangeDetail[] = [];
     el.addEventListener('rail-filter-change', (e: Event) => {
       events.push((e as CustomEvent<RailFilterChangeDetail>).detail);
     });
 
-    // Click Unread -> chip appears, not pressed.
-    filterButton(el, 'Unread')?.click();
+    // Clicking the main button selects Unread directly without opening the dropdown.
+    mainBtn!.click();
     await el.updateComplete;
     expect(el.filter).toBe('unread');
     expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBe('unread');
-    expect(filterButton(el, 'Unread')?.getAttribute('aria-pressed')).toBe('true');
-    const chip = mentionsChip(el);
-    expect(chip).not.toBeNull();
-    expect(chip?.getAttribute('aria-pressed')).toBe('false');
+    expect(unreadMainButton(el)?.textContent?.trim()).toBe('Unread');
+    expect(unreadMainButton(el)?.getAttribute('aria-pressed')).toBe('true');
+    expect(unreadMainButton(el)?.querySelector('sl-icon')?.getAttribute('name')).toBe('envelope');
+    expect(unreadDropdownTrigger(el)?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      el.shadowRoot.querySelector('sl-menu-item[value="unread"]')?.hasAttribute('checked')
+    ).toBe(true);
+    expect(
+      el.shadowRoot.querySelector('sl-menu-item[value="mentions"]')?.hasAttribute('checked')
+    ).toBe(false);
 
-    // Click chip -> switches to mentions, Unread stays active, chip is pressed.
-    chip?.click();
+    // Re-selecting the already-active option in the menu preserves its checked state cleanly.
+    const unreadItem = el.shadowRoot.querySelector(
+      'sl-menu-item[value="unread"]'
+    ) as HTMLElement & { checked?: boolean };
+    unreadItem.removeAttribute('checked');
+    unreadItem.checked = false;
+    selectUnreadMenuItem(el, 'unread');
+    await el.updateComplete;
+    expect(unreadItem.hasAttribute('checked')).toBe(true);
+
+    // Pick Mentions via dropdown -> active, icon switches to @, label switches to Mentions, persisted.
+    selectUnreadMenuItem(el, 'mentions');
     await el.updateComplete;
     expect(el.filter).toBe('mentions');
     expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBe('mentions');
-    expect(filterButton(el, 'Unread')?.getAttribute('aria-pressed')).toBe('true');
-    expect(mentionsChip(el)?.getAttribute('aria-pressed')).toBe('true');
+    expect(unreadMainButton(el)?.textContent?.trim()).toBe('Mentions');
+    expect(unreadMainButton(el)?.getAttribute('aria-pressed')).toBe('true');
+    expect(unreadMainButton(el)?.querySelector('sl-icon')?.getAttribute('name')).toBe('at');
+    expect(
+      el.shadowRoot.querySelector('sl-menu-item[value="mentions"]')?.hasAttribute('checked')
+    ).toBe(true);
+    expect(
+      el.shadowRoot.querySelector('sl-menu-item[value="unread"]')?.hasAttribute('checked')
+    ).toBe(false);
 
-    // Clicking Unread while in mentions is a no-op.
-    filterButton(el, 'Unread')?.click();
-    await el.updateComplete;
-    expect(el.filter).toBe('mentions');
-
-    // Clicking chip again returns to unread.
-    mentionsChip(el)?.click();
-    await el.updateComplete;
-    expect(el.filter).toBe('unread');
-    expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBe('unread');
-    expect(mentionsChip(el)?.getAttribute('aria-pressed')).toBe('false');
-
-    // Clicking All clears it and hides the chip.
-    mentionsChip(el)?.click();
-    await el.updateComplete;
-    expect(el.filter).toBe('mentions');
+    // Switch to All -> clears persistence, remembers Mentions mode on the split button,
+    // and clicking the main button selects Mentions again without opening the dropdown.
     filterButton(el, 'All')?.click();
     await el.updateComplete;
     expect(el.filter).toBe('all');
     expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBeNull();
-    expect(mentionsChip(el)).toBeNull();
+    expect(unreadMainButton(el)?.textContent?.trim()).toBe('Mentions');
+    expect(unreadMainButton(el)?.getAttribute('aria-pressed')).toBe('false');
+    expect(unreadMainButton(el)?.querySelector('sl-icon')?.getAttribute('name')).toBe('at');
+
+    unreadMainButton(el)!.click();
+    await el.updateComplete;
+    expect(el.filter).toBe('mentions');
+    expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBe('mentions');
+    expect(unreadMainButton(el)?.getAttribute('aria-pressed')).toBe('true');
+
+    // Pick Unread via dropdown -> returns to unread, icon back to envelope, label back to Unread.
+    selectUnreadMenuItem(el, 'unread');
+    await el.updateComplete;
+    expect(el.filter).toBe('unread');
+    expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBe('unread');
+    expect(unreadMainButton(el)?.textContent?.trim()).toBe('Unread');
+    expect(unreadMainButton(el)?.querySelector('sl-icon')?.getAttribute('name')).toBe('envelope');
 
     expect(events.map((d) => d.filter)).toEqual([
       'unread',
       'mentions',
-      'unread',
-      'mentions',
       'all',
+      'mentions',
+      'unread',
     ]);
   });
 
@@ -264,8 +333,12 @@ describe('space rail — mentions sub-filter (design §14.4, AC-8)', () => {
     const el = await mountRail([SPACE_WITH_MENTION], new Map());
 
     expect(el.filter).toBe('mentions');
-    expect(filterButton(el, 'Unread')?.getAttribute('aria-pressed')).toBe('true');
-    expect(mentionsChip(el)?.getAttribute('aria-pressed')).toBe('true');
+    expect(unreadMainButton(el)?.textContent?.trim()).toBe('Mentions');
+    expect(unreadMainButton(el)?.getAttribute('aria-pressed')).toBe('true');
+    expect(unreadMainButton(el)?.querySelector('sl-icon')?.getAttribute('name')).toBe('at');
+    expect(
+      el.shadowRoot.querySelector('sl-menu-item[value="mentions"]')?.hasAttribute('checked')
+    ).toBe(true);
   });
 
   it('filters spaces and threads to unmuted unread mentions plus selected thread, and hides Unread DMs', async () => {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -113,7 +114,9 @@ func (s *Server) handleAgentAttachmentUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	maxFile := s.attachmentMaxBytes(ctx, true)
-	r.Body = http.MaxBytesReader(w, r.Body, maxFile*MaxAttachmentsPerMessage+1024*1024)
+	bodyCap := maxFile*MaxAttachmentsPerMessage + 1024*1024
+	artifacts.ExtendUploadDeadlines(ctx, w, artifacts.ExpectedUploadBytes(r.ContentLength, bodyCap))
+	r.Body = http.MaxBytesReader(w, r.Body, bodyCap)
 	// The form is removed on every return: ParseMultipartForm can spool
 	// parts and still answer an error (from the query string).
 	cleanup, err := parseMultipartUpload(r, uploadFormMemory)

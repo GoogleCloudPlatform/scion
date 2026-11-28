@@ -178,29 +178,41 @@ type TriggerSubjectSpec struct {
 	CoalesceWindow string `json:"coalesce_window,omitempty"`
 }
 
+// TriggerNotifySpec configures failure notifications on a trigger definition
+// (Stage 2 §10, matching web/src/components/triggers/types.ts TriggerNotifySpec).
+type TriggerNotifySpec struct {
+	OnOutcomes []string `json:"onOutcomes,omitempty"`
+	UserNotice *bool    `json:"userNotice,omitempty"`
+	AgentID    string   `json:"agentId,omitempty"`
+	AgentName  string   `json:"agentName,omitempty"`
+}
+
 // TriggerResponse is the API representation of a trigger definition.
 type TriggerResponse struct {
-	ID                      string             `json:"id"`
-	ProjectID               string             `json:"projectId"`
-	Name                    string             `json:"name"`
-	Description             string             `json:"description,omitempty"`
-	Source                  TriggerSourceSpec  `json:"source"`
-	Match                   TriggerMatchSpec   `json:"match"`
-	Action                  TriggerActionSpec  `json:"action"`
-	Subject                 TriggerSubjectSpec `json:"subject"`
-	MaxFiresPerMinute       int                `json:"maxFiresPerMinute,omitempty"`
-	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches,omitempty"`
-	Status                  string             `json:"status"`
-	StatusReason            string             `json:"statusReason,omitempty"`
-	AuthorizationRevision   int                `json:"authorizationRevision"`
-	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
-	LastFireError           string             `json:"lastFireError,omitempty"`
-	FireCount               int                `json:"fireCount"`
-	ErrorCount              int                `json:"errorCount"`
-	CreatedBy               string             `json:"createdBy,omitempty"`
-	CreatedAt               time.Time          `json:"createdAt"`
-	UpdatedAt               time.Time          `json:"updatedAt"`
+	ID                      string              `json:"id"`
+	ProjectID               string              `json:"projectId"`
+	Name                    string              `json:"name"`
+	Description             string              `json:"description,omitempty"`
+	Source                  TriggerSourceSpec   `json:"source"`
+	Match                   TriggerMatchSpec    `json:"match"`
+	Action                  TriggerActionSpec   `json:"action,omitzero"`
+	Actions                 []TriggerActionSpec `json:"actions"`
+	ActionsBroken           bool                `json:"actionsBroken,omitempty"`
+	Subject                 TriggerSubjectSpec  `json:"subject"`
+	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec  `json:"notify,omitempty"`
+	Status                  string              `json:"status"`
+	StatusReason            string              `json:"statusReason,omitempty"`
+	AuthorizationRevision   int                 `json:"authorizationRevision"`
+	LastFireAt              *time.Time          `json:"lastFireAt,omitempty"`
+	LastFireStatus          string              `json:"lastFireStatus,omitempty"`
+	LastFireError           string              `json:"lastFireError,omitempty"`
+	FireCount               int                 `json:"fireCount"`
+	ErrorCount              int                 `json:"errorCount"`
+	CreatedBy               string              `json:"createdBy,omitempty"`
+	CreatedAt               time.Time           `json:"createdAt"`
+	UpdatedAt               time.Time           `json:"updatedAt"`
 }
 
 // ListTriggersResponse is the paginated response of GET /triggers.
@@ -238,6 +250,7 @@ type TriggerFireResponse struct {
 	TriggerID      string            `json:"triggerId"`
 	EventID        string            `json:"eventId"`
 	ProjectID      string            `json:"projectId"`
+	ActionIndex    int               `json:"actionIndex"`
 	Subject        string            `json:"subject,omitempty"`
 	ActionType     string            `json:"actionType,omitempty"`
 	Status         string            `json:"status"`
@@ -536,9 +549,38 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 		matchSpec.Dialect = respRules[0].Dialect
 		matchSpec.Expr = respRules[0].Expr
 	}
+	normActions, actionsErr := triggerActions(tr)
+	respActions := make([]TriggerActionSpec, len(normActions))
+	for i, a := range normActions {
+		respActions[i] = buildTriggerActionSpec(rev, a.Type, a.Payload)
+	}
+	var mirroredAction TriggerActionSpec
+	if actionsErr == nil && len(respActions) == 1 {
+		mirroredAction = respActions[0]
+	} else if actionsErr != nil && (tr.ActionType == store.TriggerActionExec || payloadHasExecContent(tr.ActionPayload)) {
+		mirroredAction = TriggerActionSpec{
+			Type:            tr.ActionType,
+			CommandRedacted: true,
+		}
+	}
 	var coalesceWindow string
 	if tr.CoalesceWindowSeconds > 0 {
 		coalesceWindow = (time.Duration(tr.CoalesceWindowSeconds) * time.Second).String()
+	}
+	var notifySpec *TriggerNotifySpec
+	if tr.Notify != nil && !tr.Notify.IsEmpty() {
+		ns := &TriggerNotifySpec{
+			AgentID:   tr.Notify.AgentID,
+			AgentName: tr.Notify.AgentName,
+		}
+		if len(tr.Notify.OnOutcomes) > 0 {
+			ns.OnOutcomes = append([]string(nil), tr.Notify.OnOutcomes...)
+		}
+		if tr.Notify.UserNotice != nil {
+			v := *tr.Notify.UserNotice
+			ns.UserNotice = &v
+		}
+		notifySpec = ns
 	}
 	return TriggerResponse{
 		ID:          tr.ID,
@@ -549,8 +591,10 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 			Kind: tr.SourceKind,
 			ID:   tr.SourceID,
 		},
-		Match:  matchSpec,
-		Action: buildTriggerActionSpec(rev, tr.ActionType, tr.ActionPayload),
+		Match:         matchSpec,
+		Action:        mirroredAction,
+		Actions:       respActions,
+		ActionsBroken: actionsErr != nil,
 		Subject: TriggerSubjectSpec{
 			Dialect:        tr.SubjectDialect,
 			Expr:           tr.SubjectRule,
@@ -559,6 +603,7 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 		},
 		MaxFiresPerMinute:       tr.MaxFiresPerMinute,
 		MaxConcurrentDispatches: tr.MaxConcurrentDispatches,
+		Notify:                  notifySpec,
 		Status:                  tr.Status,
 		StatusReason:            tr.StatusReason,
 		AuthorizationRevision:   tr.AuthorizationRevision,
@@ -612,6 +657,7 @@ func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledE
 		TriggerID:      tf.TriggerID,
 		EventID:        tf.EventID,
 		ProjectID:      tf.ProjectID,
+		ActionIndex:    tf.ActionIndex,
 		Subject:        tf.Subject,
 		ActionType:     tf.ActionType,
 		Status:         tf.Status,

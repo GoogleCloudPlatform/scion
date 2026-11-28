@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -4147,5 +4148,142 @@ func TestPutServerConfigDB_HomeStorage_Invalid(t *testing.T) {
 		if rr.Code < 400 {
 			t.Fatalf("%s: expected a 4xx, got %d: %s", body, rr.Code, rr.Body.String())
 		}
+	}
+}
+
+// TestPutAndGetServerConfigDB_UploadsChunkAndQuotaSettings verifies R1: all six
+// chunked-upload settings under server.hub.uploads.* can be written via
+// PUT /api/v1/admin/server-config, read back via GET, preserved when omitted,
+// cleared with null, warned when max_pending_bytes_per_user is below the
+// per-file limit, and rejected when invalid.
+func TestPutAndGetServerConfigDB_UploadsChunkAndQuotaSettings(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	// 1. PUT all six chunk/quota keys.
+	rr := putServerConfigDB(t, srv, ops, `{
+		"server": {
+			"hub": {
+				"uploads": {
+					"chunk_bytes": 4194304,
+					"session_idle_ttl": "30m",
+					"session_max_lifetime": "12h",
+					"max_sessions_per_user": 8,
+					"max_pending_bytes_per_user": 1073741824,
+					"max_pending_bytes_hub": 8589934592
+				}
+			}
+		}
+	}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT uploads: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	got := ops.Uploads()
+	if got.ChunkBytes != 4194304 {
+		t.Errorf("ChunkBytes = %d, want 4194304", got.ChunkBytes)
+	}
+	if got.SessionIdleTTL != 30*time.Minute {
+		t.Errorf("SessionIdleTTL = %v, want 30m", got.SessionIdleTTL)
+	}
+	if got.SessionMaxLifetime != 12*time.Hour {
+		t.Errorf("SessionMaxLifetime = %v, want 12h", got.SessionMaxLifetime)
+	}
+	if got.MaxSessionsPerUser != 8 {
+		t.Errorf("MaxSessionsPerUser = %d, want 8", got.MaxSessionsPerUser)
+	}
+	if got.MaxPendingBytesPerUser != 1073741824 {
+		t.Errorf("MaxPendingBytesPerUser = %d, want 1073741824", got.MaxPendingBytesPerUser)
+	}
+	if got.MaxPendingBytesHub != 8589934592 {
+		t.Errorf("MaxPendingBytesHub = %d, want 8589934592", got.MaxPendingBytesHub)
+	}
+
+	// 2. GET /api/v1/admin/server-config returns all six stored values.
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET server-config: expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal GET response: %v", err)
+	}
+	if resp.Server == nil || resp.Server.Hub == nil || resp.Server.Hub.Uploads == nil {
+		t.Fatalf("expected server.hub.uploads in GET response, got: %s", getRR.Body.String())
+	}
+	u := resp.Server.Hub.Uploads
+	if u.ChunkBytes == nil || *u.ChunkBytes != 4194304 {
+		t.Errorf("GET chunk_bytes = %v, want 4194304", u.ChunkBytes)
+	}
+	if u.SessionIdleTTL != "30m" {
+		t.Errorf("GET session_idle_ttl = %q, want 30m", u.SessionIdleTTL)
+	}
+	if u.SessionMaxLifetime != "12h" {
+		t.Errorf("GET session_max_lifetime = %q, want 12h", u.SessionMaxLifetime)
+	}
+	if u.MaxSessionsPerUser == nil || *u.MaxSessionsPerUser != 8 {
+		t.Errorf("GET max_sessions_per_user = %v, want 8", u.MaxSessionsPerUser)
+	}
+	if u.MaxPendingBytesPerUser == nil || *u.MaxPendingBytesPerUser != 1073741824 {
+		t.Errorf("GET max_pending_bytes_per_user = %v, want 1073741824", u.MaxPendingBytesPerUser)
+	}
+	if u.MaxPendingBytesHub == nil || *u.MaxPendingBytesHub != 8589934592 {
+		t.Errorf("GET max_pending_bytes_hub = %v, want 8589934592", u.MaxPendingBytesHub)
+	}
+
+	// 3. Second PUT omitting chunk_bytes preserves chunk_bytes.
+	rr2 := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"max_sessions_per_user":10}}}}`)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second PUT: expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	got2 := ops.Uploads()
+	if got2.ChunkBytes != 4194304 {
+		t.Errorf("omitted chunk_bytes was not preserved: got %d, want 4194304", got2.ChunkBytes)
+	}
+	if got2.MaxSessionsPerUser != 10 {
+		t.Errorf("max_sessions_per_user = %d, want 10", got2.MaxSessionsPerUser)
+	}
+
+	// 4. PUT with "chunk_bytes": null clears it back to compiled default.
+	rr3 := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"chunk_bytes":null}}}}`)
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("null PUT: expected 200, got %d: %s", rr3.Code, rr3.Body.String())
+	}
+	if got3 := ops.Uploads(); got3.ChunkBytes != opsettings.UploadsDefaultChunkBytes {
+		t.Errorf("chunk_bytes after null clear = %d, want default %d", got3.ChunkBytes, opsettings.UploadsDefaultChunkBytes)
+	}
+
+	// 5. Setting max_pending_bytes_per_user below the per-file limit emits a warning.
+	rrWarn := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"max_pending_bytes_per_user":1048576}}}}`)
+	if rrWarn.Code != http.StatusOK {
+		t.Fatalf("warning PUT: expected 200, got %d: %s", rrWarn.Code, rrWarn.Body.String())
+	}
+	if !strings.Contains(rrWarn.Body.String(), "max_pending_bytes_per_user") {
+		t.Errorf("expected PendingBytesWarning in response body, got: %s", rrWarn.Body.String())
+	}
+
+	// 6. Invalid chunk_bytes (below 1 MiB minimum) is rejected with 4xx.
+	rrBad := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"chunk_bytes":100}}}}`)
+	if rrBad.Code < 400 || rrBad.Code >= 500 {
+		t.Fatalf("invalid chunk_bytes: expected 4xx, got %d: %s", rrBad.Code, rrBad.Body.String())
+	}
+
+	// 7. LIMIT-A: max_workspace_file_size accepts 1 GiB (1073741824) and rejects 1 GiB + 1,
+	// while max_attachment_size remains capped at 100 MiB.
+	rr1GiB := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"max_workspace_file_size":1073741824}}}}`)
+	if rr1GiB.Code != http.StatusOK {
+		t.Fatalf("1 GiB max_workspace_file_size: expected 200, got %d: %s", rr1GiB.Code, rr1GiB.Body.String())
+	}
+	ApplySnapshot(srv, ops.Snapshot())
+	if got := srv.WorkspaceUploadMaxFileBytes(context.Background()); got != config.MaxLargeUploadFileSize {
+		t.Errorf("WorkspaceUploadMaxFileBytes = %d, want %d", got, config.MaxLargeUploadFileSize)
+	}
+	rrOver1GiB := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"max_workspace_file_size":1073741825}}}}`)
+	if rrOver1GiB.Code < 400 || rrOver1GiB.Code >= 500 {
+		t.Fatalf("1 GiB + 1 max_workspace_file_size: expected 4xx, got %d: %s", rrOver1GiB.Code, rrOver1GiB.Body.String())
+	}
+	rrOverAtt := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"uploads":{"max_attachment_size":104857601}}}}`)
+	if rrOverAtt.Code < 400 || rrOverAtt.Code >= 500 {
+		t.Fatalf("100 MiB + 1 max_attachment_size: expected 4xx, got %d: %s", rrOverAtt.Code, rrOverAtt.Body.String())
 	}
 }

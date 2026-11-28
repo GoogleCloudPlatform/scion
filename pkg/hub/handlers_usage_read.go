@@ -98,6 +98,8 @@ type AgentUsageRunSummary struct {
 	HarnessConfig   string    `json:"harness_config,omitempty"`
 	Template        string    `json:"template,omitempty"`
 	UsageLiveSource string    `json:"usage_live_source,omitempty"`
+	CapturePolicy   string    `json:"capture_policy,omitempty"`
+	NoticeVersion   string    `json:"notice_version,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -558,6 +560,8 @@ func buildAgentUsageResponse(
 			HarnessConfig:   ra.HarnessConfig,
 			Template:        ra.Template,
 			UsageLiveSource: ra.UsageLiveSource,
+			CapturePolicy:   ra.CapturePolicy,
+			NoticeVersion:   ra.NoticeVersion,
 			CreatedAt:       ra.CreatedAt,
 		})
 	}
@@ -850,43 +854,37 @@ func (m *usageCapabilityMemo) lookupScope(slug, scope, scopeID string) (*store.H
 }
 
 func (m *usageCapabilityMemo) resolveConfigBySlug(projectID, name string) (*store.HarnessConfig, error) {
-	if name == "" || m == nil || m.s == nil {
+	if m == nil || m.s == nil {
 		return nil, nil
 	}
-	var lookupErr error
-	for _, sc := range m.s.harnessConfigLookupScopes(projectID) {
-		hc, err := m.lookupScope(name, sc.scope, sc.scopeID)
-		if err == nil && hc != nil {
-			return hc, nil
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			if m.s.agentLifecycleLog != nil {
-				m.s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
-					"slug", name, "scope_id", sc.scopeID, "error", err)
-			}
-			if !m.s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
-				return nil, err
-			}
-			lookupErr = err
-		}
-	}
-	return nil, lookupErr
+	return m.s.resolveHarnessConfigBySlugWith(projectID, name, m.lookupScope)
 }
 
 func (m *usageCapabilityMemo) resolve(projectID, harnessConfig string) *api.HarnessUsageCapabilities {
+	usageCap, _ := m.resolveWithErr(projectID, harnessConfig)
+	return usageCap
+}
+
+func (m *usageCapabilityMemo) resolveWithErr(projectID, harnessConfig string) (*api.HarnessUsageCapabilities, error) {
 	if m == nil || m.s == nil {
-		return nil
+		return nil, nil
 	}
 	hcName := strings.TrimSpace(harnessConfig)
 	if hcName == "" {
-		return nil
+		return nil, nil
 	}
 	hc, err := m.resolveConfigBySlug(projectID, hcName)
-	if err != nil || hc == nil {
-		return nil
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if hc == nil {
+		return nil, nil
 	}
 	m.s.populateHarnessConfigCapabilities(m.ctx, hc)
-	return usageCapabilityFromHarnessConfig(hc)
+	return usageCapabilityFromHarnessConfig(hc), nil
 }
 
 // usageCapabilityFromHarnessConfig extracts the parsed usage.yaml capability

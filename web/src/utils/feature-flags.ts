@@ -130,15 +130,17 @@ export function isFeatureEnabled(name: string): boolean {
     }
   }
 
-  // 3. Check localStorage override (dev convenience)
-  if (typeof localStorage !== 'undefined') {
-    try {
+  // 3. Check localStorage override (dev convenience). Wrap even the `typeof`
+  // check in try/catch because sandboxed documents throw SecurityError when
+  // reading the `window.localStorage` getter.
+  try {
+    if (typeof localStorage !== 'undefined') {
       const stored = localStorage.getItem(`scion:feature:${name}`);
       if (stored === 'true') return true;
       if (stored === 'false') return false;
-    } catch {
-      // localStorage not available (e.g. SSR)
     }
+  } catch {
+    // localStorage not available (e.g. SSR or sandboxed iframe)
   }
 
   // 4. Default: on for flags in DEFAULT_ON_FLAGS, off otherwise
@@ -153,8 +155,8 @@ export function isFeatureEnabled(name: string): boolean {
  */
 function warnIfShadowed(name: string): void {
   if (shadowLogged.has(name)) return;
-  if (typeof localStorage === 'undefined') return;
   try {
+    if (typeof localStorage === 'undefined') return;
     const stored = localStorage.getItem(`scion:feature:${name}`);
     if (stored !== 'true' && stored !== 'false') return;
   } catch {
@@ -364,6 +366,20 @@ export function systemOneEnabled(): boolean {
 }
 
 /**
+ * Project message policies (hub.message_policies, ptone/scion#8047):
+ * exposes the message-policies experiment flag for UI presentation.
+ * Presentation only: the hub enforces the experiment (404 when off) and
+ * permissions on every /api/v1/projects/{id}/message-policies* route.
+ * Default OFF.
+ */
+export const MESSAGE_POLICIES_FLAG = 'hub.message_policies';
+
+/** Whether project message policies UI surfaces are enabled in this session. */
+export function messagePoliciesEnabled(): boolean {
+  return isFeatureEnabled(MESSAGE_POLICIES_FLAG);
+}
+
+/**
  * Effective permissions viewer (hub.effective_permissions, ptone/scion#8439):
  * shows the two-tab Roles dialog (Effective roles + Effective permissions) on
  * the admin Users page. Presentation only: the hub gates GET/HEAD
@@ -477,6 +493,23 @@ export function usageLedgerEnabled(): boolean {
 }
 
 /**
+ * Tokenomics Track 2 trajectory capture (tokenomics.trajectory_capture,
+ * ptone/scion#9250): shows trajectory capture policy controls in project
+ * settings, the Hub opt-out lock toggle in admin server configuration, and
+ * the Trajectory tab on the agent detail page for users who also hold
+ * project.trajectory.read. Presentation only: the hub enforces the experiment
+ * and permissions on capture policy read/write endpoints, segment prepare/commit
+ * routes, and trajectory segment list/download routes (404 while off, 403
+ * without permission). Default OFF.
+ */
+export const TOKENOMICS_TRAJECTORY_CAPTURE_FLAG = 'tokenomics.trajectory_capture';
+
+/** Whether Tokenomics Track 2 trajectory capture UI surfaces are enabled in this session. */
+export function trajectoryCaptureEnabled(): boolean {
+  return isFeatureEnabled(TOKENOMICS_TRAJECTORY_CAPTURE_FLAG);
+}
+
+/**
  * Triggers and webhook endpoints (hub.triggers, ptone/scion#8064):
  * gates the Project Triggers page (/projects/:id/triggers) and the Triggers
  * header button on Project Detail. Presentation only: the hub enforces
@@ -563,7 +596,7 @@ export function telemetryEnforcementEnabled(): boolean {
 /**
  * Never-suspend agents (lifecycle.never_suspend, ptone/scion#9178):
  * gates the Never suspend create checkbox, badge, edit toggle, force-suspend
- * confirmation dialog, and hub-wide agent list filter/column. Presentation
+ * confirmation dialog, and hub-wide agent list Traits pill. Presentation
  * only: the hub enforces the experiment on create, PATCH, suspend, and
  * auto-suspend sweeps. Default OFF.
  */
@@ -572,4 +605,16 @@ export const NEVER_SUSPEND_FLAG = 'lifecycle.never_suspend';
 /** Whether Never-suspend UI surfaces are enabled in this session. */
 export function neverSuspendEnabled(): boolean {
   return isFeatureEnabled(NEVER_SUSPEND_FLAG);
+}
+
+/**
+ * Agents list column picker (web.agents_column_picker, ptone/scion#9577):
+ * shows the Columns visibility picker on the hub-wide and project agents list
+ * tables, persisted per browser in localStorage. Presentation only. Default OFF.
+ */
+export const AGENTS_COLUMN_PICKER_FLAG = 'web.agents_column_picker';
+
+/** Whether the agents list column picker is enabled in this session. */
+export function agentsColumnPickerEnabled(): boolean {
+  return isFeatureEnabled(AGENTS_COLUMN_PICKER_FLAG);
 }

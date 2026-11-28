@@ -975,6 +975,7 @@ func TestHeadlessCreate_ProjectDefaultsParityTable(t *testing.T) {
 			projectSettingDefaultModel:                   "claude-sonnet-4-5",
 			projectSettingDefaultThinkingLevel:           "medium",
 			projectSettingTelemetryEnabled:               "true",
+			projectSettingTrajectoryCapture:              "metadata_only",
 			projectSettingAutoExposePortsEnabled:         "true",
 			projectSettingActiveProfile:                  "k8s-standard",
 			projectSettingDefaultMaxTurns:                "42",
@@ -987,6 +988,7 @@ func TestHeadlessCreate_ProjectDefaultsParityTable(t *testing.T) {
 			projectSettingDefaultResourcesDisk:           "20Gi",
 			projectSettingMaxAgentRole:                   string(AgentRoleFull),
 			projectSettingDefaultAgentRole:               string(AgentRoleBaseline),
+			projectSettingUsageUnmeasuredPolicy:          UsageUnmeasuredPolicyAllow,
 			projectSettingDefaultGCPIdentitySAIDByBroker: string(byBrokerJSON),
 		})
 	})
@@ -1961,7 +1963,7 @@ func TestHeadlessCreate_HomeFilesPendingBlocksConcurrentStart(t *testing.T) {
 		evID := api.NewUUID()
 		fireID := api.NewUUID()
 		now := time.Now().UTC()
-		claimed, existing, err := f.store.ClaimTriggerSubject(ctx, trigID, "pr-held-1", evID, fireID, now, now.Add(-5*time.Minute))
+		claimed, existing, err := f.store.ClaimTriggerSubject(ctx, trigID, 0, "pr-held-1", evID, fireID, now, now.Add(-5*time.Minute))
 		require.NoError(t, err)
 		require.Nil(t, existing)
 		require.NotNil(t, claimed)
@@ -2019,10 +2021,10 @@ func TestHeadlessCreate_HomeFilesPendingBlocksConcurrentStart(t *testing.T) {
 		// agent and lazily releases the bound subject claim so later events are
 		// not stuck busy (preserving P1c-2's post-commit claim invariant).
 		claims := trigger.NewSubjectClaims(f.store, f.store, time.Now)
-		live, liveErr := claims.Live(ctx, trigID, "pr-held-1")
+		live, liveErr := claims.Live(ctx, trigID, 0, "pr-held-1")
 		require.NoError(t, liveErr)
 		assert.Nil(t, live, "Live must see rolled-back agent is gone and release the claim")
-		_, claimErr := f.store.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-held-1")
+		_, claimErr := f.store.GetActiveTriggerSubjectClaim(ctx, trigID, 0, "pr-held-1")
 		assert.ErrorIs(t, claimErr, store.ErrNotFound, "bound subject claim must be lazily released after rollback")
 	})
 

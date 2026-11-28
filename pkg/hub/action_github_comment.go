@@ -925,37 +925,40 @@ func (s *Server) handleUnmatchedGitHubCommand(ctx context.Context, ev *store.Tri
 
 const githubAckCommentFailedAuditEventType = "trigger.fire.github_ack_comment_failed"
 
-// validateGitHubAckCommentPayload validates the dispatch_agent ackComment
-// payload against the PhasePost github.ackComment.body slot (§7.1, §7.2).
-func validateGitHubAckCommentPayload(ack *DispatchAgentAckComment, untrustedVars []string) error {
+// parseGitHubAckCommentPayload validates the dispatch_agent ackComment
+// payload structure and parses its body against the PhasePost
+// github.ackComment.body slot (§7.1, §7.2). Untrusted-variable derivation or
+// coverage checking is performed by the dispatch_agent caller.
+func parseGitHubAckCommentPayload(ack *DispatchAgentAckComment) (*triggertemplate.Template, error) {
 	if ack == nil {
-		return nil
+		return nil, nil
 	}
 	if ack.Body == "" {
-		return &dispatchAgentValidationError{
+		return nil, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: "action.ackComment.body is required when ackComment is set",
 		}
 	}
 	if len(ack.Body) > githubapp.MaxCommentBodyBytes {
-		return &dispatchAgentValidationError{
+		return nil, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: fmt.Sprintf("action.ackComment.body exceeds %d-byte limit", githubapp.MaxCommentBodyBytes),
 		}
 	}
 	if err := acceptGitHubCommentUTF8NoNUL(ack.Body); err != nil {
-		return &dispatchAgentValidationError{
+		return nil, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: fmt.Sprintf("invalid action.ackComment.body: %v", err),
 		}
 	}
-	if _, err := validateTemplateSlot(ack.Body, TriggerTemplateSlotGitHubAckCommentBody, untrustedVars); err != nil {
-		return err
+	tmpl, err := parseTemplateSlot(ack.Body, TriggerTemplateSlotGitHubAckCommentBody)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return tmpl, nil
 }
 
 // postDispatchAgentAckComment renders and posts the post-fire GitHub

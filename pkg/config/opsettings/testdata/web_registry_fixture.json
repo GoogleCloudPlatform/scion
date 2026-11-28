@@ -197,6 +197,8 @@
       "telemetry.retention.hourly_rollups_days",
       "telemetry.retention.daily_rollups_days",
       "telemetry.retention.scope_counters_days",
+      "telemetry.retention.group_rollups_days",
+      "telemetry.retention.budget_state_days",
       "telemetry.retention.meter_health_days",
       "telemetry.retention.sweep_interval",
       "telemetry.retention.batch_size",
@@ -204,7 +206,13 @@
     ],
     "uploads": [
       "server.hub.uploads.max_attachment_size",
-      "server.hub.uploads.max_workspace_file_size"
+      "server.hub.uploads.max_workspace_file_size",
+      "server.hub.uploads.chunk_bytes",
+      "server.hub.uploads.session_idle_ttl",
+      "server.hub.uploads.session_max_lifetime",
+      "server.hub.uploads.max_sessions_per_user",
+      "server.hub.uploads.max_pending_bytes_per_user",
+      "server.hub.uploads.max_pending_bytes_hub"
     ]
   },
   "layer0_prefixes": [
@@ -261,7 +269,8 @@
     "server.hub.schedules",
     "server.hub.default_message_mode",
     "server.hub.init_firewall",
-    "server.relay"
+    "server.relay",
+    "server.mcp"
   ],
   "file_keys": [
     "active_profile",

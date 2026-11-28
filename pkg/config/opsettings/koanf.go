@@ -138,6 +138,8 @@ var layer0Prefixes = []string{
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",
+	// MCP server listener settings (server.mcp) — read at startup.
+	"server.mcp",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -206,8 +208,14 @@ var koanfPathToJSONField = map[string]map[string]string{
 		config.HubTracingEnabledKey: "tracing_enabled",
 	},
 	UploadsSectionName: {
-		config.HubUploadsMaxAttachmentSizeKey:    "max_attachment_size",
-		config.HubUploadsMaxWorkspaceFileSizeKey: "max_workspace_file_size",
+		config.HubUploadsMaxAttachmentSizeKey:      "max_attachment_size",
+		config.HubUploadsMaxWorkspaceFileSizeKey:   "max_workspace_file_size",
+		config.HubUploadsChunkBytesKey:             "chunk_bytes",
+		config.HubUploadsSessionIdleTTLKey:         "session_idle_ttl",
+		config.HubUploadsSessionMaxLifetimeKey:     "session_max_lifetime",
+		config.HubUploadsMaxSessionsPerUserKey:     "max_sessions_per_user",
+		config.HubUploadsMaxPendingBytesPerUserKey: "max_pending_bytes_per_user",
+		config.HubUploadsMaxPendingBytesHubKey:     "max_pending_bytes_hub",
 	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
@@ -283,8 +291,14 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"tracing_enabled": config.HubTracingEnabledKey,
 	},
 	UploadsSectionName: {
-		"max_attachment_size":     config.HubUploadsMaxAttachmentSizeKey,
-		"max_workspace_file_size": config.HubUploadsMaxWorkspaceFileSizeKey,
+		"max_attachment_size":        config.HubUploadsMaxAttachmentSizeKey,
+		"max_workspace_file_size":    config.HubUploadsMaxWorkspaceFileSizeKey,
+		"chunk_bytes":                config.HubUploadsChunkBytesKey,
+		"session_idle_ttl":           config.HubUploadsSessionIdleTTLKey,
+		"session_max_lifetime":       config.HubUploadsSessionMaxLifetimeKey,
+		"max_sessions_per_user":      config.HubUploadsMaxSessionsPerUserKey,
+		"max_pending_bytes_per_user": config.HubUploadsMaxPendingBytesPerUserKey,
+		"max_pending_bytes_hub":      config.HubUploadsMaxPendingBytesHubKey,
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",

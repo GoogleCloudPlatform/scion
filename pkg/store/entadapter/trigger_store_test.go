@@ -377,7 +377,7 @@ func TestTriggerStore_EventsFiresVisibilityAndReaper(t *testing.T) {
 	require.NotNil(t, existing2)
 	assert.Equal(t, fire.ID, existing2.ID)
 
-	live, err := cs.HasLiveTriggerFireForSubject(ctx, trAgentA.ID, evtUserFired.Subject, now.Add(time.Minute))
+	live, err := cs.HasLiveTriggerFireForSubject(ctx, trAgentA.ID, 0, evtUserFired.Subject, now.Add(time.Minute))
 	require.NoError(t, err)
 	assert.True(t, live)
 
@@ -1800,10 +1800,10 @@ func TestTriggerStore_CoalesceWindowAndCoalescingLifecycle(t *testing.T) {
 	assert.Equal(t, nb1, f1.NotBefore.UTC())
 
 	// Coalescing row counts as live for subjectLive / HasLiveTriggerFireForSubjectExcluding.
-	liveAll, err := cs.HasLiveTriggerFireForSubject(ctx, trID, subject, base.Add(5*time.Second))
+	liveAll, err := cs.HasLiveTriggerFireForSubject(ctx, trID, 0, subject, base.Add(5*time.Second))
 	require.NoError(t, err)
 	assert.True(t, liveAll)
-	liveExclSelf, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, trID, subject, f1.ID, true, base.Add(5*time.Second))
+	liveExclSelf, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, trID, 0, subject, f1.ID, true, base.Add(5*time.Second))
 	require.NoError(t, err)
 	assert.False(t, liveExclSelf)
 

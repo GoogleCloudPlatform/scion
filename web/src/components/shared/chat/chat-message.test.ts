@@ -29,6 +29,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
+const renderFragmentSpy = vi.fn();
+
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
 // links — without pulling the real parser into the test.
@@ -42,7 +44,8 @@ vi.mock('../../../utils/markdown.js', () => {
     getMarkdownRenderer: () =>
       Promise.resolve({
         render,
-        renderFragment: (markdown: string) => {
+        renderFragment: (markdown: string, options?: unknown) => {
+          renderFragmentSpy(markdown, options);
           const tpl = document.createElement('template');
           tpl.innerHTML = render(markdown);
           return tpl.content;
@@ -551,24 +554,24 @@ describe('scion-chat-message attachment previews', () => {
       60
     );
     expect(dialog?.querySelector('sl-button[href]')?.getAttribute('href')).toBe(
-      '/api/v1/chat/attachments/att-expand'
+      '/api/v1/chat/attachments/att-expand?download=1'
     );
   });
 
-  it('offers a download link beside every preview', async () => {
-    respondWith('hello');
+  it('offers a forced-attachment download link beside every preview (including markdown)', async () => {
+    respondWith('# Hello\nworld');
     const el = await mountAttachments([
-      { id: 'att-dl', name: 'hello.txt', mime: 'text/plain', size: 5 },
+      { id: 'att-dl', name: 'notes.md', mime: 'text/markdown', size: 13 },
     ]);
 
     const download = el.shadowRoot?.querySelector(
       '.preview-actions sl-icon-button[name="download"]'
     );
-    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-dl');
-    expect(download?.getAttribute('download')).toBe('hello.txt');
+    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-dl?download=1');
+    expect(download?.getAttribute('download')).toBe('notes.md');
   });
 
-  it('leaves binary and oversized attachments as download chips', async () => {
+  it('leaves binary and oversized attachments as forced-attachment download chips', async () => {
     const el = await mountAttachments([
       { id: 'att-zip', name: 'bundle.zip', mime: 'application/zip', size: 1024 },
       { id: 'att-pdf', name: 'report.pdf', mime: 'application/pdf', size: 1024 },
@@ -576,7 +579,13 @@ describe('scion-chat-message attachment previews', () => {
     ]);
 
     expect(el.shadowRoot?.querySelectorAll('.attachment-preview')).toHaveLength(0);
-    expect(el.shadowRoot?.querySelectorAll('.download-chip')).toHaveLength(3);
+    const chips = el.shadowRoot?.querySelectorAll('.download-chip');
+    expect(chips).toHaveLength(3);
+    expect(Array.from(chips ?? []).map((c) => c.getAttribute('href'))).toEqual([
+      '/api/v1/chat/attachments/att-zip?download=1',
+      '/api/v1/chat/attachments/att-pdf?download=1',
+      '/api/v1/chat/attachments/att-huge?download=1',
+    ]);
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
@@ -623,7 +632,7 @@ describe('scion-chat-message attachment previews', () => {
     expect(actions).not.toBeNull();
 
     const download = actions?.querySelector('sl-icon-button[name="download"]');
-    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-img');
+    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-img?download=1');
     expect(download?.getAttribute('download')).toBe('shot.png');
 
     // The toolbar's expand opens the same overlay the thumbnail does.
@@ -2392,5 +2401,52 @@ describe('scion-chat-message code block copy (ptone/scion#7555)', () => {
     expect(writeText).toHaveBeenCalledWith('make fixture');
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(btn.textContent).toBe('Copy');
+  });
+});
+
+describe('scion-chat-message hub-only images', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    apiFetchMock.mockReset();
+    renderFragmentSpy.mockReset();
+    vi.stubGlobal('IntersectionObserver', undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+  });
+
+  it('passes sameOriginImagesOnly: true when rendering a message body', async () => {
+    await mount('Hello ![ext](https://elsewhere.example/a.png)');
+    expect(renderFragmentSpy).toHaveBeenCalledWith(
+      'Hello ![ext](https://elsewhere.example/a.png)',
+      { sameOriginImagesOnly: true }
+    );
+  });
+
+  it('passes same-origin-images to scion-markdown-preview for inline markdown attachments', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      new Response('# Title\n\n![ext](https://elsewhere.example/a.png)', { status: 200 })
+    );
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'See notes';
+    el.attachmentRefs = [
+      {
+        id: 'att-md-1',
+        name: 'notes.md',
+        mime: 'text/markdown',
+        size: 50,
+      } satisfies AttachmentRefInfo,
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      const preview = el.shadowRoot?.querySelector('scion-markdown-preview');
+      expect(preview).not.toBeNull();
+      expect(preview?.hasAttribute('same-origin-images')).toBe(true);
+    });
   });
 });

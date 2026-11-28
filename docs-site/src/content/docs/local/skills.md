@@ -104,7 +104,7 @@ The error uses code `skill_resolution_failed`. Its message names the skill refer
 | `rate_limited` | 429 | GitHub rate-limited the request. The response has a `Retry-After` header when GitHub sent one. |
 | `timeout` | 504 | GitHub did not respond before the deadline. |
 | `upstream_unavailable`, `unreachable` | 502 | GitHub returned repeated server errors, or could not be reached. |
-| `install_failed` | 500 | The skill resolved, but its files could not be downloaded, verified or installed. The message gives a short reason, such as `download failed with status 404`; a failure on the broker's own filesystem is reported as `install failed on the broker`. |
+| `install_failed` | 500 | The skill could not be installed: either it resolved but its files could not be downloaded, verified or written, or a non-shell harness has no `skills_dir` configured. The message gives a short reason, such as `download failed with status 404`; a failure on the broker's own filesystem is reported as `install failed on the broker`. |
 | `unsupported_skill_content` | 500 | A `gh://` skill cannot be installed as it is in the repository: its directory contains a git submodule, has more than 1000 files or a path that would leave the skill directory, or GitHub truncated its listing. Retrying does not help; change the skill. |
 | any other cause | 500 | An internal failure while resolving the skill. |
 

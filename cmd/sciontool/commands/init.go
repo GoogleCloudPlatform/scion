@@ -534,6 +534,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// StatusHandler is created so it writes to the correct path.
 	agentHome := resolveAgentHome(targetUID, rootless)
 
+	// Evaluate the shell execution-container isolation predicate once from
+	// PID 1's broker-set environment and pass it explicitly to every step below.
+	shellIsolation := isShellExecContainer(os.Getenv)
+	if shellIsolation {
+		log.Info("Shell execution container detected: enabling workload isolation")
+	}
+
 	// Refuse, before any credential below is written or staged, a start
 	// whose required metadata protection cannot be set up in this
 	// container (see metadataProtectionPreflight). The config is read once
@@ -551,7 +558,18 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the refresh loop keeps current; the env value is only valid for about
 	// an hour. When staged secrets are also present, the single re-exec
 	// below restarts init with the cleaned environment for both.
-	transportCleared := stageTransportToken(targetUID, targetGID)
+	var transportCleared bool
+	if shellIsolation {
+		transportCleared = stageTransportTokenWithPolicy(0, 0, true)
+		if !transportCleared && os.Getenv(transportauth.EnvTransportToken) != "" {
+			err := fmt.Errorf("failed to stage bootstrap transport token under shell isolation; refusing to leave credential in environment")
+			log.Error("%v", err)
+			reportInitFailure(agentHome, err)
+			return 1
+		}
+	} else {
+		transportCleared = stageTransportToken(targetUID, targetGID)
+	}
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file secrets into this single base64 blob
@@ -595,7 +613,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// keeps normal staging below so a FileSecret can never overwrite
 			// the hub credential file.
 			if staged.HubToken != "" {
-				if _, tokErr := stageHubToken(staged.HubToken, targetUID, targetGID); tokErr != nil {
+				var tokErr error
+				if shellIsolation {
+					tokErr = stageHubTokenForShell(staged.HubToken)
+				} else {
+					_, tokErr = stageHubToken(staged.HubToken, targetUID, targetGID)
+				}
+				if tokErr != nil {
 					log.Warn("Could not stage hub credential before reporting secret-staging failure: %v", tokErr)
 				}
 				staged.HubToken = ""
@@ -606,11 +630,19 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 		// A runtime whose instance cannot see the broker-written token file
 		// (Cloud Run) stages the hub-issued credential instead. It is
-		// written to the canonical token file, and a marker (not the
-		// credential) survives the re-exec below so this init removes the
-		// file again at exit. The errors name the step and path only.
+		// written to the canonical token file (handoff path under shell
+		// isolation, unlinking any pre-existing handoff first and owned by
+		// 0:0, before the environ-purge re-exec; after re-exec
+		// setupShellIsolatedTokenStore takes and unlinks it), and a marker
+		// (not the credential) survives the re-exec below so this init
+		// removes the file again at exit. The errors name the step and path only.
 		if staged.HubToken != "" {
-			kept, err := stageHubToken(staged.HubToken, targetUID, targetGID)
+			var kept bool
+			if shellIsolation {
+				err = stageHubTokenForShell(staged.HubToken)
+			} else {
+				kept, err = stageHubToken(staged.HubToken, targetUID, targetGID)
+			}
 			staged.HubToken = ""
 			if err != nil {
 				log.Error("Failed to write the staged hub credential: %v", err)
@@ -738,6 +770,20 @@ func RunInit(args []string, opts InitRunOptions) int {
 		log.Error("Failed to read the staged resolved-auth environment entries: %v", err)
 		reportInitFailure(agentHome, fmt.Errorf("failed to read the staged resolved-auth environment entries: %w", err))
 		return 1
+	}
+
+	// In shell execution containers, isolate the runtime agent token before
+	// any hub.NewClient() call (including telemetry/trajectory) and before any
+	// workload process starts: configure /run/sciontool/auth/scion-token
+	// (root-init) or memory-only (rootless / unwritable /run), take and unlink
+	// the handoff file, and remove any stale .tmp file. Fails closed if the
+	// handoff cannot be unlinked.
+	if shellIsolation {
+		if err := setupShellIsolatedTokenStore(targetUID, rootless); err != nil {
+			log.Error("Failed to isolate runtime token: %v", err)
+			reportInitFailure(agentHome, err)
+			return 1
+		}
 	}
 
 	// The token file this init staged from the runtime's payload is removed
@@ -1054,6 +1100,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Configure scoped git safe.directory entries in the agent's global
+	// ~/.gitconfig so git works in project-storage trees and worktrees owned
+	// by another UID (ptone/scion#6656). Runs before runGitCloneWorkspace so
+	// clone-time git commands also trust the workspace when it is owned by
+	// another UID.
+	if err := runConfigureGitSafeDirectories(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop, initEnvPolicy); err != nil {
+		log.Error("Failed to configure git safe.directory: %v", err)
+	}
+
 	// Clone git workspace BEFORE pre-start hooks so that provisioners
 	// (e.g. antigravity) see the populated workspace rather than an empty
 	// one.  The clone depends only on environment variables and agent
@@ -1191,10 +1246,23 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
-	// Write critical environment variables to a shell-sourceable file so that
-	// processes launched by harnesses (which may re-exec with a filtered env)
-	// can recover the full SCION environment. The file is sourced by .bashrc/.zshrc.
-	writeEnvFile(agentHome, targetUID, targetGID)
+	if shellIsolation {
+		// In shell execution containers, remove any stale ~/.scion/scion-env
+		// (so .zshrc never re-injects stripped SCION_* control vars) and seed
+		// ~/.scion/context.yaml if absent so `scion hub auth login` / `scion login`
+		// discovers the Hub with zero flags. Both run before sup.Run.
+		if err := removeEnvFileNoFollow(agentHome); err != nil {
+			log.Error("Failed to remove stale scion-env file (interactive zsh sessions may re-source SCION_* control variables from ~/.scion/scion-env): %v", err)
+		}
+		if err := seedShellCLIContext(agentHome, targetUID, targetGID, os.Getenv); err != nil {
+			log.Error("Failed to seed CLI context: %v", err)
+		}
+	} else {
+		// Write critical environment variables to a shell-sourceable file so that
+		// processes launched by harnesses (which may re-exec with a filtered env)
+		// can recover the full SCION environment. The file is sourced by .bashrc/.zshrc.
+		writeEnvFile(agentHome, targetUID, targetGID)
+	}
 
 	// For execution containers (SCION_HARNESS=shell), write a one-screen MOTD
 	// and login-shell profile snippet so first attach displays usage, S9
@@ -1241,6 +1309,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			if len(specs) > 0 {
 				log.Info("Starting %d sidecar service(s)...", len(specs))
 				svcManager = services.New(gracePeriod)
+				svcManager.SetWorkloadIsolation(shellIsolation)
 				svcCtx := context.Background()
 				servicesStart := time.Now()
 				svcErr := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop)
@@ -1316,6 +1385,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	config.AuthEnv = resolvedAuthEnv
+	config.WorkloadIsolation = shellIsolation
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown
@@ -1364,6 +1434,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
 	removeStaleHarnessExitFiles()
+
+	// Best-effort tmux first-line capture notice: check injectable shape before
+	// contacting the Hub and before taking harnessLaunchedAt so Hub latency is
+	// not counted as harness launch time.
+	childArgs = maybeInjectTmuxTrajectoryNotice(ctx, hubClient, childArgs, trajectoryNoticeFetchTimeout)
+
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first
@@ -1381,8 +1457,29 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// differently keeps a step-line summation from silently double-counting
 	// it.
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
+	supChildArgs := childArgs
+	var lateHandoffPending string
+	if shellIsolation {
+		if beforeVerifyHandoffAbsentForTest != nil {
+			beforeVerifyHandoffAbsentForTest()
+		}
+		var reconcileErr error
+		lateHandoffPending, reconcileErr = reconcileShellHandoffBeforeSupervisorRun(hubClient)
+		if reconcileErr != nil {
+			log.Error("Refusing to start workload: %v", reconcileErr)
+			reportInitFailure(agentHome, reconcileErr)
+			return 1
+		}
+		supChildArgs = resolveShellStartCmdArgs(childArgs, os.Getenv)
+		if hasUnresolvedScionEnvRef(supChildArgs) {
+			log.Error("Unresolved $SCION_ or ${SCION_ reference remains in child argv under shell workload isolation; SCION_* variables are stripped so tmux or the workload may not start")
+		}
+	}
+	if beforeSupervisorRunForTest != nil {
+		beforeSupervisorRunForTest(config)
+	}
 	go func() {
-		code, err := sup.Run(ctx, childArgs)
+		code, err := sup.Run(ctx, supChildArgs)
 		exitChan <- struct {
 			code int
 			err  error
@@ -1577,28 +1674,31 @@ func RunInit(args []string, opts InitRunOptions) int {
 					execOpts,
 					os.Getenv).run(ctx)
 
-				// Auto-expose: detect and register listening ports
-				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
-					reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
-					reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
-					go reconciler.Run(ctx)
-					log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+				// Auto-expose: detect and register listening ports (skipped in shell
+				// execution containers: the Hub refuses port exposure and capped
+				// shell tokens lack RegisterPort scope).
+				if !shellIsolation {
+					if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
+						reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
+						reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
+						go reconciler.Run(ctx)
+						log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+					}
 				}
 			}
 
-			// Read the agent token from the canonical token file (written by
-			// the host-side agent manager before the container started).
-			// Init runs as root — chown the file so the scion user can read
-			// it. ChownTokenFile resolves the file via a symlink-safe fd
-			// chain and fchowns the open fd, rather than a path-based chown
-			// that a symlink swapped in after this point (this runs after
-			// sup.Run has started, so the workload is already alive) could
-			// redirect to an arbitrary file.
+			// Read the agent token from the active token store. In non-isolated
+			// mode (canonical ~/.scion/scion-token), init runs as root and
+			// chowns the file to the scion user via a symlink-safe fd chain.
+			// In shell isolated mode the token lives in /run/sciontool/auth/scion-token
+			// (0600 root:root) or memory only, so ChownTokenFile is skipped and
+			// refresh persists with ChownUID=0, ChownGID=0.
 			token := hub.ReadTokenFile()
-			if token != "" && targetUID > 0 {
-				if err := hub.ChownTokenFile(targetUID, targetGID); err != nil {
-					log.Error("Failed to chown token file to UID=%d: %v", targetUID, err)
-				}
+			chownTokenFileForStartup(shellIsolation, token, targetUID, targetGID)
+
+			tokenChownUID, tokenChownGID := targetUID, targetGID
+			if shellIsolation {
+				tokenChownUID, tokenChownGID = 0, 0
 			}
 
 			// Start token refresh loop if token has an expiry
@@ -1629,8 +1729,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 				tokenRefreshCtx, tokenRefreshCancel = context.WithCancel(context.Background())
 				tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
 					RefreshAt: refreshAt,
-					ChownUID:  targetUID,
-					ChownGID:  targetGID,
+					ChownUID:  tokenChownUID,
+					ChownGID:  tokenChownGID,
 					OnRefreshed: func(newExpiry time.Time) {
 						log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
 					},
@@ -1645,8 +1745,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			}
 
 			// Serve the delegation socket, through which processes in the
-			// agent make hub requests with a delegation grant.
-			delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
+			// agent make hub requests with a delegation grant. Skipped in shell
+			// execution containers so the workload has no hub-identity surface.
+			if !shellIsolation {
+				delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
+			}
 		} else {
 			log.Debug("Hub client not configured - skipping status report")
 		}
@@ -1717,7 +1820,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 							ChownGID:  targetGID,
 							OnRefreshed: func(newToken string, newExpiry time.Time) {
 								log.Info("GitHub token refreshed, new expiry: %s", newExpiry.Format(time.RFC3339))
-								writeEnvFile(agentHome, targetUID, targetGID)
+								if !shellIsolation {
+									writeEnvFile(agentHome, targetUID, targetGID)
+								}
 							},
 							OnError: func(err error) {
 								log.Error("GitHub token refresh failed: %v", err)
@@ -1789,6 +1894,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 		statusHandler:      statusHandler,
 		targetUID:          targetUID,
 		targetGID:          targetGID,
+		isolated:           shellIsolation,
+		pendingCandidate:   lateHandoffPending,
 		now:                time.Now,
 	}
 
@@ -1800,6 +1907,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 	defer credWatchCancel()
 	if hubClient != nil && hubClient.IsConfigured() {
 		authReset.watcher = startCredentialFileWatch(credWatchCtx, hubClient, hub.TokenWatchConfig{Notify: credFileChan})
+		if shellIsolation && authReset.watcher != nil {
+			// A reset-auth handoff written between the pre-sup.Run reconcile
+			// and watcher startup must be reported on the first interval rather
+			// than recorded as already seen and left on disk.
+			authReset.watcher.RecheckAgent()
+			authReset.watcher.RecheckTransport()
+		}
+		if lateHandoffPending != "" && authReset.watcher != nil {
+			authReset.watcher.RetryPendingAfter(hub.TokenFingerprint(lateHandoffPending), 0)
+		}
 	}
 
 	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, credential
@@ -2570,6 +2687,11 @@ type authResetter struct {
 	statusHandler      *handlers.StatusHandler
 	targetUID          int
 	targetGID          int
+	// isolated enables shell runtime token isolation: candidates are taken
+	// (read + unconditionally unlinked) from the handoff path, adopted tokens
+	// are persisted to the runtime store with uid=gid=0, and refused
+	// candidates leave the runtime store untouched.
+	isolated bool
 	// watcher is told about refused credentials; nil when not watching.
 	watcher *hub.TokenFileWatcher
 	now     func() time.Time
@@ -2582,6 +2704,20 @@ type authResetter struct {
 	uncheckedFP       hub.Fingerprint
 	uncheckedAttempts int
 	uncheckedLogged   bool
+
+	// pendingCandidate holds the last taken-but-unadopted handoff token in
+	// PID 1 memory when isolated is true (never written back to the handoff
+	// path). If the watcher took and unlinked a candidate that could not yet
+	// be confirmed by the hub (503/network error or 401 before the transport
+	// token landed), a subsequent SIGUSR2 or due retry falls back to it.
+	pendingCandidate string
+}
+
+func (r *authResetter) tokenChownOwner() (int, int) {
+	if r.isolated {
+		return 0, 0
+	}
+	return r.targetUID, r.targetGID
 }
 
 const (
@@ -2613,7 +2749,9 @@ func recheckDelay(attempts int) time.Duration {
 // its issue time is known when a newer credential arrives. That check is
 // not retried and changes nothing if it does not succeed.
 func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hub.TokenWatchConfig) *hub.TokenFileWatcher {
-	hubClient.NoteTransportTokenFile()
+	if !hub.IsIsolatedTokenStore() {
+		hubClient.NoteTransportTokenFile()
+	}
 	w := hub.NewTokenFileWatcher(cfg)
 	w.Run(ctx)
 	current := hubClient.GetToken()
@@ -2661,13 +2799,46 @@ func (r *authResetter) reset(source authResetSource) {
 		return
 	}
 
-	newToken := hub.ReadTokenFile()
+	var newToken string
+	if r.isolated {
+		taken, takeErr := hub.TakeHandoffToken()
+		if r.watcher != nil {
+			// The handoff file has been unlinked; clear last-seen state so any
+			// subsequent broker write to the handoff path is reported again.
+			r.watcher.RecheckAgent()
+		}
+		if takeErr != nil {
+			if errors.Is(takeErr, os.ErrNotExist) {
+				if r.pendingCandidate != "" {
+					newToken = r.pendingCandidate
+				} else if source == authResetFileChange {
+					r.adoptTransportIfChanged(source)
+					return
+				}
+			} else {
+				log.Error("AUTH_RESET: Failed to take handoff credential (%s): %v", source, takeErr)
+				r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+				r.pendingCandidate = ""
+				if source == authResetFileChange {
+					r.adoptTransportIfChanged(source)
+				}
+				return
+			}
+		} else {
+			newToken = taken
+			// A newer handoff file supersedes any older pending candidate.
+			r.pendingCandidate = ""
+		}
+	} else {
+		newToken = hub.ReadTokenFile()
+	}
 	fp := hub.TokenFingerprint(newToken)
 	info, err := hub.ValidateCandidateToken(newToken, hubClient.AgentID(), r.now())
 	if source == authResetFileChange {
 		if newToken != "" && fp == hubClient.CredentialInfo().Fingerprint {
 			// The agent credential is the one in use; only the transport
 			// token file may have changed.
+			r.pendingCandidate = ""
 			r.adoptTransportIfChanged(source)
 			return
 		}
@@ -2679,6 +2850,9 @@ func (r *authResetter) reset(source authResetSource) {
 		if err == nil {
 			err = r.checkWithHub(newToken, false)
 			if errors.Is(err, hub.ErrCandidateUnchecked) {
+				if r.isolated {
+					r.pendingCandidate = newToken
+				}
 				r.recheckLater(fp, info)
 				r.adoptTransportIfChanged(source)
 				return
@@ -2689,7 +2863,18 @@ func (r *authResetter) reset(source authResetSource) {
 		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
 		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
 		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
-		if r.watcher != nil {
+		if r.isolated {
+			// Keep a locally valid candidate that the hub refused (e.g. 401
+			// before the transport token landed) or rejected as older so a
+			// subsequent SIGUSR2 can adopt it under signal rules without
+			// writing anything back to the handoff path.
+			if source == authResetFileChange && (errors.Is(err, hub.ErrCandidateRefused) || errors.Is(err, hub.ErrCandidateOlder)) {
+				r.pendingCandidate = newToken
+			} else {
+				r.pendingCandidate = ""
+			}
+		}
+		if r.watcher != nil && !r.isolated {
 			r.watcher.Refused(fp)
 		}
 		if source == authResetFileChange {
@@ -2698,6 +2883,7 @@ func (r *authResetter) reset(source authResetSource) {
 		return
 	}
 	r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+	r.pendingCandidate = ""
 	log.TaggedInfo("AUTH_RESET", "Adopting credential %s (%s)", info.LogID(), source)
 
 	// Cancel the existing token refresh loop if running.
@@ -2712,10 +2898,20 @@ func (r *authResetter) reset(source authResetSource) {
 	// that is waiting after the hub refused the previous credential.
 	hubClient.SetToken(newToken)
 
+	chownUID, chownGID := r.tokenChownOwner()
+	if r.isolated {
+		// Persist only an adopted credential to the runtime store (file mode
+		// 0600 root:root, or memory-only). Refused candidates never reach here.
+		if err := hub.WriteTokenFile(newToken, chownUID, chownGID); err != nil {
+			log.Error("AUTH_RESET: Failed to persist adopted credential to runtime store: %v", err)
+		}
+	}
+
 	// Reset-auth may also have written a fresh transport token. Adopt it so
-	// this process uses it immediately and the file is owned by the scion
-	// user for every other hub client in the container.
-	if adopted, err := hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+	// this process uses it immediately; in isolated mode it is taken from the
+	// handoff path and stored at /run/sciontool/auth/transport-token (0600
+	// root:root) or in memory only (chownUID=chownGID=0).
+	if adopted, err := hubClient.AdoptTransportTokenFile(chownUID, chownGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
@@ -2739,8 +2935,8 @@ func (r *authResetter) reset(source authResetSource) {
 	statusHandler := r.statusHandler
 	*r.tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
 		RefreshAt: refreshAt,
-		ChownUID:  r.targetUID,
-		ChownGID:  r.targetGID,
+		ChownUID:  chownUID,
+		ChownGID:  chownGID,
 		OnRefreshed: func(newExpiry time.Time) {
 			log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
 		},
@@ -2808,7 +3004,11 @@ func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
 		r.uncheckedLogged = true
 	}
 	if r.watcher != nil {
-		r.watcher.RetryAfter(fp, delay)
+		if r.isolated {
+			r.watcher.RetryPendingAfter(fp, delay)
+		} else {
+			r.watcher.RetryAfter(fp, delay)
+		}
 	}
 }
 
@@ -2816,10 +3016,28 @@ func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
 // process wrote a new value there (reset-auth writes it after the agent
 // credential, so it can land after the agent credential was adopted).
 func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
-	if !r.hubClient.TransportTokenFileChanged() {
+	if !r.isolated && !r.hubClient.TransportTokenFileChanged() {
 		return
 	}
-	if adopted, err := r.hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+	if r.isolated && !r.hubClient.HasHubProvidedTransport() {
+		// No hub-provided transport configured: take and discard any transport
+		// handoff so RecheckTransport does not re-report it every interval.
+		if _, err := hub.TakeHandoffTransportToken(); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Warn("AUTH_RESET: Ignored and removed transport handoff (%s): %v", source, err)
+		}
+		if r.watcher != nil {
+			r.watcher.RecheckTransport()
+		}
+		return
+	}
+	chownUID, chownGID := r.tokenChownOwner()
+	adopted, err := r.hubClient.AdoptTransportTokenFile(chownUID, chownGID)
+	if r.isolated && r.watcher != nil {
+		// The transport handoff file has been unlinked; clear last-seen state
+		// so any subsequent broker write is reported again.
+		r.watcher.RecheckTransport()
+	}
+	if err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)
@@ -2827,7 +3045,11 @@ func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
 		// for want of this transport token; let the watcher report it
 		// again.
 		if r.watcher != nil {
-			r.watcher.RecheckAgent()
+			if r.isolated && r.pendingCandidate != "" {
+				r.watcher.RetryPendingAfter(hub.TokenFingerprint(r.pendingCandidate), 0)
+			} else {
+				r.watcher.RecheckAgent()
+			}
 		}
 	}
 }
@@ -2885,6 +3107,15 @@ var reExecWithCleanEnv = func() error {
 // written the env var is left in place so hub access keeps working until
 // it expires.
 func stageTransportToken(uid, gid int) bool {
+	return stageTransportTokenWithPolicy(uid, gid, false)
+}
+
+// stageTransportTokenWithPolicy is stageTransportToken with an optional
+// overwrite mode used under shellIsolation: when overwrite is true, any
+// pre-existing handoff transport token file is unlinked (no-follow) first and
+// the expires-later comparison is skipped so a workload-planted far-future
+// file on a persistent home can never override the fresh bootstrap token.
+func stageTransportTokenWithPolicy(uid, gid int, overwrite bool) bool {
 	tok := os.Getenv(transportauth.EnvTransportToken)
 	if tok == "" {
 		// No hub-provided transport token this start. If none was staged
@@ -2900,7 +3131,19 @@ func stageTransportToken(uid, gid int) bool {
 		}
 		return false
 	}
-	path, err := hub.SeedTransportTokenFile(tok, uid, gid)
+	var (
+		path string
+		err  error
+	)
+	if overwrite {
+		if _, rerr := hub.RemoveTransportTokenFile(); rerr != nil {
+			log.Error("Failed to remove pre-existing handoff transport token file: %v", rerr)
+		}
+		path = hub.TransportTokenFilePath()
+		err = hub.WriteTransportTokenFile(tok, uid, gid)
+	} else {
+		path, err = hub.SeedTransportTokenFile(tok, uid, gid)
+	}
 	if err != nil {
 		log.Error("Failed to write transport token file; leaving bootstrap value in the environment: %v", err)
 		return false

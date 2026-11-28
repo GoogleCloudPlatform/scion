@@ -35,7 +35,6 @@ pkg/agentplugin/copy.go | copyFile | 2 | broker-managed plugin bundle copy with 
 pkg/agentplugin/copy.go | readRootDir | 1 | broker-managed plugin bundle directory listing
 pkg/agentplugin/digest.go | fileSHA256 | 1 | broker-managed plugin bundle digest calculation
 pkg/agentplugin/fsutil.go | readRegularFile | 1 | broker-managed plugin metadata read with realDirs/Lstat/SameFile
-pkg/config/remote_templates.go | copyRegularFileNoFollow | 1 | reads private fetched template temp dir with Lstat/SameFile
 pkg/config/remote_templates.go | writeFileInRoot | 1 | writes private fetched template cache dir (not agent-mounted)
 pkg/hub/welcome_stage.go | welcomeWriteFile | 1 | writes fresh hub-private 0700 temp staging dir with O_EXCL
 pkg/runtimebroker/delete_ownership.go | findForeignOwnerInRoot | 1 | read-only directory listing for delete ownership diagnostics

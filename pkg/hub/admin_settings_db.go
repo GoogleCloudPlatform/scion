@@ -110,6 +110,10 @@ type ServerConfigDBResponse struct {
 	// AgentLimits holds Hub-level run-limit ceilings (DB-only opsettings
 	// section agent_limits). Omitted when no ceilings are configured.
 	AgentLimits *opsettings.AgentLimitsSettings `json:"agent_limits,omitempty"`
+
+	// Artifacts holds Hub-level artifact service settings (DB-only opsettings
+	// section artifacts). Omitted when no overrides are configured.
+	Artifacts *opsettings.ArtifactsSettings `json:"artifacts,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -151,6 +155,12 @@ type ServerConfigUpdateDBRequest struct {
 	// AgentLimits updates the DB-only agent_limits operational settings section
 	// (run-limit ceilings). Omitted = unchanged; empty object or null = clear.
 	AgentLimits *opsettings.AgentLimitsSettings `json:"agent_limits,omitempty"`
+
+	// Artifacts updates the DB-only artifacts operational settings section
+	// (retention, share-link TTLs, size/file limits, remote images). Omitted =
+	// unchanged; sent fields merge onto the current row (null clears a field
+	// to its compiled default); top-level null clears all overrides.
+	Artifacts *opsettings.ArtifactsSettings `json:"artifacts,omitempty"`
 }
 
 // handleGetServerConfigDB handles GET /api/v1/admin/server-config
@@ -246,6 +256,14 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	if al := ops.AgentLimits(); !al.IsEmpty() {
 		resp.AgentLimits = &al
 	}
+	if raw, ok := ops.rawSection("artifacts"); ok && len(bytes.TrimSpace(raw)) > 0 {
+		var art opsettings.ArtifactsSettings
+		if err := json.Unmarshal(raw, &art); err != nil {
+			slog.Warn("GET server-config: failed to parse stored artifacts section", "error", err)
+		} else if art != (opsettings.ArtifactsSettings{}) {
+			resp.Artifacts = &art
+		}
+	}
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
 	resp.Server.Hub.HubName = effectiveHubName(ops)
@@ -336,10 +354,15 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultGCPIdentityServiceAccountID = snap.DefaultGCPIdentityServiceAccountID
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
-	if snap.TelemetryConfig != nil || snap.TelemetryEnforced {
+	if snap.TelemetryConfig != nil || snap.TelemetryEnforced || snap.TrajectoryAllowProjectOptOut != nil {
 		ts := &opsettings.TelemetrySettings{Enforced: snap.TelemetryEnforced}
 		if snap.TelemetryConfig != nil {
 			ts.V1TelemetryConfig = *snap.TelemetryConfig
+		}
+		if snap.TrajectoryAllowProjectOptOut != nil {
+			ts.Trajectory = &opsettings.TelemetryTrajectorySettings{
+				AllowProjectOptOut: copyBoolPtr(snap.TrajectoryAllowProjectOptOut),
+			}
 		}
 		resp.Telemetry = ts
 	} else {
@@ -407,10 +430,19 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 
 	// Uploads: saved or bootstrap value; nil when unset.
 	resp.Server.Hub.Uploads = nil
-	if !snap.Uploads.IsZero() {
+	us := snap.UploadsSettings
+	if !snap.Uploads.IsZero() || us.ChunkBytes != nil || us.SessionIdleTTL != "" ||
+		us.SessionMaxLifetime != "" || us.MaxSessionsPerUser != nil ||
+		us.MaxPendingBytesPerUser != nil || us.MaxPendingBytesHub != nil {
 		resp.Server.Hub.Uploads = &config.V1ServerHubUploadsConfig{
-			MaxAttachmentSize:    snap.Uploads.MaxAttachmentSize,
-			MaxWorkspaceFileSize: snap.Uploads.MaxWorkspaceFileSize,
+			MaxAttachmentSize:      snap.Uploads.MaxAttachmentSize,
+			MaxWorkspaceFileSize:   snap.Uploads.MaxWorkspaceFileSize,
+			ChunkBytes:             us.ChunkBytes,
+			SessionIdleTTL:         us.SessionIdleTTL,
+			SessionMaxLifetime:     us.SessionMaxLifetime,
+			MaxSessionsPerUser:     us.MaxSessionsPerUser,
+			MaxPendingBytesPerUser: us.MaxPendingBytesPerUser,
+			MaxPendingBytesHub:     us.MaxPendingBytesHub,
 		}
 	}
 
@@ -1715,6 +1747,29 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				}
 			}
 		}
+		// telemetry.trajectory.allow_project_opt_out=false is refused while
+		// experiment tokenomics.trajectory_capture is off (412
+		// experiment_disabled; ptone/scion#9250). Echoing an already-stored
+		// false value or resetting to true passes so other telemetry settings
+		// can still be saved.
+		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			var candidate opsettings.TelemetrySettings
+			if json.Unmarshal(merged, &candidate) == nil &&
+				candidate.Trajectory != nil &&
+				candidate.Trajectory.AllowProjectOptOut != nil &&
+				!*candidate.Trajectory.AllowProjectOptOut {
+				var existing opsettings.TelemetrySettings
+				storedDisallowed := false
+				if len(bytes.TrimSpace(cur)) > 0 && json.Unmarshal(cur, &existing) == nil &&
+					existing.Trajectory != nil && existing.Trajectory.AllowProjectOptOut != nil {
+					storedDisallowed = !*existing.Trajectory.AllowProjectOptOut
+				}
+				if !storedDisallowed {
+					writeTrajectoryCaptureExperimentDisabled(w, "telemetry.trajectory.allow_project_opt_out")
+					return
+				}
+			}
+		}
 		sectionDocs["telemetry"] = merged
 		mergedBaseRevs["telemetry"] = rev
 	}
@@ -1772,6 +1827,20 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		sectionDocs[opsettings.AgentLimitsSectionName] = rawDoc
+	}
+
+	// artifacts: DB-only Layer-1 section (no KoanfPaths). When present in the
+	// request body, merge sent fields onto the current row (null clears a field
+	// back to its compiled default; top-level null clears all overrides).
+	if rawArt, ok := findRawSectionFold(topFP, "artifacts"); ok {
+		merged, rev, err := mergeArtifactsSectionOnCurrent(r.Context(), ops, req.Artifacts, rawArt)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build artifacts document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["artifacts"] = merged
+		mergedBaseRevs["artifacts"] = rev
 	}
 
 	// GCP permission-check section: carry an omitted key forward from the
@@ -1983,6 +2052,36 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		var harnessConfigs opsettings.HarnessConfigsSettings
 		if err := json.Unmarshal(doc, &harnessConfigs); err == nil {
 			saveWarnings = append(saveWarnings, harnessArgsIgnoredSaveWarnings(harnessConfigs)...)
+		}
+	}
+
+	// uploads.max_pending_bytes_per_user warning (§3.11): warn (do not reject)
+	// when the per-user pending cap is below the largest effective per-file
+	// upload limit across workspace, attachment, and artifact settings.
+	if doc, ok := sectionDocs[opsettings.UploadsSectionName]; ok {
+		if cfg, err := opsettings.ParseUploadsDoc(doc); err == nil {
+			var us opsettings.UploadsSettings
+			_ = json.Unmarshal(doc, &us)
+			limits := s.ResolvedUploads()
+			if us.MaxAttachmentSize != nil {
+				limits.MaxAttachmentSize = *us.MaxAttachmentSize
+			}
+			if us.MaxWorkspaceFileSize != nil {
+				limits.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
+			}
+			largest := max(limits.EffectiveMaxWorkspaceFileSize(), limits.EffectiveMaxAttachmentSize())
+			art := ops.Artifacts()
+			if artDoc, ok := sectionDocs["artifacts"]; ok {
+				if parsed, err := opsettings.ParseArtifactsDoc(artDoc); err == nil {
+					art = parsed
+				}
+			}
+			if art.MaxFileBytes > largest {
+				largest = art.MaxFileBytes
+			}
+			if warn := cfg.PendingBytesWarning(largest); warn != "" {
+				saveWarnings = append(saveWarnings, warn)
+			}
 		}
 	}
 
@@ -2706,6 +2805,24 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 				if u.MaxWorkspaceFileSize != 0 {
 					keys = append(keys, config.HubUploadsMaxWorkspaceFileSizeKey)
 				}
+				if u.ChunkBytes != nil {
+					keys = append(keys, config.HubUploadsChunkBytesKey)
+				}
+				if u.SessionIdleTTL != "" {
+					keys = append(keys, config.HubUploadsSessionIdleTTLKey)
+				}
+				if u.SessionMaxLifetime != "" {
+					keys = append(keys, config.HubUploadsSessionMaxLifetimeKey)
+				}
+				if u.MaxSessionsPerUser != nil {
+					keys = append(keys, config.HubUploadsMaxSessionsPerUserKey)
+				}
+				if u.MaxPendingBytesPerUser != nil {
+					keys = append(keys, config.HubUploadsMaxPendingBytesPerUserKey)
+				}
+				if u.MaxPendingBytesHub != nil {
+					keys = append(keys, config.HubUploadsMaxPendingBytesHubKey)
+				}
 			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
@@ -3250,12 +3367,19 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		// (bodyMergedSections): an omitted key keeps its value, null clears it.
 		d := &opsettings.UploadsSettings{}
 		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Uploads != nil {
-			if v := req.Server.Hub.Uploads.MaxAttachmentSize; v != 0 {
+			u := req.Server.Hub.Uploads
+			if v := u.MaxAttachmentSize; v != 0 {
 				d.MaxAttachmentSize = &v
 			}
-			if v := req.Server.Hub.Uploads.MaxWorkspaceFileSize; v != 0 {
+			if v := u.MaxWorkspaceFileSize; v != 0 {
 				d.MaxWorkspaceFileSize = &v
 			}
+			d.ChunkBytes = u.ChunkBytes
+			d.SessionIdleTTL = u.SessionIdleTTL
+			d.SessionMaxLifetime = u.SessionMaxLifetime
+			d.MaxSessionsPerUser = u.MaxSessionsPerUser
+			d.MaxPendingBytesPerUser = u.MaxPendingBytesPerUser
+			d.MaxPendingBytesHub = u.MaxPendingBytesHub
 		}
 		doc = d
 
@@ -3763,7 +3887,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
 	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
 	"branding":          settingsTokenRefused,       // unauthenticated /login content, logos, icons and palette
-	"uploads":           settingsTokenConfiguration, // per-file web upload limits
+	"uploads":           settingsTokenConfiguration, // per-file web upload limits and chunked-upload quotas
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
@@ -3866,11 +3990,100 @@ func tokenRefusedServerConfigKeys(rawBody []byte) []string {
 		if len(l.path) > 0 && l.path[0] == "expected_revisions" {
 			continue
 		}
+		if len(l.path) > 0 && l.path[0] == "artifacts" && serverConfigTokenSections["artifacts"] == settingsTokenConfiguration {
+			continue
+		}
 		if serverConfigKeyTokenClass(serverConfigBodyKoanfKey(l.path)) != settingsTokenConfiguration {
 			refused[strings.Join(l.path, ".")] = true
 		}
 	}
 	return sortedSettingsKeys(refused)
+}
+
+// findRawSectionFold looks up a top-level section key in fp case-insensitively
+// (matching encoding/json's struct field decoding).
+func findRawSectionFold(fp *fieldPresence, name string) (json.RawMessage, bool) {
+	if fp == nil {
+		return nil, false
+	}
+	if raw, ok := fp.raw[name]; ok {
+		return raw, true
+	}
+	for k, raw := range fp.raw {
+		if strings.EqualFold(k, name) {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
+// mergeArtifactsSectionOnCurrent merges the sent fields of the DB-only
+// "artifacts" section onto the current stored row. A top-level null
+// (reqArtifacts == nil) clears the entire section to {}. Otherwise, each
+// present field in rawArtifacts either replaces the stored value (when
+// non-nil) or removes the key (when null, restoring the compiled default).
+// Returns the merged JSON document and the base revision read from the store
+// (0 when no row exists).
+func mergeArtifactsSectionOnCurrent(ctx context.Context, ops *OperationalSettings, reqArtifacts *opsettings.ArtifactsSettings, rawArtifacts json.RawMessage) (json.RawMessage, int64, error) {
+	base := map[string]json.RawMessage{}
+	var baseRev int64
+	row, err := ops.store.GetHubSetting(ctx, "artifacts")
+	switch {
+	case err == nil:
+		baseRev = row.Revision
+		if len(bytes.TrimSpace(row.Value)) > 0 {
+			if unmarshalErr := json.Unmarshal(row.Value, &base); unmarshalErr != nil {
+				// Stored row is malformed; start from empty so an admin save
+				// can overwrite and repair it.
+				base = map[string]json.RawMessage{}
+			}
+		}
+	case errors.Is(err, store.ErrNotFound):
+		baseRev = 0
+	default:
+		return nil, 0, fmt.Errorf("reading artifacts section: %w", err)
+	}
+
+	if reqArtifacts == nil {
+		return json.RawMessage(`{}`), baseRev, nil
+	}
+
+	var sent map[string]json.RawMessage
+	if err := json.Unmarshal(rawArtifacts, &sent); err != nil {
+		return nil, 0, fmt.Errorf("decoding artifacts object: %w", err)
+	}
+	if len(sent) > 0 {
+		nextBytes, err := json.Marshal(reqArtifacts)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshaling artifacts settings: %w", err)
+		}
+		var next map[string]json.RawMessage
+		if err := json.Unmarshal(nextBytes, &next); err != nil {
+			return nil, 0, fmt.Errorf("decoding marshaled artifacts settings: %w", err)
+		}
+		artType := reflect.TypeOf(opsettings.ArtifactsSettings{})
+		for k := range sent {
+			f, ok := structFieldByJSONName(artType, k)
+			if !ok {
+				continue
+			}
+			canon := strings.Split(f.Tag.Get("json"), ",")[0]
+			if val, present := next[canon]; present {
+				base[canon] = val
+			} else {
+				delete(base, canon)
+			}
+		}
+	}
+
+	if len(base) == 0 {
+		return json.RawMessage(`{}`), baseRev, nil
+	}
+	out, err := json.Marshal(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshaling merged artifacts settings: %w", err)
+	}
+	return out, baseRev, nil
 }
 
 // tokenRefusedProjectDefaultsKeys returns, sorted, the body keys of a

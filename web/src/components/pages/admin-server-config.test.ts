@@ -5686,6 +5686,16 @@ describe('scion-page-admin-server-config', () => {
             gcp_iam_check_mode: 'enforce',
             gcp_iam_deny_unknown_policy: 'fail-closed',
             observability: { metrics_enabled: true, tracing_enabled: false },
+            uploads: {
+              max_attachment_size: 10485760,
+              max_workspace_file_size: 52428800,
+              chunk_bytes: 8388608,
+              session_idle_ttl: '1h',
+              session_max_lifetime: '24h',
+              max_sessions_per_user: 4,
+              max_pending_bytes_per_user: 2147483648,
+              max_pending_bytes_hub: 17179869184,
+            },
           },
           broker: {
             enabled: true,
@@ -5887,6 +5897,39 @@ describe('scion-page-admin-server-config', () => {
       },
       'server.hub.observability.tracing_enabled': {
         clear: (el) => (el.hubTracingEnabled = null),
+        expected: null,
+      },
+      // uploads: "cleared" is empty string, sent as null to reset to default.
+      'server.hub.uploads.max_attachment_size': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, max_attachment_size: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.max_workspace_file_size': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, max_workspace_file_size: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.chunk_bytes': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, chunk_bytes: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.session_idle_ttl': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, session_idle_ttl: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.session_max_lifetime': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, session_max_lifetime: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.max_sessions_per_user': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, max_sessions_per_user: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.max_pending_bytes_per_user': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, max_pending_bytes_per_user: '' }),
+        expected: null,
+      },
+      'server.hub.uploads.max_pending_bytes_hub': {
+        clear: (el) => (el.hubUploads = { ...el.hubUploads, max_pending_bytes_hub: '' }),
         expected: null,
       },
       // telemetry

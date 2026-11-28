@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -49,7 +50,54 @@ const (
 	mutationTypeWebhookEndpointDelete       = "webhook_endpoint_delete"
 	mutationTypeTriggerPause                = "trigger_pause"
 	mutationTypeTriggerDelete               = "trigger_delete"
+
+	// agentAuthoringFloorScope is the baseline agent scope required for trigger
+	// and webhook-endpoint authoring routes and live agent-authored trigger
+	// fires (Stage 2 §4.3, ptone/scion#8065). Pinned by
+	// TestAgentAuthoringFloorScope_MatchesBaselineFloor in agentrole_test.go so
+	// adding this scope to AgentRoleReadOnly fails a test rather than silently
+	// reopening authoring.
+	agentAuthoringFloorScope = ScopeAgentNotify
+
+	agentAuthoringFloorForbiddenMessage = "Agent role must be baseline or higher to author triggers or webhook endpoints"
 )
+
+// requireAgentAuthoringFloor enforces the baseline agent floor (Stage 2 §4.3,
+// ptone/scion#8065) for an agent identity. Non-agent identities are unaffected
+// (returns nil). Agent identities lacking agentAuthoringFloorScope return an
+// error so HTTP handlers write 403 and fire-time authorization refuses the fire.
+func requireAgentAuthoringFloor(identity Identity) error {
+	// Untyped nil means no agent identity (e.g. non-agent HTTP caller via
+	// GetAgentIdentityFromContext); floor does not apply.
+	if identity == nil {
+		return nil
+	}
+	// Fail closed on a typed-nil concrete identity (e.g. (*agentIdentityWrapper)(nil))
+	// so it never passes the floor or panics in HasScope (security Low-1).
+	if isNilIdentity(identity) {
+		return fmt.Errorf("%w: agent lacks baseline authoring floor (%s)", errScheduledAuthorityDenied, agentAuthoringFloorScope)
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	if !ok {
+		return nil
+	}
+	if !agentIdent.HasScope(agentAuthoringFloorScope) {
+		return fmt.Errorf("%w: agent lacks baseline authoring floor (%s)", errScheduledAuthorityDenied, agentAuthoringFloorScope)
+	}
+	return nil
+}
+
+// checkAgentAuthoringFloor enforces requireAgentAuthoringFloor on HTTP routes
+// that create or widen trigger/webhook-endpoint authority. User and UAT callers
+// are unaffected (returns true). Below-baseline agents receive the hub's
+// standard 403 forbidden response with an authoring-specific message.
+func checkAgentAuthoringFloor(w http.ResponseWriter, r *http.Request) bool {
+	if err := requireAgentAuthoringFloor(GetAgentIdentityFromContext(r.Context())); err != nil {
+		writeForbidden(w, agentAuthoringFloorForbiddenMessage)
+		return false
+	}
+	return true
+}
 
 func newWebhookEndpointAudit(ctx context.Context, mutationType, endpointID string) *store.MutationAuditRecord {
 	record := &store.MutationAuditRecord{
@@ -184,6 +232,10 @@ type webhookEndpointAccess struct {
 //     webhook_endpoint.send for hub_token ingress and webhook_endpoint.update
 //     for PATCH/rotate). UATs must carry the matching scope and project/hub boundary.
 //   - Agents: must be in good standing;
+//   - ActionCreate / rotate-secret / non-disable ActionUpdate: additionally
+//     gated on ScopeAgentNotify (baseline floor, Stage 2 §4.3, ptone/scion#8065)
+//     in handleWebhookEndpoints / updateWebhookEndpoint; reads, DELETE, and
+//     disable-only PATCH stay at project:read.
 //   - ActionCreate / project-level gate (ep == nil): admitted for agents in
 //     projectID (they become the endpoint owner).
 //   - ActionSend (hub_token ingress): requires same project
@@ -459,20 +511,81 @@ func (s *Server) resolveTriggerWebhookSource(w http.ResponseWriter, r *http.Requ
 	return ep, true
 }
 
+// resolveTriggerMessageTarget validates a trigger message or notify-agent
+// payload through messageAction.Validate and enforces the Stage 3 §8.1
+// self-only targeting rule for agent callers on github triggers.
+func (s *Server) resolveTriggerMessageTarget(
+	w http.ResponseWriter,
+	r *http.Request,
+	identity Identity,
+	projectID string,
+	sourceKind string,
+	payload MessageEventPayload,
+	denialPrefix string,
+) (string, MessageEventPayload, bool) {
+	ctx := r.Context()
+	var (
+		raw []byte
+		err error
+	)
+	if payload.UntrustedVars != nil && len(payload.UntrustedVars) == 0 {
+		// Preserve an explicitly supplied empty untrustedVars ([]) distinct from
+		// omitted (nil), since MessageEventPayload.UntrustedVars has omitempty.
+		type explicitEmptyUntrusted struct {
+			MessageEventPayload
+			UntrustedVars []string `json:"untrustedVars"`
+		}
+		raw, err = json.Marshal(explicitEmptyUntrusted{
+			MessageEventPayload: payload,
+			UntrustedVars:       []string{},
+		})
+	} else {
+		raw, err = json.Marshal(payload)
+	}
+	if err != nil {
+		InternalError(w)
+		return "", MessageEventPayload{}, false
+	}
+
+	action := &messageAction{srv: s}
+	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
+	if err != nil {
+		writeMessageAuthoringError(w, r, identity, err)
+		return "", MessageEventPayload{}, false
+	}
+
+	var resolved MessageEventPayload
+	if err := json.Unmarshal([]byte(normalized), &resolved); err != nil {
+		InternalError(w)
+		return "", MessageEventPayload{}, false
+	}
+	if sourceKind == store.TriggerSourceKindGitHub && isAgentCaller(ctx) && resolved.AgentID != identity.ID() {
+		logAuthzDenial(r, identity, Resource{
+			Type:       permissions.ResourceAgent,
+			ID:         resolved.AgentID,
+			ParentType: permissions.ResourceProject,
+			ParentID:   projectID,
+		}, ActionMessage, denialPrefix+": agent caller may only target itself")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"agent callers may only target themselves on github triggers", nil)
+		return "", MessageEventPayload{}, false
+	}
+	return normalized, resolved, true
+}
+
 // authorizeTriggerMessageAuthoring validates a Stage 1 message action spec
 // through the shared HTTP-free target rule (messageAction.Validate), enforcing
 // self-only targeting for agent callers on github triggers (Stage 3 §8.1),
 // updating spec with the authoritative AgentID and display AgentName, and
 // returning the canonical JSON action_payload.
 func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http.Request, projectID, sourceKind string, spec *TriggerActionSpec) (string, bool) {
-	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
+	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return "", false
 	}
 
-	raw, err := json.Marshal(MessageEventPayload{
+	normalized, resolved, ok := s.resolveTriggerMessageTarget(w, r, identity, projectID, sourceKind, MessageEventPayload{
 		AgentID:         spec.AgentID,
 		AgentName:       spec.AgentName,
 		Message:         spec.Message,
@@ -482,33 +595,8 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 		Offline:         spec.Offline,
 		QueueTTLSeconds: spec.QueueTTLSeconds,
 		UntrustedVars:   spec.UntrustedVars,
-	})
-	if err != nil {
-		InternalError(w)
-		return "", false
-	}
-
-	action := &messageAction{srv: s}
-	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
-	if err != nil {
-		writeMessageAuthoringError(w, r, identity, err)
-		return "", false
-	}
-
-	var resolved MessageEventPayload
-	if err := json.Unmarshal([]byte(normalized), &resolved); err != nil {
-		InternalError(w)
-		return "", false
-	}
-	if sourceKind == store.TriggerSourceKindGitHub && isAgentCaller(ctx) && resolved.AgentID != identity.ID() {
-		logAuthzDenial(r, identity, Resource{
-			Type:       permissions.ResourceAgent,
-			ID:         resolved.AgentID,
-			ParentType: permissions.ResourceProject,
-			ParentID:   projectID,
-		}, ActionMessage, "github trigger message authoring: agent caller may only target itself")
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"agent callers may only target themselves on github triggers", nil)
+	}, "github trigger message authoring")
+	if !ok {
 		return "", false
 	}
 	spec.AgentID = resolved.AgentID
@@ -517,6 +605,88 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	spec.QueueTTLSeconds = resolved.QueueTTLSeconds
 	spec.UntrustedVars = resolved.UntrustedVars
 	return normalized, true
+}
+
+// authorizeTriggerNotifyAuthoring validates and authorizes a trigger's notify
+// policy (Stage 2 §10): outcomes must be a subset of {failed, refused, expired,
+// skipped} (defaulting to failed/refused/expired), userNotice defaults to true,
+// and an optional agentId/agentName is validated through messageAction.Validate
+// under the caller's live authority so an author who cannot message that agent
+// cannot save, edit, or resume the rule.
+func (s *Server) authorizeTriggerNotifyAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	spec *TriggerNotifySpec,
+) (*store.TriggerNotifyPolicy, bool) {
+	if spec == nil {
+		return nil, true
+	}
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return nil, false
+	}
+
+	var normalizedOutcomes []string
+	if len(spec.OnOutcomes) == 0 {
+		normalizedOutcomes = []string{
+			store.TriggerFireStatusFailed,
+			store.TriggerFireStatusRefused,
+			store.TriggerFireStatusExpired,
+		}
+	} else {
+		seen := make(map[string]bool, len(spec.OnOutcomes))
+		for _, raw := range spec.OnOutcomes {
+			v := strings.TrimSpace(raw)
+			switch v {
+			case store.TriggerFireStatusFailed,
+				store.TriggerFireStatusRefused,
+				store.TriggerFireStatusExpired,
+				store.TriggerFireStatusSkipped:
+				if !seen[v] {
+					seen[v] = true
+					normalizedOutcomes = append(normalizedOutcomes, v)
+				}
+			default:
+				ValidationError(w, fmt.Sprintf("invalid notify.onOutcomes value %q (supported: failed, refused, expired, skipped)", v), map[string]any{
+					"field": "notify.onOutcomes",
+				})
+				return nil, false
+			}
+		}
+	}
+
+	userNotice := true
+	if spec.UserNotice != nil {
+		userNotice = *spec.UserNotice
+	}
+
+	agentID := strings.TrimSpace(spec.AgentID)
+	agentName := strings.TrimSpace(spec.AgentName)
+	if agentID != "" || agentName != "" {
+		_, resolved, ok := s.resolveTriggerMessageTarget(w, r, identity, projectID, sourceKind, MessageEventPayload{
+			AgentID:       agentID,
+			AgentName:     agentName,
+			Message:       "Trigger failure notification",
+			Wake:          false,
+			Plain:         false,
+			UntrustedVars: []string{},
+		}, "github trigger notify authoring")
+		if !ok {
+			return nil, false
+		}
+		agentID = resolved.AgentID
+		agentName = resolved.AgentName
+	}
+
+	return &store.TriggerNotifyPolicy{
+		OnOutcomes: normalizedOutcomes,
+		UserNotice: &userNotice,
+		AgentID:    agentID,
+		AgentName:  agentName,
+	}, true
 }
 
 // authorizeTriggerDispatchAgentAuthoring validates a Stage 2 dispatch_agent
@@ -542,7 +712,7 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		return "", false
 	}
 
-	raw, err := json.Marshal(DispatchAgentEventPayload{
+	dispatchPayload := DispatchAgentEventPayload{
 		AgentName:     spec.AgentName,
 		NameConflict:  spec.NameConflict,
 		Template:      spec.Template,
@@ -556,7 +726,24 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		AckComment:    spec.AckComment,
 		UntrustedVars: spec.UntrustedVars,
 		NoAuth:        spec.NoAuth,
-	})
+	}
+	var (
+		raw []byte
+		err error
+	)
+	if spec.UntrustedVars != nil {
+		// Preserve an explicit empty slice ("untrustedVars": []) across the
+		// JSON boundary so Validate distinguishes omitted from supplied-empty.
+		raw, err = json.Marshal(struct {
+			DispatchAgentEventPayload
+			UntrustedVars []string `json:"untrustedVars"`
+		}{
+			DispatchAgentEventPayload: dispatchPayload,
+			UntrustedVars:             spec.UntrustedVars,
+		})
+	} else {
+		raw, err = json.Marshal(dispatchPayload)
+	}
 	if err != nil {
 		InternalError(w)
 		return "", false
@@ -816,44 +1003,86 @@ var (
 	errTriggerExecTargetCapExceeded  = errors.New("target agent active exec trigger limit exceeded")
 )
 
-// checkTriggerExecCapsInTx enforces P8's own per-trigger-exec authoring caps
+// checkTriggerExecCapsInTx enforces P8's per-trigger-exec authoring caps
 // inside WithTx under LockTriggerQuota, independent of exec-schedule quotas.
+// Caps count per exec action row across active triggers (action-arrays §4);
+// excludeTriggerID omits the trigger currently being updated or resumed so its
+// previous actions are not double-counted.
 func checkTriggerExecCapsInTx(
 	ctx context.Context,
 	tx store.Store,
 	projectID string,
-	targetAgentID string,
-	alreadyCountedInProject bool,
-	alreadyCountedOnTarget bool,
+	newActions []store.TriggerAction,
+	excludeTriggerID string,
 ) error {
-	projExecCount, err := tx.CountTriggers(ctx, store.TriggerFilter{
-		ProjectID:   projectID,
-		ActionTypes: []string{store.TriggerActionExec},
-		Status:      store.TriggerStatusActive,
-	})
-	if err != nil {
-		return err
+	newProjExecs := 0
+	newTargetExecs := make(map[string]int)
+	for _, act := range newActions {
+		if act.Type != store.TriggerActionExec {
+			continue
+		}
+		newProjExecs++
+		if tid := execPayloadTarget(act.Payload); tid != "" {
+			newTargetExecs[tid]++
+		}
 	}
-	if alreadyCountedInProject && projExecCount > 0 {
-		projExecCount--
+	if newProjExecs == 0 {
+		return nil
 	}
-	if projExecCount >= triggerExecMaxActivePerProject {
-		return errTriggerExecProjectCapExceeded
-	}
-	if targetAgentID != "" {
-		targetExecCount, err := tx.CountTriggers(ctx, store.TriggerFilter{
-			ProjectID:     projectID,
-			ActionTypes:   []string{store.TriggerActionExec},
-			TargetAgentID: targetAgentID,
-			Status:        store.TriggerStatusActive,
+
+	existingProjExecs := 0
+	existingTargetExecs := make(map[string]int)
+	cursor := ""
+	for {
+		page, err := tx.ListTriggers(ctx, store.TriggerFilter{
+			ProjectID:   projectID,
+			ActionTypes: []string{store.TriggerActionExec},
+			Status:      store.TriggerStatusActive,
+		}, store.ListOptions{
+			Limit:          store.MaxTriggersPerProject,
+			Cursor:         cursor,
+			SkipTotalCount: true,
 		})
 		if err != nil {
 			return err
 		}
-		if alreadyCountedOnTarget && targetExecCount > 0 {
-			targetExecCount--
+		for _, tr := range page.Items {
+			if excludeTriggerID != "" && tr.ID == excludeTriggerID {
+				continue
+			}
+			acts, aErr := triggerActions(tr)
+			if aErr != nil {
+				// O3 / O-d: count a corrupt active row as a floor of one exec when
+				// its scalar action_type or raw actions column matched the exec
+				// filter (a corrupt list could have held up to MaxTriggerActions).
+				if tr.ActionType == store.TriggerActionExec || tr.ActionsCorrupt {
+					existingProjExecs++
+					if tid := execPayloadTarget(tr.ActionPayload); tid != "" {
+						existingTargetExecs[tid]++
+					}
+				}
+				continue
+			}
+			for _, act := range acts {
+				if act.Type != store.TriggerActionExec {
+					continue
+				}
+				existingProjExecs++
+				if tid := execPayloadTarget(act.Payload); tid != "" {
+					existingTargetExecs[tid]++
+				}
+			}
 		}
-		if targetExecCount >= triggerExecMaxActivePerTarget {
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if existingProjExecs+newProjExecs > triggerExecMaxActivePerProject {
+		return errTriggerExecProjectCapExceeded
+	}
+	for tid, add := range newTargetExecs {
+		if existingTargetExecs[tid]+add > triggerExecMaxActivePerTarget {
 			return errTriggerExecTargetCapExceeded
 		}
 	}

@@ -283,33 +283,42 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 }
 
 // translateConversationForBroker translates a stored conversation row into the
-// surface-native Conversation attached to outbound broker messages (Phase 11).
+// surface-native Conversation attached to outbound broker messages (Phase 11 / P5).
 //
 // Hub-derived internal keys ("thread:<project>:<ref>", "dm:...") are never
 // emitted as Conversation.ExternalRef:
 //   - Conversations on an external surface whose ExternalRef has the canonical
-//     "thread:<project>:<ref>" form emit the translated surface-native <ref>.
+//     "thread:<project>:<ref>" form emit the translated surface-native <ref>
+//     along with Surface, ParentRef, DisplayName, and Kind.
 //   - Native conversations, direct/dm:* conversations, and any ref that cannot
-//     be translated safely return nil so Conversation is omitted and plugins
-//     fall back to legacy Channel/ThreadID (while ConversationID is preserved).
+//     be translated safely emit {Surface: "native", Kind, DisplayName} with
+//     empty ExternalRef and ParentRef so Conversation is always present when
+//     ConversationID resolves and hub keys never cross the wire.
 func translateConversationForBroker(conv *store.Conversation) *messages.Conversation {
 	if conv == nil {
 		return nil
 	}
+	nativeFallback := func() *messages.Conversation {
+		return &messages.Conversation{
+			Surface:     "native",
+			DisplayName: conv.DisplayName,
+			Kind:        conv.Kind,
+		}
+	}
 	if conv.Surface == "" || conv.Surface == "native" {
-		return nil
+		return nativeFallback()
 	}
 	if conv.Kind == "direct" || strings.HasPrefix(conv.ExternalRef, "dm:") {
-		return nil
+		return nativeFallback()
 	}
 	if conv.ExternalRef == "" {
-		return nil
+		return nativeFallback()
 	}
 	extRef := conv.ExternalRef
 	if strings.HasPrefix(extRef, "thread:") {
 		_, nativeRef, err := messaging.ParseThreadConversationExternalRef(extRef)
 		if err != nil || nativeRef == "" {
-			return nil
+			return nativeFallback()
 		}
 		extRef = nativeRef
 	}
@@ -318,6 +327,7 @@ func translateConversationForBroker(conv *store.Conversation) *messages.Conversa
 		ExternalRef: extRef,
 		ParentRef:   conv.ParentRef,
 		DisplayName: conv.DisplayName,
+		Kind:        conv.Kind,
 	}
 }
 
@@ -361,7 +371,7 @@ func (s *Server) resolveBrokerInboundConversation(
 	ctx context.Context,
 	log *slog.Logger,
 	projectID, surface, externalRef, parentRef, displayName, defaultAgentID string,
-	legacyChannel, legacyThreadID string,
+	legacyChannel, legacyRef, legacyThreadID string,
 ) (*messaging.ConversationResult, error) {
 	newKey, keyErr := deriveBrokerInboundThreadKey(projectID, externalRef)
 	if keyErr != nil {
@@ -375,7 +385,7 @@ func (s *Server) resolveBrokerInboundConversation(
 		return nil, lookupErr
 	}
 	if errors.Is(lookupErr, store.ErrNotFound) || existingNew == nil {
-		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID); err != nil {
+		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyRef, legacyThreadID); err != nil {
 			return nil, err
 		} else if legacyConv != nil {
 			return &messaging.ConversationResult{
@@ -438,15 +448,21 @@ func isContainerScopedLegacyThreadID(externalRef, parentRef, legacyThreadID stri
 }
 
 // lookupLegacyPhase5Conversation performs a strictly read-only lookup for a
-// pre-P4 Phase-5 conversation row matching legacyThreadID. It never creates a
-// row and skips container-scoped legacy keys (where legacyThreadID equals
-// parentRef or the container portion of externalRef).
+// pre-P4 Phase-5 conversation row. It reads legacyRef (top-level legacy_ref)
+// first, falling back to legacyThreadID (message.thread_id) only when
+// legacyRef is empty. It never creates a row and skips container-scoped legacy
+// keys (where the chosen legacy key equals parentRef or the container portion
+// of externalRef).
 func (s *Server) lookupLegacyPhase5Conversation(
 	ctx context.Context,
 	log *slog.Logger,
-	projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID string,
+	projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyRef, legacyThreadID string,
 ) (*store.Conversation, error) {
-	if isContainerScopedLegacyThreadID(externalRef, parentRef, legacyThreadID) {
+	effectiveLegacyRef := legacyRef
+	if effectiveLegacyRef == "" {
+		effectiveLegacyRef = legacyThreadID
+	}
+	if isContainerScopedLegacyThreadID(externalRef, parentRef, effectiveLegacyRef) {
 		return nil, nil
 	}
 	type candidate struct {
@@ -476,10 +492,10 @@ func (s *Server) lookupLegacyPhase5Conversation(
 			legacySurface = mapped
 		}
 	}
-	if legacyThreadID != "" {
-		addCandidate(legacySurface, legacyThreadID)
+	if effectiveLegacyRef != "" {
+		addCandidate(legacySurface, effectiveLegacyRef)
 		if legacySurface != surface {
-			addCandidate(surface, legacyThreadID)
+			addCandidate(surface, effectiveLegacyRef)
 		}
 	}
 
@@ -502,15 +518,24 @@ func (s *Server) lookupLegacyPhase5Conversation(
 }
 
 // enrichConversation populates msg.Conversation from the conversations table
-// when msg.ConversationID is set. It always overwrites any pre-existing
-// Conversation from the authoritative store row (translating stored thread
-// keys to surface-native refs or omitting Conversation for native/DM rows),
-// returns a shallow copy so callers' structs are never mutated, and preserves
-// ConversationID and all legacy fields (Channel, ThreadID, etc.) untouched for
-// older plugin binaries.
+// when msg.ConversationID resolves. It always overwrites any pre-existing
+// Conversation from the authoritative store row (translating external thread
+// keys to surface-native refs, or emitting {Surface: "native", Kind, DisplayName}
+// with empty refs for native/direct/untranslatable rows), clears any pre-set
+// Conversation when ConversationID is empty or the lookup fails, returns a
+// shallow copy so callers' structs are never mutated, and preserves
+// ConversationID and legacy fields untouched for older plugin binaries.
 func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messages.StructuredMessage) *messages.StructuredMessage {
-	if msg == nil || msg.ConversationID == "" || p.store == nil {
-		return msg
+	if msg == nil {
+		return nil
+	}
+	if msg.ConversationID == "" || p.store == nil {
+		if msg.Conversation == nil {
+			return msg
+		}
+		cp := *msg
+		cp.Conversation = nil
+		return &cp
 	}
 	conv, err := p.store.GetConversation(ctx, msg.ConversationID)
 	if err != nil {
@@ -518,7 +543,12 @@ func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messag
 			p.log.Warn("failed to load conversation for broker publish",
 				"conversation_id", msg.ConversationID, "error", err)
 		}
-		return msg
+		if msg.Conversation == nil {
+			return msg
+		}
+		cp := *msg
+		cp.Conversation = nil
+		return &cp
 	}
 	cp := *msg
 	cp.Conversation = translateConversationForBroker(conv)

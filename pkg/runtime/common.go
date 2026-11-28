@@ -148,6 +148,17 @@ const resumeFallbackNotice = "scion: no resumable session; starting fresh"
 // with an explained message instead of a shell syntax error.
 const emptyHarnessCmdNotice = "scion: harness command is empty (provide a task, harness args, or command_args)"
 
+// genericExecForm127Hint is printed to stderr when a single-argv exec-form task
+// containing spaces or shell metacharacters fails with exit code 127.
+const genericExecForm127Hint = `scion: generic harness runs tasks in exec form (no shell); for shell syntax opt in with command.base: ["sh", "-c"] or command_args: ["sh", "-c"]`
+
+// looksLikeShellCommand reports whether s contains whitespace or POSIX shell
+// metacharacters that indicate a shell-form command rather than a single
+// executable name.
+func looksLikeShellCommand(s string) bool {
+	return strings.ContainsAny(s, " \t\n&|;<>$`()*?'\"")
+}
+
 func emptyHarnessCmdLine() string {
 	return fmt.Sprintf("echo %s >&2; (exit 1)", shellQuote(emptyHarnessCmdNotice))
 }
@@ -177,7 +188,18 @@ func harnessCmdLine(cfg RunConfig, opts harnessCmdLineOptions) (cmdLine string, 
 				return resumeFallbackCmdLine(harnessArgs, freshArgs), true
 			}
 		}
-		return quotedOrEmptyCmdLine(harnessArgs, nil), true
+		line := quotedOrEmptyCmdLine(harnessArgs, nil)
+		// When a generic exec-form harness runs the raw task string as argv[0]
+		// and the task contains spaces or shell metacharacters, surface a hint
+		// on exit 127 without altering the command or its exit status.
+		if len(harnessArgs) == 1 && cfg.Task != "" && harnessArgs[0] == cfg.Task && looksLikeShellCommand(cfg.Task) {
+			line = fmt.Sprintf(
+				`%s; scion_rc=$?; if [ "$scion_rc" -eq 127 ]; then printf '%%s\n' %s >&2; fi; (exit "$scion_rc")`,
+				line,
+				shellQuote(genericExecForm127Hint),
+			)
+		}
+		return line, true
 	}
 	return "", false
 }
@@ -1171,7 +1193,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	if len(fuseMounts) > 0 {
 		mountCmds := strings.Join(fuseMounts, " && ")
-		wrapped := fmt.Sprintf(`%s && exec sh -c "$SCION_START_CMD"`, mountCmds)
+		wrapped := fmt.Sprintf("%s && %s", mountCmds, state.FUSEStartCmdExecSuffix)
 		args = append(args, "sh", "-c", wrapped)
 	} else {
 		args = append(args, "sh", "-c", tmuxCmd)

@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -119,36 +120,122 @@ func TestControlChannelClient_MarkDisconnected_NilCallback(t *testing.T) {
 	}
 }
 
-// newWSPair creates a connected pair of wsprotocol.Connection for testing.
-// It starts an httptest server with a WebSocket endpoint, dials it, and
-// returns (brokerConn, hubConn, cleanup).
-func newWSPair(t *testing.T) (brokerConn, hubConn *wsprotocol.Connection, cleanup func()) {
-	t.Helper()
-	hubReady := make(chan *wsprotocol.Connection, 1)
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+type wsPairResult struct {
+	conn *wsprotocol.Connection
+	err  error
+}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// newWSPairHandler returns an HTTP handler that upgrades only a single
+// WebSocket request on expectedPath and sends the resulting connection (or
+// upgrade error) on hubReady. Any stray request on another path, or any
+// request after the first upgrade attempt, receives 404 without touching the
+// test handle — preventing flakes when an unrelated goroutine hits a reused
+// ephemeral loopback port.
+func newWSPairHandler(expectedPath string, hubReady chan<- wsPairResult) http.Handler {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	var handled atomic.Bool
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != expectedPath || !handled.CompareAndSwap(false, true) {
+			http.NotFound(w, r)
+			return
+		}
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			t.Fatalf("upgrade: %v", err)
+			hubReady <- wsPairResult{err: err}
+			return
 		}
 		cfg := wsprotocol.ConnectionConfig{WriteWait: 5 * time.Second}
-		hubReady <- wsprotocol.NewConnection(ws, cfg)
-	}))
+		hubReady <- wsPairResult{conn: wsprotocol.NewConnection(ws, cfg)}
+	})
+}
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+// newWSPair creates a connected pair of wsprotocol.Connection for testing.
+// It starts an httptest server with a per-call WebSocket path, dials it, closes
+// the HTTP server once the connection is hijacked, and returns
+// (brokerConn, hubConn, cleanup).
+func newWSPair(t *testing.T) (brokerConn, hubConn *wsprotocol.Connection, cleanup func()) {
+	t.Helper()
+	expectedPath := "/ws-pair/" + uuid.NewString()
+	hubReady := make(chan wsPairResult, 1)
+
+	srv := httptest.NewServer(newWSPairHandler(expectedPath, hubReady))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + expectedPath
 	rawConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	bCfg := wsprotocol.ConnectionConfig{WriteWait: 5 * time.Second}
 	bc := wsprotocol.NewConnection(rawConn, bCfg)
-	hc := <-hubReady
-
-	return bc, hc, func() {
+	res := <-hubReady
+	if res.err != nil {
 		_ = bc.Close()
-		_ = hc.Close()
-		srv.Close()
+		t.Fatalf("upgrade: %v", res.err)
+	}
+
+	return bc, res.conn, func() {
+		_ = bc.Close()
+		_ = res.conn.Close()
+	}
+}
+
+func TestNewWSPair_IgnoresStrayHTTPRequests(t *testing.T) {
+	expectedPath := "/ws-pair/" + uuid.NewString()
+	hubReady := make(chan wsPairResult, 1)
+	srv := httptest.NewServer(newWSPairHandler(expectedPath, hubReady))
+	defer srv.Close()
+
+	// A stray plain HTTP request (no Connection: Upgrade) on an unrelated path
+	// must be rejected with 404 rather than failing the WebSocket upgrade.
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("stray GET /: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for stray GET /, got %d", resp.StatusCode)
+	}
+
+	// The legitimate WebSocket dial on expectedPath must still succeed.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + expectedPath
+	rawConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial after stray request: %v", err)
+	}
+	defer func() { _ = rawConn.Close() }()
+
+	res := <-hubReady
+	if res.err != nil {
+		t.Fatalf("upgrade error: %v", res.err)
+	}
+	defer func() { _ = res.conn.Close() }()
+
+	// A duplicate plain HTTP request even on expectedPath after upgrade must
+	// also return 404 without blocking or failing.
+	resp2, err := http.Get(srv.URL + expectedPath)
+	if err != nil {
+		t.Fatalf("duplicate GET %s: %v", expectedPath, err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for duplicate GET %s, got %d", expectedPath, resp2.StatusCode)
+	}
+
+	// Verify newWSPair itself remains usable after its httptest.Server closes.
+	bc, hc, cleanup := newWSPair(t)
+	defer cleanup()
+
+	want := map[string]string{"ping": "ok"}
+	if err := bc.WriteJSON(want); err != nil {
+		t.Fatalf("WriteJSON after srv.Close: %v", err)
+	}
+	var got map[string]string
+	if err := hc.ReadJSON(&got); err != nil {
+		t.Fatalf("ReadJSON after srv.Close: %v", err)
+	}
+	if got["ping"] != "ok" {
+		t.Fatalf("expected ping=ok, got %v", got)
 	}
 }
 

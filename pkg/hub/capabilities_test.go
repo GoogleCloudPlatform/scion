@@ -957,3 +957,123 @@ func TestResourceBuilders(t *testing.T) {
 		assert.Equal(t, Resource{}, gcpServiceAccountResource(nil))
 	})
 }
+
+// TestProjectCapabilities_MessagePolicyAndSystemOneActions pins the exact
+// project _capabilities.actions names and built-in role mapping relied on by
+// the message-policy and System One project UI (A5).
+func TestProjectCapabilities_MessagePolicyAndSystemOneActions(t *testing.T) {
+	const (
+		actionManagePolicies = "manage_message_policies"
+		actionReadPolicies   = "read_message_policies"
+		actionManageS1       = "manage_system_one_instances"
+	)
+
+	// Pin the exact action names on ResourceActions["project"].
+	assert.Contains(t, ResourceActions["project"], Action(actionManagePolicies))
+	assert.Contains(t, ResourceActions["project"], Action(actionReadPolicies))
+	assert.Contains(t, ResourceActions["project"], Action(actionManageS1))
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("mp-cap-project"),
+		Name: "MP Cap Project",
+		Slug: "mp-cap-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	type roleCase struct {
+		name         string
+		userID       string
+		email        string
+		systemRole   string
+		projectRole  string
+		wantActions  []string
+		forbidAction []string
+	}
+
+	cases := []roleCase{
+		{
+			name:        "project-owner",
+			userID:      tid("mp-cap-owner"),
+			email:       "mp-cap-owner@example.com",
+			projectRole: store.ProjectRoleOwner,
+			wantActions: []string{actionManagePolicies, actionReadPolicies, actionManageS1},
+		},
+		{
+			name:        "project-admin",
+			userID:      tid("mp-cap-admin"),
+			email:       "mp-cap-admin@example.com",
+			projectRole: store.ProjectRoleAdmin,
+			wantActions: []string{actionManagePolicies, actionReadPolicies, actionManageS1},
+		},
+		{
+			name:        "hub-admin",
+			userID:      tid("mp-cap-hubadmin"),
+			email:       "mp-cap-hubadmin@example.com",
+			systemRole:  store.SystemRoleHubAdmin,
+			wantActions: []string{actionManagePolicies, actionReadPolicies, actionManageS1},
+		},
+		{
+			name:         "project-member",
+			userID:       tid("mp-cap-member"),
+			email:        "mp-cap-member@example.com",
+			projectRole:  store.ProjectRoleMember,
+			wantActions:  []string{actionReadPolicies},
+			forbidAction: []string{actionManagePolicies, actionManageS1},
+		},
+		{
+			name:         "project-viewer",
+			userID:       tid("mp-cap-viewer"),
+			email:        "mp-cap-viewer@example.com",
+			projectRole:  store.ProjectRoleViewer,
+			wantActions:  []string{actionReadPolicies},
+			forbidAction: []string{actionManagePolicies, actionManageS1},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.systemRole != "" {
+				createTestUserWithRole(t, s, tc.userID, tc.email, store.UserRoleAdmin, tc.systemRole)
+			} else {
+				require.NoError(t, s.CreateUser(ctx, &store.User{
+					ID:          tc.userID,
+					Email:       tc.email,
+					DisplayName: tc.name,
+					Role:        store.UserRoleMember,
+					Status:      "active",
+				}))
+				projectOpsGrant(t, s, tc.userID, project.ID, tc.projectRole)
+			}
+
+			userRole := store.UserRoleMember
+			if tc.systemRole != "" {
+				userRole = store.UserRoleAdmin
+			}
+			ident := NewAuthenticatedUser(tc.userID, tc.email, tc.name, userRole, "session")
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+project.ID, nil).
+				WithContext(contextWithIdentity(ctx, ident))
+			srv.getProject(rec, req, project.ID)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			var resp struct {
+				Capabilities *Capabilities `json:"_capabilities"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Capabilities, "GET /api/v1/projects/{id} must populate _capabilities")
+
+			for _, want := range tc.wantActions {
+				assert.Contains(t, resp.Capabilities.Actions, want,
+					"%s must receive %q in project _capabilities.actions", tc.name, want)
+			}
+			for _, forbid := range tc.forbidAction {
+				assert.NotContains(t, resp.Capabilities.Actions, forbid,
+					"%s must not receive %q in project _capabilities.actions", tc.name, forbid)
+			}
+		})
+	}
+}

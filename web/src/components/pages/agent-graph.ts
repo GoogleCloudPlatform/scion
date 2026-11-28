@@ -682,7 +682,6 @@ export class AgentGraphPage extends LitElement {
 
   private onFilterInput(e: CustomEvent<FilterInputDetail>): void {
     this.filterQueryText = e.detail.value;
-    this.activeFilterQuery = e.detail.query;
   }
 
   private onFilterCommit(e: CustomEvent<FilterCommitDetail>): void {

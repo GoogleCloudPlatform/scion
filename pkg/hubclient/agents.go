@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -356,6 +357,10 @@ type CreateAgentResponse struct {
 	// EnvGather is populated when the Hub returns HTTP 202, indicating the
 	// broker needs additional env vars that only the CLI can provide.
 	EnvGather *EnvGatherResponse `json:"envGather,omitempty"`
+
+	// TrajectoryCapture reports the effective Track 2 trajectory capture policy
+	// for the agent's project when experiment tokenomics.trajectory_capture is on.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // EnvGatherResponse contains env requirements returned by the Hub when the
@@ -996,6 +1001,9 @@ type MessageResponse struct {
 	// the sender can reply into it. Empty on hubs that predate this field,
 	// or when the message was not recorded in a conversation.
 	ConversationID string `json:"conversation_id,omitempty"`
+	// Cursor is the opaque eventfeed cursor positioned at the persisted
+	// message's conversation sequence, allocated atomically with the message.
+	Cursor string `json:"cursor,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.

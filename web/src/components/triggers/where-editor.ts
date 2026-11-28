@@ -25,6 +25,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import {
   ADMITTED_TRIGGER_DIALECTS,
+  isAdmittedTriggerDialect,
   type TriggerDialectOption,
   type TriggerMatchRuleSpec,
   type TriggerRuleRowError,
@@ -126,6 +127,32 @@ export class ScionTriggerWhereEditor extends LitElement {
       flex-shrink: 0;
     }
 
+    .dialect-readonly {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.25rem 0.5rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      font-family: var(--scion-font-mono);
+      color: var(--scion-text);
+      background: var(--scion-surface);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-sm);
+      flex-shrink: 0;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .row-actions {
       display: flex;
       align-items: center;
@@ -196,14 +223,23 @@ export class ScionTriggerWhereEditor extends LitElement {
     this.emitRules(next);
   }
 
+  private isNonAdmittedRule(rule: TriggerMatchRuleSpec | undefined): boolean {
+    if (!rule?.dialect) return false;
+    return !isAdmittedTriggerDialect(rule.dialect, this.admittedDialects);
+  }
+
   private updateDialect(index: number, dialect: string): void {
     if (this.readonly) return;
+    const current = this.rules[index];
+    if (!current || this.isNonAdmittedRule(current)) return;
     const next = this.rules.map((r, i) => (i === index ? { ...r, dialect } : r));
     this.emitRules(next);
   }
 
   private updateExpr(index: number, expr: string): void {
     if (this.readonly) return;
+    const current = this.rules[index];
+    if (!current || this.isNonAdmittedRule(current)) return;
     const next = this.rules.map((r, i) => (i === index ? { ...r, expr } : r));
     this.emitRules(next);
   }
@@ -239,27 +275,43 @@ export class ScionTriggerWhereEditor extends LitElement {
             <div class="rule-list">
               ${this.rules.map((rule, index) => {
                 const err = this.rowErrors[index];
+                const nonAdmitted = this.isNonAdmittedRule(rule);
                 return html`
-                  <div class="rule-row ${err ? 'has-error' : ''}" data-where-row=${index}>
+                  <div
+                    class="rule-row ${err ? 'has-error' : ''}"
+                    data-where-row=${index}
+                    ?data-where-non-admitted=${nonAdmitted}
+                  >
                     <div class="rule-row-top">
                       <span class="order-badge" title="Evaluation order">${index + 1}</span>
-                      <sl-select
-                        class="dialect-select"
-                        size="small"
-                        label="Dialect"
-                        hoist
-                        ?disabled=${this.readonly}
-                        .value=${rule.dialect || this.admittedDialects[0]?.value || 'cel'}
-                        data-where-dialect=${index}
-                        @sl-change=${(e: Event) => {
-                          const sel = e.target as HTMLSelectElement;
-                          this.updateDialect(index, sel.value);
-                        }}
-                      >
-                        ${this.admittedDialects.map(
-                          (d) => html`<sl-option value=${d.value}>${d.label}</sl-option>`
-                        )}
-                      </sl-select>
+                      ${nonAdmitted
+                        ? html`
+                            <span
+                              class="dialect-readonly"
+                              data-where-dialect=${index}
+                              data-where-dialect-readonly
+                              ><span class="sr-only">Dialect: </span>${rule.dialect}</span
+                            >
+                          `
+                        : html`
+                            <sl-select
+                              class="dialect-select"
+                              size="small"
+                              label="Dialect"
+                              hoist
+                              ?disabled=${this.readonly}
+                              .value=${rule.dialect || this.admittedDialects[0]?.value || 'cel'}
+                              data-where-dialect=${index}
+                              @sl-change=${(e: Event) => {
+                                const sel = e.target as HTMLSelectElement;
+                                this.updateDialect(index, sel.value);
+                              }}
+                            >
+                              ${this.admittedDialects.map(
+                                (d) => html`<sl-option value=${d.value}>${d.label}</sl-option>`
+                              )}
+                            </sl-select>
+                          `}
                       ${this.readonly
                         ? nothing
                         : html`
@@ -293,10 +345,14 @@ export class ScionTriggerWhereEditor extends LitElement {
                       rows="2"
                       resize="auto"
                       placeholder="event.attributes.env == 'prod'"
-                      ?readonly=${this.readonly}
+                      help-text=${nonAdmitted
+                        ? `This rule uses ${rule.dialect}; edit it with the CLI or API.`
+                        : nothing}
+                      ?readonly=${this.readonly || nonAdmitted}
                       .value=${rule.expr}
                       data-where-expr=${index}
                       @sl-input=${(e: Event) => {
+                        if (nonAdmitted) return;
                         const ta = e.target as HTMLTextAreaElement;
                         this.updateExpr(index, ta.value);
                       }}

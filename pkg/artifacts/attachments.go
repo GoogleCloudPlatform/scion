@@ -384,37 +384,6 @@ func (s *Service) MayReadAttachments(ctx context.Context, messageID string, mess
 	return mh.MayReadMessage(ctx, messageID, messageProjectID)
 }
 
-// OpenBoundAttachment opens the bytes of attachment artifactID, which must
-// be bound to message messageID, for the host to deliver to the message's
-// addressees. It checks no caller: the host calls it only from its own
-// send path, after the send was authorized and the message stored, never
-// on behalf of a request that names an attachment.
-func (s *Service) OpenBoundAttachment(ctx context.Context, artifactID, messageID string) (io.ReadCloser, AttachmentInfo, error) {
-	b, ok := s.backend()
-	if !ok {
-		return nil, AttachmentInfo{}, ErrUnavailable
-	}
-	if !canonicalID(artifactID) || messageID == "" {
-		return nil, AttachmentInfo{}, ErrNotFound
-	}
-	a, err := b.store.GetAttachment(ctx, artifactID)
-	if err != nil {
-		return nil, AttachmentInfo{}, err
-	}
-	if a.ID != artifactID || a.ScopeKind != ScopeKindMessage || a.ScopeRef != messageID {
-		return nil, AttachmentInfo{}, ErrNotFound
-	}
-	f, err := attachmentFile(ctx, b, a)
-	if err != nil {
-		return nil, AttachmentInfo{}, err
-	}
-	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, f.SHA256))
-	if err != nil {
-		return nil, AttachmentInfo{}, fmt.Errorf("artifacts: open attachment: %w", err)
-	}
-	return rc, AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size}, nil
-}
-
 // DeliveryRedirectTTL is the lifetime of the object-store URL a broker is
 // redirected to when it redeems an attachment delivery capability
 // (ptone/scion#4596).
@@ -422,7 +391,7 @@ const DeliveryRedirectTTL = 60 * time.Second
 
 // ServeBoundAttachment answers a broker redeeming a delivery capability
 // for attachment artifactID, which must be bound to message messageID
-// (ptone/scion#4596). Like OpenBoundAttachment it checks no caller: the host
+// (ptone/scion#4596). It checks no caller: the host
 // calls it only from its capability redemption route, after the capability
 // (issued under the read decision for the recipient) has been verified and
 // spent. The local provider streams the bytes; an object store answers a

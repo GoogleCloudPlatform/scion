@@ -30,19 +30,21 @@ import (
 // removed safely.
 var errInjectedRemoval = fmt.Errorf("injected removal failure: %w", errors.ErrUnsupported)
 
-// failRemoveAllSafeAt makes removeAllSafe fail with errInjectedRemoval for a
-// path whose last two elements are parent/name (the guard may hand over a
-// resolved path, so the full path is not compared); every other path is
-// removed by util.RemoveAllSafe. It returns the paths the stub failed.
+// failRemoveAllSafeAt makes agentFilesRemoveAll fail with errInjectedRemoval
+// for a path whose last two elements are parent/name (the guard may hand over
+// a resolved path, so the full path is not compared); every other path is
+// removed normally. It returns the paths the stub failed.
 func failRemoveAllSafeAt(t *testing.T, parent, name string) *[]string {
 	t.Helper()
 	var failed []string
-	setSeam(t, &removeAllSafe, func(path string) error {
+	orig := agentFilesRemoveAll
+	setSeam(t, &agentFilesRemoveAll, func(rootDir, rel string) error {
+		path := filepath.Join(rootDir, rel)
 		if filepath.Base(path) == name && filepath.Base(filepath.Dir(path)) == parent {
 			failed = append(failed, path)
 			return errInjectedRemoval
 		}
-		return util.RemoveAllSafe(path)
+		return orig(rootDir, rel)
 	})
 	return &failed
 }

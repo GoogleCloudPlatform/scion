@@ -38,6 +38,7 @@ type routedInboundRequest struct {
 	ExternalRef  string                      `json:"external_ref,omitempty"`
 	ParentRef    string                      `json:"parent_ref,omitempty"`
 	DisplayName  string                      `json:"display_name,omitempty"`
+	LegacyRef    string                      `json:"legacy_ref,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
 
 	// AttachmentIDs is not supported on this route yet; a request naming
@@ -117,8 +118,7 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 
 	// Parse request body.
 	var req routedInboundRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &req) {
 		return
 	}
 
@@ -536,7 +536,7 @@ func (s *Server) dispatchRoutedRecipient(
 		convResult, convErr := s.resolveBrokerInboundConversation(
 			ctx, s.messageLog, agent.ProjectID,
 			params.req.Surface, params.req.ExternalRef, params.req.ParentRef, params.req.DisplayName, agent.ID,
-			params.req.Message.Channel, params.req.Message.ThreadID,
+			params.req.Message.Channel, params.req.LegacyRef, params.req.Message.ThreadID,
 		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {

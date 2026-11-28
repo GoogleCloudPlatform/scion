@@ -3244,7 +3244,7 @@ func TestProvisionAgent_GitWorkspaceSkillInjectedInContainer(t *testing.T) {
 
 func TestLoadMandatoryPreamble(t *testing.T) {
 	t.Run("nil FS returns nil without panic", func(t *testing.T) {
-		result, err := loadMandatoryPreamble(nil)
+		result, err := loadMandatoryPreamble(nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3255,7 +3255,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 
 	t.Run("empty FS returns nil", func(t *testing.T) {
 		fsys := fstest.MapFS{}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3270,7 +3270,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 				Data: []byte("# Hello\r\nWorld\r\n"),
 			},
 		}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3286,7 +3286,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 				Data: []byte("# Hello\nWorld\n"),
 			},
 		}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3301,7 +3301,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 			"b-second.md": &fstest.MapFile{Data: []byte("Second\n")},
 			"a-first.md":  &fstest.MapFile{Data: []byte("First\n")},
 		}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3315,7 +3315,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 		fsys := fstest.MapFS{
 			"empty.md": &fstest.MapFile{Data: []byte("   \n   \n")},
 		}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3328,7 +3328,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 		fsys := fstest.MapFS{
 			"readme.txt": &fstest.MapFile{Data: []byte("This is a text file\n")},
 		}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3343,7 +3343,7 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 			"config.yaml": &fstest.MapFile{Data: []byte("key: value\n")},
 			"readme.txt":  &fstest.MapFile{Data: []byte("some text\n")},
 		}
-		result, err := loadMandatoryPreamble(fsys)
+		result, err := loadMandatoryPreamble(fsys, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -3418,7 +3418,7 @@ func TestComposeInstructions(t *testing.T) {
 
 func TestProvisionAgent_MandatoryPreamble(t *testing.T) {
 	// Load the actual preamble so tests reflect real binary state.
-	realPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	realPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS(), nil)
 	if err != nil {
 		t.Fatalf("failed to load real mandatory preamble: %v", err)
 	}

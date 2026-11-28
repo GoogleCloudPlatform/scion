@@ -1068,6 +1068,8 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to add creator to project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
+		} else if err == nil {
+			s.InvalidatePooledGroupCacheForUser(project.CreatedBy)
 		}
 	}
 
@@ -2521,7 +2523,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// an empty-ID caller.
 			broker.CreatedBy = ownerForNewBroker(callerUser)
 
-			if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+			if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
@@ -2964,6 +2966,14 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read-only discovery summary of available Hub System One instances for
+	// callers who already pass project System One binding authorization (A2):
+	// …/system-one/available-instances.
+	if subPath == "system-one/available-instances" {
+		s.handleProjectSystemOneAvailableInstances(w, r, projectID)
+		return
+	}
+
 	// Project message policies (ptone/scion#8047):
 	// …/message-policies, …/message-policies/test, …/message-policies/decisions,
 	// …/message-policies/{policyId}, …/message-policies/{policyId}/test, and
@@ -3027,7 +3037,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Project GitHub App and git identity settings
 	switch subPath {
-	case "github-installation", "github-status", "github-permissions", "git-identity":
+	case "github", "github-installation", "github-status", "github-permissions", "git-identity":
 		s.handleProjectGitHubRoutes(w, r, projectID, subPath)
 		return
 	}
@@ -3373,9 +3383,17 @@ func (s *Server) applyProjectAgentFilterQuery(ctx context.Context, w http.Respon
 func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
+	// Authorization for every caller kind. This route had no gate at all before
+	// #591: any agent token could create an agent in any project, and it is the
+	// route the CLI uses for create/start/sync. The URL project implies no
+	// isolation by itself. Authorize before reading the body so unauthorized
+	// callers consume zero body bytes.
+	if !s.authorizeAgentCreate(w, r, projectID) {
+		return
+	}
+
 	var req CreateAgentRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedCreateAgentRequest(w, r, &req, nil) {
 		return
 	}
 
@@ -3390,14 +3408,6 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 	}
 	if err := labels.Validate(req.Labels); err != nil {
 		ValidationError(w, "Invalid labels: "+err.Error(), nil)
-		return
-	}
-
-	// Authorization for every caller kind. This route had no gate at all before
-	// #591: any agent token could create an agent in any project, and it is the
-	// route the CLI uses for create/start/sync. The URL project implies no
-	// isolation by itself.
-	if !s.authorizeAgentCreate(w, r, projectID) {
 		return
 	}
 

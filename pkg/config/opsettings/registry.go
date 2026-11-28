@@ -200,10 +200,11 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.retention", "telemetry.retention.usage_events_days", "telemetry.retention.hourly_rollups_days",
 				"telemetry.retention.daily_rollups_days", "telemetry.retention.scope_counters_days",
+				"telemetry.retention.group_rollups_days", "telemetry.retention.budget_state_days",
 				"telemetry.retention.meter_health_days", "telemetry.retention.sweep_interval", "telemetry.retention.batch_size",
 				"telemetry.resource",
 			},
-			DBOnlyKeys:      []string{"telemetry.enforced"},
+			DBOnlyKeys:      []string{"telemetry.enforced", "telemetry.trajectory", "telemetry.trajectory.allow_project_opt_out"},
 			New:             func() any { return &TelemetrySettings{} },
 			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval", "telemetry.retention.sweep_interval"},
 		},
@@ -254,6 +255,12 @@ func init() {
 			KoanfPaths: []string{
 				config.HubUploadsMaxAttachmentSizeKey,
 				config.HubUploadsMaxWorkspaceFileSizeKey,
+				config.HubUploadsChunkBytesKey,
+				config.HubUploadsSessionIdleTTLKey,
+				config.HubUploadsSessionMaxLifetimeKey,
+				config.HubUploadsMaxSessionsPerUserKey,
+				config.HubUploadsMaxPendingBytesPerUserKey,
+				config.HubUploadsMaxPendingBytesHubKey,
 			},
 			New: func() any { return &UploadsSettings{} },
 		},
@@ -1135,13 +1142,24 @@ func buildTelemetrySchema(defs map[string]interface{}) map[string]interface{} {
 			cloned[k] = v
 		}
 		if props, ok := tc["properties"].(map[string]interface{}); ok {
-			clonedProps := make(map[string]interface{}, len(props)+1)
+			clonedProps := make(map[string]interface{}, len(props)+2)
 			for k, v := range props {
 				clonedProps[k] = v
 			}
 			clonedProps["enforced"] = map[string]interface{}{
 				"type":        "boolean",
 				"description": "Make telemetry mandatory for every agent this hub dispatches. Requires enabled=true.",
+			}
+			clonedProps["trajectory"] = map[string]interface{}{
+				"type":        "object",
+				"description": "Hub-level Track 2 trajectory capture policy settings.",
+				"properties": map[string]interface{}{
+					"allow_project_opt_out": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Allow projects to lower telemetry.trajectory.capture to metadata_only or off. Defaults to true.",
+					},
+				},
+				"additionalProperties": false,
 			}
 			cloned["properties"] = clonedProps
 		}
@@ -1242,18 +1260,7 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 		}
 		return errs
 	case UploadsSectionName:
-		var us UploadsSettings
-		if err := json.Unmarshal(doc, &us); err != nil {
-			return []config.ValidationError{{Message: fmt.Sprintf("invalid uploads JSON: %v", err)}}
-		}
-		var cfg config.HubUploadsConfig
-		if us.MaxAttachmentSize != nil {
-			cfg.MaxAttachmentSize = *us.MaxAttachmentSize
-		}
-		if us.MaxWorkspaceFileSize != nil {
-			cfg.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
-		}
-		if err := cfg.Validate(); err != nil {
+		if _, err := ParseUploadsDoc(doc); err != nil {
 			return []config.ValidationError{{Message: err.Error()}}
 		}
 		return nil

@@ -382,9 +382,20 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	b.mu.Unlock()
 
 	// Priority 1: Resolved conversation target (Conversation.ExternalRef /
-	// ParentRef, falling back to legacy ThreadID).
+	// ParentRef, falling back to legacy ThreadID when Conversation is nil).
 	convTarget := plugin.ResolveConversationTarget(msg)
-	if convTarget.ExternalRef != "" && store != nil {
+	// Direct user conversations and any native-surface user-addressed
+	// conversation (direct or group) are strictly recipient-routed and must
+	// never broadcast to project-linked channels. Against a pre-P5a hub
+	// (Conversation == nil), a "dm:" ExternalRef for a user recipient is also
+	// treated as recipient-only. Agent-to-agent observer copies
+	// (Recipient: "agent:...") remain eligible for channel-link delivery.
+	isUserRecipient := strings.HasPrefix(msg.Recipient, "user:")
+	isNativeSurface := msg.Conversation != nil && msg.Conversation.Surface == "native"
+	isPreP5aDM := msg.Conversation == nil && strings.HasPrefix(convTarget.ExternalRef, "dm:")
+	recipientOnly := isUserRecipient && (convTarget.Kind == "direct" || isNativeSurface || isPreP5aDM)
+
+	if convTarget.Kind != "direct" && convTarget.ExternalRef != "" && store != nil {
 		ref, err := store.GetConversationReference(ctx, convTarget.ExternalRef)
 		if err != nil {
 			b.log.Warn("Error looking up conversation reference", "external_ref", convTarget.ExternalRef, "error", err)
@@ -469,7 +480,7 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 
 	// Priority 4: ChannelLinks broadcast.
-	if len(targets) == 0 && projectID != "" && store != nil {
+	if len(targets) == 0 && !recipientOnly && projectID != "" && store != nil {
 		links, err := store.GetChannelLinksForProject(ctx, projectID)
 		if err != nil {
 			b.log.Warn("Error looking up channel links", "project_id", projectID, "error", err)

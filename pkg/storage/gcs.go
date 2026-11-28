@@ -238,23 +238,32 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 		// return before the upload goroutine finishes.
 		_ = writer.CloseWithError(err) //nolint:staticcheck // see above
 		cancel()
-		_ = writer.Close()
+		closeErr := writer.Close()
+		if isGCSPreconditionFailed(err) || isGCSPreconditionFailed(closeErr) {
+			return nil, ErrPreconditionFailed
+		}
 		return nil, fmt.Errorf("failed to upload data: %w", err)
 	}
 
 	// Close and finalize
 	if err := writer.Close(); err != nil {
-		var apiErr *googleapi.Error
-		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+		if isGCSPreconditionFailed(err) {
 			return nil, ErrPreconditionFailed
 		}
 		return nil, fmt.Errorf("failed to finalize upload: %w", err)
 	}
 
-	// Get object attributes
-	attrs, err := obj.Attrs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get object attributes: %w", err)
+	// Read attributes from the writer rather than calling obj.Attrs(ctx):
+	// obj may carry a write precondition (e.g. DoesNotExist / GenerationMatch)
+	// that no longer holds once the write has committed, causing GCS to reject
+	// a conditioned metadata GET with 412.
+	attrs := writer.Attrs()
+	if attrs == nil {
+		var err error
+		attrs, err = s.bucket.Object(objectPath).Attrs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get object attributes: %w", err)
+		}
 	}
 
 	return &Object{
@@ -547,6 +556,13 @@ func (s *GCSStorage) Close() error {
 // isNotExist checks if an error is a "not found" error.
 func isNotExist(err error) bool {
 	return errors.Is(err, storage.ErrObjectNotExist)
+}
+
+// isGCSPreconditionFailed reports whether err wraps a GCS HTTP 412
+// Precondition Failed response.
+func isGCSPreconditionFailed(err error) bool {
+	var apiErr *googleapi.Error
+	return errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed
 }
 
 // Ensure GCSStorage implements Storage interface.

@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,8 +34,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // fakeGitHub stands in for api.github.com for the two endpoints the gh://
@@ -1805,4 +1808,264 @@ func TestResolveGitHubSkill_BackgroundRefreshBoundsConcurrency(t *testing.T) {
 
 	assert.Equal(t, int64(hubGHRefreshConcurrency), maxInFlight.Load(),
 		"concurrent background refreshes must be bounded by hubGHRefreshConcurrency")
+}
+
+// TestSkillsResolve_GHCarriesResolvingCredential verifies that when the Hub
+// resolves a gh:// skill with a project's GitHub App credential (ptone/scion#5028):
+//   - A user access token limited to project skill:read receives no downloadToken.
+//   - A project-member user receives no downloadToken.
+//   - A registered provider broker receives a read-only (contents:read,
+//     metadata:read — no write permissions) repository-scoped downloadToken on
+//     both cache misses and cache hits, with Cache-Control: no-store.
+//   - Anonymous resolutions (no ProjectID) omit downloadToken.
+func TestSkillsResolve_GHCarriesResolvingCredential(t *testing.T) {
+	const (
+		owner        = "acme"
+		repo         = "private-skills"
+		uri          = "gh://" + owner + "/" + repo + "/secret@main"
+		uri2         = "gh://" + owner + "/" + repo + "/other@main"
+		commitSHA    = "dddddddddddddddddddddddddddddddddddddddd"
+		mintedToken  = "ghs_project_app_resolving_token_5028"
+		installIDVal = int64(5028)
+	)
+
+	srv, st, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	ctx := context.Background()
+
+	type mintReqBody struct {
+		Repositories []string          `json:"repositories"`
+		Permissions  map[string]string `json:"permissions"`
+	}
+	var (
+		treeCalls atomic.Int64
+		mintMu    sync.Mutex
+		mintReqs  []mintReqBody
+	)
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			// Advertise write-capable App permissions so the test genuinely
+			// proves the Hub requested read-only permissions rather than
+			// inheriting a read-only App ceiling.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   1,
+				"slug": "fake-scion-app",
+				"permissions": map[string]string{
+					"contents":      "write",
+					"pull_requests": "write",
+					"issues":        "write",
+					"metadata":      "read",
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == fmt.Sprintf("/app/installations/%d/access_tokens", installIDVal):
+			var body mintReqBody
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			mintMu.Lock()
+			mintReqs = append(mintReqs, body)
+			mintMu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"token":      mintedToken,
+				"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			})
+		case strings.HasPrefix(r.URL.Path, "/repos/"+owner+"/"+repo+"/commits/"):
+			if r.Header.Get("Authorization") != "Bearer "+mintedToken {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(commitSHA))
+		case strings.HasPrefix(r.URL.Path, "/repos/"+owner+"/"+repo+"/git/trees/"):
+			if r.Header.Get("Authorization") != "Bearer "+mintedToken {
+				http.NotFound(w, r)
+				return
+			}
+			treeCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sha":"t","truncated":false,"tree":[{
+				"path": "SKILL.md",
+				"mode": "100644",
+				"type": "blob",
+				"sha": "ce013625030ba8dba906f756967f9e9ca394464a",
+				"size": 6
+			}]}`))
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ghSrv.Close)
+
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.APIBaseURL = ghSrv.URL
+	srv.config.GitHubAppConfig.RawBaseURL = ghSrv.URL
+	srv.config.GitHubAppConfig.AppID = 1
+	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+	srv.mu.Unlock()
+
+	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installIDVal,
+		AccountLogin:   owner,
+		AccountType:    "Organization",
+		AppID:          1,
+		Repositories:   []string{owner + "/" + repo},
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+
+	// Bind the installation to the project via a super-admin user so
+	// authorizeGitHubAppAssociation authorizes token minting.
+	admin := &store.User{
+		ID:          tid("admin-5028"),
+		Email:       "admin-5028@test.com",
+		DisplayName: "admin-5028",
+		Role:        store.UserRoleAdmin,
+		Status:      store.UserStatusActive,
+		Created:     time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, admin))
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      admin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	remote := ghSrv.URL + "/" + owner + "/" + repo
+	bindingRaw, err := json.Marshal(githubInstallationBinding{
+		InstallationID: installIDVal,
+		Remote:         util.NormalizeGitRemote(remote),
+		BoundBy:        admin.ID,
+		BoundAt:        time.Now(),
+	})
+	require.NoError(t, err)
+
+	installID := installIDVal
+	storedProj, err := st.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	storedProj.GitRemote = remote
+	storedProj.GitHubInstallationID = &installID
+	if storedProj.Annotations == nil {
+		storedProj.Annotations = map[string]string{}
+	}
+	storedProj.Annotations[githubInstallationBindingAnnotation] = string(bindingRaw)
+	require.NoError(t, st.UpdateProject(ctx, storedProj))
+
+	// Register a provider broker for the project.
+	brokerID := api.NewUUID()
+	require.NoError(t, st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   brokerID,
+		BrokerName: "skill-download-broker-5028",
+		Status:     "online",
+	}))
+
+	// Create a project-member user and a UAT whose ceiling is only project skill:read.
+	member := createNamedTestUser(t, st, "member-5028", store.UserRoleMember)
+	createTestUserWithProjectRole(t, st, member.ID, member.Email, project.ID, store.ProjectRoleMember)
+	skillReadUAT := mintScopedUAT(t, srv, member.ID, project.ID, []string{"skill:read"})
+
+	doRequestAsBroker := func(t *testing.T, body ResolveSkillsRequest) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, merr := json.Marshal(body)
+		require.NoError(t, merr)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/resolve", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(brokerID)))
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	reqBody := ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: uri}},
+		ProjectID: project.ID,
+	}
+
+	// (a) A UAT whose ceiling is only project skill:read resolves the skill
+	// (even on a cache miss), but never receives downloadToken.
+	recUAT := doRequestWithUAT(t, srv, skillReadUAT, http.MethodPost, "/api/v1/skills/resolve", reqBody)
+	require.Equal(t, http.StatusOK, recUAT.Code, "body: %s", recUAT.Body.String())
+	assert.NotContains(t, recUAT.Body.String(), "downloadToken")
+	assert.NotContains(t, recUAT.Body.String(), mintedToken)
+
+	var respUAT ResolveSkillsResponse
+	require.NoError(t, json.Unmarshal(recUAT.Body.Bytes(), &respUAT))
+	require.Empty(t, respUAT.Errors)
+	require.Len(t, respUAT.Resolved, 1)
+	assert.Empty(t, respUAT.Resolved[0].DownloadToken)
+	assert.Equal(t, int64(1), treeCalls.Load())
+
+	// (b) A project-member user resolves the same skill and never receives downloadToken.
+	recMember := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/skills/resolve", reqBody)
+	require.Equal(t, http.StatusOK, recMember.Code, "body: %s", recMember.Body.String())
+	assert.NotContains(t, recMember.Body.String(), "downloadToken")
+	assert.NotContains(t, recMember.Body.String(), mintedToken)
+
+	var respMember ResolveSkillsResponse
+	require.NoError(t, json.Unmarshal(recMember.Body.Bytes(), &respMember))
+	require.Empty(t, respMember.Errors)
+	require.Len(t, respMember.Resolved, 1)
+	assert.Empty(t, respMember.Resolved[0].DownloadToken)
+
+	// (c1) Provider broker on a cache hit: receives DownloadToken with Cache-Control: no-store
+	// and makes no second GitHub tree call.
+	recBrokerHit := doRequestAsBroker(t, reqBody)
+	require.Equal(t, http.StatusOK, recBrokerHit.Code, "body: %s", recBrokerHit.Body.String())
+	assert.Equal(t, "no-store", recBrokerHit.Header().Get("Cache-Control"))
+
+	var respBrokerHit ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(recBrokerHit.Body).Decode(&respBrokerHit))
+	require.Empty(t, respBrokerHit.Errors)
+	require.Len(t, respBrokerHit.Resolved, 1)
+	assert.Equal(t, mintedToken, respBrokerHit.Resolved[0].DownloadToken)
+	assert.Equal(t, int64(1), treeCalls.Load(), "broker resolve of cached URI must be served from cache")
+
+	// (c2) Provider broker on a cache miss: resolves a second URI and receives DownloadToken.
+	recBrokerMiss := doRequestAsBroker(t, ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: uri2}},
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusOK, recBrokerMiss.Code, "body: %s", recBrokerMiss.Body.String())
+	assert.Equal(t, "no-store", recBrokerMiss.Header().Get("Cache-Control"))
+
+	var respBrokerMiss ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(recBrokerMiss.Body).Decode(&respBrokerMiss))
+	require.Empty(t, respBrokerMiss.Errors)
+	require.Len(t, respBrokerMiss.Resolved, 1)
+	assert.Equal(t, mintedToken, respBrokerMiss.Resolved[0].DownloadToken)
+	assert.Equal(t, int64(2), treeCalls.Load())
+
+	// Assert on the actual mint request body sent to GitHub: repository-scoped
+	// and strictly read-only (contents:read, metadata:read — no write level).
+	mintMu.Lock()
+	capturedMints := append([]mintReqBody(nil), mintReqs...)
+	mintMu.Unlock()
+	require.Len(t, capturedMints, 1, "read-only installation token should be minted once and cached")
+	assert.Equal(t, []string{repo}, capturedMints[0].Repositories)
+	assert.Equal(t, map[string]string{
+		"contents": "read",
+		"metadata": "read",
+	}, capturedMints[0].Permissions)
+	for perm, level := range capturedMints[0].Permissions {
+		assert.NotEqual(t, "write", level, "permission %q must not be write", perm)
+	}
+
+	// Anonymous resolution (request omits ProjectID, so the configured GitHub
+	// App is not used): DownloadToken is omitted from JSON.
+	pubGH := newFakeGitHub(t, owner, "public-repo", "skills/pub", commitSHA)
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.APIBaseURL = pubGH.URL
+	srv.config.GitHubAppConfig.RawBaseURL = pubGH.URL
+	srv.mu.Unlock()
+
+	recPub := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: "gh://" + owner + "/public-repo/pub@main"}},
+	})
+	require.Equal(t, http.StatusOK, recPub.Code, "body: %s", recPub.Body.String())
+	assert.NotContains(t, recPub.Body.String(), "downloadToken")
 }

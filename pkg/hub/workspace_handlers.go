@@ -203,6 +203,20 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 	})
 }
 
+// maxFileManifestBodySize bounds JSON request bodies carrying file lists or
+// manifests (workspace sync-to/finalize, template/harness-config
+// create/upload/finalize) at 16 MiB (same class as maxAgentCreateBodySize).
+// Templates and harness-configs cap file counts at importMaxTreeFiles (20,000);
+// workspace sync-to/finalize cap file counts at maxAgentCreateWorkspaceFiles
+// (175,000) to match agent create.
+const maxFileManifestBodySize = 16 << 20
+
+const fileManifestTooLargeMsg = "request body exceeds the 16 MiB maximum size"
+
+const maxWorkspaceSyncManifestBodySize = maxFileManifestBodySize
+
+const workspaceSyncManifestTooLargeMsg = fileManifestTooLargeMsg
+
 // handleWorkspaceSyncFrom initiates a workspace sync from an agent.
 // POST /api/v1/agents/{id}/workspace/sync-from
 //
@@ -216,8 +230,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 	// Parse optional request body
 	var req SyncFromRequest
 	if r.ContentLength > 0 {
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
+		if !decodeJSON(w, r, &req) {
 			return
 		}
 	}
@@ -329,8 +342,7 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 
 	// Parse request body
 	var req SyncToRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxWorkspaceSyncManifestBodySize, workspaceSyncManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -342,6 +354,15 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 
 	agent := s.getAuthorizedWorkspaceAgent(w, r, agentID, ActionUpdate)
 	if agent == nil {
+		return
+	}
+
+	if len(req.Files) > maxAgentCreateWorkspaceFiles {
+		tooManyErr := &tooManyFilesError{field: "files", count: len(req.Files), limit: maxAgentCreateWorkspaceFiles}
+		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
+			"field": tooManyErr.field,
+			"max":   tooManyErr.limit,
+		})
 		return
 	}
 
@@ -415,8 +436,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	// Parse request body
 	var req SyncToFinalizeRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxWorkspaceSyncManifestBodySize, workspaceSyncManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -428,6 +448,15 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	agent := s.getAuthorizedWorkspaceAgent(w, r, agentID, ActionUpdate)
 	if agent == nil {
+		return
+	}
+
+	if len(req.Manifest.Files) > maxAgentCreateWorkspaceFiles {
+		tooManyErr := &tooManyFilesError{field: "manifest.files", count: len(req.Manifest.Files), limit: maxAgentCreateWorkspaceFiles}
+		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
+			"field": tooManyErr.field,
+			"max":   tooManyErr.limit,
+		})
 		return
 	}
 
@@ -514,6 +543,14 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to update agent config: "+err.Error())
+			return
+		}
+
+		// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1).
+		if err := s.checkTokenBudgetAdmission(ctx, agent, project); err != nil {
+			if !writeTokenBudgetAdmissionError(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
 			return
 		}
 

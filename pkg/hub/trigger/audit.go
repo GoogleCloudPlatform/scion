@@ -195,6 +195,7 @@ type FireAuditRecord struct {
 	TriggerID      string
 	EventID        string
 	FireID         string
+	ActionIndex    int
 	ActionType     string
 	Status         string // "fired" | "skipped" | "refused" | "failed"
 	MatchedThrough string
@@ -258,6 +259,7 @@ func (s *SlogAuditSink) RecordFire(ctx context.Context, rec FireAuditRecord) {
 		slog.String("trigger_id", rec.TriggerID),
 		slog.String("event_id", rec.EventID),
 		slog.String("fire_id", rec.FireID),
+		slog.Int("action_index", rec.ActionIndex),
 		slog.String("action_type", rec.ActionType),
 		slog.String("status", status),
 		slog.String("matched_through", rec.MatchedThrough),

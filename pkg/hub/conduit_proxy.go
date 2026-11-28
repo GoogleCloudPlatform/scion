@@ -280,8 +280,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		// sees a truncated response, never an error body appended to it.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			roundTripFailed = true
-			setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
-			w.Header().Set("X-Content-Type-Options", "nosniff")
+			setAgentPortPagePolicy(w.Header())
 			if r.Context().Err() == nil && isResponseHeaderTimeout(err) {
 				// The transport closed the stream; the agent end closes
 				// with it.

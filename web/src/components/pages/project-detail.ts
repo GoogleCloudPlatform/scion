@@ -21,6 +21,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { syncSingleSelectMenuChecked, type SlCheckboxMenuItem } from '../../utils/menu-checkbox.js';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
@@ -167,11 +168,23 @@ import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/proje
 import {
   AGENT_BADGES_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
+  agentsColumnPickerEnabled,
   decisionsEnabled,
   isFeatureEnabled,
+  messagePoliciesEnabled,
   triggersEnabled,
   usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
+import {
+  PROJECT_AGENT_COLUMNS,
+  defaultVisibleProjectAgentColumns,
+  loadVisibleProjectAgentColumns,
+  saveVisibleProjectAgentColumns,
+  toggleProjectAgentColumn,
+  type ProjectAgentColumnDef,
+  type ProjectAgentColumnId,
+} from '../../shared/agent-columns.js';
+import { renderColumnPicker } from '../shared/column-picker.js';
 import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
 import '../shared/measurement-status-badge.js';
@@ -219,6 +232,10 @@ function listViewOf(mode: ViewMode): AgentListView {
 // User-level (not per-project) sticky preference for the agents section height.
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
+
+const ALL_PROJECT_AGENT_COLUMN_IDS: ReadonlySet<ProjectAgentColumnId> = new Set(
+  PROJECT_AGENT_COLUMNS.map((col) => col.id)
+);
 
 /**
  * The server-prefetched project in `pageData.data`, when it is the project
@@ -507,6 +524,12 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private pagerPageSize: AgentPagerPageSize = 25;
 
+  /** Visible columns for the project agents table, lazily loaded under `scion-columns-project-agents` when enabled. */
+  @state()
+  private visibleColumns: Set<ProjectAgentColumnId> = defaultVisibleProjectAgentColumns();
+
+  private visibleColumnsLoaded = false;
+
   /** Forces a re-render when `agentWindow` changes outside of a `@state` setter (pagination, live updates, resync). */
   @state()
   private windowTick = 0;
@@ -581,6 +604,9 @@ export class ScionPageProjectDetail extends LitElement {
   private triggersEnabled = false;
 
   @state()
+  private messagePoliciesEnabled = false;
+
+  @state()
   private usageLedgerEnabled = false;
 
   @state()
@@ -591,6 +617,8 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnFeatureFlagsChanged = (): void => {
     this.triggersEnabled = triggersEnabled();
+    this.messagePoliciesEnabled = messagePoliciesEnabled();
+    this.requestUpdate();
     const nextUsage = usageLedgerEnabled();
     if (nextUsage !== this.usageLedgerEnabled) {
       this.usageLedgerEnabled = nextUsage;
@@ -884,8 +912,28 @@ export class ScionPageProjectDetail extends LitElement {
       }
 
       .agents-expand-toggle {
+        appearance: none;
+        background: transparent;
+        border: none;
+        padding: 0.375rem;
+        margin: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         font-size: 1rem;
         color: var(--scion-text-muted, #64748b);
+        border-radius: var(--scion-radius-sm, 0.25rem);
+        cursor: pointer;
+        transition: color var(--scion-transition-fast, 150ms ease);
+      }
+
+      .agents-expand-toggle:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
+
+      .agents-expand-toggle:focus-visible {
+        outline: var(--sl-focus-ring, 2px solid var(--scion-primary, #3b82f6));
+        outline-offset: var(--sl-focus-ring-offset, 1px);
       }
 
       .agent-card scion-deletion-banner {
@@ -983,6 +1031,12 @@ export class ScionPageProjectDetail extends LitElement {
 
       .broker-link:hover {
         color: var(--scion-primary, #3b82f6);
+      }
+
+      .reincarnated-meta {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted);
+        margin-top: 0.125rem;
       }
 
       .agent-task {
@@ -1485,6 +1539,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     this.decisionsEnabled = decisionsEnabled();
     this.triggersEnabled = triggersEnabled();
+    this.messagePoliciesEnabled = messagePoliciesEnabled();
     this.usageLedgerEnabled = usageLedgerEnabled();
 
     // Set SSE scope to this project (receives all agent events within
@@ -1553,6 +1608,10 @@ export class ScionPageProjectDetail extends LitElement {
     // indefinitely.
     if (changed.has('project') || changed.has('editingFilePath')) {
       this.normalizeActiveFileTab();
+    }
+    if (agentsColumnPickerEnabled() && !this.visibleColumnsLoaded) {
+      this.visibleColumnsLoaded = true;
+      this.visibleColumns = loadVisibleProjectAgentColumns();
     }
   }
 
@@ -2760,24 +2819,13 @@ export class ScionPageProjectDetail extends LitElement {
   private handleFilterInput(e: CustomEvent<FilterInputDetail>): void {
     this.filterNotice = '';
     this.filterQueryText = e.detail.value;
-    this.filterQuery = e.detail.query;
-    const fq = e.detail.query;
-    const ctx = this.filterContext;
-    this.agentWindow.setViewState({
-      filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
-      previewDiffersFromCommitted: true,
-    });
   }
 
   private handleFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
     this.filterNotice = '';
-    // Do not overwrite `this.filterQueryText` or the URL when a deferred commit
-    // fires after the user has moved on to a newer (e.g. in-progress invalid) edit.
-    const isCurrentText = e.detail.value === this.filterQueryText;
+    this.filterQueryText = e.detail.value;
     this.filterQuery = e.detail.query;
-    if (isCurrentText) {
-      this.syncQueryToUrl(e.detail.value);
-    }
+    this.syncQueryToUrl(e.detail.value);
     const fq = e.detail.query;
     const nextQ = e.detail.serverQ;
     const nextHasClientOnly = hasClientOnlyKeys(fq, PROJECT_AGENTS_FILTER_SCHEMA);
@@ -2793,7 +2841,7 @@ export class ScionPageProjectDetail extends LitElement {
     const pred = (a: Agent) => matchAgentQuery(fq, a, ctx);
     this.agentWindow.setViewState({
       filterPredicate: pred,
-      previewDiffersFromCommitted: !isCurrentText,
+      previewDiffersFromCommitted: false,
       committedFilterPredicate: pred,
       committedNonPhasePredicate: nonPhasePredicateForQuery(fq, ctx),
       committedPhasePredicate: phasePredicateForQuery(fq),
@@ -2873,6 +2921,27 @@ export class ScionPageProjectDetail extends LitElement {
     return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
   }
 
+  private onToggleColumn(id: ProjectAgentColumnId): void {
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = toggleProjectAgentColumn(this.visibleColumns, id);
+    saveVisibleProjectAgentColumns(this.visibleColumns);
+  }
+
+  private resetVisibleColumns(): void {
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = defaultVisibleProjectAgentColumns();
+    saveVisibleProjectAgentColumns(this.visibleColumns);
+  }
+
+  private renderColumnPicker(): TemplateResult {
+    return renderColumnPicker({
+      columns: PROJECT_AGENT_COLUMNS,
+      visible: this.visibleColumns,
+      onToggle: (id) => this.onToggleColumn(id),
+      onReset: () => this.resetVisibleColumns(),
+    });
+  }
+
   private renderFilterBar() {
     const activePhase = getActiveSingleKeyValue(
       this.filterQueryText,
@@ -2941,24 +3010,39 @@ export class ScionPageProjectDetail extends LitElement {
                   Sort: ${this.sortField}
                 </sl-button>
                 <sl-menu
-                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
-                    this.toggleSort(e.detail.item.value as AgentSortField)}
+                  @sl-select=${(e: CustomEvent<{ item: SlCheckboxMenuItem }>) => {
+                    const value = e.detail.item.value as AgentSortField;
+                    this.toggleSort(value);
+                    syncSingleSelectMenuChecked(e.detail.item, this.sortField === value);
+                  }}
                 >
-                  <sl-menu-item value="name" ?checked=${this.sortField === 'name'}
+                  <sl-menu-item type="checkbox" value="name" ?checked=${this.sortField === 'name'}
                     >Name</sl-menu-item
                   >
-                  <sl-menu-item value="status" ?checked=${this.sortField === 'status'}
+                  <sl-menu-item
+                    type="checkbox"
+                    value="status"
+                    ?checked=${this.sortField === 'status'}
                     >Status</sl-menu-item
                   >
-                  <sl-menu-item value="created" ?checked=${this.sortField === 'created'}
+                  <sl-menu-item
+                    type="checkbox"
+                    value="created"
+                    ?checked=${this.sortField === 'created'}
                     >Created</sl-menu-item
                   >
-                  <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}
+                  <sl-menu-item
+                    type="checkbox"
+                    value="updated"
+                    ?checked=${this.sortField === 'updated'}
                     >Updated</sl-menu-item
                   >
                 </sl-menu>
               </sl-dropdown>
             `
+          : nothing}
+        ${this.viewMode === 'list' && agentsColumnPickerEnabled()
+          ? this.renderColumnPicker()
           : nothing}
       </div>
     `;
@@ -3325,6 +3409,21 @@ export class ScionPageProjectDetail extends LitElement {
                 </a>
               `
             : nothing}
+          ${this.messagePoliciesEnabled &&
+          canAny(this.project?._capabilities, 'read_message_policies', 'manage_message_policies')
+            ? html`
+                <a
+                  href="/projects/${encodeURIComponent(this.projectId)}/message-policies"
+                  style="text-decoration: none;"
+                  data-message-policies-link
+                >
+                  <sl-button size="small" data-message-policies-button>
+                    <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                    Message Policies
+                  </sl-button>
+                </a>
+              `
+            : nothing}
           <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
             <sl-button size="small">
               <sl-icon slot="prefix" name="graph-up"></sl-icon>
@@ -3565,13 +3664,18 @@ export class ScionPageProjectDetail extends LitElement {
           ${this.agentStats.total > 0 && this.viewMode !== 'graph'
             ? html`
                 <sl-tooltip content=${this.agentsExpanded ? 'Collapse' : 'Expand'}>
-                  <sl-icon-button
+                  <button
+                    type="button"
                     class="agents-expand-toggle"
-                    name=${this.agentsExpanded ? 'arrows-angle-contract' : 'arrows-angle-expand'}
-                    label=${this.agentsExpanded ? 'Collapse agents' : 'Expand agents'}
+                    aria-label=${this.agentsExpanded ? 'Collapse agents' : 'Expand agents'}
                     aria-expanded=${this.agentsExpanded ? 'true' : 'false'}
                     @click=${() => this.toggleAgentsExpanded()}
-                  ></sl-icon-button>
+                  >
+                    <sl-icon
+                      name=${this.agentsExpanded ? 'arrows-angle-contract' : 'arrows-angle-expand'}
+                      aria-hidden="true"
+                    ></sl-icon>
+                  </button>
                 </sl-tooltip>
               `
             : nothing}
@@ -4178,35 +4282,54 @@ export class ScionPageProjectDetail extends LitElement {
     this.backgroundRefresh('chip');
   }
 
-  private renderAgentTableHead() {
+  private renderAgentTableHead(activeColumns: readonly ProjectAgentColumnDef[]) {
     return html`
       <thead>
         <tr>
+          ${activeColumns.map((col) => this.renderAgentTableHeaderCell(col))}
+        </tr>
+      </thead>
+    `;
+  }
+
+  private renderAgentTableHeaderCell(col: ProjectAgentColumnDef): TemplateResult {
+    switch (col.id) {
+      case 'name':
+        return html`
           <th
             class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
             @click=${() => this.toggleSort('name')}
           >
             Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
           </th>
-          <th class="hide-mobile">Template</th>
-          <th class="hide-mobile">Broker</th>
+        `;
+      case 'template':
+        return html`<th class="hide-mobile">Template</th>`;
+      case 'broker':
+        return html`<th class="hide-mobile">Broker</th>`;
+      case 'status':
+        return html`
           <th
             class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
             @click=${() => this.toggleSort('status')}
           >
             Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
           </th>
+        `;
+      case 'updated':
+        return html`
           <th
             class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
             @click=${() => this.toggleSort('updated')}
           >
             Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
           </th>
-          <th class="hide-mobile">Task</th>
-          <th style="text-align: right">Actions</th>
-        </tr>
-      </thead>
-    `;
+        `;
+      case 'task':
+        return html`<th class="hide-mobile">Task</th>`;
+      case 'actions':
+        return html`<th style="text-align: right">Actions</th>`;
+    }
   }
 
   /** The list view: the window's page `items` and the pager, in every state. */
@@ -4214,15 +4337,20 @@ export class ScionPageProjectDetail extends LitElement {
     const items = this.agentWindow.items;
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
+    const columnPickerOn = agentsColumnPickerEnabled();
+    const visibleColumns = columnPickerOn ? this.visibleColumns : ALL_PROJECT_AGENT_COLUMN_IDS;
+    const activeColumns = columnPickerOn
+      ? PROJECT_AGENT_COLUMNS.filter((col) => visibleColumns.has(col.id))
+      : PROJECT_AGENT_COLUMNS;
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${items.length === 0
           ? this.renderNoAgentRows()
           : html`
               <table>
-                ${this.renderAgentTableHead()}
+                ${this.renderAgentTableHead(activeColumns)}
                 <tbody>
-                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn))}
+                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn, visibleColumns))}
                 </tbody>
               </table>
             `}
@@ -4282,7 +4410,11 @@ export class ScionPageProjectDetail extends LitElement {
     this.onAgentViewStateChanged();
   }
 
-  private renderAgentRow(agent: Agent, badgesOn: boolean) {
+  private renderAgentRow(
+    agent: Agent,
+    badgesOn: boolean,
+    visibleColumns: ReadonlySet<ProjectAgentColumnId>
+  ) {
     const isLoading = this.actionLoading[agent.id] || false;
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
@@ -4295,40 +4427,67 @@ export class ScionPageProjectDetail extends LitElement {
             ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
+          ${visibleColumns.has('status') ? nothing : this.renderDeletionBanner(agent, true)}
         </td>
-        <td class="hide-mobile">${agent.template}</td>
-        <td class="hide-mobile">
-          ${agent.runtimeBrokerId
-            ? html`<a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                <sl-icon name="hdd-rack"></sl-icon>
-                ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-              </a>`
-            : '\u2014'}
-        </td>
-        <td>
-          ${agentStatusBadge(agent, { size: 'small' })}
-          ${neverSuspendBadge(agent, { compact: true })}
-          <scion-deletion-badge
-            .deletion=${this.deletingView(agent)}
-            size="small"
-          ></scion-deletion-badge>
-          <scion-authority-badge .authority=${agent.authority} size="small"></scion-authority-badge>
-          ${this.renderDeletionBanner(agent, true)}
-        </td>
-        <td class="hide-mobile">
-          ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
-          agent.updated ||
-          agent.updatedAt
-            ? this.formatRelativeTime(
-                (agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')
-                  ? agent.lastActivityEvent
-                  : agent.updated || agent.updatedAt)!
-              )
-            : '\u2014'}
-        </td>
-        <td class="hide-mobile">
-          <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
-        </td>
+        ${visibleColumns.has('template')
+          ? html`<td class="hide-mobile">${agent.template}</td>`
+          : nothing}
+        ${visibleColumns.has('broker')
+          ? html`
+              <td class="hide-mobile">
+                ${agent.runtimeBrokerId
+                  ? html`<a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                      <sl-icon name="hdd-rack"></sl-icon>
+                      ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                    </a>`
+                  : '\u2014'}
+              </td>
+            `
+          : nothing}
+        ${visibleColumns.has('status')
+          ? html`
+              <td>
+                ${agentStatusBadge(agent, { size: 'small' })}
+                ${neverSuspendBadge(agent, { compact: true })}
+                <scion-deletion-badge
+                  .deletion=${this.deletingView(agent)}
+                  size="small"
+                ></scion-deletion-badge>
+                <scion-authority-badge
+                  .authority=${agent.authority}
+                  size="small"
+                ></scion-authority-badge>
+                ${this.renderDeletionBanner(agent, true)}
+              </td>
+            `
+          : nothing}
+        ${visibleColumns.has('updated')
+          ? html`
+              <td class="hide-mobile">
+                ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||
+                agent.updated ||
+                agent.updatedAt
+                  ? this.formatRelativeTime(
+                      (agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')
+                        ? agent.lastActivityEvent
+                        : agent.updated || agent.updatedAt)!
+                    )
+                  : '\u2014'}
+                ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
+                  ? html`<div class="reincarnated-meta" data-testid="agent-row-reincarnated">
+                      Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
+                    </div>`
+                  : nothing}
+              </td>
+            `
+          : nothing}
+        ${visibleColumns.has('task')
+          ? html`
+              <td class="hide-mobile">
+                <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
+              </td>
+            `
+          : nothing}
         <td class="actions-cell">
           <span class="table-actions">
             ${can(agent._capabilities, 'attach')
@@ -4498,6 +4657,12 @@ export class ScionPageProjectDetail extends LitElement {
                 </a>
               </div>`
             : ''}
+          ${agent.lastReincarnatedAt && !agent.lastReincarnatedAt.startsWith('0001')
+            ? html`<div data-testid="agent-card-reincarnated">
+                <sl-icon name="arrow-repeat"></sl-icon>
+                Reincarnated ${this.formatRelativeTime(agent.lastReincarnatedAt)}
+              </div>`
+            : nothing}
         </div>
 
         ${this.renderDeletionBanner(agent, false)}

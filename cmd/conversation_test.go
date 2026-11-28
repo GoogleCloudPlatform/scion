@@ -1101,7 +1101,7 @@ func TestRunConversationList_FullIDsRoundTrip(t *testing.T) {
 	assert.Equal(t, convID, fields[0])
 	assert.Equal(t, agentID, fields[4], "DEFAULT AGENT must not be truncated")
 
-	got, err := resolveConversationRef(context.Background(), nil, "conv:"+fields[0])
+	got, err := resolveConversationRef(context.Background(), nil, "", "conv:"+fields[0])
 	require.NoError(t, err)
 	assert.Equal(t, convID, got)
 

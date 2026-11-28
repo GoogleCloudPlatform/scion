@@ -45,7 +45,8 @@ type HubClient struct {
 }
 
 // SetHubInboundConversation toggles whether DeliverInbound emits top-level
-// Phase 11 conversation addressing (surface, external_ref, parent_ref).
+// Phase 11 / P5 conversation addressing (surface, external_ref, parent_ref,
+// legacy_ref).
 func (c *HubClient) SetHubInboundConversation(enabled bool) {
 	c.mu.Lock()
 	c.hubInboundConversation = enabled
@@ -70,37 +71,33 @@ type inboundPayload struct {
 	plugin.InboundConversation
 }
 
-// teamsInboundConversation derives the Phase 11 top-level conversation
-// addressing (surface, external_ref, parent_ref) for an inbound Teams message.
+// teamsInboundConversation derives the Phase 11 / P5 top-level conversation
+// addressing (surface, external_ref, parent_ref, legacy_ref) for an inbound
+// Teams message. Surface is always set to "teams" when msg is non-nil, and
+// LegacyRef carries the exact pre-P4 message.thread_id value.
 func teamsInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
 	if msg == nil {
 		return plugin.InboundConversation{}
+	}
+	ic := plugin.InboundConversation{
+		Surface:   "teams",
+		LegacyRef: msg.ThreadID,
 	}
 	var convID string
 	if msg.Metadata != nil {
 		convID = msg.Metadata["teams_conversation_id"]
 	}
 	if convID != "" {
-		parentID := stripThreadSuffix(convID)
-		if parentID != "" && parentID != convID {
-			return plugin.InboundConversation{
-				Surface:     "teams",
-				ExternalRef: convID,
-				ParentRef:   parentID,
-			}
+		ic.ExternalRef = convID
+		if parentID := stripThreadSuffix(convID); parentID != "" && parentID != convID {
+			ic.ParentRef = parentID
 		}
-		return plugin.InboundConversation{
-			Surface:     "teams",
-			ExternalRef: convID,
-		}
+		return ic
 	}
 	if msg.ThreadID != "" {
-		return plugin.InboundConversation{
-			Surface:     "teams",
-			ExternalRef: msg.ThreadID,
-		}
+		ic.ExternalRef = msg.ThreadID
 	}
-	return plugin.InboundConversation{}
+	return ic
 }
 
 // DeliverInbound sends a structured message to the hub's inbound endpoint.

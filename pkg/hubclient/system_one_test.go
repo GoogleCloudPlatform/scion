@@ -303,6 +303,13 @@ func TestSystemOne_ListAdapters(t *testing.T) {
 					DisplayName:     "Gemini Decisions",
 					DefaultEndpoint: "https://generativelanguage.googleapis.com",
 					ModelRequired:   true,
+					KnownModels: []SystemOneKnownModel{
+						{
+							ID:          "gemini-decision-1",
+							DisplayName: "Gemini Decision 1",
+							Source:      "provider-doc",
+						},
+					},
 					AuthModes: []SystemOneAdapterAuthMode{
 						{Mode: "owned_api_key", AuthKind: "api_key", TransportScheme: "header:x-goog-api-key", CustomEndpointAllowed: true},
 						{Mode: "secret_ref", AuthKind: "api_key", TransportScheme: "header:x-goog-api-key", CustomEndpointAllowed: false},
@@ -327,6 +334,9 @@ func TestSystemOne_ListAdapters(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Adapters, 1)
 	assert.Equal(t, "gemini_decisions", resp.Adapters[0].ID)
+	assert.Equal(t, []SystemOneKnownModel{
+		{ID: "gemini-decision-1", DisplayName: "Gemini Decision 1", Source: "provider-doc"},
+	}, resp.Adapters[0].KnownModels)
 	assert.Equal(t, []string{"GEMINI_API_KEY", "GEMINI_ALT_KEY"}, resp.Adapters[0].AllowedSecretNames)
 	assert.Equal(t, "project_or_hub", resp.Adapters[0].DefaultSecretScope)
 }

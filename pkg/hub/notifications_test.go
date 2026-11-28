@@ -575,6 +575,24 @@ func TestFormatNotificationMessage_StalledAge(t *testing.T) {
 		LastActivityEvent:   time.Now().Add(-6*time.Minute - 10*time.Second),
 	}
 	assert.Equal(t, "bot has STALLED (was working): no activity for 6m ("+state.StalledNoHookActivityHint+")", formatNotificationMessage(noHookAgent, "STALLED"))
+
+	// Defensive floor: if LastActivityEvent predates StartedAt (e.g. a
+	// pre-suspension timestamp on a resumed agent), anchor stall age at StartedAt.
+	resumedAgent := &store.Agent{
+		Slug:              "bot",
+		StartedAt:         time.Now().Add(-6*time.Minute - 10*time.Second),
+		LastActivityEvent: time.Now().Add(-6 * time.Hour),
+	}
+	assert.Equal(t, "bot has STALLED: no activity for 6m", formatNotificationMessage(resumedAgent, "STALLED"))
+
+	// Normal case: LastActivityEvent after StartedAt uses LastActivityEvent.
+	normalAgent := &store.Agent{
+		Slug:                "bot",
+		StalledFromActivity: "executing",
+		StartedAt:           time.Now().Add(-2 * time.Hour),
+		LastActivityEvent:   time.Now().Add(-6*time.Minute - 10*time.Second),
+	}
+	assert.Equal(t, "bot has STALLED (was executing): no activity for 6m", formatNotificationMessage(normalAgent, "STALLED"))
 }
 
 func TestFormatStallAge(t *testing.T) {

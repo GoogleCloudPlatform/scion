@@ -407,8 +407,7 @@ export type ReviewHint =
   | 'paste-multi'
   | 'earlier'
   | 'moved'
-  | 'source-own'
-  | 'resumed-draft'
+  | 'unmarked-source'
   | 'composing'
   | 'code-run'
   | 'generic'
@@ -447,13 +446,9 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title: 'This edit would move an earlier comment.',
     body: 'Edit around it, or use the Source view.',
   },
-  'source-own': {
+  'unmarked-source': {
     title:
-      "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
-    body: 'You can still change them there.',
-  },
-  'resumed-draft': {
-    title: 'Suggestions from before you left are read-only in the graphical view.',
+      'Existing marks are read-only in the graphical view while text outside marks has changed.',
     body: 'You can change them in Source.',
   },
   composing: {
@@ -624,6 +619,10 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private draftDiscardBusy = false;
   @state() private draftDiscardConflict = false;
   @state() private draftDiscardError: string | null = null;
+  @state() private draftAbandonOpen = false;
+  @state() private draftAbandonBusy = false;
+  @state() private draftAbandonConflict = false;
+  @state() private draftAbandonError: string | null = null;
   @state() private staleDraft: { draft: ReviewDraft; currentSeq: number } | null = null;
   @state() private staleDraftBusy = false;
   @state() private staleDraftError: string | null = null;
@@ -735,6 +734,8 @@ export class ScionPageArtifactDetail extends LitElement {
   private tooLargeByBlocks = false;
   /** The hint shown under the toolbar of the graphical review page. */
   @state() private graphicalHint: ReviewHint | null = null;
+  /** The base version seq of the current review draft (used to guard baseContent). */
+  @state() private reviewBaseSeq: number | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
   private preloaded = false;
 
@@ -889,12 +890,14 @@ export class ScionPageArtifactDetail extends LitElement {
       }
       .edit-footer {
         display: flex;
+        flex-wrap: wrap;
         gap: 0.5rem;
         align-items: flex-end;
         margin-top: 0.75rem;
       }
       .edit-footer sl-input {
         flex: 1;
+        min-width: 12rem;
       }
       sl-tab-group {
         margin-bottom: 0.5rem;
@@ -1315,8 +1318,8 @@ export class ScionPageArtifactDetail extends LitElement {
         }
         .g-toolbar {
           flex-wrap: nowrap;
-          gap: 0.2rem;
-          padding: 0.3rem 0.25rem;
+          gap: 0.125rem;
+          padding: 0.3rem 0.2rem;
         }
         .g-toolbar .sep,
         .g-toolbar .spacer,
@@ -1347,7 +1350,7 @@ export class ScionPageArtifactDetail extends LitElement {
           white-space: nowrap;
         }
         .g-toolbar sl-button::part(base) {
-          padding-inline: 0.25rem;
+          padding-inline: 0.2rem;
         }
         .g-toolbar sl-button::part(prefix) {
           padding-inline-end: 0;
@@ -1365,8 +1368,16 @@ export class ScionPageArtifactDetail extends LitElement {
           padding: 0;
         }
         .g-review-actions {
-          gap: 0.2rem;
+          gap: 0.125rem;
           margin-left: auto;
+        }
+        .g-review-actions sl-icon-button::part(base) {
+          padding: 0.125rem 0.25rem;
+          min-width: 1.5rem;
+          min-height: var(--sl-input-height-small, 1.875rem);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
         }
         /* Visually hidden, still the buttons' accessible names. */
         .g-toolbar .lbl {
@@ -1396,6 +1407,55 @@ export class ScionPageArtifactDetail extends LitElement {
         font-size: 2rem;
         color: var(--sl-color-danger-500);
         margin-bottom: 0.5rem;
+      }
+      sl-dialog::part(panel) {
+        width: min(34rem, calc(100vw - 2rem));
+      }
+      sl-dialog.stale-draft-dialog::part(panel) {
+        width: min(38rem, calc(100vw - 2rem));
+      }
+      sl-dialog p {
+        margin: 0 0 0.75rem;
+        font-size: 0.875rem;
+        line-height: 1.5;
+      }
+      sl-dialog p:last-of-type {
+        margin-bottom: 0;
+      }
+      .dialog-footer {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        width: 100%;
+      }
+      .dialog-footer-start {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        margin-inline-end: auto;
+      }
+      .dialog-footer-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        margin-inline-start: auto;
+      }
+      @media (max-width: 480px) {
+        .dialog-footer {
+          flex-direction: column-reverse;
+          align-items: stretch;
+        }
+        .dialog-footer-start,
+        .dialog-footer-actions {
+          flex-direction: column-reverse;
+          align-items: stretch;
+          margin-inline: 0;
+        }
       }
     `,
   ];
@@ -2275,6 +2335,10 @@ export class ScionPageArtifactDetail extends LitElement {
     this.draftCancelOpen = false;
     this.draftDiscardTarget = null;
     this.draftDiscardConflict = false;
+    this.draftAbandonOpen = false;
+    this.draftAbandonBusy = false;
+    this.draftAbandonConflict = false;
+    this.draftAbandonError = null;
     this.staleDraft = null;
     this.staleReviewError = false;
     this.requestReviewOpen = false;
@@ -2399,6 +2463,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.staleDraft = null;
     this.criticView = 'marks';
     this.reviewing = true;
+    this.reviewBaseSeq = v?.seq ?? null;
     this.reviewGraphical = this.graphicalReview;
     if (this.reviewDraftsEnabled && v && this.artifactId) {
       this.draftController = new ReviewDraftController({
@@ -2438,12 +2503,6 @@ export class ScionPageArtifactDetail extends LitElement {
       this.largeConfirmed = false;
       this.releaseChoice();
       void this.sizeReview(this.reviewText, ++this.reviewRuns);
-      if (init.rev > 0 && init.savedAt) {
-        const counts = countCritic(init.body);
-        if (counts.suggestions + counts.comments + counts.highlights > 0) {
-          this.showHint('resumed-draft');
-        }
-      }
     }
   }
 
@@ -2623,11 +2682,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Switches between the graphical and source views, remembering the choice. */
   private setReviewView(next: ReviewView): void {
     if (next === this.reviewView) return;
-    // Own suggestions are the reviewer's only until the text returns from
-    // the Source view, where it is opened again (every mark then earlier).
-    let ownMarks = false;
     if (next === 'source') {
-      ownMarks = this.graphicalEditor?.hasOwnMarks() ?? false;
       if (!this.takeGraphicalText()) return;
     } else {
       void this.ensureEditor();
@@ -2635,7 +2690,6 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.graphicalHint !== 'load-failed' || next === 'graphical') this.clearHint();
     this.reviewView = next;
     storeReviewView(next);
-    if (ownMarks) this.showHint('source-own');
   }
 
   /** Ctrl+Alt+M (and Cmd+Alt+M) comments in the source view too. */
@@ -2861,6 +2915,10 @@ export class ScionPageArtifactDetail extends LitElement {
     this.releaseChoice();
     this.disposeDraftController();
     this.draftCancelOpen = false;
+    this.draftAbandonOpen = false;
+    this.draftAbandonBusy = false;
+    this.draftAbandonConflict = false;
+    this.draftAbandonError = null;
     this.reviewing = false;
     this.discardedReview = null;
     this.carriedReview = null;
@@ -2927,6 +2985,7 @@ export class ScionPageArtifactDetail extends LitElement {
         this.reviewText = loaded.body;
         this.reviewNote = loaded.note;
         this.reviewPreview = loaded.body;
+        this.reviewBaseSeq = loaded.base;
         this.carriedReview = loaded.carried
           ? { base: loaded.carried.base, body: loaded.carried.body, entry: loaded.entry }
           : null;
@@ -2957,8 +3016,63 @@ export class ScionPageArtifactDetail extends LitElement {
   };
 
   private draftChipTooltip(d: ReviewDraft): string {
-    const hhmm = formatDraftTime(d.savedAt);
-    return hhmm ? `Your saved review draft, saved ${hhmm}` : 'Your saved review draft';
+    const formatted = formatDraftTime(d.savedAt);
+    return formatted ? `Your saved review draft, saved ${formatted}` : 'Your saved review draft';
+  }
+
+  private openAbandonReviewDialog = (): void => {
+    if (this.reviewBusy || this.draftAbandonOpen) return;
+    this.draftAbandonError = null;
+    this.draftAbandonConflict = false;
+    this.draftAbandonOpen = true;
+  };
+
+  private closeAbandonReviewDialog(): void {
+    this.draftAbandonOpen = false;
+    this.draftAbandonConflict = false;
+    this.draftAbandonError = null;
+    this.draftController?.resumeFromQuiesce();
+  }
+
+  private async confirmAbandonReview(): Promise<void> {
+    if (!this.draftAbandonOpen || this.draftAbandonBusy || this.draftAbandonConflict) return;
+    this.draftAbandonBusy = true;
+    this.draftAbandonError = null;
+    const draftCtrl = this.draftController;
+    const abandonGen = this.draftLoadGen;
+    try {
+      if (draftCtrl) {
+        await draftCtrl.quiesce();
+        if (
+          !this.reviewing ||
+          this.draftController !== draftCtrl ||
+          this.draftLoadGen !== abandonGen
+        ) {
+          return;
+        }
+      }
+      const rev = draftCtrl ? draftCtrl.currentRev : (this.savedDraft?.rev ?? 0);
+      if (rev > 0) {
+        await deleteReviewDraft(this.artifactId, { rev });
+        if (!this.reviewing || this.draftLoadGen !== abandonGen) return;
+        this.clearMyDraftState();
+      }
+      this.closeReviewMode();
+    } catch (err) {
+      if (!this.reviewing || this.draftLoadGen !== abandonGen) return;
+      if (err instanceof DraftConflictError) {
+        this.draftAbandonConflict = true;
+        this.draftAbandonError =
+          'This draft was updated on another device or tab. Close this dialog to choose whether to load the newer draft or keep yours before abandoning.';
+        draftCtrl?.noteConflict(err);
+        void this.loadSavedDraft(this.loadGen);
+      } else {
+        this.draftAbandonError =
+          err instanceof Error ? err.message : 'Could not abandon the review';
+      }
+    } finally {
+      this.draftAbandonBusy = false;
+    }
   }
 
   private openDiscardDraftDialog(): void {
@@ -3387,6 +3501,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ? html`<scion-artifact-request-review-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
+            .canAdminister=${!!(this.data.canManage || this.data.canShare)}
             ?open=${this.requestReviewOpen}
             @artifact-review-requested=${(): void => {
               void this.loadReviewRequests();
@@ -4531,26 +4646,26 @@ export class ScionPageArtifactDetail extends LitElement {
           ${runes} / ${MAX_REVIEW_REQUEST_NOTE_RUNES}
         </span>
       </div>
-      <sl-button
-        slot="footer"
-        size="small"
-        class="dismiss-request-cancel"
-        ?disabled=${this.dismissRequestBusy}
-        @click=${(): void => this.closeDismissRequestDialog()}
-      >
-        Cancel
-      </sl-button>
-      <sl-button
-        slot="footer"
-        size="small"
-        variant="primary"
-        class="dismiss-request-confirm"
-        ?disabled=${tooLong}
-        ?loading=${this.dismissRequestBusy}
-        @click=${(): void => void this.confirmDismissRequest()}
-      >
-        Dismiss
-      </sl-button>
+      <div slot="footer" class="dialog-footer">
+        <sl-button
+          size="small"
+          class="dismiss-request-cancel"
+          ?disabled=${this.dismissRequestBusy}
+          @click=${(): void => this.closeDismissRequestDialog()}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="primary"
+          class="dismiss-request-confirm"
+          ?disabled=${tooLong}
+          ?loading=${this.dismissRequestBusy}
+          @click=${(): void => void this.confirmDismissRequest()}
+        >
+          Dismiss
+        </sl-button>
+      </div>
     </sl-dialog>`;
   }
 
@@ -4673,18 +4788,13 @@ export class ScionPageArtifactDetail extends LitElement {
         ? 'image'
         : hint === 'load-failed'
           ? 'exclamation-triangle'
-          : hint === 'source-own' ||
-              hint === 'resumed-draft' ||
-              hint === 'large' ||
-              hint === 'too-large'
+          : hint === 'unmarked-source' || hint === 'large' || hint === 'too-large'
             ? 'info-circle'
             : 'slash-circle';
     const action =
       hint === 'image' ||
       hint === 'load-failed' ||
       hint === 'earlier' ||
-      hint === 'source-own' ||
-      hint === 'resumed-draft' ||
       hint === 'large' ||
       hint === 'too-large'
         ? nothing
@@ -4858,6 +4968,10 @@ export class ScionPageArtifactDetail extends LitElement {
             ? this.editorLoad === 'ready' && this.reviewSize !== null
               ? html`<scion-review-editor
                   .content=${this.reviewText}
+                  .baseContent=${this.text !== null &&
+                  (this.reviewBaseSeq === null || this.reviewBaseSeq === v.seq)
+                    ? lfText(this.text)
+                    : undefined}
                   .artifactId=${this.artifactId}
                   .seq=${v.seq}
                   .entryPath=${f.path}
@@ -5166,7 +5280,32 @@ export class ScionPageArtifactDetail extends LitElement {
                   <sl-icon slot="prefix" name="send"></sl-icon>
                   <span class="lbl">Submit Review</span>
                 </sl-button>
-              </sl-tooltip>`
+              </sl-tooltip>
+              <sl-dropdown class="review-actions-overflow" placement="bottom-end" distance="4">
+                <sl-icon-button
+                  slot="trigger"
+                  class="review-actions-overflow-btn"
+                  name="three-dots-vertical"
+                  label="More review actions"
+                  ?disabled=${this.reviewBusy}
+                ></sl-icon-button>
+                <sl-menu
+                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void => {
+                    if (e.detail.item.value === 'abandon') {
+                      this.openAbandonReviewDialog();
+                    }
+                  }}
+                >
+                  <sl-menu-item
+                    class="abandon-review-menu-item"
+                    value="abandon"
+                    ?disabled=${this.reviewBusy}
+                  >
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Abandon review
+                  </sl-menu-item>
+                </sl-menu>
+              </sl-dropdown>`
           : html`<sl-tooltip content="Save review">
               <sl-button
                 size="small"
@@ -5206,6 +5345,17 @@ export class ScionPageArtifactDetail extends LitElement {
         >
         ${this.reviewDraftsEnabled
           ? html`<sl-button
+                size="small"
+                variant="danger"
+                outline
+                class="abandon-review-btn"
+                ?disabled=${this.reviewBusy}
+                @click=${this.openAbandonReviewDialog}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Abandon review
+              </sl-button>
+              <sl-button
                 size="small"
                 class="save-draft-btn"
                 ?loading=${this.draftSnapshot?.inFlight ?? false}
@@ -5260,35 +5410,42 @@ export class ScionPageArtifactDetail extends LitElement {
               Save your changes to your draft before closing, or discard them? Discarding reverts to
               your last saved draft and does not delete it.
             </p>
-            <sl-button
-              slot="footer"
-              class="draft-cancel-back"
-              ?disabled=${this.draftCancelBusy}
-              @click=${(): void => {
-                this.draftCancelOpen = false;
-              }}
-              >Back to review</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-cancel-discard"
-              variant="danger"
-              ?disabled=${this.draftCancelBusy}
-              @click=${this.cancelDiscardChanges}
-              >Discard changes</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-cancel-save"
-              variant="primary"
-              autofocus
-              ?loading=${this.draftCancelBusy}
-              @click=${(): void => void this.cancelSaveAndClose()}
-              >Save draft and close</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <div class="dialog-footer-start">
+                <sl-button
+                  size="small"
+                  class="draft-cancel-discard"
+                  variant="danger"
+                  outline
+                  ?disabled=${this.draftCancelBusy}
+                  @click=${this.cancelDiscardChanges}
+                  >Discard changes</sl-button
+                >
+              </div>
+              <div class="dialog-footer-actions">
+                <sl-button
+                  size="small"
+                  class="draft-cancel-back"
+                  ?disabled=${this.draftCancelBusy}
+                  @click=${(): void => {
+                    this.draftCancelOpen = false;
+                  }}
+                  >Back to review</sl-button
+                >
+                <sl-button
+                  size="small"
+                  class="draft-cancel-save"
+                  variant="primary"
+                  autofocus
+                  ?loading=${this.draftCancelBusy}
+                  @click=${(): void => void this.cancelSaveAndClose()}
+                  >Save draft and close</sl-button
+                >
+              </div>
+            </div>
           </sl-dialog>`
         : nothing}
-      ${conflict
+      ${conflict && !this.draftAbandonOpen
         ? html`<sl-dialog
             class="draft-conflict-dialog"
             label="This review was changed on another device or tab"
@@ -5304,31 +5461,37 @@ export class ScionPageArtifactDetail extends LitElement {
                 : nothing}.
               Autosave is paused until you choose how to continue.
             </p>
-            <sl-button
-              slot="footer"
-              class="draft-conflict-download"
-              ?disabled=${this.draftConflictBusy}
-              @click=${this.downloadCurrentReview}
-            >
-              <sl-icon slot="prefix" name="download"></sl-icon>
-              Download this one
-            </sl-button>
-            <sl-button
-              slot="footer"
-              class="draft-conflict-keep"
-              variant="warning"
-              ?loading=${this.draftConflictBusy}
-              @click=${(): void => void this.resolveConflictKeep()}
-              >Keep this one</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-conflict-load"
-              variant="primary"
-              ?loading=${this.draftConflictBusy}
-              @click=${(): void => void this.resolveConflictLoad()}
-              >Load the newer draft</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <div class="dialog-footer-start">
+                <sl-button
+                  size="small"
+                  class="draft-conflict-download"
+                  ?disabled=${this.draftConflictBusy}
+                  @click=${this.downloadCurrentReview}
+                >
+                  <sl-icon slot="prefix" name="download"></sl-icon>
+                  Download this one
+                </sl-button>
+              </div>
+              <div class="dialog-footer-actions">
+                <sl-button
+                  size="small"
+                  class="draft-conflict-keep"
+                  variant="warning"
+                  ?loading=${this.draftConflictBusy}
+                  @click=${(): void => void this.resolveConflictKeep()}
+                  >Keep this one</sl-button
+                >
+                <sl-button
+                  size="small"
+                  class="draft-conflict-load"
+                  variant="primary"
+                  ?loading=${this.draftConflictBusy}
+                  @click=${(): void => void this.resolveConflictLoad()}
+                  >Load the newer draft</sl-button
+                >
+              </div>
+            </div>
           </sl-dialog>`
         : nothing}
       ${stale
@@ -5353,45 +5516,52 @@ export class ScionPageArtifactDetail extends LitElement {
                   ${this.staleDraftError}
                 </sl-alert>`
               : nothing}
-            <sl-button
-              slot="footer"
-              class="stale-draft-cancel"
-              ?disabled=${this.staleDraftBusy}
-              @click=${(): void => {
-                this.staleDraft = null;
-              }}
-              >Cancel</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="stale-draft-download"
-              ?disabled=${this.staleDraftBusy}
-              @click=${(): void =>
-                downloadTextFile(
-                  safeReviewDownloadName(stale.draft.entry, stale.draft.base),
-                  stale.draft.body
-                )}
-            >
-              <sl-icon slot="prefix" name="download"></sl-icon>
-              Download draft
-            </sl-button>
-            <sl-button
-              slot="footer"
-              class="stale-draft-discard"
-              variant="danger"
-              ?loading=${this.staleDraftBusy}
-              @click=${(): void => void this.discardStaleDraft()}
-              >Discard draft</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="stale-draft-move"
-              variant="primary"
-              autofocus
-              ?loading=${this.staleDraftBusy}
-              @click=${(): void => void this.moveStaleDraftToCurrent()}
-              >Move my review to v${stale.currentSeq}</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <div class="dialog-footer-start">
+                <sl-button
+                  size="small"
+                  class="stale-draft-download"
+                  ?disabled=${this.staleDraftBusy}
+                  @click=${(): void =>
+                    downloadTextFile(
+                      safeReviewDownloadName(stale.draft.entry, stale.draft.base),
+                      stale.draft.body
+                    )}
+                >
+                  <sl-icon slot="prefix" name="download"></sl-icon>
+                  Download draft
+                </sl-button>
+                <sl-button
+                  size="small"
+                  class="stale-draft-discard"
+                  variant="danger"
+                  outline
+                  ?loading=${this.staleDraftBusy}
+                  @click=${(): void => void this.discardStaleDraft()}
+                  >Discard draft</sl-button
+                >
+              </div>
+              <div class="dialog-footer-actions">
+                <sl-button
+                  size="small"
+                  class="stale-draft-cancel"
+                  ?disabled=${this.staleDraftBusy}
+                  @click=${(): void => {
+                    this.staleDraft = null;
+                  }}
+                  >Cancel</sl-button
+                >
+                <sl-button
+                  size="small"
+                  class="stale-draft-move"
+                  variant="primary"
+                  autofocus
+                  ?loading=${this.staleDraftBusy}
+                  @click=${(): void => void this.moveStaleDraftToCurrent()}
+                  >Move my review to v${stale.currentSeq}</sl-button
+                >
+              </div>
+            </div>
           </sl-dialog>`
         : nothing}
       ${this.draftDiscardTarget
@@ -5414,24 +5584,72 @@ export class ScionPageArtifactDetail extends LitElement {
                   ${this.draftDiscardError}
                 </sl-alert>`
               : nothing}
-            <sl-button
-              slot="footer"
-              class="draft-discard-cancel"
-              ?disabled=${this.draftDiscardBusy}
-              @click=${(): void => {
-                this.closeDiscardDraftDialog();
-              }}
-              >${this.draftDiscardConflict ? 'Close' : 'Cancel'}</sl-button
-            >
-            <sl-button
-              slot="footer"
-              class="draft-discard-confirm"
-              variant="danger"
-              ?disabled=${this.draftDiscardConflict}
-              ?loading=${this.draftDiscardBusy}
-              @click=${(): void => void this.confirmDiscardDraft()}
-              >Discard draft</sl-button
-            >
+            <div slot="footer" class="dialog-footer">
+              <sl-button
+                size="small"
+                class="draft-discard-cancel"
+                ?disabled=${this.draftDiscardBusy}
+                @click=${(): void => {
+                  this.closeDiscardDraftDialog();
+                }}
+                >${this.draftDiscardConflict ? 'Close' : 'Cancel'}</sl-button
+              >
+              <sl-button
+                size="small"
+                class="draft-discard-confirm"
+                variant="danger"
+                ?disabled=${this.draftDiscardConflict}
+                ?loading=${this.draftDiscardBusy}
+                @click=${(): void => void this.confirmDiscardDraft()}
+                >Discard draft</sl-button
+              >
+            </div>
+          </sl-dialog>`
+        : nothing}
+      ${this.draftAbandonOpen
+        ? html`<sl-dialog
+            class="draft-abandon-dialog"
+            label="Abandon review?"
+            open
+            @sl-request-close=${(e: Event): void => {
+              if (e.target !== e.currentTarget) return;
+              if (this.draftAbandonBusy) e.preventDefault();
+              else this.closeAbandonReviewDialog();
+            }}
+          >
+            <p>
+              ${(this.draftController
+                ? (this.draftSnapshot?.rev ?? this.draftController.currentRev)
+                : (this.savedDraft?.rev ?? 0)) > 0
+                ? "Delete your saved review draft and discard any unsaved changes without submitting? This can't be undone."
+                : "Discard your review edits and exit Review mode without submitting? This can't be undone."}
+            </p>
+            ${this.draftAbandonError
+              ? html`<sl-alert variant="danger" open>
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  ${this.draftAbandonError}
+                </sl-alert>`
+              : nothing}
+            <div slot="footer" class="dialog-footer">
+              <sl-button
+                size="small"
+                class="draft-abandon-cancel"
+                ?disabled=${this.draftAbandonBusy}
+                @click=${(): void => {
+                  this.closeAbandonReviewDialog();
+                }}
+                >${this.draftAbandonConflict ? 'Close' : 'Cancel'}</sl-button
+              >
+              <sl-button
+                size="small"
+                class="draft-abandon-confirm"
+                variant="danger"
+                ?disabled=${this.draftAbandonConflict}
+                ?loading=${this.draftAbandonBusy}
+                @click=${(): void => void this.confirmAbandonReview()}
+                >Abandon review</sl-button
+              >
+            </div>
           </sl-dialog>`
         : nothing}
     `;
@@ -5536,17 +5754,24 @@ export class ScionPageArtifactDetail extends LitElement {
           If you publish now, their review can't be saved on this version. They keep their text.
           Your edit stays in the editor if you wait.
         </p>
-        <sl-button slot="footer" class="review-open-wait" variant="primary" autofocus @click=${wait}
-          >Wait</sl-button
-        >
-        <sl-button
-          slot="footer"
-          class="review-open-force"
-          variant="warning"
-          ?loading=${this.editBusy}
-          @click=${(): void => void this.publishEdit(true)}
-          >Publish anyway</sl-button
-        >
+        <div slot="footer" class="dialog-footer">
+          <sl-button
+            size="small"
+            class="review-open-force"
+            variant="warning"
+            ?loading=${this.editBusy}
+            @click=${(): void => void this.publishEdit(true)}
+            >Publish anyway</sl-button
+          >
+          <sl-button
+            size="small"
+            class="review-open-wait"
+            variant="primary"
+            autofocus
+            @click=${wait}
+            >Wait</sl-button
+          >
+        </div>
       </sl-dialog>
     `;
   }

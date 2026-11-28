@@ -40,6 +40,8 @@ async function globalSetup(): Promise<void> {
       'hub.artifacts',
       'hub.artifacts_review_requests',
       'hub.artifacts_review_drafts',
+      'hub.agent_secrets',
+      'hub.command_requests',
     ],
   });
   console.info(`[setup] Inbox real hub ${String(state.hubId)} at ${state.baseURL}`);

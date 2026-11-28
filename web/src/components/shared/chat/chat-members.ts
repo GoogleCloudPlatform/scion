@@ -32,7 +32,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues, TemplateResult } from 'lit';
 import {
-  ACTIVITY_DISPLAY,
+  agentMemberBadgeStatus,
   activityTooltip,
   stateLabel,
   suspendReasonHint,
@@ -1136,13 +1136,7 @@ export class ScionChatMembers extends LitElement {
 
   /** Map an agent's phase/activity to a StatusType for the badge. */
   private resolveAgentStatus(a: ChatAgentMember): string {
-    // Mirror getAgentDisplayStatus (shared/types.ts) so the sidebar shows the
-    // same fine-grained state as the agent list: while an agent is running its
-    // activity ("thinking", "executing", "blocked", ...) is the real status;
-    // otherwise the phase is.
-    const activity = (a.activity || '').toLowerCase();
-    if (a.phase === 'running' && Object.hasOwn(ACTIVITY_DISPLAY, activity)) return activity;
-    return a.phase || 'unknown';
+    return agentMemberBadgeStatus(a) || 'unknown';
   }
 
   private renderAgent(a: ChatAgentMember) {

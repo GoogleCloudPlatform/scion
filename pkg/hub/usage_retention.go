@@ -244,6 +244,22 @@ func (sw *UsageRetentionSweeper) registerDefaultTargets(st store.UsageRetentionS
 		SweepBatch:    st.SweepUsageScopeCountersDailyBatch,
 	})
 	sw.RegisterTarget(UsageRetentionTarget{
+		Name: "usage_group_rollups_daily",
+		RetentionDays: func(cfg config.ResolvedTelemetryRetention) int {
+			return cfg.GroupRollupsDays
+		},
+		ComputeCutoff: scopeCountersRetentionCutoff,
+		SweepBatch:    st.SweepUsageGroupRollupsDailyBatch,
+	})
+	sw.RegisterTarget(UsageRetentionTarget{
+		Name: "usage_budget_state",
+		RetentionDays: func(cfg config.ResolvedTelemetryRetention) int {
+			return cfg.BudgetStateDays
+		},
+		ComputeCutoff: budgetStateRetentionCutoff,
+		SweepBatch:    st.SweepUsageBudgetStateBatch,
+	})
+	sw.RegisterTarget(UsageRetentionTarget{
 		Name: "meter_health",
 		RetentionDays: func(cfg config.ResolvedTelemetryRetention) int {
 			return cfg.MeterHealthDays
@@ -287,6 +303,18 @@ func scopeCountersRetentionCutoff(now time.Time, retentionDays int) time.Time {
 		return prevMonthStart
 	}
 	return ageCutoff
+}
+
+// budgetStateRetentionCutoff returns the cutoff for closed usage_budget_state
+// windows (window_end_utc < cutoff), clamped to never exceed now.UTC() so
+// active windows (window_end_utc > now) are never deleted (Tokenomics §4.2).
+func budgetStateRetentionCutoff(now time.Time, retentionDays int) time.Time {
+	u := now.UTC()
+	cutoff := u.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	if cutoff.After(u) {
+		return u
+	}
+	return cutoff
 }
 
 // Run executes one tick of the retention sweeper, honoring cfg.SweepInterval

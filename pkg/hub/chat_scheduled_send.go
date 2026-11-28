@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -224,8 +225,8 @@ func scheduledSendCaller(w http.ResponseWriter, r *http.Request, action Action) 
 		return nil
 	}
 	logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "chat_scheduled_message"}, action, refusal)
-	writeError(w, http.StatusForbidden, ErrCodeForbidden,
-		"scheduled messages require a signed-in session", nil)
+	writeSessionOnlyDenial(w, ErrCodeForbidden,
+		"scheduled messages require a signed-in session", authzop.ReasonInteractiveState)
 	return nil
 }
 

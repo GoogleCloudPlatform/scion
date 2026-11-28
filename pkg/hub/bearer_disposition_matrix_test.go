@@ -231,6 +231,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "404 while hub.system_one is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full credential and role matrix",
 		Pin:    "TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate",
 	},
+	{OperationID: "project.systemoneinstances.available", Method: "GET", Pattern: "/api/v1/projects/{id}/system-one/available-instances"}: {
+		Reason: "404 while hub.system_one or hub.message_policies is off in this fixture, and discovery reuses authorizeProjectSystemOneManage (active project owner/admin or unscoped local hub admin); the dedicated test enables both experiments and drives the full credential and role matrix",
+		Pin:    "TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage",
+	},
 	{OperationID: "project.messagepolicy.read", Method: "GET", Pattern: "/api/v1/projects/{id}/message-policies"}: {
 		Reason: "the route answers 404 while the hub.message_policies experiment is off, as in this fixture; the dedicated test enables the experiment and drives the full §4 credential matrix across session, dev, project/hub/other-project UATs, member, viewer, agent, delegated/broker/hub-delivery/federation/visitor, and hub admin",
 		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
@@ -250,6 +254,46 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "project.messagepolicy.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}/message-policies/{policyId}"}: {
 		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
 		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}/complete"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.workspace.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestWorkspaceUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.shareddir.read", Method: "GET", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestSharedDirUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.shareddir.write", Method: "POST", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestSharedDirUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.shareddir.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestSharedDirUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.shareddir.write", Method: "POST", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}/complete"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestSharedDirUploads_OwnerScopeBindingAndAgentRefused",
+	},
+	{OperationID: "project.shareddir.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}: {
+		Reason: "the route answers 404 while the hub.large_uploads experiment is off, as in this fixture; the dedicated test enables the experiment and verifies owner/scope binding and agent refusal",
+		Pin:    "TestSharedDirUploads_OwnerScopeBindingAndAgentRefused",
 	},
 	{OperationID: "project.messagepolicy.test", Method: "POST", Pattern: "/api/v1/projects/{id}/message-policies/test"}: {
 		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
@@ -382,6 +426,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "chat.usersecretrequests.list", Method: "GET", Pattern: "/api/v1/users/me/secret-requests"}: {
 		Reason: "the route answers 404 while the hub.agent_secrets experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestUserMeSecretRequests_AuthorizationAndScope enables the experiment and drives GET with a user access token, agent token, visitor, and session users",
 		Pin:    "TestUserMeSecretRequests_AuthorizationAndScope",
+	},
+	{OperationID: "chat.usercommandrequests.list", Method: "GET", Pattern: "/api/v1/users/me/command-requests"}: {
+		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestUserMeCommandRequests_AuthorizationAndScope enables the experiment and drives GET with a user access token, agent token, visitor, federated identity, and session users",
+		Pin:    "TestUserMeCommandRequests_AuthorizationAndScope",
 	},
 	{OperationID: "chat.commandrequest.read", Method: "GET", Pattern: "/api/v1/command-requests/{id}"}: {
 		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestCommandRequests_EndToEnd enables the experiment and drives GET with a real CLI session token, real PAT through Handler(), real agent JWT through Handler(), visitor identity, federated identity, and non-recipient",
@@ -587,7 +635,7 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
-		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and refuses non-interactive credentials at the route level with 403 interactive_session_required before charging the limiter; TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 403 interactive_session_required) and agent callers",
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and refuses non-interactive user credentials at the route level with 403 interactive_session_required before charging the limiter while admitting owning agents on the bounded path; TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 403 interactive_session_required) and owning/non-owning agent callers",
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.withdraw", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests/{rid}/withdraw"}: {

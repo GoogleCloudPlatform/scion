@@ -179,6 +179,12 @@ var windowsAllowed = map[string]bool{
 	// and the leave), no local writes. The parent 'project' stays gated, as
 	// for project.use.
 	"project.leave": true,
+	// Project GitHub App integration (ptone/scion#9327): pure Hub API calls,
+	// no local writes. The parent 'project' stays gated, as for project.use.
+	"project.github":        true,
+	"project.github.status": true,
+	"project.github.bind":   true,
+	"project.github.unbind": true,
 
 	"config":            true,
 	"config.list":       true,
@@ -191,6 +197,11 @@ var windowsAllowed = map[string]bool{
 	"config.cd-config":  true,
 	"config.cd-project": true,
 	"config.schema":     true,
+
+	// Top-level alias of 'hub auth login' (ptone/scion#9744): client-side only;
+	// local writes go through pkg/credentials (credentials.json) and
+	// pkg/config/cli_context.go (context.yaml), both using privatefs.
+	"login": true,
 
 	"hub":                       true,
 	"hub.auth":                  true,

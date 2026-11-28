@@ -64,11 +64,16 @@ message StructuredMessage {
 // Conversation carries the resolved conversation metadata for a message on
 // the hub-to-plugin wire (Phase 11). Plugins choose their spoke from surface
 // and target external_ref instead of reading legacy channel/thread_id fields.
+// For native/direct/untranslatable conversations the hub emits surface="native"
+// with empty external_ref/parent_ref so hub-internal keys never cross the wire.
 message Conversation {
   string surface = 1;
   string external_ref = 2;
   string parent_ref = 3;
   string display_name = 4;
+  // Conversation kind from conversations.kind: "direct" or "group"
+  // (empty when talking to a pre-P5a hub).
+  string kind = 5;
 }
 
 message ConfigureRequest {

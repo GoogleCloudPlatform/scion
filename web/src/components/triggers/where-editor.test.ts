@@ -138,4 +138,79 @@ describe('scion-trigger-where-editor', () => {
     expect(el.shadowRoot?.querySelector('[data-add-where-rule]')).toBeNull();
     expect(el.shadowRoot?.querySelector('[data-where-remove="0"]')).toBeNull();
   });
+
+  it('renders non-admitted dialects read-only, preserves them on edit/reorder, and allows explicit removal (J16c)', async () => {
+    const systemOneRule: TriggerMatchRuleSpec = {
+      dialect: 'system_one',
+      expr: 'match {\n  severity >= "high"\n}',
+    };
+    const el = document.createElement('scion-trigger-where-editor') as ScionTriggerWhereEditor;
+    el.rules = [
+      { dialect: 'cel', expr: 'event.attributes.a == "1"' },
+      { ...systemOneRule },
+      { dialect: 'cel', expr: 'event.attributes.b == "2"' },
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    let emittedCount = 0;
+    let latest: TriggerMatchRuleSpec[] = el.rules;
+    el.addEventListener('rules-changed', (e: Event) => {
+      emittedCount++;
+      latest = (e as CustomEvent<{ rules: TriggerMatchRuleSpec[] }>).detail.rules;
+    });
+
+    // Non-admitted row 1 renders dialect as read-only text (no sl-select), readonly textarea, and CLI/API help-text.
+    const row1 = el.shadowRoot?.querySelector('[data-where-row="1"]');
+    expect(row1?.hasAttribute('data-where-non-admitted')).toBe(true);
+    expect(row1?.querySelector('sl-select')).toBeNull();
+    const dialectEl = el.shadowRoot?.querySelector('[data-where-dialect="1"]');
+    expect(dialectEl?.hasAttribute('data-where-dialect-readonly')).toBe(true);
+    expect(dialectEl?.textContent?.trim()).toBe('Dialect: system_one');
+
+    const expr0Check = el.shadowRoot?.querySelector('[data-where-expr="0"]') as HTMLTextAreaElement;
+    expect(expr0Check.hasAttribute('help-text')).toBe(false);
+
+    const expr1 = el.shadowRoot?.querySelector('[data-where-expr="1"]') as HTMLTextAreaElement;
+    expect(expr1.hasAttribute('readonly')).toBe(true);
+    expect(expr1.value).toBe(systemOneRule.expr);
+    expect(expr1.getAttribute('help-text')).toBe(
+      'This rule uses system_one; edit it with the CLI or API.'
+    );
+
+    // Attempting to emit sl-input on the non-admitted row must be ignored.
+    expr1.value = 'tampered';
+    expr1.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    expect(emittedCount).toBe(0);
+    expect(el.rules[1]).toEqual(systemOneRule);
+
+    // Editing admitted row 0 preserves row 1 byte-identical.
+    const expr0 = el.shadowRoot?.querySelector('[data-where-expr="0"]') as HTMLTextAreaElement;
+    expr0.value = 'event.attributes.a == "edited"';
+    expr0.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    expect(latest).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.a == "edited"' },
+      systemOneRule,
+      { dialect: 'cel', expr: 'event.attributes.b == "2"' },
+    ]);
+
+    // Reordering row 2 up moves it ahead of system_one while keeping system_one intact.
+    (el.shadowRoot?.querySelector('[data-where-up="2"]') as HTMLElement).click();
+    await el.updateComplete;
+    expect(latest).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.a == "edited"' },
+      { dialect: 'cel', expr: 'event.attributes.b == "2"' },
+      systemOneRule,
+    ]);
+
+    // Explicitly removing system_one (now at index 2) removes it.
+    (el.shadowRoot?.querySelector('[data-where-remove="2"]') as HTMLElement).click();
+    await el.updateComplete;
+    expect(latest).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.a == "edited"' },
+      { dialect: 'cel', expr: 'event.attributes.b == "2"' },
+    ]);
+  });
 });

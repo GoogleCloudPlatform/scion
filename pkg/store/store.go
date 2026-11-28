@@ -639,6 +639,9 @@ type Store interface {
 
 	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
 	AgentSuspendScreenStore
+
+	// Resumable chunked web upload sessions (ptone/scion#8654)
+	UploadSessionStore
 }
 
 // StallCutoffs holds the activity-age cutoffs used by MarkStalledAgents.
@@ -3313,6 +3316,11 @@ type GroupStore interface {
 	// GetEffectiveGroupsForAgent returns all groups an agent belongs to,
 	// including the implicit project_agents group and transitive parent groups.
 	GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error)
+
+	// GetEffectiveGroupMemberUserIDs returns all distinct active (non-expired)
+	// user IDs who belong to groupID directly or transitively through nested
+	// child groups, sorted ascending.
+	GetEffectiveGroupMemberUserIDs(ctx context.Context, groupID string) ([]string, error)
 
 	// GetParentGroups returns all ancestor groups of the given group —
 	// i.e., groups that transitively contain this group as a child.

@@ -48,6 +48,11 @@ func (EntitlementBinding) Fields() []ent.Field {
 		field.String("scope_id").
 			Default(""),
 		field.Int64("value"),
+		// Additive nullable column for llm_tokens breach action
+		// (Tokenomics §4.4; NULL = pause_new).
+		field.String("token_action").
+			Optional().
+			Nillable(),
 		field.String("created_by").
 			Optional().
 			Default("").

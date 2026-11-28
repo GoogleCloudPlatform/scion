@@ -1262,13 +1262,11 @@ func TestCapabilityKeyring_DeliveryIssuanceClosed(t *testing.T) {
 	assertNoCapabilityKeyMaterial(t, logs.String(), before)
 }
 
-// TestCapabilityKeyring_DeliveryWithProjectionStillSigned: a deliverable
-// plan entry that carries a scratchpad projection (applyProjection) is
-// issued a versioned capability like any other: it redeems on the other
-// replica with the file bytes, and the same token with its payload altered
-// is refused without spending the nonce. The projection is plan metadata;
-// the signed payload is unchanged by it.
-func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
+// TestCapabilityKeyring_DeliveryCapabilitySignedAndTamperRejected: a
+// deliverable plan entry is issued a versioned capability that redeems on the
+// other replica with the file bytes, and the same token with its payload
+// altered is refused without spending the nonce.
+func TestCapabilityKeyring_DeliveryCapabilitySignedAndTamperRejected(t *testing.T) {
 	allowVersionedRings(t)
 	f := setupCapDeliveryFixture(t)
 	clk := &krClock{t: krT0}
@@ -1278,11 +1276,6 @@ func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
 	plan := append([]messages.AttachmentPlanEntry(nil), f.call.StructuredMessage.AttachmentPlan...)
 	require.Len(t, plan, 1)
 	require.Equal(t, messages.AttachmentDeliverable, plan[0].State)
-	plan[0].Delivery.ProjectedPath = "/test-only/shared/.attachments/" + plan[0].Delivery.ArtifactID + "/report.txt"
-	plan[0].Delivery.ProjectedMount = "test-only-shared"
-	applyProjection(&plan[0])
-	require.Equal(t, plan[0].Delivery.ProjectedPath, plan[0].ProjectedPath)
-	require.Equal(t, "test-only-shared", plan[0].ProjectedMount)
 	wire := a.attachmentDelivery().Issue(context.Background(), f.call.Agent, f.call.Agent.RuntimeBrokerID, plan)
 	require.Len(t, wire, 1)
 	token := tokenOf(t, wire[0])
@@ -1293,8 +1286,7 @@ func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
 	// token stays well-formed and its refusal comes from the MAC check.
 	payload, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])
 	require.NoError(t, err)
-	// The signed payload carries only the capability fields; the projection
-	// is not part of it.
+	// The signed payload carries only the capability fields.
 	var fields map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(payload, &fields))
 	keys := make([]string, 0, len(fields))
@@ -1302,7 +1294,6 @@ func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
 		keys = append(keys, k)
 	}
 	assert.ElementsMatch(t, []string{"a", "m", "g", "b", "e", "n"}, keys)
-	assert.NotContains(t, string(payload), "test-only-shared")
 	// Flip a byte inside the artifact ID value (never the nonce), so the
 	// refusal below cannot depend on the field lengths.
 	at := bytes.Index(payload, []byte(`"a":"`))

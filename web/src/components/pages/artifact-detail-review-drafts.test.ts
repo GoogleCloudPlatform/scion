@@ -24,6 +24,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../artifact-review/review-editor-loader.js', () => ({
+  loadReviewEditor: vi.fn(() => Promise.resolve()),
+  preloadReviewEditor: vi.fn(),
+}));
+
 import './artifact-detail.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
@@ -34,6 +39,28 @@ import {
   ARTIFACTS_REVIEW_DRAFTS_FLAG,
   resetServerFlagStateForTests,
 } from '../../utils/feature-flags.js';
+
+/** Stand-in for <scion-review-editor> so graphical-mode draft tests mount it directly. */
+class FakeReviewEditor extends HTMLElement {
+  content = '';
+  baseContent?: string;
+  scrollInset = 0;
+  hasOwnMarks(): boolean {
+    return false;
+  }
+  isComposing(): boolean {
+    return false;
+  }
+  flush(): string | null {
+    return this.content;
+  }
+  comment(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+if (!customElements.get('scion-review-editor')) {
+  customElements.define('scion-review-editor', FakeReviewEditor);
+}
 
 const PROJECT_ID = '11111111-1111-1111-1111-111111111111';
 const ARTIFACT_ID = '22222222-2222-2222-2222-222222222222';
@@ -103,6 +130,7 @@ interface DraftServerState {
   canPublish?: boolean;
   canReview?: boolean;
   fileText?: string;
+  nextGetResponse?: () => Response;
   nextPutResponse?: () => Response;
   holdPut?: (res: Response) => Promise<Response>;
   nextDeleteResponse?: () => Response;
@@ -124,6 +152,7 @@ function mockHub(state: DraftServerState): void {
 
     if (url.includes('/review-draft')) {
       if (method === 'GET') {
+        if (state.nextGetResponse) return reply(state.nextGetResponse());
         return reply(
           new Response(JSON.stringify({ draft: state.draft, currentSeq: state.currentSeq }), {
             status: 200,
@@ -179,6 +208,26 @@ function mockHub(state: DraftServerState): void {
       }
       if (method === 'DELETE') {
         if (state.nextDeleteResponse) return reply(state.nextDeleteResponse());
+        const revParam = new URL(url, 'http://localhost').searchParams.get('rev');
+        const curRev = state.draft?.rev ?? 0;
+        if (revParam !== null && curRev > 0 && Number(revParam) !== curRev) {
+          return reply(
+            new Response(
+              JSON.stringify({
+                error: {
+                  code: 'draft_conflict',
+                  message: 'draft rev mismatch',
+                  details: {
+                    rev: curRev,
+                    savedAt: state.draft?.savedAt ?? '2026-11-21T18:05:00Z',
+                    base: state.draft?.base ?? 1,
+                  },
+                },
+              }),
+              { status: 409, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
         state.draft = null;
         return reply(new Response(null, { status: 204 }));
       }
@@ -829,7 +878,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(v1Row.querySelector('.draft-chip-badge')?.textContent?.trim()).toBe('Draft');
     const chipTooltip = v1Row.querySelector('.draft-chip-trigger sl-tooltip');
     expect(chipTooltip?.getAttribute('content')).toMatch(
-      /Your saved review draft, saved \d{2}:\d{2}/
+      /Your saved review draft, saved [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}/
     );
     expect(v1Row.querySelector('.draft-chip-resume')?.textContent).toContain('Resume');
     expect(v1Row.querySelector('.draft-chip-discard')?.textContent).toContain('Discard draft');
@@ -898,7 +947,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
   });
 
-  it('resumes byte-exact from the History chip menu with no replace prompt and shows fail-closed notice in graphical view', async () => {
+  it('resumes byte-exact from the History chip menu with no replace prompt and passes baseContent in graphical view', async () => {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACT_REVIEW_EDITOR_FLAG]: true,
@@ -939,9 +988,104 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(internals.reviewNote).toBe('Byte-exact note');
     expect(internals.draftController?.currentRev).toBe(4);
 
-    // Fail-closed marks notice in graphical view (v3 §7.1).
-    const hint = el.shadowRoot!.querySelector('.hint-strip');
-    expect(hint?.textContent).toContain('read-only in the graphical view');
+    // Normal resume passes baseContent so own marks remain editable with no read-only hint.
+    expect(el.shadowRoot!.querySelector('.hint-strip')).toBeNull();
+    let editor: FakeReviewEditor | null = null;
+    await vi.waitFor(() => {
+      editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+      expect(editor).not.toBeNull();
+    });
+    expect(editor!.content).toBe(MARKED_TEXT);
+    expect(editor!.baseContent).toBe(BASE_TEXT);
+  });
+
+  it('clears baseContent on 409 conflict load when loaded.base differs from the viewed version and keeps it when base matches', async () => {
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+    };
+    const state: DraftServerState = {
+      draft: {
+        rev: 1,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    const chipMenu = el.shadowRoot!.querySelector('.draft-chip-menu sl-menu')!;
+    chipMenu.dispatchEvent(new CustomEvent('sl-select', { detail: { item: { value: 'resume' } } }));
+    await settle(el);
+
+    let editor: FakeReviewEditor | null = null;
+    await vi.waitFor(() => {
+      editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+      expect(editor).not.toBeNull();
+    });
+    expect(editor!.baseContent).toBe(BASE_TEXT);
+
+    const internals = el as unknown as {
+      reviewBaseSeq: number | null;
+      resolveConflictLoad: () => Promise<void>;
+      draftController?: {
+        resolveConflictLoad: () => Promise<ReviewDraft | null>;
+      };
+    };
+    expect(internals.reviewBaseSeq).toBe(1);
+
+    // Positive control: a 409 conflict load on the same base (seq 1) keeps baseContent.
+    const sameBaseBody = 'We ship in {~~Q3~>Q5~~}.\n';
+    internals.draftController!.resolveConflictLoad = () =>
+      Promise.resolve({
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: sameBaseBody,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:08:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      });
+    await internals.resolveConflictLoad();
+    await settle(el);
+
+    expect(internals.reviewBaseSeq).toBe(1);
+    editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+    expect(editor).not.toBeNull();
+    expect(editor!.content).toBe(sameBaseBody);
+    expect(editor!.baseContent).toBe(BASE_TEXT);
+
+    // Moved base: another device moves the draft to a newer base version (seq 2);
+    // baseContent must clear so marks from v2 are not misclassified as own.
+    const movedBaseBody = 'Newer version body {++edit++}.\n';
+    internals.draftController!.resolveConflictLoad = () =>
+      Promise.resolve({
+        rev: 3,
+        base: 2,
+        entry: 'plan.md',
+        body: movedBaseBody,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:10:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      });
+    await internals.resolveConflictLoad();
+    await settle(el);
+
+    expect(internals.reviewBaseSeq).toBe(2);
+    editor = el.shadowRoot!.querySelector<FakeReviewEditor>('scion-review-editor');
+    expect(editor).not.toBeNull();
+    expect(editor!.content).toBe(movedBaseBody);
+    expect(editor!.baseContent).toBeUndefined();
   });
 
   it('discards a draft from the History chip with confirmation and DELETE ?rev=', async () => {
@@ -1320,5 +1464,332 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector('sl-dialog.draft-discard-dialog')).toBeNull();
     expect(el.shadowRoot!.querySelector('.review-draft-badge')?.textContent?.trim()).toBe('Draft');
+  });
+
+  it('renders draft-cancel-dialog footer with grouped start/end actions and small buttons (ptone/scion#9693)', async () => {
+    const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    await settle(el);
+
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } }));
+    await el.updateComplete;
+
+    findButton(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-cancel-dialog')!;
+    expect(dialog).not.toBeNull();
+
+    // Footer buttons live inside a flex container rather than raw sl-dialog footer slot children.
+    const footer = dialog.querySelector<HTMLElement>(':scope > .dialog-footer[slot="footer"]');
+    expect(footer).not.toBeNull();
+    expect(dialog.querySelectorAll(':scope > sl-button[slot="footer"]')).toHaveLength(0);
+
+    const startGroup = footer!.querySelector('.dialog-footer-start');
+    const actionsGroup = footer!.querySelector('.dialog-footer-actions');
+    expect(startGroup).not.toBeNull();
+    expect(actionsGroup).not.toBeNull();
+
+    const discardBtn = startGroup!.querySelector('sl-button.draft-cancel-discard');
+    const backBtn = actionsGroup!.querySelector('sl-button.draft-cancel-back');
+    const saveBtn = actionsGroup!.querySelector('sl-button.draft-cancel-save');
+    expect(discardBtn).not.toBeNull();
+    expect(backBtn).not.toBeNull();
+    expect(saveBtn).not.toBeNull();
+
+    expect(discardBtn!.getAttribute('size')).toBe('small');
+    expect(discardBtn!.getAttribute('variant')).toBe('danger');
+    expect(discardBtn!.hasAttribute('outline')).toBe(true);
+    expect(backBtn!.getAttribute('size')).toBe('small');
+    expect(saveBtn!.getAttribute('size')).toBe('small');
+    expect(saveBtn!.getAttribute('variant')).toBe('primary');
+  });
+
+  it('abandons a saved review draft from Review mode with confirmation, DELETE ?rev=, and clean exit (ptone/scion#9706)', async () => {
+    const state: DraftServerState = {
+      draft: {
+        rev: 4,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: 'In-progress note',
+        carried: null,
+        savedAt: '2026-11-27T23:45:00Z',
+        createdAt: '2026-11-27T23:30:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    // Autosave status header displays date + time.
+    const status = el.shadowRoot!.querySelector('.draft-status');
+    expect(status?.textContent).toMatch(/Draft saved [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}/);
+
+    const abandonBtn = el.shadowRoot!.querySelector<HTMLElement>(
+      '.edit-footer sl-button.abandon-review-btn'
+    )!;
+    expect(abandonBtn).not.toBeNull();
+    expect(abandonBtn.hasAttribute('disabled')).toBe(false);
+    abandonBtn.click();
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.querySelector(':scope > .dialog-footer[slot="footer"]')).not.toBeNull();
+    expect(dialog.querySelectorAll(':scope > sl-button[slot="footer"]')).toHaveLength(0);
+    expect((dialog.textContent ?? '').replace(/\s+/g, ' ')).toContain("can't be undone");
+
+    // Cancel closes the dialog without deleting or leaving Review mode.
+    dialog.querySelector<HTMLElement>('sl-button.draft-abandon-cancel')!.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
+    expect(state.draft?.rev).toBe(4);
+
+    // Re-open and confirm Abandon review.
+    abandonBtn.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    )!.click();
+    await settle(el);
+
+    const delReq = state.requests.find(
+      (r) => r.method === 'DELETE' && r.url.includes('/review-draft')
+    );
+    expect(delReq?.url).toContain('?rev=4');
+    expect(state.draft).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).toBeNull();
+    expect(findButton(el, '.header-actions sl-button', 'Review')).toBeDefined();
+  });
+
+  it('abandons a local-only review (rev === 0) without calling DELETE and exits Review mode cleanly (ptone/scion#9706)', async () => {
+    const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    await settle(el);
+
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } }));
+    await el.updateComplete;
+
+    const abandonBtn = el.shadowRoot!.querySelector<HTMLElement>(
+      '.edit-footer sl-button.abandon-review-btn'
+    )!;
+    expect(abandonBtn).not.toBeNull();
+    expect(abandonBtn.hasAttribute('disabled')).toBe(false);
+    abandonBtn.click();
+    await el.updateComplete;
+
+    el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    )!.click();
+    await settle(el);
+
+    expect(
+      state.requests.filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+    ).toHaveLength(0);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+    const unload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(false);
+  });
+
+  it('quiesces an in-flight autosave PUT before abandoning and deletes the committed rev (ptone/scion#9706)', async () => {
+    let releasePut!: () => void;
+    const state: DraftServerState = {
+      draft: null,
+      currentSeq: 1,
+      requests: [],
+      holdPut: (res) =>
+        new Promise<Response>((resolve) => {
+          releasePut = (): void => resolve(res);
+        }),
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    await settle(el);
+
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } }));
+    await el.updateComplete;
+
+    // Kick off an in-flight PUT (rev 0 -> 1).
+    findButton(el, '.edit-footer sl-button', 'Save Draft')!.click();
+    await el.updateComplete;
+
+    // Open Abandon review and confirm while PUT is still in flight.
+    el.shadowRoot!.querySelector<HTMLElement>('.edit-footer sl-button.abandon-review-btn')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    )!.click();
+    await el.updateComplete;
+
+    // DELETE must not fire until the in-flight PUT finishes.
+    expect(
+      state.requests.filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+    ).toHaveLength(0);
+
+    releasePut();
+    await settle(el);
+
+    const delReqs = state.requests.filter(
+      (r) => r.method === 'DELETE' && r.url.includes('/review-draft')
+    );
+    expect(delReqs).toHaveLength(1);
+    expect(delReqs[0].url).toContain('?rev=1');
+    expect(state.draft).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+  });
+
+  it('handles 409 conflict and transient network errors in the Abandon review dialog (ptone/scion#9706)', async () => {
+    const state: DraftServerState = {
+      draft: {
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-27T23:45:00Z',
+        createdAt: '2026-11-27T23:30:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+      nextDeleteResponse: () =>
+        new Response(JSON.stringify({ error: { code: 'internal', message: 'db unavailable' } }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    el.shadowRoot!.querySelector<HTMLElement>('.edit-footer sl-button.abandon-review-btn')!.click();
+    await el.updateComplete;
+
+    // 1. Generic 500 error: keeps dialog open, shows alert, confirm stays enabled for retry.
+    const confirmBtn = el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    )!;
+    confirmBtn.click();
+    await settle(el);
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.querySelector('sl-alert[variant="danger"]')).not.toBeNull();
+    expect(confirmBtn.hasAttribute('disabled')).toBe(false);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
+
+    // 2. 409 DraftConflictError enforced by mockHub when server advances to rev 3:
+    //    disables confirm, switches cancel to Close, preserves newer draft, and routes into conflict model.
+    const newerBody = 'We ship in {~~Q3~>Q1~~}{>>pulled forward<<}.\n';
+    state.nextDeleteResponse = undefined;
+    state.draft = {
+      ...state.draft!,
+      rev: 3,
+      body: newerBody,
+      savedAt: '2026-11-27T23:50:00Z',
+    };
+    confirmBtn.click();
+    await settle(el);
+
+    expect(dialog.textContent).toContain('updated on another device or tab');
+    expect(confirmBtn.hasAttribute('disabled')).toBe(true);
+    const cancelBtn = dialog.querySelector<HTMLElement>('sl-button.draft-abandon-cancel')!;
+    expect(cancelBtn.textContent?.trim()).toBe('Close');
+    expect(state.draft?.rev).toBe(3);
+    // Conflict dialog must not stack while the Abandon dialog is still open.
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-conflict-dialog')).toBeNull();
+
+    // Closing the Abandon dialog surfaces the standard conflict dialog so the user can resolve in place.
+    cancelBtn.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
+    const conflictDialog = el.shadowRoot!.querySelector('sl-dialog.draft-conflict-dialog')!;
+    expect(conflictDialog).not.toBeNull();
+
+    // Load the newer draft (rev 3) and then Abandon again: DELETE must send ?rev=3 and succeed.
+    conflictDialog.querySelector<HTMLElement>('sl-button.draft-conflict-load')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-conflict-dialog')).toBeNull();
+
+    el.shadowRoot!.querySelector<HTMLElement>('.edit-footer sl-button.abandon-review-btn')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-abandon-dialog sl-button.draft-abandon-confirm'
+    )!.click();
+    await settle(el);
+
+    const delUrls = state.requests
+      .filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+      .map((r) => r.url);
+    expect(delUrls[delUrls.length - 1]).toContain('?rev=3');
+    expect(state.draft).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+  });
+
+  it('preserves hub draft state when abandoning a rev-0 session started after a failed GET (ptone/scion#9706)', async () => {
+    const state: DraftServerState = {
+      draft: {
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-27T23:45:00Z',
+        createdAt: '2026-11-27T23:30:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    // Initial load populated savedDraft; simulate a transient GET failure when entering Review mode.
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeDefined();
+    state.nextGetResponse = () => {
+      state.nextGetResponse = undefined;
+      return new Response('server error', { status: 500 });
+    };
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    el.shadowRoot!.querySelector<HTMLElement>('.edit-footer sl-button.abandon-review-btn')!.click();
+    await el.updateComplete;
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-abandon-dialog')!;
+    expect(dialog.textContent).toContain('Discard your review edits and exit Review mode');
+
+    dialog.querySelector<HTMLElement>('sl-button.draft-abandon-confirm')!.click();
+    await settle(el);
+
+    expect(
+      state.requests.filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+    ).toHaveLength(0);
+    expect(state.draft?.rev).toBe(2);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+    // Hub draft badge and Resume draft button remain because no DELETE was issued.
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeDefined();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).not.toBeNull();
   });
 });

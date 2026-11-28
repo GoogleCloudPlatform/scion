@@ -36,8 +36,7 @@ func TestSubstrateGetLogs_ReturnsSentinel_NoKubernetesOrAteapiCall(t *testing.T)
 	k8sClient := k8sfake.NewClientset()
 
 	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://example.invalid"), k8sClient, config.V1SubstrateConfig{
-		SnapshotStorage:   "gs://bucket/prefix/",
-		SandboxConfigName: "gvisor-default",
+		SnapshotStorage: "gs://bucket/prefix/",
 	})
 
 	logs, err := rt.GetLogs(context.Background(), "scion-550e8400-e29/test-agent")
@@ -65,8 +64,7 @@ func TestSubstrateGetLogs_FixedMessage_NoTenantIdentifiers(t *testing.T) {
 	rec := &callRecorder{}
 	fc := newFakeControlClient(rec)
 	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://example.invalid"), k8sfake.NewClientset(), config.V1SubstrateConfig{
-		SnapshotStorage:   "gs://bucket/prefix/",
-		SandboxConfigName: "gvisor-default",
+		SnapshotStorage: "gs://bucket/prefix/",
 	})
 
 	wantMessage := ErrLogsNotSupported.Error()

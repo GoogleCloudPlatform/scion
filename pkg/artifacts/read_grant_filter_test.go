@@ -28,14 +28,17 @@ import (
 // project" subquery) carry them, so neither can drift from canReadWith.
 func TestReadGrantFilterMatchesGrantsForRead(t *testing.T) {
 	cond, args := readGrantFilter("g")
-	want := make([]any, len(grantsForRead))
-	for i, p := range grantsForRead {
-		want[i] = p
+	want := make([]any, 0, len(grantsForRead)+2)
+	for _, p := range grantsForRead {
+		want = append(want, p)
 	}
+	want = append(want, SponsorReviewCreator, BoundedReviewCreator)
 	if !slices.Equal(args, want) {
-		t.Fatalf("readGrantFilter args = %v, want grantsForRead %v", args, want)
+		t.Fatalf("readGrantFilter args = %v, want %v", args, want)
 	}
-	if wantCond := "g.permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(want)), ", ") + ")"; cond != wantCond {
+	wantCond := "(g.permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(grantsForRead)), ", ") + ")" +
+		" AND (g.created_by_ref IS NULL OR g.created_by_ref NOT IN (?, ?)))"
+	if cond != wantCond {
 		t.Fatalf("readGrantFilter cond = %q, want %q", cond, wantCond)
 	}
 
@@ -56,8 +59,11 @@ func TestReadGrantFilterMatchesGrantsForRead(t *testing.T) {
 	if got := strings.Count(sqlText, ".permission IN ("); got != wantFilters {
 		t.Fatalf("candidate query has %d permission filters, want %d:\n%s", got, wantFilters, sqlText)
 	}
+	if got := strings.Count(sqlText, ".created_by_ref NOT IN (?, ?)"); got != wantFilters {
+		t.Fatalf("candidate query has %d role-gated exclusions, want %d:\n%s", got, wantFilters, sqlText)
+	}
 	if got := countRuns(qargs, want); got != wantFilters {
-		t.Fatalf("candidate query args carry grantsForRead %d times, want %d: %v", got, wantFilters, qargs)
+		t.Fatalf("candidate query args carry readGrantFilter args %d times, want %d: %v", got, wantFilters, qargs)
 	}
 }
 

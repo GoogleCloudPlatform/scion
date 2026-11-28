@@ -11,13 +11,16 @@ vi.mock('../../../client/api.js', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));
 
+const renderFragmentMock = vi.fn();
+
 vi.mock('../../../utils/markdown.js', () => {
   const render = (markdown: string): string => `<p>${markdown}</p>`;
   return {
     getMarkdownRenderer: () =>
       Promise.resolve({
         render,
-        renderFragment: (markdown: string) => {
+        renderFragment: (markdown: string, options?: unknown) => {
+          renderFragmentMock(markdown, options);
           const tpl = document.createElement('template');
           tpl.innerHTML = render(markdown);
           return tpl.content;
@@ -50,6 +53,7 @@ describe('scion-chat-interagent-marker', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     apiFetchMock.mockReset();
+    renderFragmentMock.mockReset();
   });
 
   afterEach(() => {
@@ -541,5 +545,40 @@ describe('scion-chat-interagent-marker', () => {
     await new Promise((r) => setTimeout(r, 10));
     await el.updateComplete;
     expect(el.shadowRoot?.querySelector('.ia-full-body')?.textContent).toBe('Full body 2');
+  });
+
+  it('renders popover markdown with sameOriginImagesOnly enabled', async () => {
+    const fullBody = 'Check ![tracker](https://elsewhere.example/pixel.png)';
+    apiFetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          messages: [makeMessage({ id: 'msg-img', msg: fullBody, msgTruncated: false })],
+        }),
+        { status: 200 }
+      )
+    );
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    el.setAttribute('conversation-key', 'dm:agent:agent-alpha-id:user:user-1');
+    el.messageCount = 1;
+    el.messages = [
+      makeMessage({
+        id: 'msg-img',
+        msg: 'Check...',
+        msgTruncated: true,
+      }),
+    ];
+    el.expanded = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const btn = el.shadowRoot?.querySelector('.ia-expand sl-icon-button') as HTMLElement | null;
+    expect(btn).toBeTruthy();
+    btn!.click();
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelector('.ia-full-body')).toBeTruthy();
+    });
+
+    expect(renderFragmentMock).toHaveBeenCalledWith(fullBody, { sameOriginImagesOnly: true });
   });
 });

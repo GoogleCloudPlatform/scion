@@ -38,6 +38,7 @@ func TestResolveConversationTarget(t *testing.T) {
 				ExternalRef: "C0123:1700.001",
 				ParentRef:   "C0123",
 				DisplayName: "#general",
+				Kind:        "group",
 			},
 		}
 		got := ResolveConversationTarget(msg)
@@ -47,6 +48,7 @@ func TestResolveConversationTarget(t *testing.T) {
 			ExternalRef:    "C0123:1700.001",
 			ParentRef:      "C0123",
 			DisplayName:    "#general",
+			Kind:           "group",
 		}, got)
 	})
 
@@ -64,31 +66,34 @@ func TestResolveConversationTarget(t *testing.T) {
 		}, got)
 	})
 
-	t.Run("falls back field-by-field when conversation is partial", func(t *testing.T) {
+	t.Run("does not fall back to thread_id when conversation is present", func(t *testing.T) {
 		msg := &messages.StructuredMessage{
 			Channel:  "telegram",
 			ThreadID: "42",
 			Conversation: &messages.Conversation{
 				Surface:     "telegram",
 				DisplayName: "Ops Chat",
+				Kind:        "group",
 			},
 		}
 		got := ResolveConversationTarget(msg)
 		assert.Equal(t, ConversationTarget{
 			Surface:     "telegram",
-			ExternalRef: "42",
+			ExternalRef: "",
 			DisplayName: "Ops Chat",
+			Kind:        "group",
 		}, got)
 	})
-	t.Run("ignores native conversation so hub keys never become external targets", func(t *testing.T) {
+	t.Run("native conversation preserves kind and display_name without external refs or thread_id fallback", func(t *testing.T) {
 		msg := &messages.StructuredMessage{
 			ConversationID: "conv-dm-1",
 			Channel:        "discord",
-			ThreadID:       "",
+			ThreadID:       "dm:agent:a1:user:u1",
 			Conversation: &messages.Conversation{
 				Surface:     "native",
 				ExternalRef: "dm:agent:a1:user:u1",
 				DisplayName: "DM",
+				Kind:        "direct",
 			},
 		}
 		got := ResolveConversationTarget(msg)
@@ -96,6 +101,8 @@ func TestResolveConversationTarget(t *testing.T) {
 			ConversationID: "conv-dm-1",
 			Surface:        "discord",
 			ExternalRef:    "",
+			DisplayName:    "DM",
+			Kind:           "direct",
 		}, got)
 	})
 }
@@ -199,6 +206,7 @@ func TestInboundConversationJSONEmbedding(t *testing.T) {
 			ExternalRef: "C0123:1700.001",
 			ParentRef:   "C0123",
 			DisplayName: "#eng",
+			LegacyRef:   "1700.001",
 		},
 	})
 	require.NoError(t, err)
@@ -210,6 +218,7 @@ func TestInboundConversationJSONEmbedding(t *testing.T) {
 	assert.Equal(t, "C0123:1700.001", decoded["external_ref"])
 	assert.Equal(t, "C0123", decoded["parent_ref"])
 	assert.Equal(t, "#eng", decoded["display_name"])
+	assert.Equal(t, "1700.001", decoded["legacy_ref"])
 }
 
 func TestHubSupportsInboundConversation(t *testing.T) {

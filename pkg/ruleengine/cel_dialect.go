@@ -143,7 +143,14 @@ func (d *CELDialect) Compile(ctx context.Context, rule string, kind Kind, env En
 	if err != nil {
 		return Compiled{}, err
 	}
-	return NewCompiled(env.Consumer, DialectCEL, kind, prog), nil
+	progID := ComputeSourceProgramID(DialectCEL, ChainElementSource{
+		Expr:       rule,
+		Scope:      celengine.CacheScope{Consumer: env.Consumer},
+		Kind:       kind,
+		EnvRef:     env,
+		EnvVersion: eng.Environment().Version,
+	})
+	return NewCompiledWithIdentity(env.Consumer, DialectCEL, kind, progID, prog), nil
 }
 
 // CachedCompile retrieves or compiles rule in the environment's content-addressed LRU cache.
@@ -174,7 +181,14 @@ func (d *CELDialect) CachedCompileWithGate(
 	if err != nil {
 		return Compiled{}, false, err
 	}
-	return NewCompiled(env.Consumer, DialectCEL, kind, prog), hit, nil
+	progID := ComputeSourceProgramID(DialectCEL, ChainElementSource{
+		Expr:       rule,
+		Scope:      scope,
+		Kind:       kind,
+		EnvRef:     env,
+		EnvVersion: eng.Environment().Version,
+	})
+	return NewCompiledWithIdentity(env.Consumer, DialectCEL, kind, progID, prog), hit, nil
 }
 
 // Invalidate removes scope bindings in the named CEL environment's program cache.

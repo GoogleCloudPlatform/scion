@@ -23,6 +23,7 @@ import type { ScionArtifactList } from '../shared/artifact-list.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import type { ArtifactListItem } from '../../client/artifacts.js';
 import {
+  ARTIFACTS_REVIEW_DRAFTS_FLAG,
   ARTIFACTS_REVIEW_REQUESTS_FLAG,
   resetServerFlagStateForTests,
 } from '../../utils/feature-flags.js';
@@ -187,5 +188,71 @@ describe('artifacts list & project artifact-list: review requests (P1)', () => {
     expect(chip).toBeDefined();
     expect(chip.getAttribute('aria-pressed')).toBe('true');
     expect(urls[0].searchParams.get('q')).toBe('is:requested');
+  });
+
+  it('toggles Requested of me and My drafts independently and hides gated chips when off across global and project lists', async () => {
+    mockList([makeItem('a1')]);
+    const chipLabels = async (
+      kind: 'global' | 'project',
+      requestsOn: boolean,
+      draftsOn: boolean
+    ): Promise<string[]> => {
+      window.__SCION_FEATURES__ = {
+        [ARTIFACTS_FLAG]: true,
+        [ARTIFACTS_REVIEW_REQUESTS_FLAG]: requestsOn,
+        [ARTIFACTS_REVIEW_DRAFTS_FLAG]: draftsOn,
+      };
+      if (kind === 'global') {
+        const el = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
+        el.pageData = {
+          path: '/artifacts',
+          title: 'Artifacts',
+          user: { id: ME, email: 'me@example.com', name: 'Me' },
+        } as ScionPageArtifacts['pageData'];
+        document.body.appendChild(el);
+        await settle(el);
+        const labels = [...el.shadowRoot!.querySelectorAll('.filter-chip')].map(
+          (c) => c.textContent?.trim() ?? ''
+        );
+        el.remove();
+        return labels;
+      }
+      const list = document.createElement('scion-artifact-list') as ScionArtifactList;
+      list.projectId = PROJECT_ID;
+      list.currentUserId = ME;
+      document.body.appendChild(list);
+      await settle(list);
+      const labels = [...list.shadowRoot!.querySelectorAll('.filter-chip')].map(
+        (c) => c.textContent?.trim() ?? ''
+      );
+      list.remove();
+      return labels;
+    };
+
+    for (const kind of ['global', 'project'] as const) {
+      // Both gates on.
+      const bothOn = await chipLabels(kind, true, true);
+      expect(bothOn).toContain('Review on latest');
+      expect(bothOn).toContain('Requested of me');
+      expect(bothOn).toContain('My drafts');
+
+      // Requests on, drafts off.
+      const reqOnly = await chipLabels(kind, true, false);
+      expect(reqOnly).toContain('Review on latest');
+      expect(reqOnly).toContain('Requested of me');
+      expect(reqOnly).not.toContain('My drafts');
+
+      // Requests off, drafts on.
+      const draftsOnly = await chipLabels(kind, false, true);
+      expect(draftsOnly).toContain('Review on latest');
+      expect(draftsOnly).not.toContain('Requested of me');
+      expect(draftsOnly).toContain('My drafts');
+
+      // Both gates off.
+      const bothOff = await chipLabels(kind, false, false);
+      expect(bothOff).toContain('Review on latest');
+      expect(bothOff).not.toContain('Requested of me');
+      expect(bothOff).not.toContain('My drafts');
+    }
   });
 });

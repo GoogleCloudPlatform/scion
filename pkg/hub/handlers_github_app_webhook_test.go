@@ -2068,7 +2068,7 @@ func TestInstallationRepositoriesRemoved_ReleasesSubjectClaimsWithAssociationLos
 	now := time.Now().UTC()
 	seedClaim := func(trigID, subject string) *store.TriggerSubjectClaim {
 		t.Helper()
-		c, existing, err := f.store.ClaimTriggerSubject(ctx, trigID, subject, uuid.NewString(), uuid.NewString(), now, now.Add(-5*time.Minute))
+		c, existing, err := f.store.ClaimTriggerSubject(ctx, trigID, 0, subject, uuid.NewString(), uuid.NewString(), now, now.Add(-5*time.Minute))
 		if err != nil || existing != nil || c == nil {
 			t.Fatalf("ClaimTriggerSubject(%s, %s): c=%v existing=%v err=%v", trigID, subject, c, existing, err)
 		}
@@ -2101,13 +2101,13 @@ func TestInstallationRepositoriesRemoved_ReleasesSubjectClaimsWithAssociationLos
 	}
 
 	// projA's GitHub trigger claim must be released; webhook trigger claim and projB's claim stay active.
-	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, ghTrigA, "github:acme/widgets#42"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, ghTrigA, 0, "github:acme/widgets#42"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected projA GitHub subject claim to be released, got err=%v", err)
 	}
-	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, whTrigA, "wh-subject-42"); err != nil {
+	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, whTrigA, 0, "wh-subject-42"); err != nil {
 		t.Fatalf("expected projA webhook subject claim to remain active, got err=%v", err)
 	}
-	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, ghTrigB, "github:acme/other#7"); err != nil {
+	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, ghTrigB, 0, "github:acme/other#7"); err != nil {
 		t.Fatalf("expected projB GitHub subject claim to remain active, got err=%v", err)
 	}
 
@@ -2144,7 +2144,7 @@ func TestInstallationRepositoriesRemoved_ReleasesSubjectClaimsWithAssociationLos
 	}
 
 	// Because the old claim was released, a new claim on the same subject succeeds cleanly.
-	reclaimed, existing, err := f.store.ClaimTriggerSubject(ctx, ghTrigA, "github:acme/widgets#42", uuid.NewString(), uuid.NewString(), now.Add(time.Minute), now)
+	reclaimed, existing, err := f.store.ClaimTriggerSubject(ctx, ghTrigA, 0, "github:acme/widgets#42", uuid.NewString(), uuid.NewString(), now.Add(time.Minute), now)
 	if err != nil || existing != nil || reclaimed == nil {
 		t.Fatalf("expected fresh claim after re-association, got reclaimed=%v existing=%v err=%v", reclaimed, existing, err)
 	}

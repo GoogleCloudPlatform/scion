@@ -74,6 +74,7 @@ type wpEntry struct {
 	linkname string
 	raw      bool
 	size     int64 // when set, overrides len(body) in the header
+	mode     int64 // when set, overrides default 0o644 mode in the header
 }
 
 // wpArchive builds a GitHub-style archive: a pax global header carrying
@@ -100,7 +101,11 @@ func wpArchive(t *testing.T, comment, top string, entries []wpEntry) []byte {
 		if tf == 0 {
 			tf = tar.TypeReg
 		}
-		hdr := &tar.Header{Typeflag: tf, Name: name, Mode: 0o644, Linkname: e.linkname, Format: tar.FormatPAX}
+		mode := e.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		hdr := &tar.Header{Typeflag: tf, Name: name, Mode: mode, Linkname: e.linkname, Format: tar.FormatPAX}
 		if tf == tar.TypeReg {
 			hdr.Size = int64(len(e.body))
 			if e.size > 0 {
@@ -956,6 +961,90 @@ func TestExtractWelcomeArchive_CapsCountedWhileStreaming(t *testing.T) {
 		_, err := wpExtract(t, body, wpTeamSHA, lim, nil)
 		require.ErrorIs(t, err, errWelcomeTooLarge, "entries outside the selection still count against the stream cap")
 	})
+	t.Run("cumulative budget across archives", func(t *testing.T) {
+		dir := t.TempDir()
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		budget := &welcomeBudget{lim: small} // MaxFiles: 2, MaxTotal: 10
+		sel := func(rel string) []string {
+			if rest, ok := strings.CutPrefix(rel, "templates/"); ok && rest != "" {
+				return []string{rest}
+			}
+			return nil
+		}
+		first := wpArchive(t, wpTeamSHA, top, []wpEntry{
+			{name: "templates/a/1", body: "12345"},
+		})
+		require.NoError(t, extractWelcomeArchive(first, wpTeamSHA, root, sel, []string{"templates"}, budget))
+		assert.Equal(t, 1, budget.files)
+		assert.Equal(t, int64(5), budget.total)
+
+		// Second archive pushes cumulative total over MaxTotal (5 + 6 > 10).
+		second := wpArchive(t, wpTeamSHA, top, []wpEntry{
+			{name: "templates/a/2", body: "123456"},
+		})
+		err = extractWelcomeArchive(second, wpTeamSHA, root, sel, []string{"templates"}, budget)
+		require.ErrorIs(t, err, errWelcomeTooLarge)
+		_, statErr := os.Stat(filepath.Join(dir, "a", "2"))
+		assert.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+}
+
+func TestExtractWelcomeArchive_RepresentativeTreeModesAndMultiDest(t *testing.T) {
+	top := "r-" + wpTeamSHA
+	body := wpArchive(t, wpTeamSHA, top, []wpEntry{
+		{name: "README.md", body: "ignored\n"},
+		{name: "CLAUDE.md", typeflag: tar.TypeSymlink, linkname: "AGENTS.md"},
+		{name: "docs/dev", typeflag: tar.TypeFifo},
+		{name: "templates/", typeflag: tar.TypeDir},
+		{name: "templates/empty-dir/", typeflag: tar.TypeDir},
+		{name: "templates/shared/SKILL.md", body: "skill\n", mode: 0o600},
+		{name: "templates/shared/bin/run.sh", body: "#!/bin/sh\n", mode: 0o750},
+	})
+	sel := func(rel string) []string {
+		if rest, ok := strings.CutPrefix(rel, "templates/shared/"); ok && rest != "" {
+			return []string{"coord/skills/shared/" + rest, "dev/skills/shared/" + rest}
+		}
+		return nil
+	}
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	budget := &welcomeBudget{lim: defaultWelcomeLimits}
+	require.NoError(t, extractWelcomeArchive(body, wpTeamSHA, root, sel, []string{"templates/shared"}, budget))
+
+	assert.Equal(t, 4, budget.files)
+	assert.Equal(t, int64(2*(len("skill\n")+len("#!/bin/sh\n"))), budget.total)
+	assert.Equal(t, 2, budget.skipped)
+
+	_, err = os.Lstat(filepath.Join(dir, "empty-dir"))
+	assert.ErrorIs(t, err, os.ErrNotExist, "standalone empty dirs are not created")
+
+	for _, tpl := range []string{"coord", "dev"} {
+		skillPath := filepath.Join(dir, tpl, "skills", "shared", "SKILL.md")
+		b, err := os.ReadFile(skillPath)
+		require.NoError(t, err)
+		assert.Equal(t, "skill\n", string(b))
+		fi, err := os.Stat(skillPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm())
+
+		runPath := filepath.Join(dir, tpl, "skills", "shared", "bin", "run.sh")
+		b, err = os.ReadFile(runPath)
+		require.NoError(t, err)
+		assert.Equal(t, "#!/bin/sh\n", string(b))
+		fi, err = os.Stat(runPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o755), fi.Mode().Perm())
+
+		dirInfo, err := os.Stat(filepath.Join(dir, tpl, "skills", "shared", "bin"))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+	}
 }
 
 func TestWelcome_DownloadCapFailsClosed(t *testing.T) {

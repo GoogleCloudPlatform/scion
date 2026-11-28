@@ -1659,7 +1659,7 @@ describe('<scion-page-project-decisions>', () => {
     }
   });
 
-  it('debounces search q by 300ms, ignores 1-char typing, and aborts superseded in-flight search requests', async () => {
+  it('commits search q only on Enter, ignores 1-char search, and aborts superseded in-flight search requests', async () => {
     enableDecisionsFlag();
     let callNum = 0;
     let firstSearchAborted = false;
@@ -1701,25 +1701,36 @@ describe('<scion-page-project-decisions>', () => {
     const box = panel.querySelector<HTMLElement & { value: string }>('scion-filter-box')!;
     const searchInput = box.shadowRoot!.querySelector<HTMLInputElement>('input')!;
 
-    // 1-char input does not trigger an invalid q=b request even after debounce
+    // 1-char input fires no request while typing (even past 300ms) or on Enter
     searchInput.value = 'b';
     searchInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     await settle(el, 330);
     expect(callNum).toBe(1);
+    searchInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
+    );
+    await settle(el, 25);
+    expect(callNum).toBe(1);
 
-    // Type "ba" -> wait 330ms -> starts first search request (held in flight)
+    // Typing "ba" and waiting past 300ms fires no request; pressing Enter starts request 2 (held in flight)
     searchInput.value = 'ba';
     searchInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    await settle(el, 100);
-    expect(callNum).toBe(1); // Not yet fired before debounce
-    await settle(el, 230);
+    await settle(el, 330);
+    expect(callNum).toBe(1);
+    searchInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
+    );
+    await settle(el, 25);
     expect(callNum).toBe(2);
     expect(firstSearchAborted).toBe(false);
 
-    // Type "backfill" while "ba" is in flight -> after debounce, aborts "ba" and fires "backfill"
+    // Editing to "backfill" and pressing Enter while "ba" is in flight aborts "ba" and fires request 3
     searchInput.value = 'backfill';
     searchInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    await settle(el, 330);
+    searchInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
+    );
+    await settle(el, 25);
     expect(firstSearchAborted).toBe(true);
     expect(callNum).toBe(3);
     expect(window.location.search).toBe('?q=backfill');

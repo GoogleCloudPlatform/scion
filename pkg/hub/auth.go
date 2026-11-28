@@ -549,7 +549,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// the HMAC signature unconditionally and rejects the request
 				// if it does not validate, and every other handler sees an
 				// anonymous request exactly as it would for a public route.
-				if isSignedSkillFileRequest(r) {
+				if isSignedSkillFileRequest(r) || isSignedTrajectoryContentRequest(r) {
 					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
 					serveAfterAuth(w, next, r.WithContext(ctx))
 					return

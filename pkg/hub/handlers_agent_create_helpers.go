@@ -420,7 +420,9 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		agent.AppliedConfig.Branch = defaultBranch
 	}
 
-	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	if err := s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate); err != nil {
+		return err
+	}
 	if guard := noAuthFallbackGuardFrom(ctx); guard != nil && guard.refused {
 		return errNoAuthFallbackRefused
 	}
@@ -736,7 +738,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // GitClone, Workspace, and Branch (kept verbatim across a reincarnation per
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
-func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Populate template ID and hash if template was resolved. The agent role
 	// determines hub access scopes; a template sets none (ptone/scion#4224).
 	if resolvedTemplate != nil {
@@ -804,9 +806,17 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		if project != nil {
 			projectID = project.ID
 		}
-		// A lookup error is logged by the resolver; the create goes on as
-		// for a name the hub does not know.
-		hc, _ := s.resolveHarnessConfigBySlug(ctx, projectID, hcName)
+		// A non-active match refuses the create/reincarnate instead of falling
+		// through to broker-local resolution. Any other lookup error is logged
+		// by the resolver and the create goes on as for a name the hub does not
+		// know.
+		hc, err := s.resolveActiveHarnessConfigBySlug(ctx, projectID, hcName)
+		if err != nil {
+			var notActive *harnessConfigNotActiveError
+			if errors.As(err, &notActive) {
+				return err
+			}
+		}
 		if hc != nil {
 			resolvedHC = hc
 			agent.AppliedConfig.HarnessConfigID = hc.ID
@@ -991,6 +1001,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// leaves the env records. Every create entry point (HTTP create,
 	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
 	s.captureCreateTimezone(ctx, agent, resolvedHC)
+	return nil
 }
 
 // resolveAutoExposeEnv resolves SCION_AUTO_EXPOSE_PORTS into ac.Env by the
@@ -1751,6 +1762,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeTokenBudgetAdmissionError(w, err) {
+				return existingAgentErrored
+			}
 			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 				return existingAgentErrored
 			}
@@ -1812,8 +1826,9 @@ func (s *Server) handleExistingAgent(
 
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent:    redactedAgentCopy(ctx, s, existingAgent),
-			Warnings: dispatchWarningsFromContext(ctx),
+			Agent:             redactedAgentCopy(ctx, s, existingAgent),
+			Warnings:          dispatchWarningsFromContext(ctx),
+			TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 		})
 		return existingAgentStarted
 	}
@@ -1922,6 +1937,9 @@ func (s *Server) handleExistingAgent(
 				if answered {
 					return existingAgentErrored
 				}
+				if writeTokenBudgetAdmissionError(w, err) {
+					return existingAgentErrored
+				}
 				if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 					return existingAgentErrored
 				}
@@ -1983,8 +2001,9 @@ func (s *Server) handleExistingAgent(
 
 			s.enrichAgent(ctx, existingAgent, project, nil)
 			writeJSON(w, http.StatusOK, CreateAgentResponse{
-				Agent:    redactedAgentCopy(ctx, s, existingAgent),
-				Warnings: dispatchWarningsFromContext(ctx),
+				Agent:             redactedAgentCopy(ctx, s, existingAgent),
+				Warnings:          dispatchWarningsFromContext(ctx),
+				TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 			})
 			return existingAgentStarted
 		}
@@ -1994,6 +2013,18 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
+		// Check raw-token budget exhaustion before tearing down the existing
+		// provisioning row or its secrets so a budget refusal does not lose them.
+		// Harness-dependent unmeasured policy is evaluated by the fall-through
+		// create path against the new request's resolved config.
+		if !req.ProvisionOnly {
+			if err := s.checkTokenBudgetExhaustionOnly(ctx, existingAgent, project); err != nil {
+				if !writeTokenBudgetAdmissionError(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return existingAgentErrored
+			}
+		}
 		// If the recreate flips auto -> never, check never-suspend headroom
 		// before tearing down the existing provisioning row so an over-cap
 		// request does not destroy the row and then fail at commitAgentCreate.
@@ -2211,6 +2242,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeTokenBudgetAdmissionError(w, err) {
+				return existingAgentErrored
+			}
 			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 				return existingAgentErrored
 			}
@@ -2274,8 +2308,9 @@ func (s *Server) handleExistingAgent(
 		// Enrich and return the existing agent.
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent:    redactedAgentCopy(ctx, s, existingAgent),
-			Warnings: dispatchWarningsFromContext(ctx),
+			Agent:             redactedAgentCopy(ctx, s, existingAgent),
+			Warnings:          dispatchWarningsFromContext(ctx),
+			TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 		})
 		return existingAgentStarted
 	}
@@ -3592,6 +3627,43 @@ func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.Respo
 	return true
 }
 
+// harnessConfigNotActiveError reports that a harness config matched by slug
+// exists in the store, but its status is not active (for example "archived"
+// or "pending"). Returning a typed error rather than treating it as not-found
+// prevents callers from falling through to a lower scope or to broker-local
+// fallback resolution.
+type harnessConfigNotActiveError struct {
+	Name   string
+	Scope  string
+	Status string
+}
+
+func (e *harnessConfigNotActiveError) Error() string {
+	status := e.Status
+	if status == "" {
+		status = "inactive"
+	}
+	return fmt.Sprintf("harness config %q is not active (status: %s)", e.Name, status)
+}
+
+// writeHarnessConfigNotActive writes a 400 validation error for a
+// *harnessConfigNotActiveError in err and reports whether it did.
+func writeHarnessConfigNotActive(w http.ResponseWriter, err error) bool {
+	var notActive *harnessConfigNotActiveError
+	if !errors.As(err, &notActive) {
+		return false
+	}
+	details := map[string]interface{}{
+		"harnessConfig": notActive.Name,
+		"status":        notActive.Status,
+	}
+	if notActive.Scope != "" {
+		details["scope"] = notActive.Scope
+	}
+	ValidationError(w, notActive.Error(), details)
+	return true
+}
+
 // resolveHarnessConfigBySlug looks up the hub harness config named name in
 // the scopes harnessConfigLookupScopes gives: project then global on a
 // workstation hub, global then project on a hosted hub. It returns (nil, nil)
@@ -3600,21 +3672,37 @@ func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.Respo
 // with a nil config if none matches, while on a hosted hub a failed global
 // lookup is returned at once, so the project scope is never consulted
 // without knowing whether a global config of that slug exists.
+//
+// This lookup is status-agnostic so existing-agent readers (capabilities,
+// model-alias fallback, usage reads) continue to resolve configs that were
+// archived after the agent was created. Callers selecting a harness config
+// for a new generation (create or reincarnate) should use
+// resolveActiveHarnessConfigBySlug instead.
 func (s *Server) resolveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
-	var lookupErr error
-	for _, sc := range s.harnessConfigLookupScopes(projectID) {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, sc.scope, sc.scopeID)
-		if err == nil && hc != nil {
-			return hc, nil
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
-				"slug", name, "scope_id", sc.scopeID, "error", err)
-			if !s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
-				return nil, err
-			}
-			lookupErr = err
+	if s == nil || s.store == nil {
+		return nil, nil
+	}
+	return s.resolveHarnessConfigBySlugWith(projectID, name, func(slug, scope, scopeID string) (*store.HarnessConfig, error) {
+		return s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
+	})
+}
+
+// resolveActiveHarnessConfigBySlug resolves name via resolveHarnessConfigBySlug
+// and enforces that the first matching row in scope order is active. Non-active
+// rows (e.g. archived or pending) return (nil, *harnessConfigNotActiveError)
+// immediately without falling through to a lower scope or broker-local
+// fallback.
+func (s *Server) resolveActiveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
+	hc, err := s.resolveHarnessConfigBySlug(ctx, projectID, name)
+	if err != nil || hc == nil {
+		return nil, err
+	}
+	if hc.Status != store.HarnessConfigStatusActive {
+		return nil, &harnessConfigNotActiveError{
+			Name:   name,
+			Scope:  hc.Scope,
+			Status: hc.Status,
 		}
 	}
-	return nil, lookupErr
+	return hc, nil
 }

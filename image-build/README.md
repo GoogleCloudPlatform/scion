@@ -626,6 +626,27 @@ build skips the unused `hub-gke` stage; the legacy builder
 (`DOCKER_BUILDKIT=0`) runs that stage too but still outputs the runtime image,
 so it only costs build time.
 
+## Optional Build Arguments
+
+Downstream builders can pin base images, core toolchain binaries, and harness
+CLIs via `--build-arg` without forking the Dockerfiles. Every argument below is
+optional; omitting it preserves the existing unpinned default behavior.
+
+| Image | Build Arg | Default | Notes |
+|---|---|---|---|
+| `core-base` | `NODE_IMAGE` | `node:24-trixie-slim` | Base image for `core-base` (and its `git-patched` stage). Can be a digest ref (`node@sha256:...`). |
+| `core-base` | `BUN_IMAGE` | `oven/bun:latest` | Source image for `/usr/local/bin/bun`. Can be a digest ref. |
+| `core-base` | `GIT_IMAGE` | `chainguard/git:latest` | Source image for vendored `git` (>= 2.48.0). |
+| `core-base` | `KUBECTL_VERSION`, `KUBECTL_SHA256_AMD64`, `KUBECTL_SHA256_ARM64` | unset (latest stable) | Optional exact pin (`X.Y.Z`, no leading `v`). Setting any of the three enables fail-closed pin mode: both a concrete semver and the target architecture's 64-hex SHA-256 are required, and `sha256sum` is verified before installation. |
+| `core-base` | `GOLANGCI_LINT_VERSION`, `GOLANGCI_LINT_SHA256_AMD64`, `GOLANGCI_LINT_SHA256_ARM64` | unset (upstream `install.sh` latest) | Same fail-closed pin contract as `kubectl`: requires concrete `X.Y.Z` and target-arch 64-hex SHA-256 of the release tarball, verified before extraction and installation. |
+| `core-base` | `GO_MIN_VERSION`, `GO_VERSION`, `GH_VERSION`, `HELM_VERSION`, `HELM_SHA256_AMD64`, `HELM_SHA256_ARM64` | pinned in Dockerfile | Existing toolchain version/checksum ARGs. |
+| `scion-claude` | `CLAUDE_CLI_VERSION` | `latest` | `@anthropic-ai/claude-code` npm version passed to `npm install -g`. |
+| `scion-opencode` | `OPENCODE_VERSION` | `latest` | `opencode-ai` npm version passed to `npm install -g`. |
+
+Other harness Dockerfiles that install via npm or versioned installers already
+expose version ARGs (`CODEX_CLI_VERSION`, `COPILOT_CLI_VERSION`,
+`GEMINI_CLI_VERSION`, `GROK_VERSION`, `HERMES_VERSION`, `PI_VERSION`).
+
 ## Package Registries
 
 By default the images install packages from the public npm registry and PyPI. On

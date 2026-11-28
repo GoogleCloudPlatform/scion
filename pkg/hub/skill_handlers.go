@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -134,6 +135,15 @@ type ResolvedSkillResponse struct {
 	Deprecated         bool              `json:"deprecated,omitempty"`
 	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
 	ReplacementURI     string            `json:"replacementUri,omitempty"`
+	// DownloadToken is a short-lived, read-only (contents:read, metadata:read),
+	// repository-scoped GitHub App installation token carried so an authorized
+	// download consumer (the project's provider broker or an agent of the
+	// project) downloads the skill's files with the project credential rather
+	// than falling back to the creating user's credential (ptone/scion#5028).
+	// Never returned to user or user-access-token callers; omitted when
+	// resolved anonymously or for non-gh:// skills; never stored in the
+	// resolution cache.
+	DownloadToken string `json:"downloadToken,omitempty"`
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
@@ -1130,8 +1140,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	var req PublishVersionRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1471,8 +1480,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		Version string              `json:"version"`
 		Files   []FileUploadRequest `json:"files"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1552,8 +1560,7 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	var req FinalizeSkillVersionRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1802,10 +1809,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	// (no token minted). Evaluated once, up front, and only when the request
 	// actually contains a gh:// URI.
 	ghProjectAllowed := true
+	ghCanReceiveDownloadToken := false
 	ghDeniedMessage := "caller may not resolve GitHub skills for this project"
 	if hasGitHubSkillRef(req.Skills) {
 		if req.ProjectID != "" {
 			ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+			ghCanReceiveDownloadToken = ghProjectAllowed && s.canReceiveProjectGitHubDownloadToken(ctx, req.ProjectID)
 		} else {
 			// With no ProjectID the Hub fetches public repositories and
 			// writes its resolution cache on the caller's behalf: a user
@@ -1842,6 +1851,9 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
 					skillRef.URI, code, ghErrorStatus(err), err.Error()))
 			} else {
+				if !ghCanReceiveDownloadToken {
+					ghResolved.DownloadToken = ""
+				}
 				if s.skillContentHashV2Enabled() {
 					// v2 over the git blob IDs and the git tree modes, the
 					// metadata the broker installs and verifies from.
@@ -1885,6 +1897,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		resolved = append(resolved, *entry)
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, ResolveSkillsResponse{
 		Resolved: resolved,
 		Errors:   resolveErrors,
@@ -2055,12 +2068,25 @@ func hasGitHubSkillRef(refs []ResolveSkillRef) bool {
 	return false
 }
 
-// canUseProjectGitHubToken reports whether the caller in ctx is permitted to have
-// the Hub mint projectID's GitHub App token on their behalf. Agents are confined
-// to their own project; users must hold read access on the project's skills;
-// brokers must be registered as a provider for the project.
-// Unauthenticated callers are always denied.
-func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string) bool {
+// skillGitHubReadOnlyPermissions is the least-privilege permission set used
+// when minting a project's GitHub App token for gh:// skill resolution and
+// broker/agent file downloads (ptone/scion#5028). It requests read-only access
+// to repository contents and metadata and never write access.
+var skillGitHubReadOnlyPermissions = githubapp.TokenPermissions{
+	Contents: "read",
+	Metadata: "read",
+}
+
+// canReceiveProjectGitHubDownloadToken reports whether the caller in ctx is an
+// authorized download consumer for projectID's read-only GitHub App skill
+// download token: a BrokerIdentity registered as a provider for projectID, or
+// an AgentIdentity belonging to projectID in good standing. Users and user
+// access tokens never receive the raw GitHub App token in the resolve response
+// (ptone/scion#5028).
+func (s *Server) canReceiveProjectGitHubDownloadToken(ctx context.Context, projectID string) bool {
+	if projectID == "" {
+		return false
+	}
 	// A BrokerIdentity is NOT a global privilege: broker join is unauthenticated,
 	// so anyone can mint one. A broker may only borrow the token of a project it
 	// is registered to serve, which GetProjectProvider confirms.
@@ -2076,6 +2102,18 @@ func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string)
 			return false
 		}
 		return s.agentStanding(ctx, agentIdent.ID()) == nil
+	}
+	return false
+}
+
+// canUseProjectGitHubToken reports whether the caller in ctx is permitted to have
+// the Hub mint projectID's GitHub App token on their behalf. Agents are confined
+// to their own project; users must hold read access on the project's skills;
+// brokers must be registered as a provider for the project.
+// Unauthenticated callers are always denied.
+func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string) bool {
+	if GetBrokerIdentityFromContext(ctx) != nil || GetAgentIdentityFromContext(ctx) != nil {
+		return s.canReceiveProjectGitHubDownloadToken(ctx, projectID)
 	}
 	// Last arm, and the only one left: anything that is not a broker or an agent
 	// must be a user holding read on the project's skills. The nil test is
@@ -2131,7 +2169,7 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 		return "public", "", nil
 	}
 
-	mintedToken, _, err := s.mintGitHubAppToken(ctx, project)
+	mintedToken, _, err := s.MintGitHubAppTokenWithPermissions(ctx, project, skillGitHubReadOnlyPermissions)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to mint GitHub App token: %w", err)
 	}
@@ -2381,7 +2419,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		} else if hit {
 			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
 				"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
-			return buildResolvedSkillResponse(ghRef, entry), nil
+			return buildResolvedSkillResponse(ghRef, entry, token), nil
 		} else if isBranchRef {
 			stale, ok, staleErr := s.ghResolutionStore.GetStale(ctx, cacheKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
 			if staleErr != nil {
@@ -2402,7 +2440,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 					go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, installID, isBranchRef)
 				}
 				injectGHStaleServe(cacheKey, refreshStarted)
-				return buildResolvedSkillResponse(ghRef, stale), nil
+				return buildResolvedSkillResponse(ghRef, stale, token), nil
 			}
 		}
 	}
@@ -2422,7 +2460,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		}
 		slog.WarnContext(ctx, "github_resolution_cache: re-resolve failed; serving an entry from before file modes were recorded, so its files may lack executable bits",
 			"uri", rawURI, "commit_sha", safeShortSHA(legacy.CommitSHA), "error", err)
-		return buildResolvedSkillResponse(ghRef, legacy), nil
+		return buildResolvedSkillResponse(ghRef, legacy, token), nil
 	}
 
 	// A ref GitHub reported as not found for this cache key within the last
@@ -2516,7 +2554,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		// the same cacheKey with different raw URI text (a bare ref vs
 		// "@HEAD", or different owner/repo letter case) — the entry carries
 		// none of that, so each caller supplies it from its own parsed ghRef.
-		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry)), nil
+		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry), token), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -2707,7 +2745,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 // sha256 digest is not available to it. The client recognises the format and
 // verifies accordingly (see hashFileAs in pkg/agent/skill_resolver.go).
 // ContentHash is likewise a digest over the git blob IDs.
-func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry) *ResolvedSkillResponse {
+func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry, downloadToken string) *ResolvedSkillResponse {
 	files := make([]DownloadURLInfo, len(entry.FileEntries))
 	for i, f := range entry.FileEntries {
 		files[i] = DownloadURLInfo{
@@ -2728,6 +2766,7 @@ func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheE
 		ResolvedVersion: safeShortSHA(entry.CommitSHA), // Short SHA for display
 		ContentHash:     entry.BundleHash,
 		Files:           files,
+		DownloadToken:   downloadToken,
 	}
 }
 

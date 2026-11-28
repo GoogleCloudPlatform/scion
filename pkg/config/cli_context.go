@@ -18,15 +18,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/internal/settingslockhook"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/hubname"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"gopkg.in/yaml.v3"
@@ -62,10 +61,6 @@ const (
 // Readers treat such a file as empty (after a warning); writers refuse to
 // replace it unless forced.
 var ErrCLIContextCorrupt = errors.New("context.yaml is not a valid context file")
-
-// hubNameRe is the format of a hub nickname. It never contains ':' or '/',
-// so a nickname can always be told apart from a URL.
-var hubNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // CLIContext is the content of context.yaml.
 type CLIContext struct {
@@ -334,44 +329,13 @@ func lockCLIContext(path string) (func(), error) {
 
 // ValidHubName reports whether name is a valid hub nickname.
 func ValidHubName(name string) bool {
-	return hubNameRe.MatchString(name)
+	return hubname.ValidHubName(name)
 }
 
 // NormalizeEndpoint returns endpoint in the form in which two spellings of
-// one hub URL compare equal: spaces and trailing slashes trimmed, the ASCII
-// letters of the scheme and host lowercased, and the scheme's default port
-// (80 for http, 443 for https) dropped. A value that does not parse as a
-// URL with a host is only trimmed. It is the key of hub entries and of
-// stored logins, so two different hubs must never get the same key:
-//
-//   - only ASCII letters are lowercased; a non-ASCII host is kept as
-//     written, because Unicode case mapping folds some characters into
-//     ASCII ones (U+212A KELVIN SIGN becomes "k");
-//   - an IDN host and its punycode form ("xn--...") are different keys;
-//   - a host with a trailing dot ("hub.example.com.") is a different key
-//     from the one without;
-//   - any non-default port is kept as written ("0443" stays "0443");
-//   - the path keeps its case and its escaping.
+// one hub URL compare equal. See hubname.NormalizeEndpoint for the exact rules.
 func NormalizeEndpoint(endpoint string) string {
-	e := strings.TrimRight(strings.TrimSpace(endpoint), "/")
-	u, err := url.Parse(e)
-	if err != nil || u.Host == "" {
-		return e
-	}
-	u.Scheme = asciiLower(u.Scheme)
-	host := asciiLower(u.Hostname())
-	port := u.Port()
-	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-		port = ""
-	}
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	if port != "" {
-		host += ":" + port
-	}
-	u.Host = host
-	return strings.TrimRight(u.String(), "/")
+	return hubname.NormalizeEndpoint(endpoint)
 }
 
 // HubByEndpoint returns the name and entry of the hub with endpoint, or ""
@@ -437,46 +401,7 @@ func (c *CLIContext) EnsureHub(endpoint, baseName string) (name string, created 
 // nickname format. It returns "hub" when nothing usable is left. Callers
 // name the local workstation hub "local" themselves.
 func DeriveHubName(endpoint string) string {
-	host := ""
-	if u, err := url.Parse(strings.TrimSpace(endpoint)); err == nil {
-		host = u.Hostname()
-	}
-	host = strings.ToLower(host)
-	label := host
-	if strings.ContainsAny(host, ":") || isDottedIPv4(host) {
-		label = strings.NewReplacer(".", "-", ":", "-").Replace(host)
-	} else if i := strings.IndexByte(host, '.'); i >= 0 {
-		label = host[:i]
-	}
-	var b strings.Builder
-	for _, r := range label {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	name := strings.Trim(b.String(), "-")
-	if len(name) > 63 {
-		name = strings.TrimRight(name[:63], "-")
-	}
-	if !ValidHubName(name) {
-		return "hub"
-	}
-	return name
-}
-
-func isDottedIPv4(host string) bool {
-	parts := strings.Split(host, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		if _, err := strconv.Atoi(p); err != nil {
-			return false
-		}
-	}
-	return true
+	return hubname.DeriveHubName(endpoint)
 }
 
 // SelectProject makes hubName the current hub and p its current project,

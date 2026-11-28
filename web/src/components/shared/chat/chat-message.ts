@@ -48,12 +48,14 @@ import {
   isMarkdownFileName,
   formatFileSize,
   GCS_URI_PATTERN,
+  buildAttachmentDownloadUrl,
   buildGcsLinkElement,
   parseGcsUri,
   resolveGcsMatch,
   ARTIFACT_REF_PATTERN,
   buildArtifactLinkElement,
 } from '../../../utils/chat-file-links.js';
+import { triggerFileDownload } from '../../../utils/download-url.js';
 import {
   agentSecretsEnabled,
   codeSpanMentionsEnabled,
@@ -3991,7 +3993,7 @@ export class ScionChatMessage extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      const fragment = renderer.renderFragment(body);
+      const fragment = renderer.renderFragment(body, { sameOriginImagesOnly: true });
       // gs:// links are gated on the message being agent-sent — a user-sent
       // message never links, however the body happens to be spelled.
       const codeSpans = codeSpanMentionsEnabled();
@@ -4855,7 +4857,7 @@ export class ScionChatMessage extends LitElement {
                       <sl-icon-button
                         name="download"
                         label="Download ${img.name}"
-                        href=${attachmentURL(img.id)}
+                        href=${buildAttachmentDownloadUrl(img.id)}
                         download=${img.name}
                       ></sl-icon-button>
                       ${this.renderAttachmentMenu(img)}
@@ -4875,7 +4877,7 @@ export class ScionChatMessage extends LitElement {
                   <span class="download-chip-wrap">
                     <a
                       class="download-chip"
-                      href="/api/v1/chat/attachments/${file.id}"
+                      href=${buildAttachmentDownloadUrl(file.id)}
                       download=${file.name}
                       title="Download ${file.name}"
                     >
@@ -4967,16 +4969,7 @@ export class ScionChatMessage extends LitElement {
       return;
     }
     if (action === 'download') {
-      const a = document.createElement('a');
-      a.href = attachmentURL(file.id);
-      a.download = file.name;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      try {
-        a.click();
-      } finally {
-        a.remove();
-      }
+      triggerFileDownload(buildAttachmentDownloadUrl(file.id), file.name);
     }
   }
 
@@ -5035,7 +5028,7 @@ export class ScionChatMessage extends LitElement {
             <sl-icon-button
               name="download"
               label="Download ${ref.name}"
-              href=${attachmentURL(ref.id)}
+              href=${buildAttachmentDownloadUrl(ref.id)}
               download=${ref.name}
             ></sl-icon-button>
             ${this.renderAttachmentMenu(ref)}
@@ -5093,7 +5086,10 @@ export class ScionChatMessage extends LitElement {
     if (state.status === 'error') {
       return html`<div class="preview-placeholder error">${state.error}</div>`;
     }
-    return html`<scion-markdown-preview .content=${state.text ?? ''}></scion-markdown-preview>`;
+    return html`<scion-markdown-preview
+      .content=${state.text ?? ''}
+      same-origin-images
+    ></scion-markdown-preview>`;
   }
 
   /**

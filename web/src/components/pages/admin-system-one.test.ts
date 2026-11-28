@@ -33,6 +33,13 @@ const {
   formatCredentialStatus,
   hasInvalidSecretBinding,
   instanceNeedsProjectSelectorForTest,
+  OTHER_MODEL_OPTION,
+  KNOWN_MODELS_HELP_TEXT,
+  initModelFieldState,
+  effectiveModelValue,
+  selectModelOption,
+  updateCustomModelInput,
+  switchModelFieldAdapter,
 } = mod;
 type Page = import('./admin-system-one.js').ScionPageAdminSystemOne;
 type AdapterCap = import('./admin-system-one.js').SystemOneAdapterCapability;
@@ -47,6 +54,13 @@ const SAMPLE_ADAPTERS: AdapterCap[] = [
     defaultEndpoint: 'https://generativelanguage.googleapis.com',
     modelRequired: true,
     supportsModelListing: false,
+    knownModels: [
+      {
+        id: 'gemini-decision-1',
+        displayName: 'Gemini Decision 1',
+        source: 'provider-doc',
+      },
+    ],
     authModes: [
       {
         mode: 'owned_api_key',
@@ -209,6 +223,86 @@ describe('admin-system-one helpers', () => {
     expect(instanceNeedsProjectSelectorForTest(SAMPLE_INSTANCES[0]!)).toBe(true);
     expect(instanceNeedsProjectSelectorForTest(SAMPLE_INSTANCES[1]!)).toBe(false);
     expect(instanceNeedsProjectSelectorForTest(SAMPLE_INSTANCES[2]!)).toBe(false);
+  });
+
+  it('initializes model field for create and edit (catalog match, custom Other, empty catalog)', () => {
+    const gemini = SAMPLE_ADAPTERS[0]!;
+    const typesafe = SAMPLE_ADAPTERS[1]!;
+
+    // Fresh create with catalog
+    const freshCatalog = initModelFieldState(gemini);
+    expect(freshCatalog).toEqual({
+      selection: '',
+      customValue: '',
+      isCustom: false,
+      switchHint: null,
+    });
+    expect(effectiveModelValue(freshCatalog, gemini)).toBe('');
+
+    // Edit with existing value in catalog -> selects catalog option
+    const editKnown = initModelFieldState(gemini, 'gemini-decision-1');
+    expect(editKnown).toEqual({
+      selection: 'gemini-decision-1',
+      customValue: '',
+      isCustom: false,
+      switchHint: null,
+    });
+    expect(effectiveModelValue(editKnown, gemini)).toBe('gemini-decision-1');
+
+    // Edit with existing custom value NOT in catalog -> shows Other with value filled in
+    const editCustom = initModelFieldState(gemini, 'gemini-decision-custom-2');
+    expect(editCustom).toEqual({
+      selection: OTHER_MODEL_OPTION,
+      customValue: 'gemini-decision-custom-2',
+      isCustom: true,
+      switchHint: null,
+    });
+    expect(effectiveModelValue(editCustom, gemini)).toBe('gemini-decision-custom-2');
+
+    // Edit with empty catalog -> write-in only with value filled in
+    const editEmptyCatalog = initModelFieldState(typesafe, 'jev-1.14.0');
+    expect(editEmptyCatalog).toEqual({
+      selection: '',
+      customValue: 'jev-1.14.0',
+      isCustom: true,
+      switchHint: null,
+    });
+    expect(effectiveModelValue(editEmptyCatalog, typesafe)).toBe('jev-1.14.0');
+  });
+
+  it('handles adapter switch: clears catalog pick with hint, keeps custom write-in with hint', () => {
+    const gemini = SAMPLE_ADAPTERS[0]!;
+    const typesafe = SAMPLE_ADAPTERS[1]!;
+
+    // Catalog pick cleared on switch
+    const picked = selectModelOption(initModelFieldState(gemini), 'gemini-decision-1');
+    const afterClear = switchModelFieldAdapter(picked, gemini, typesafe);
+    expect(afterClear.selection).toBe('');
+    expect(afterClear.customValue).toBe('');
+    expect(afterClear.isCustom).toBe(false);
+    expect(afterClear.switchHint).toContain('Cleared "gemini-decision-1"');
+    expect(effectiveModelValue(afterClear, typesafe)).toBe('');
+
+    // Custom write-in kept on switch (catalog -> empty catalog)
+    const otherTyped = updateCustomModelInput(
+      selectModelOption(initModelFieldState(gemini), OTHER_MODEL_OPTION),
+      'custom-model-v9',
+      true
+    );
+    const keptOnEmpty = switchModelFieldAdapter(otherTyped, gemini, typesafe);
+    expect(keptOnEmpty.selection).toBe('');
+    expect(keptOnEmpty.customValue).toBe('custom-model-v9');
+    expect(keptOnEmpty.isCustom).toBe(true);
+    expect(keptOnEmpty.switchHint).toContain('Kept custom model "custom-model-v9"');
+    expect(effectiveModelValue(keptOnEmpty, typesafe)).toBe('custom-model-v9');
+
+    // Custom write-in kept on switch (empty catalog -> catalog) in Other mode
+    const keptOnCatalog = switchModelFieldAdapter(keptOnEmpty, typesafe, gemini);
+    expect(keptOnCatalog.selection).toBe(OTHER_MODEL_OPTION);
+    expect(keptOnCatalog.customValue).toBe('custom-model-v9');
+    expect(keptOnCatalog.isCustom).toBe(true);
+    expect(keptOnCatalog.switchHint).toContain('Kept custom model "custom-model-v9"');
+    expect(effectiveModelValue(keptOnCatalog, gemini)).toBe('custom-model-v9');
   });
 });
 
@@ -537,7 +631,7 @@ describe('scion-page-admin-system-one', () => {
     failNextPost = true;
     let dlg = await openCreate();
     setVal(dlg, 'sl-input[name="name"]', 'owned-err');
-    setVal(dlg, 'sl-input[name="model"]', 'gemini-decision-1');
+    setVal(dlg, 'sl-select[name="modelSelect"]', 'gemini-decision-1', 'sl-change');
     setVal(dlg, 'sl-input[name="apiKey"]', 'synthetic-key-error');
     await settle();
     dlg.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }));
@@ -565,7 +659,7 @@ describe('scion-page-admin-system-one', () => {
     setVal(dlg, 'sl-radio-group[name="authMode"]', 'secret_ref', 'sl-change');
     await settle();
     setVal(dlg, 'sl-input[name="name"]', 'named-one');
-    setVal(dlg, 'sl-input[name="model"]', 'gemini-decision-1');
+    setVal(dlg, 'sl-select[name="modelSelect"]', 'gemini-decision-1', 'sl-change');
     await settle();
     dlg.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }));
     await settle();
@@ -581,7 +675,7 @@ describe('scion-page-admin-system-one', () => {
     setVal(dlg, 'sl-radio-group[name="authMode"]', 'google_access_token', 'sl-change');
     await settle();
     setVal(dlg, 'sl-input[name="name"]', 'adc-one');
-    setVal(dlg, 'sl-input[name="model"]', 'gemini-decision-1');
+    setVal(dlg, 'sl-select[name="modelSelect"]', 'gemini-decision-1', 'sl-change');
     setVal(
       dlg,
       'sl-textarea[name="scopes"]',
@@ -702,8 +796,22 @@ describe('scion-page-admin-system-one', () => {
     expect(probeRequests[0]?.body).toMatchObject({
       project: 'proj-1',
       probe: { text: expect.any(String) as unknown },
-      spec: { version: 1 },
+      spec: {
+        version: 1,
+        questions: [
+          {
+            id: 'q1',
+            type: 'binary',
+            instructions: expect.any(String) as unknown,
+          },
+        ],
+        output: { question: 'q1' },
+      },
     });
+    const firstQuestion = ((
+      probeRequests[0]?.body.spec as { questions?: Array<Record<string, unknown>> }
+    )?.questions ?? [])[0];
+    expect(firstQuestion).not.toHaveProperty('question');
 
     // Close dialog and reopen for gemini-adc BEFORE first probe resolves (R1)
     const closeBtn = Array.from(
@@ -761,5 +869,163 @@ describe('scion-page-admin-system-one', () => {
     const text = shadowText(el);
     expect(text).toContain('gemini-named');
     expect(text).toContain('gemini-adc');
+  });
+
+  it('scopes decorative 2.5rem icon styling to direct empty/error-state icons, not button prefix icons', async () => {
+    setFeatureFlag(SYSTEM_ONE_FLAG, true);
+    apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/system-one/adapters') {
+        return Promise.resolve(json({ adapters: SAMPLE_ADAPTERS }));
+      }
+      if (path === '/api/v1/admin/system-one/instances') {
+        return Promise.resolve(json({ instances: [], totalCount: 0 }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    const el = await mount();
+    const emptyState = el.shadowRoot?.querySelector('.empty-state');
+    expect(emptyState).not.toBeNull();
+
+    const decorativeIcon = emptyState?.querySelector(':scope > sl-icon');
+    const buttonPrefixIcon = emptyState?.querySelector('sl-button sl-icon[slot="prefix"]');
+    expect(decorativeIcon?.getAttribute('name')).toBe('robot');
+    expect(buttonPrefixIcon?.getAttribute('name')).toBe('plus-lg');
+
+    // Verify stylesheet selectors: decorative rule uses child combinator so nested button icons do not match.
+    const cssText = (
+      Array.isArray(mod.ScionPageAdminSystemOne.styles)
+        ? mod.ScionPageAdminSystemOne.styles
+        : [mod.ScionPageAdminSystemOne.styles]
+    )
+      .map((s) => s.cssText)
+      .join('\n');
+    expect(cssText).toContain('.empty-state > sl-icon');
+    expect(cssText).toContain('.error-state > sl-icon');
+    expect(cssText).not.toMatch(/\.empty-state\s+sl-icon\b/);
+    expect(cssText).not.toMatch(/\.error-state\s+sl-icon\b/);
+
+    expect(decorativeIcon?.matches('.empty-state > sl-icon')).toBe(true);
+    expect(buttonPrefixIcon?.matches('.empty-state > sl-icon')).toBe(false);
+
+    // Verify computed styles in shadow root: decorative icon keeps 2.5rem (40px) while button prefix icon does not.
+    const decorativeStyle = window.getComputedStyle(decorativeIcon!);
+    const buttonIconStyle = window.getComputedStyle(buttonPrefixIcon!);
+    expect(decorativeStyle.fontSize).toBe('40px');
+    expect(decorativeStyle.opacity).toBe('0.6');
+    expect(buttonIconStyle.fontSize).not.toBe('40px');
+    expect(buttonIconStyle.opacity).not.toBe('0.6');
+
+    // Error state decorative icon keeps the 2.5rem (40px) rule too.
+    el.remove();
+    apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/system-one/adapters') {
+        return Promise.resolve(json({ adapters: SAMPLE_ADAPTERS }));
+      }
+      if (path === '/api/v1/admin/system-one/instances') {
+        return Promise.resolve(json({ error: { message: 'backend unavailable' } }, 500));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+    const errEl = await mount();
+    const errorIcon = errEl.shadowRoot?.querySelector('.error-state > sl-icon');
+    expect(errorIcon?.getAttribute('name')).toBe('exclamation-triangle');
+    expect(errorIcon?.matches('.error-state > sl-icon')).toBe(true);
+    expect(window.getComputedStyle(errorIcon!).fontSize).toBe('40px');
+  });
+
+  it('renders knownModels dropdown with Other write-in, adapter switch behavior, and empty-catalog fallback', async () => {
+    setFeatureFlag(SYSTEM_ONE_FLAG, true);
+    const postedBodies: Array<Record<string, unknown>> = [];
+
+    apiFetch.mockImplementation((path: string, init?: RequestInit) => {
+      if (path === '/api/v1/admin/system-one/adapters') {
+        return Promise.resolve(json({ adapters: SAMPLE_ADAPTERS }));
+      }
+      if (path === '/api/v1/admin/system-one/instances' && !init?.method) {
+        return Promise.resolve(json({ instances: [], totalCount: 0 }));
+      }
+      if (path === '/api/v1/admin/system-one/instances' && init?.method === 'POST') {
+        const raw = typeof init.body === 'string' ? init.body : '{}';
+        postedBodies.push(JSON.parse(raw) as Record<string, unknown>);
+        return Promise.resolve(json(SAMPLE_INSTANCES[0], 201));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    const el = await mount();
+    const addBtn = Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Add Provider Instance')
+    ) as HTMLElement;
+    addBtn.click();
+    await settle();
+
+    const dlg = el.shadowRoot!.querySelector(
+      'sl-dialog[label="Add System One Provider Instance"]'
+    )!;
+    const setVal = (selector: string, val: string, event = 'sl-input'): void => {
+      const input = dlg.querySelector(selector) as HTMLElement & { value: string };
+      input.value = val;
+      input.dispatchEvent(new CustomEvent(event, { bubbles: true, composed: true }));
+    };
+
+    // 1. Adapter with knownModels shows dropdown + help text + Other option, no write-in input initially.
+    const modelSelect = dlg.querySelector('sl-select[name="modelSelect"]');
+    expect(modelSelect).not.toBeNull();
+    expect(modelSelect?.getAttribute('help-text')).toBe(KNOWN_MODELS_HELP_TEXT);
+    const options = Array.from(modelSelect?.querySelectorAll('sl-option') ?? []).map((o) => ({
+      value: o.getAttribute('value'),
+      text: o.textContent?.trim(),
+    }));
+    expect(options).toEqual([
+      { value: 'gemini-decision-1', text: 'Gemini Decision 1 (gemini-decision-1)' },
+      { value: OTHER_MODEL_OPTION, text: 'Other (enter model ID)' },
+    ]);
+    expect(dlg.querySelector('sl-input[name="model"]')).toBeNull();
+
+    // 2. Pick catalog model, then switch adapter -> clears selection and shows hint; empty catalog is write-in only.
+    setVal('sl-select[name="modelSelect"]', 'gemini-decision-1', 'sl-change');
+    await settle();
+    setVal('sl-select[name="adapter"]', 'typesafe', 'sl-change');
+    await settle();
+
+    expect(dlg.querySelector('sl-select[name="modelSelect"]')).toBeNull();
+    const tsModelInput = dlg.querySelector('sl-input[name="model"]') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(tsModelInput).not.toBeNull();
+    expect(tsModelInput?.value).toBe('');
+    const clearHint = dlg.querySelector('[data-testid="model-switch-hint"]');
+    expect(clearHint?.textContent).toContain('Cleared "gemini-decision-1"');
+
+    // 3. Type custom value on empty-catalog adapter, switch to catalog adapter -> keeps custom value in Other mode + hint.
+    setVal('sl-input[name="model"]', 'custom-exp-model');
+    await settle();
+    setVal('sl-select[name="adapter"]', 'gemini_decisions', 'sl-change');
+    await settle();
+
+    const gemSelectAfterSwitch = dlg.querySelector('sl-select[name="modelSelect"]') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(gemSelectAfterSwitch?.value).toBe(OTHER_MODEL_OPTION);
+    const gemCustomInput = dlg.querySelector('sl-input[name="model"]') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(gemCustomInput?.value).toBe('custom-exp-model');
+    const keepHint = dlg.querySelector('[data-testid="model-switch-hint"]');
+    expect(keepHint?.textContent).toContain('Kept custom model "custom-exp-model"');
+
+    // 4. Submit with Other custom model ID sends the custom value.
+    setVal('sl-input[name="name"]', 'custom-gemini');
+    setVal('sl-input[name="apiKey"]', 'synthetic-key-custom');
+    await settle();
+    dlg.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }));
+    await settle();
+
+    expect(postedBodies[0]).toMatchObject({
+      name: 'custom-gemini',
+      adapter: 'gemini_decisions',
+      model: 'custom-exp-model',
+    });
   });
 });

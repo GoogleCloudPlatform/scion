@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
@@ -42,13 +43,26 @@ const (
 	KindFilter Kind = "filter"
 	// KindSubject projects a string subject/coalescing key decision.
 	KindSubject Kind = "subject"
+	// KindJudgment projects a dialect-typed judgment (Detail); class pass means
+	// a judgment was produced, and fail is undefined.
+	KindJudgment Kind = "judgment"
 )
 
 // Capabilities describes static properties declared by a Dialect.
 type Capabilities struct {
-	PerformsIO  bool
-	MaxEvalTime time.Duration
-	ResultKinds []Kind
+	PerformsIO   bool
+	MaxEvalTime  time.Duration
+	ResultKinds  []Kind
+	TraceReasons []string
+	TraceFields  []TraceField
+	// CopyDetail returns an independent deep copy of a dialect's Decision.Detail
+	// value while preserving its concrete Go type (for example *systemone.Evaluation).
+	// Required for any Dialect used with KindJudgment chain elements: NewChainRun
+	// fails closed if a KindJudgment element's dialect declares CopyDetail == nil.
+	// CopyDetail runs while the ChainRun's mutex is held: it MUST NOT call back
+	// into the same ChainRun (which would self-deadlock), and it must be pure and
+	// fast.
+	CopyDetail func(any) any
 }
 
 // EnvironmentRef identifies the consumer and schema environment a rule compiles against.
@@ -59,12 +73,34 @@ type EnvironmentRef struct {
 	ResultType   celengine.Type
 }
 
-// Input supplies evaluation data to a Dialect. Activation carries variable
-// bindings for expression dialects such as CEL; Payload carries optional typed
-// dialect input alongside Activation (ignored by CELDialect).
+// Input supplies evaluation data to a Dialect.
+//
+// Activation carries JSON-shaped variable bindings for expression dialects such
+// as CEL and is defensively deep-copied by NewChainRun.
+//
+// Payload carries optional typed dialect input alongside Activation (ignored by
+// CELDialect). Consumers MUST treat Payload as immutable after NewChainRun
+// (NewChainRun deep-copies JSON-shaped Payload values, but consumer struct
+// pointers/values are held as supplied). When AdmittedInputKey is empty, the
+// grouped-evaluation safety floor hashes Payload via encoding/json, so Payload
+// MUST be JSON-complete (no unexported or json:"-" fields that affect
+// evaluation or authorization).
+//
+// AdmittedInputKey optionally supplies a consumer-computed fingerprint of the
+// admitted input fields (excluding per-member provenance such as RuleID or
+// Revision) for grouped-evaluation safety-floor validation. The consumer key
+// MUST cover every authorization-relevant field the IO dialect reads (for
+// example ProjectID, which selects project allowlists and project-scoped
+// secrets). When an Enricher supplies non-empty JSON-shaped additions (chain.*
+// or reserved names) for a step, the engine automatically mixes a type-tagged
+// canonical hash of those additions into the keyed admitted-input hash and
+// fails closed (incompatible_group) if the additions differ or contain
+// unhashable values (such as NaN or Inf); non-JSON-shaped chain.* values are
+// rejected earlier at enrichment time as failed/invalid_enrichment.
 type Input struct {
-	Activation map[string]any
-	Payload    any
+	Activation       map[string]any
+	Payload          any
+	AdmittedInputKey string
 }
 
 // ErrBudgetExhausted is returned when an aggregate BudgetTracker has no remaining time.
@@ -166,13 +202,30 @@ type Budget struct {
 	Tracker     *BudgetTracker
 }
 
+// TraceProvenance carries typed operational metadata emitted by a Dialect for
+// ChainTrace projection. Held by pointer on Decision so Decision remains
+// comparable.
+type TraceProvenance struct {
+	Fields map[string]any
+}
+
+// NewTraceProvenance constructs a TraceProvenance with a defensive shallow copy
+// of fields.
+func NewTraceProvenance(fields map[string]any) *TraceProvenance {
+	if len(fields) == 0 {
+		return nil
+	}
+	return &TraceProvenance{Fields: cloneProvenanceMap(fields)}
+}
+
 // Decision carries a dialect's typed result beneath the Bool/String consumer projections.
 type Decision struct {
-	Kind   Kind
-	Bool   bool
-	String string
-	Detail any
-	Trace  string // content-free
+	Kind       Kind
+	Bool       bool
+	String     string
+	Detail     any
+	Trace      string           // content-free legacy trace token
+	Provenance *TraceProvenance // typed operational metadata validated against Capabilities.TraceFields
 }
 
 // UncertainError indicates an unknown or uncertain judgment (distinct from
@@ -260,19 +313,28 @@ func (e *UnsupportedDialectError) Error() string {
 // Compiled wraps a dialect-owned compiled rule representation bound to the
 // consumer it was compiled for.
 type Compiled struct {
-	consumer string
-	dialect  string
-	kind     Kind
-	rep      any
+	consumer  string
+	dialect   string
+	kind      Kind
+	programID string
+	rep       any
 }
 
 // NewCompiled constructs a Compiled handle for Dialect implementations.
 func NewCompiled(consumer, dialect string, kind Kind, rep any) Compiled {
+	return NewCompiledWithIdentity(consumer, dialect, kind, "", rep)
+}
+
+// NewCompiledWithIdentity constructs a Compiled handle with an explicit
+// semantic program identity (used by grouped evaluation safety-floor checks
+// instead of pointer equality).
+func NewCompiledWithIdentity(consumer, dialect string, kind Kind, programID string, rep any) Compiled {
 	return Compiled{
-		consumer: strings.TrimSpace(consumer),
-		dialect:  strings.TrimSpace(dialect),
-		kind:     kind,
-		rep:      rep,
+		consumer:  strings.TrimSpace(consumer),
+		dialect:   strings.TrimSpace(dialect),
+		kind:      kind,
+		programID: strings.TrimSpace(programID),
+		rep:       rep,
 	}
 }
 
@@ -284,6 +346,9 @@ func (c Compiled) Dialect() string { return c.dialect }
 
 // Kind returns the Kind c was compiled for.
 func (c Compiled) Kind() Kind { return c.kind }
+
+// ProgramID returns the semantic program identity of c, if set.
+func (c Compiled) ProgramID() string { return c.programID }
 
 // Rep returns the dialect's internal compiled representation.
 func (c Compiled) Rep() any { return c.rep }
@@ -326,6 +391,7 @@ type Engine struct {
 	mu       sync.RWMutex
 	dialects map[string]Dialect
 	allowed  map[string]map[string]DialectGrant // consumer -> dialect -> grant; absent = deny-by-default
+	groupSeq atomic.Uint64
 }
 
 // NewEngine creates an empty rule Engine registry.
@@ -553,21 +619,26 @@ var (
 // Evaluate executes a compiled rule under the dialect's declared MaxEvalTime
 // and the caller's Budget. Non-nil errors always return a zero Decision.
 func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget Budget) (Decision, error) {
+	dec, _, err := e.evaluateCore(ctx, c, input, budget)
+	return dec, err
+}
+
+func (e *Engine) evaluateCore(ctx context.Context, c Compiled, input Input, budget Budget) (Decision, time.Duration, error) {
 	if c.IsZero() {
-		return Decision{}, &FailedError{Reason: "uninitialized_program"}
+		return Decision{}, 0, &FailedError{Reason: "uninitialized_program"}
 	}
 	d, err := e.resolveDialect(c.Consumer(), c.Dialect())
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, 0, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return Decision{}, &FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+		return Decision{}, 0, &FailedError{Reason: celengine.ReasonCanceled, Cause: err}
 	}
 	if budget.Tracker != nil && budget.Tracker.Exhausted() {
-		return Decision{}, ErrBudgetExhausted
+		return Decision{}, 0, ErrBudgetExhausted
 	}
 
 	evalTimeout := d.Declares().MaxEvalTime
@@ -578,7 +649,7 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 	if budget.Tracker != nil {
 		rem := budget.Tracker.Remaining()
 		if rem <= 0 {
-			return Decision{}, ErrBudgetExhausted
+			return Decision{}, 0, ErrBudgetExhausted
 		}
 		if evalTimeout == 0 || rem < evalTimeout {
 			evalTimeout = rem
@@ -608,14 +679,17 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		defer cancel()
 	}
 
+	if err := ctx.Err(); err != nil {
+		return Decision{}, 0, &FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+	}
 	dec, err := d.Evaluate(evalCtx, c, input, effBudget)
-	elapsed := time.Since(start)
+	elapsed := max(time.Since(start), time.Duration(0))
 	if budget.Tracker != nil {
 		budget.Tracker.Charge(elapsed)
 	}
 	if err != nil {
 		if callerErr := ctx.Err(); callerErr != nil {
-			return Decision{}, &FailedError{
+			return Decision{}, elapsed, &FailedError{
 				Reason: celengine.ReasonCanceled,
 				Cause:  errors.Join(callerErr, err),
 			}
@@ -624,17 +698,48 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 			elapsed >= evalTimeout-EngineDeadlineMargin(evalTimeout)
 		if boundFromTracker && trackerDeadline && isTimeoutOrCancelFailure(err) {
 			budget.Tracker.Exhaust()
-			return Decision{}, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)
+			return Decision{}, elapsed, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)
 		}
 		if errors.Is(context.Cause(evalCtx), errDialectEvalTimeout) && isTimeoutOrCancelFailure(err) {
-			return Decision{}, &FailedError{
+			return Decision{}, elapsed, &FailedError{
 				Reason: celengine.ReasonTimeout,
 				Cause:  errors.Join(&celengine.EvalError{Reason: celengine.ReasonTimeout}, err),
 			}
 		}
-		return Decision{}, err
+		return Decision{}, elapsed, err
 	}
-	return dec, nil
+
+	// Post-return late-success classification by bounding cause (§3.4, acceptance 5):
+	// discard any nil-error decision arriving after caller cancellation or the
+	// dispatch-time bound, classifying by the cause that bounded the evaluation
+	// while preserving EngineDeadlineMargin skew tolerance for in-time results.
+	if callerErr := ctx.Err(); callerErr != nil {
+		return Decision{}, elapsed, &FailedError{
+			Reason: celengine.ReasonCanceled,
+			Cause:  callerErr,
+		}
+	}
+	if evalTimeout > 0 {
+		cause := context.Cause(evalCtx)
+		if boundFromTracker {
+			if errors.Is(cause, errTrackerTimeout) || elapsed > evalTimeout+EngineDeadlineMargin(evalTimeout) {
+				budget.Tracker.Exhaust()
+				if cause == nil {
+					cause = errTrackerTimeout
+				}
+				return Decision{}, elapsed, fmt.Errorf("%w: %w", ErrBudgetExhausted, cause)
+			}
+		} else if errors.Is(cause, errDialectEvalTimeout) || elapsed > evalTimeout+EngineDeadlineMargin(evalTimeout) {
+			if cause == nil {
+				cause = errDialectEvalTimeout
+			}
+			return Decision{}, elapsed, &FailedError{
+				Reason: celengine.ReasonTimeout,
+				Cause:  errors.Join(&celengine.EvalError{Reason: celengine.ReasonTimeout}, cause),
+			}
+		}
+	}
+	return dec, elapsed, nil
 }
 
 func isTimeoutFailure(err error) bool {

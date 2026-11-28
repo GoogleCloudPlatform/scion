@@ -483,7 +483,7 @@ func ReapReviewRequests(ctx context.Context, st Store, host Host, now time.Time,
 	ttlCutoff := now.UTC().Add(-ReviewRequestTTL)
 
 	expireOne := func(rr ReviewRequest, reason string) {
-		expired, err := st.ExpireReviewRequest(ctx, rr.ArtifactID, rr.ID, rr.UpdatedAt, reason, now, &reconcilerActor)
+		expired, removedGrant, err := st.ExpireReviewRequest(ctx, rr.ArtifactID, rr.ID, rr.UpdatedAt, reason, now, &reconcilerActor)
 		if err != nil {
 			res.Errors++
 			recordErr(err)
@@ -493,6 +493,26 @@ func ReapReviewRequests(ctx context.Context, st Store, host Host, now time.Time,
 			return
 		}
 		res.Expired++
+		if rr.ArtifactID == curArtID {
+			grantsLoaded = false
+		}
+		if removedGrant != nil {
+			art := curArt
+			if rr.ArtifactID != curArtID || art == nil {
+				if loaded, aerr := st.GetArtifact(ctx, rr.ArtifactID); aerr == nil && loaded != nil {
+					art = loaded
+				} else {
+					art = &Artifact{ID: rr.ArtifactID}
+				}
+			}
+			writeSystemDecision(ctx, log, reconcilerActor, logEntry{
+				action:      logActionGrantRemoved,
+				artifact:    art,
+				subjectKind: removedGrant.SubjectKind,
+				subjectRef:  removedGrant.SubjectRef,
+				permission:  removedGrant.Permission,
+			})
+		}
 		if rr.ReviewerKind == PrincipalKindUser && rr.ReviewerRef != "" {
 			if notifier != nil {
 				notifier.RequestClosed(ctx, rr.ArtifactID, rr.ReviewerRef)

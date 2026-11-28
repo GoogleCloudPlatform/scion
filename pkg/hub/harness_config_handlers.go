@@ -283,8 +283,7 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateHarnessConfigRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -924,8 +923,7 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req UploadRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -1031,8 +1029,7 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		// (ptone/scion#4219).
 		UploadID string `json:"uploadId,omitempty"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -1630,7 +1627,10 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		if writeImportContentRefusal(w, err) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
+		if writeImportRateLimitError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, "reimport_failed", importFetchErrorMessage(err), nil)
 		return
 	}
 

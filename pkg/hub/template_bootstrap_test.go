@@ -1145,29 +1145,22 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Stub git ls-remote so branch disambiguation never execs real git against
-	// github.com (ptone/scion#3670). The stub pins that resolution goes through
-	// the seam with the project token URL; the resolved ref ("main" +
-	// "templates") is the same as the naive parse. Matcher coverage lives in
-	// pkg/config's TestResolveGitHubRef_UsesLsRemoteSeam.
-	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
-
-	// Hijack the HTTP client's Transport to mock the tarball fetch.
+	// Hijack the HTTP client's Transport to mock the GitHub fetch.
 	// NOTE: This test mutates http.DefaultClient.Transport globally and MUST NOT be run in parallel (t.Parallel()).
 	oldTransport := http.DefaultClient.Transport
 	defer func() { http.DefaultClient.Transport = oldTransport }()
 
-	var capturedAuthHeader string
+	var capturedAPIAuth, capturedRawAuth string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "api.github.com" {
+			switch req.URL.Host {
+			case "api.github.com":
+				capturedAPIAuth = req.Header.Get("Authorization")
+			case "raw.githubusercontent.com":
+				capturedRawAuth = req.Header.Get("Authorization")
+			default:
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
-			if req.URL.Path != "/repos/chiefkarlin/scion-experiments/tarball/main" {
-				return nil, fmt.Errorf("unexpected request path: %s", req.URL.Path)
-			}
-
-			capturedAuthHeader = req.Header.Get("Authorization")
 
 			// Write a simple dummy tar.gz containing a test template directory structure
 			var buf bytes.Buffer
@@ -1223,10 +1216,12 @@ system_prompt: system-prompt.md
 		t.Errorf("expected imported templates [my-template], got %v", imported)
 	}
 
-	if capturedAuthHeader != "Bearer my-secret-token-12345" {
-		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
+	if capturedAPIAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected api.github.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedAPIAuth)
 	}
-	assertLsRemoteCalledWithToken(t, lsRemote)
+	if capturedRawAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected raw.githubusercontent.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedRawAuth)
+	}
 
 	// Verify template was saved to store
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
@@ -1278,24 +1273,22 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Stub git ls-remote (see TestImportTemplatesFromRemote_WithProjectGithubToken).
-	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
-
-	// Hijack the HTTP client's Transport to mock the tarball fetch.
+	// Hijack the HTTP client's Transport to mock the GitHub fetch.
 	// NOTE: mutates http.DefaultClient.Transport globally; MUST NOT run in parallel.
 	oldTransport := http.DefaultClient.Transport
 	defer func() { http.DefaultClient.Transport = oldTransport }()
 
-	var capturedAuthHeader string
+	var capturedAPIAuth, capturedRawAuth string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "api.github.com" {
+			switch req.URL.Host {
+			case "api.github.com":
+				capturedAPIAuth = req.Header.Get("Authorization")
+			case "raw.githubusercontent.com":
+				capturedRawAuth = req.Header.Get("Authorization")
+			default:
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
-			if req.URL.Path != "/repos/chiefkarlin/scion-experiments/tarball/main" {
-				return nil, fmt.Errorf("unexpected request path: %s", req.URL.Path)
-			}
-			capturedAuthHeader = req.Header.Get("Authorization")
 
 			var buf bytes.Buffer
 			gzw := gzip.NewWriter(&buf)
@@ -1330,10 +1323,12 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	if len(imported) != 1 || imported[0] != "my-config" {
 		t.Errorf("expected imported harness-configs [my-config], got %v", imported)
 	}
-	if capturedAuthHeader != "Bearer my-secret-token-12345" {
-		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
+	if capturedAPIAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected api.github.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedAPIAuth)
 	}
-	assertLsRemoteCalledWithToken(t, lsRemote)
+	if capturedRawAuth != "Bearer my-secret-token-12345" {
+		t.Errorf("expected raw.githubusercontent.com Authorization header 'Bearer my-secret-token-12345', got %q", capturedRawAuth)
+	}
 
 	existing, err := s.GetHarnessConfigBySlug(ctx, "my-config", store.HarnessConfigScopeProject, projectID)
 	if err != nil {
@@ -1348,10 +1343,10 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 }
 
 // TestImportTemplatesFromRemote_NoSparseCheckoutFallback verifies that a
-// hosted Hub does not fall back to sparse git checkout when the GitHub
-// tarball download fails: a credentialed fetch tries the REST tarball URL on
-// api.github.com once and then fails without invoking git or persisting anything.
+// hosted Hub fails cleanly when GitHub returns 404 without invoking git or
+// persisting anything.
 func TestImportTemplatesFromRemote_NoSparseCheckoutFallback(t *testing.T) {
+	t.Setenv("PATH", "")
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -1375,23 +1370,17 @@ func TestImportTemplatesFromRemote_NoSparseCheckoutFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
-	checkout := stubGitSparseCheckout(t, map[string]string{
-		"my-template/scion-agent.yaml": "schema_version: \"1\"\ndescription: \"From sparse checkout\"\nagent_instructions: agents.md\n",
-		"my-template/agents.md":        "# Agents instructions",
-	})
-
-	// Make all tarball downloads fail. NOTE: mutates http.DefaultClient.Transport
-	// globally; MUST NOT run in parallel.
+	// Make all GitHub API requests fail with 404. NOTE: mutates
+	// http.DefaultClient.Transport globally; MUST NOT run in parallel.
 	oldTransport := http.DefaultClient.Transport
 	defer func() { http.DefaultClient.Transport = oldTransport }()
-	var tarballRequests []string
+	var apiRequests []string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			if req.URL.Host != "api.github.com" {
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
-			tarballRequests = append(tarballRequests, req.URL.Path)
+			apiRequests = append(apiRequests, req.URL.Path)
 			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader(nil)), Request: req}, nil
 		},
 	}
@@ -1399,41 +1388,11 @@ func TestImportTemplatesFromRemote_NoSparseCheckoutFallback(t *testing.T) {
 	if _, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/chiefkarlin/scion-experiments/tree/main/templates"); err == nil {
 		t.Fatal("expected importTemplatesFromRemote to fail without sparse-checkout fallback")
 	}
-	wantRequests := []string{
-		"/repos/chiefkarlin/scion-experiments/tarball/main",
-	}
-	if len(tarballRequests) != len(wantRequests) || tarballRequests[0] != wantRequests[0] {
-		t.Errorf("expected REST tarball request %v, got %v", wantRequests, tarballRequests)
-	}
-	assertLsRemoteCalledWithToken(t, lsRemote)
-	if calls := checkout.Calls(); len(calls) != 0 {
-		t.Errorf("expected no sparse checkout on the Hub, got %d", len(calls))
+	if len(apiRequests) == 0 {
+		t.Errorf("expected GitHub API requests, got none")
 	}
 	if len(stor.objects) != 0 {
 		t.Errorf("expected nothing stored, got %d objects", len(stor.objects))
-	}
-}
-
-// testLsRemoteHeads is canned `git ls-remote --heads` output for
-// chiefkarlin/scion-experiments. It models a remote that can exist in real
-// git (no ref is both a branch and a directory of branches); only "main" is a
-// prefix of "main/templates" and "main/harness-configs".
-const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/main\n" +
-	"2222222222222222222222222222222222222222\trefs/heads/release/1.0\n" +
-	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
-
-// assertLsRemoteCalledWithToken checks that branch resolution went through the
-// stubbed ls-remote seam exactly once, for the anonymous repository URL, and
-// was given the project token separately. If a regression bypassed the seam,
-// real git would run and this fails.
-func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
-	t.Helper()
-	wantURL := "https://github.com/chiefkarlin/scion-experiments.git"
-	if got := stub.URLs(); len(got) != 1 || got[0] != wantURL {
-		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", wantURL, got)
-	}
-	if got := stub.Tokens(); len(got) != 1 || got[0] != "my-secret-token-12345" {
-		t.Errorf("expected the project token to be passed to ls-remote once, got %d token(s)", len(got))
 	}
 }
 

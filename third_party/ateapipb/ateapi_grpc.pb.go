@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v4.25.3
-// source: ateapi.proto
+// source: api/ateapi/v1/ateapi.proto
 
-package ateapipb
+package ateapi
 
 import (
 	context "context"
@@ -33,41 +33,48 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_GetActor_FullMethodName                   = "/ateapi.Control/GetActor"
-	Control_CreateActor_FullMethodName                = "/ateapi.Control/CreateActor"
-	Control_UpdateActor_FullMethodName                = "/ateapi.Control/UpdateActor"
-	Control_SuspendActor_FullMethodName               = "/ateapi.Control/SuspendActor"
-	Control_PauseActor_FullMethodName                 = "/ateapi.Control/PauseActor"
-	Control_ResumeActor_FullMethodName                = "/ateapi.Control/ResumeActor"
-	Control_RevertActor_FullMethodName                = "/ateapi.Control/RevertActor"
-	Control_DeleteActor_FullMethodName                = "/ateapi.Control/DeleteActor"
-	Control_GetActorEgressPolicy_FullMethodName       = "/ateapi.Control/GetActorEgressPolicy"
-	Control_CreateActorEgressPolicy_FullMethodName    = "/ateapi.Control/CreateActorEgressPolicy"
-	Control_UpdateActorEgressPolicy_FullMethodName    = "/ateapi.Control/UpdateActorEgressPolicy"
-	Control_DeleteActorEgressPolicy_FullMethodName    = "/ateapi.Control/DeleteActorEgressPolicy"
-	Control_MintActorJWT_FullMethodName               = "/ateapi.Control/MintActorJWT"
-	Control_MintActorCertificate_FullMethodName       = "/ateapi.Control/MintActorCertificate"
-	Control_CreateTag_FullMethodName                  = "/ateapi.Control/CreateTag"
-	Control_GetTag_FullMethodName                     = "/ateapi.Control/GetTag"
-	Control_ListTags_FullMethodName                   = "/ateapi.Control/ListTags"
-	Control_UpdateTag_FullMethodName                  = "/ateapi.Control/UpdateTag"
-	Control_DeleteTag_FullMethodName                  = "/ateapi.Control/DeleteTag"
-	Control_ListWorkers_FullMethodName                = "/ateapi.Control/ListWorkers"
-	Control_GetWorker_FullMethodName                  = "/ateapi.Control/GetWorker"
-	Control_CreateWorker_FullMethodName               = "/ateapi.Control/CreateWorker"
-	Control_UpdateWorker_FullMethodName               = "/ateapi.Control/UpdateWorker"
-	Control_DeleteWorker_FullMethodName               = "/ateapi.Control/DeleteWorker"
-	Control_DrainWorker_FullMethodName                = "/ateapi.Control/DrainWorker"
-	Control_ListWorkerActorAssignments_FullMethodName = "/ateapi.Control/ListWorkerActorAssignments"
-	Control_ListActors_FullMethodName                 = "/ateapi.Control/ListActors"
-	Control_CreateAtespace_FullMethodName             = "/ateapi.Control/CreateAtespace"
-	Control_GetAtespace_FullMethodName                = "/ateapi.Control/GetAtespace"
-	Control_ListAtespaces_FullMethodName              = "/ateapi.Control/ListAtespaces"
-	Control_DeleteAtespace_FullMethodName             = "/ateapi.Control/DeleteAtespace"
-	Control_CreateActorTemplate_FullMethodName        = "/ateapi.Control/CreateActorTemplate"
-	Control_GetActorTemplate_FullMethodName           = "/ateapi.Control/GetActorTemplate"
-	Control_ListActorTemplates_FullMethodName         = "/ateapi.Control/ListActorTemplates"
-	Control_DeleteActorTemplate_FullMethodName        = "/ateapi.Control/DeleteActorTemplate"
+	Control_GetActor_FullMethodName                   = "/substrate.ateapi.v1.Control/GetActor"
+	Control_CreateActor_FullMethodName                = "/substrate.ateapi.v1.Control/CreateActor"
+	Control_UpdateActor_FullMethodName                = "/substrate.ateapi.v1.Control/UpdateActor"
+	Control_SuspendActor_FullMethodName               = "/substrate.ateapi.v1.Control/SuspendActor"
+	Control_ResumeActor_FullMethodName                = "/substrate.ateapi.v1.Control/ResumeActor"
+	Control_RevertActor_FullMethodName                = "/substrate.ateapi.v1.Control/RevertActor"
+	Control_DeleteActor_FullMethodName                = "/substrate.ateapi.v1.Control/DeleteActor"
+	Control_GetActorEgressPolicy_FullMethodName       = "/substrate.ateapi.v1.Control/GetActorEgressPolicy"
+	Control_CreateActorEgressPolicy_FullMethodName    = "/substrate.ateapi.v1.Control/CreateActorEgressPolicy"
+	Control_UpdateActorEgressPolicy_FullMethodName    = "/substrate.ateapi.v1.Control/UpdateActorEgressPolicy"
+	Control_DeleteActorEgressPolicy_FullMethodName    = "/substrate.ateapi.v1.Control/DeleteActorEgressPolicy"
+	Control_MintActorJwt_FullMethodName               = "/substrate.ateapi.v1.Control/MintActorJwt"
+	Control_CreateTag_FullMethodName                  = "/substrate.ateapi.v1.Control/CreateTag"
+	Control_GetTag_FullMethodName                     = "/substrate.ateapi.v1.Control/GetTag"
+	Control_ListTags_FullMethodName                   = "/substrate.ateapi.v1.Control/ListTags"
+	Control_UpdateTag_FullMethodName                  = "/substrate.ateapi.v1.Control/UpdateTag"
+	Control_DeleteTag_FullMethodName                  = "/substrate.ateapi.v1.Control/DeleteTag"
+	Control_ListWorkers_FullMethodName                = "/substrate.ateapi.v1.Control/ListWorkers"
+	Control_GetWorker_FullMethodName                  = "/substrate.ateapi.v1.Control/GetWorker"
+	Control_CreateWorker_FullMethodName               = "/substrate.ateapi.v1.Control/CreateWorker"
+	Control_UpdateWorker_FullMethodName               = "/substrate.ateapi.v1.Control/UpdateWorker"
+	Control_DeleteWorker_FullMethodName               = "/substrate.ateapi.v1.Control/DeleteWorker"
+	Control_DrainWorker_FullMethodName                = "/substrate.ateapi.v1.Control/DrainWorker"
+	Control_MarkWorkerAvailable_FullMethodName        = "/substrate.ateapi.v1.Control/MarkWorkerAvailable"
+	Control_MarkWorkerUnavailable_FullMethodName      = "/substrate.ateapi.v1.Control/MarkWorkerUnavailable"
+	Control_ListWorkerActorAssignments_FullMethodName = "/substrate.ateapi.v1.Control/ListWorkerActorAssignments"
+	Control_ListActors_FullMethodName                 = "/substrate.ateapi.v1.Control/ListActors"
+	Control_CreateAtespace_FullMethodName             = "/substrate.ateapi.v1.Control/CreateAtespace"
+	Control_GetAtespace_FullMethodName                = "/substrate.ateapi.v1.Control/GetAtespace"
+	Control_ListAtespaces_FullMethodName              = "/substrate.ateapi.v1.Control/ListAtespaces"
+	Control_DeleteAtespace_FullMethodName             = "/substrate.ateapi.v1.Control/DeleteAtespace"
+	Control_CreateActorTemplate_FullMethodName        = "/substrate.ateapi.v1.Control/CreateActorTemplate"
+	Control_GetActorTemplate_FullMethodName           = "/substrate.ateapi.v1.Control/GetActorTemplate"
+	Control_ListActorTemplates_FullMethodName         = "/substrate.ateapi.v1.Control/ListActorTemplates"
+	Control_DeleteActorTemplate_FullMethodName        = "/substrate.ateapi.v1.Control/DeleteActorTemplate"
+	Control_GetGlobalAccessPolicy_FullMethodName      = "/substrate.ateapi.v1.Control/GetGlobalAccessPolicy"
+	Control_CreateGlobalAccessPolicy_FullMethodName   = "/substrate.ateapi.v1.Control/CreateGlobalAccessPolicy"
+	Control_UpdateGlobalAccessPolicy_FullMethodName   = "/substrate.ateapi.v1.Control/UpdateGlobalAccessPolicy"
+	Control_GetAtespaceAccessPolicy_FullMethodName    = "/substrate.ateapi.v1.Control/GetAtespaceAccessPolicy"
+	Control_CreateAtespaceAccessPolicy_FullMethodName = "/substrate.ateapi.v1.Control/CreateAtespaceAccessPolicy"
+	Control_UpdateAtespaceAccessPolicy_FullMethodName = "/substrate.ateapi.v1.Control/UpdateAtespaceAccessPolicy"
+	Control_DeleteAtespaceAccessPolicy_FullMethodName = "/substrate.ateapi.v1.Control/DeleteAtespaceAccessPolicy"
 )
 
 // ControlClient is the client API for Control service.
@@ -83,17 +90,17 @@ type ControlClient interface {
 	// Update mutable fields on an existing Actor.
 	UpdateActor(ctx context.Context, in *UpdateActorRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Suspend a given actor to a new snapshot. A running actor is checkpointed
-	// on its worker; a paused actor's node-local snapshot is uploaded, narrowed
-	// to the template's commit scope where required (Full capture, Data commit).
+	// on its worker. A SUSPENDED actor is returned as it is.
 	SuspendActor(ctx context.Context, in *SuspendActorRequest, opts ...grpc.CallOption) (*SuspendActorResponse, error)
-	// Pause a given actor and keep its snapshots on node VM.
-	PauseActor(ctx context.Context, in *PauseActorRequest, opts ...grpc.CallOption) (*PauseActorResponse, error)
 	// Resume an actor from its latest snapshot.
 	ResumeActor(ctx context.Context, in *ResumeActorRequest, opts ...grpc.CallOption) (*ResumeActorResponse, error)
-	// Revert an actor to SUSPENDED state.
-	// Only crashed, running or paused actors can be reverted.
+	// Revert an actor to SUSPENDED state at its durable snapshot.
+	// Only crashed or running actors, or suspended actors with a node-local
+	// snapshot, can be reverted. A suspended actor without a node-local snapshot
+	// is already at its durable snapshot, so there is nothing to revert.
 	RevertActor(ctx context.Context, in *RevertActorRequest, opts ...grpc.CallOption) (*RevertActorResponse, error)
-	// Delete an actor. Only suspended actors can be deleted.
+	// Delete an actor. A running actor's workload is terminated, its volumes
+	// detached, and its worker released before the record is removed.
 	DeleteActor(ctx context.Context, in *DeleteActorRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Get the egress policy resource nested under an Actor.
 	GetActorEgressPolicy(ctx context.Context, in *GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*EgressPolicy, error)
@@ -106,18 +113,11 @@ type ControlClient interface {
 	// Create a Substrate-issued JWT asserting the actor identity.
 	//
 	// * Called by the egress gateway when actor JWT injection is configured for outbound requests.
-	MintActorJWT(ctx context.Context, in *MintActorJWTRequest, opts ...grpc.CallOption) (*MintActorJWTResponse, error)
-	// Create a Substrate-issued SPIFFE certificate asserting the actor identity.
-	//
-	// * Called by atelet to provision an atunnel with a certificate for
-	//   communication with the egress gateway.  TODO(identity): Migrate this use
-	//   case to a distinct certificate to prevent actor/atunnel confusion.
-	// * Called by the egress gateway when actor client certificate injection is
-	//   configured for outbound requests.
-	MintActorCertificate(ctx context.Context, in *MintActorCertificateRequest, opts ...grpc.CallOption) (*MintActorCertificateResponse, error)
+	MintActorJwt(ctx context.Context, in *MintActorJwtRequest, opts ...grpc.CallOption) (*MintActorJwtResponse, error)
 	// Tag the external snapshot a suspended Actor holds. The tag gets its own
 	// copy of that snapshot, so suspending or deleting the Actor afterwards
-	// cannot collect it.
+	// cannot collect it. When the Actor's latest snapshot is not uploaded yet,
+	// atelet uploads it first, so the call can take as long as that upload.
 	CreateTag(ctx context.Context, in *CreateTagRequest, opts ...grpc.CallOption) (*Tag, error)
 	// Get a Tag.
 	GetTag(ctx context.Context, in *GetTagRequest, opts ...grpc.CallOption) (*Tag, error)
@@ -133,7 +133,8 @@ type ControlClient interface {
 	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
 	// Get a Worker.
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
-	// Register a Worker. Called once its Pod is Ready and has an IP.
+	// Register a Worker. Called once its Pod has an IP. A Worker is registered
+	// UNAVAILABLE and takes no Actors until MarkWorkerAvailable.
 	CreateWorker(ctx context.Context, in *CreateWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	// Update observed pool state on a Worker.
 	UpdateWorker(ctx context.Context, in *UpdateWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
@@ -143,7 +144,19 @@ type ControlClient interface {
 	// Mark a Worker as terminating so the scheduler stops routing new Actors to
 	// it. Idempotent; one-way. Deliberately leaves any bound Actor alone.
 	// Returns ABORTED if another write lands on the Worker first; retry.
-	DrainWorker(ctx context.Context, in *DrainWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
+	DrainWorker(ctx context.Context, in *DrainWorkerRequest, opts ...grpc.CallOption) (*DrainWorkerResponse, error)
+	// Mark an UNAVAILABLE Worker ACTIVE so the scheduler places Actors on it.
+	// Idempotent. Returns FAILED_PRECONDITION for a DRAINING Worker, and ABORTED
+	// if another write lands on the Worker first; retry.
+	//
+	// Every Actor placed after this call is stamped with the Worker's epoch as
+	// it stands then, so a caller raises epoch for a restarted the worker first.
+	MarkWorkerAvailable(ctx context.Context, in *MarkWorkerAvailableRequest, opts ...grpc.CallOption) (*MarkWorkerAvailableResponse, error)
+	// Mark an ACTIVE Worker UNAVAILABLE so the scheduler stops placing Actors on
+	// it, as while its Pod is not Ready. Idempotent. Leaves any bound Actor
+	// alone. Returns FAILED_PRECONDITION for a DRAINING Worker, and ABORTED if
+	// another write lands on the Worker first; retry.
+	MarkWorkerUnavailable(ctx context.Context, in *MarkWorkerUnavailableRequest, opts ...grpc.CallOption) (*MarkWorkerUnavailableResponse, error)
 	// List the Actors hosted by a given Worker.
 	ListWorkerActorAssignments(ctx context.Context, in *ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerActorAssignmentsResponse, error)
 	// List Actors.
@@ -161,8 +174,27 @@ type ControlClient interface {
 	GetActorTemplate(ctx context.Context, in *GetActorTemplateRequest, opts ...grpc.CallOption) (*ActorTemplate, error)
 	ListActorTemplates(ctx context.Context, in *ListActorTemplatesRequest, opts ...grpc.CallOption) (*ListActorTemplatesResponse, error)
 	// Delete an ActorTemplate together with its golden actor and golden
-	// tag in the reserved ate-golden atespace.
+	// tag in the template's atespace.
 	DeleteActorTemplate(ctx context.Context, in *DeleteActorTemplateRequest, opts ...grpc.CallOption) (*ActorTemplate, error)
+	// Get the deployment-wide global access policy singleton. Returns NotFound
+	// until the policy has been created.
+	GetGlobalAccessPolicy(ctx context.Context, in *GetGlobalAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
+	// Create the deployment-wide global access policy singleton. The server's
+	// configured bootstrap owners are global owners whether or not this policy
+	// exists, so they can create it.
+	CreateGlobalAccessPolicy(ctx context.Context, in *CreateGlobalAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
+	// Replace the deployment-wide global access policy singleton. Empty
+	// bindings revoke every grant held through the policy; bootstrap owners
+	// keep access.
+	UpdateGlobalAccessPolicy(ctx context.Context, in *UpdateGlobalAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
+	// Get the access policy resource nested under an Atespace.
+	GetAtespaceAccessPolicy(ctx context.Context, in *GetAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
+	// Create the access policy resource nested under an Atespace.
+	CreateAtespaceAccessPolicy(ctx context.Context, in *CreateAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
+	// Replace the access policy resource nested under an Atespace.
+	UpdateAtespaceAccessPolicy(ctx context.Context, in *UpdateAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
+	// Delete the access policy resource nested under an Atespace.
+	DeleteAtespaceAccessPolicy(ctx context.Context, in *DeleteAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error)
 }
 
 type controlClient struct {
@@ -207,16 +239,6 @@ func (c *controlClient) SuspendActor(ctx context.Context, in *SuspendActorReques
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SuspendActorResponse)
 	err := c.cc.Invoke(ctx, Control_SuspendActor_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *controlClient) PauseActor(ctx context.Context, in *PauseActorRequest, opts ...grpc.CallOption) (*PauseActorResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(PauseActorResponse)
-	err := c.cc.Invoke(ctx, Control_PauseActor_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -293,20 +315,10 @@ func (c *controlClient) DeleteActorEgressPolicy(ctx context.Context, in *DeleteA
 	return out, nil
 }
 
-func (c *controlClient) MintActorJWT(ctx context.Context, in *MintActorJWTRequest, opts ...grpc.CallOption) (*MintActorJWTResponse, error) {
+func (c *controlClient) MintActorJwt(ctx context.Context, in *MintActorJwtRequest, opts ...grpc.CallOption) (*MintActorJwtResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(MintActorJWTResponse)
-	err := c.cc.Invoke(ctx, Control_MintActorJWT_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *controlClient) MintActorCertificate(ctx context.Context, in *MintActorCertificateRequest, opts ...grpc.CallOption) (*MintActorCertificateResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(MintActorCertificateResponse)
-	err := c.cc.Invoke(ctx, Control_MintActorCertificate_FullMethodName, in, out, cOpts...)
+	out := new(MintActorJwtResponse)
+	err := c.cc.Invoke(ctx, Control_MintActorJwt_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -413,10 +425,30 @@ func (c *controlClient) DeleteWorker(ctx context.Context, in *DeleteWorkerReques
 	return out, nil
 }
 
-func (c *controlClient) DrainWorker(ctx context.Context, in *DrainWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
+func (c *controlClient) DrainWorker(ctx context.Context, in *DrainWorkerRequest, opts ...grpc.CallOption) (*DrainWorkerResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Worker)
+	out := new(DrainWorkerResponse)
 	err := c.cc.Invoke(ctx, Control_DrainWorker_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) MarkWorkerAvailable(ctx context.Context, in *MarkWorkerAvailableRequest, opts ...grpc.CallOption) (*MarkWorkerAvailableResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MarkWorkerAvailableResponse)
+	err := c.cc.Invoke(ctx, Control_MarkWorkerAvailable_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) MarkWorkerUnavailable(ctx context.Context, in *MarkWorkerUnavailableRequest, opts ...grpc.CallOption) (*MarkWorkerUnavailableResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MarkWorkerUnavailableResponse)
+	err := c.cc.Invoke(ctx, Control_MarkWorkerUnavailable_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -523,6 +555,76 @@ func (c *controlClient) DeleteActorTemplate(ctx context.Context, in *DeleteActor
 	return out, nil
 }
 
+func (c *controlClient) GetGlobalAccessPolicy(ctx context.Context, in *GetGlobalAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_GetGlobalAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) CreateGlobalAccessPolicy(ctx context.Context, in *CreateGlobalAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_CreateGlobalAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) UpdateGlobalAccessPolicy(ctx context.Context, in *UpdateGlobalAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_UpdateGlobalAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) GetAtespaceAccessPolicy(ctx context.Context, in *GetAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_GetAtespaceAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) CreateAtespaceAccessPolicy(ctx context.Context, in *CreateAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_CreateAtespaceAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) UpdateAtespaceAccessPolicy(ctx context.Context, in *UpdateAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_UpdateAtespaceAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) DeleteAtespaceAccessPolicy(ctx context.Context, in *DeleteAtespaceAccessPolicyRequest, opts ...grpc.CallOption) (*AccessPolicy, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessPolicy)
+	err := c.cc.Invoke(ctx, Control_DeleteAtespaceAccessPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlServer is the server API for Control service.
 // All implementations must embed UnimplementedControlServer
 // for forward compatibility.
@@ -536,17 +638,17 @@ type ControlServer interface {
 	// Update mutable fields on an existing Actor.
 	UpdateActor(context.Context, *UpdateActorRequest) (*Actor, error)
 	// Suspend a given actor to a new snapshot. A running actor is checkpointed
-	// on its worker; a paused actor's node-local snapshot is uploaded, narrowed
-	// to the template's commit scope where required (Full capture, Data commit).
+	// on its worker. A SUSPENDED actor is returned as it is.
 	SuspendActor(context.Context, *SuspendActorRequest) (*SuspendActorResponse, error)
-	// Pause a given actor and keep its snapshots on node VM.
-	PauseActor(context.Context, *PauseActorRequest) (*PauseActorResponse, error)
 	// Resume an actor from its latest snapshot.
 	ResumeActor(context.Context, *ResumeActorRequest) (*ResumeActorResponse, error)
-	// Revert an actor to SUSPENDED state.
-	// Only crashed, running or paused actors can be reverted.
+	// Revert an actor to SUSPENDED state at its durable snapshot.
+	// Only crashed or running actors, or suspended actors with a node-local
+	// snapshot, can be reverted. A suspended actor without a node-local snapshot
+	// is already at its durable snapshot, so there is nothing to revert.
 	RevertActor(context.Context, *RevertActorRequest) (*RevertActorResponse, error)
-	// Delete an actor. Only suspended actors can be deleted.
+	// Delete an actor. A running actor's workload is terminated, its volumes
+	// detached, and its worker released before the record is removed.
 	DeleteActor(context.Context, *DeleteActorRequest) (*Actor, error)
 	// Get the egress policy resource nested under an Actor.
 	GetActorEgressPolicy(context.Context, *GetActorEgressPolicyRequest) (*EgressPolicy, error)
@@ -559,18 +661,11 @@ type ControlServer interface {
 	// Create a Substrate-issued JWT asserting the actor identity.
 	//
 	// * Called by the egress gateway when actor JWT injection is configured for outbound requests.
-	MintActorJWT(context.Context, *MintActorJWTRequest) (*MintActorJWTResponse, error)
-	// Create a Substrate-issued SPIFFE certificate asserting the actor identity.
-	//
-	// * Called by atelet to provision an atunnel with a certificate for
-	//   communication with the egress gateway.  TODO(identity): Migrate this use
-	//   case to a distinct certificate to prevent actor/atunnel confusion.
-	// * Called by the egress gateway when actor client certificate injection is
-	//   configured for outbound requests.
-	MintActorCertificate(context.Context, *MintActorCertificateRequest) (*MintActorCertificateResponse, error)
+	MintActorJwt(context.Context, *MintActorJwtRequest) (*MintActorJwtResponse, error)
 	// Tag the external snapshot a suspended Actor holds. The tag gets its own
 	// copy of that snapshot, so suspending or deleting the Actor afterwards
-	// cannot collect it.
+	// cannot collect it. When the Actor's latest snapshot is not uploaded yet,
+	// atelet uploads it first, so the call can take as long as that upload.
 	CreateTag(context.Context, *CreateTagRequest) (*Tag, error)
 	// Get a Tag.
 	GetTag(context.Context, *GetTagRequest) (*Tag, error)
@@ -586,7 +681,8 @@ type ControlServer interface {
 	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
 	// Get a Worker.
 	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
-	// Register a Worker. Called once its Pod is Ready and has an IP.
+	// Register a Worker. Called once its Pod has an IP. A Worker is registered
+	// UNAVAILABLE and takes no Actors until MarkWorkerAvailable.
 	CreateWorker(context.Context, *CreateWorkerRequest) (*Worker, error)
 	// Update observed pool state on a Worker.
 	UpdateWorker(context.Context, *UpdateWorkerRequest) (*Worker, error)
@@ -596,7 +692,19 @@ type ControlServer interface {
 	// Mark a Worker as terminating so the scheduler stops routing new Actors to
 	// it. Idempotent; one-way. Deliberately leaves any bound Actor alone.
 	// Returns ABORTED if another write lands on the Worker first; retry.
-	DrainWorker(context.Context, *DrainWorkerRequest) (*Worker, error)
+	DrainWorker(context.Context, *DrainWorkerRequest) (*DrainWorkerResponse, error)
+	// Mark an UNAVAILABLE Worker ACTIVE so the scheduler places Actors on it.
+	// Idempotent. Returns FAILED_PRECONDITION for a DRAINING Worker, and ABORTED
+	// if another write lands on the Worker first; retry.
+	//
+	// Every Actor placed after this call is stamped with the Worker's epoch as
+	// it stands then, so a caller raises epoch for a restarted the worker first.
+	MarkWorkerAvailable(context.Context, *MarkWorkerAvailableRequest) (*MarkWorkerAvailableResponse, error)
+	// Mark an ACTIVE Worker UNAVAILABLE so the scheduler stops placing Actors on
+	// it, as while its Pod is not Ready. Idempotent. Leaves any bound Actor
+	// alone. Returns FAILED_PRECONDITION for a DRAINING Worker, and ABORTED if
+	// another write lands on the Worker first; retry.
+	MarkWorkerUnavailable(context.Context, *MarkWorkerUnavailableRequest) (*MarkWorkerUnavailableResponse, error)
 	// List the Actors hosted by a given Worker.
 	ListWorkerActorAssignments(context.Context, *ListWorkerActorAssignmentsRequest) (*ListWorkerActorAssignmentsResponse, error)
 	// List Actors.
@@ -614,8 +722,27 @@ type ControlServer interface {
 	GetActorTemplate(context.Context, *GetActorTemplateRequest) (*ActorTemplate, error)
 	ListActorTemplates(context.Context, *ListActorTemplatesRequest) (*ListActorTemplatesResponse, error)
 	// Delete an ActorTemplate together with its golden actor and golden
-	// tag in the reserved ate-golden atespace.
+	// tag in the template's atespace.
 	DeleteActorTemplate(context.Context, *DeleteActorTemplateRequest) (*ActorTemplate, error)
+	// Get the deployment-wide global access policy singleton. Returns NotFound
+	// until the policy has been created.
+	GetGlobalAccessPolicy(context.Context, *GetGlobalAccessPolicyRequest) (*AccessPolicy, error)
+	// Create the deployment-wide global access policy singleton. The server's
+	// configured bootstrap owners are global owners whether or not this policy
+	// exists, so they can create it.
+	CreateGlobalAccessPolicy(context.Context, *CreateGlobalAccessPolicyRequest) (*AccessPolicy, error)
+	// Replace the deployment-wide global access policy singleton. Empty
+	// bindings revoke every grant held through the policy; bootstrap owners
+	// keep access.
+	UpdateGlobalAccessPolicy(context.Context, *UpdateGlobalAccessPolicyRequest) (*AccessPolicy, error)
+	// Get the access policy resource nested under an Atespace.
+	GetAtespaceAccessPolicy(context.Context, *GetAtespaceAccessPolicyRequest) (*AccessPolicy, error)
+	// Create the access policy resource nested under an Atespace.
+	CreateAtespaceAccessPolicy(context.Context, *CreateAtespaceAccessPolicyRequest) (*AccessPolicy, error)
+	// Replace the access policy resource nested under an Atespace.
+	UpdateAtespaceAccessPolicy(context.Context, *UpdateAtespaceAccessPolicyRequest) (*AccessPolicy, error)
+	// Delete the access policy resource nested under an Atespace.
+	DeleteAtespaceAccessPolicy(context.Context, *DeleteAtespaceAccessPolicyRequest) (*AccessPolicy, error)
 	mustEmbedUnimplementedControlServer()
 }
 
@@ -638,9 +765,6 @@ func (UnimplementedControlServer) UpdateActor(context.Context, *UpdateActorReque
 func (UnimplementedControlServer) SuspendActor(context.Context, *SuspendActorRequest) (*SuspendActorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SuspendActor not implemented")
 }
-func (UnimplementedControlServer) PauseActor(context.Context, *PauseActorRequest) (*PauseActorResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method PauseActor not implemented")
-}
 func (UnimplementedControlServer) ResumeActor(context.Context, *ResumeActorRequest) (*ResumeActorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResumeActor not implemented")
 }
@@ -662,11 +786,8 @@ func (UnimplementedControlServer) UpdateActorEgressPolicy(context.Context, *Upda
 func (UnimplementedControlServer) DeleteActorEgressPolicy(context.Context, *DeleteActorEgressPolicyRequest) (*EgressPolicy, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteActorEgressPolicy not implemented")
 }
-func (UnimplementedControlServer) MintActorJWT(context.Context, *MintActorJWTRequest) (*MintActorJWTResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method MintActorJWT not implemented")
-}
-func (UnimplementedControlServer) MintActorCertificate(context.Context, *MintActorCertificateRequest) (*MintActorCertificateResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method MintActorCertificate not implemented")
+func (UnimplementedControlServer) MintActorJwt(context.Context, *MintActorJwtRequest) (*MintActorJwtResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MintActorJwt not implemented")
 }
 func (UnimplementedControlServer) CreateTag(context.Context, *CreateTagRequest) (*Tag, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateTag not implemented")
@@ -698,8 +819,14 @@ func (UnimplementedControlServer) UpdateWorker(context.Context, *UpdateWorkerReq
 func (UnimplementedControlServer) DeleteWorker(context.Context, *DeleteWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteWorker not implemented")
 }
-func (UnimplementedControlServer) DrainWorker(context.Context, *DrainWorkerRequest) (*Worker, error) {
+func (UnimplementedControlServer) DrainWorker(context.Context, *DrainWorkerRequest) (*DrainWorkerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DrainWorker not implemented")
+}
+func (UnimplementedControlServer) MarkWorkerAvailable(context.Context, *MarkWorkerAvailableRequest) (*MarkWorkerAvailableResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MarkWorkerAvailable not implemented")
+}
+func (UnimplementedControlServer) MarkWorkerUnavailable(context.Context, *MarkWorkerUnavailableRequest) (*MarkWorkerUnavailableResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MarkWorkerUnavailable not implemented")
 }
 func (UnimplementedControlServer) ListWorkerActorAssignments(context.Context, *ListWorkerActorAssignmentsRequest) (*ListWorkerActorAssignmentsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkerActorAssignments not implemented")
@@ -730,6 +857,27 @@ func (UnimplementedControlServer) ListActorTemplates(context.Context, *ListActor
 }
 func (UnimplementedControlServer) DeleteActorTemplate(context.Context, *DeleteActorTemplateRequest) (*ActorTemplate, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteActorTemplate not implemented")
+}
+func (UnimplementedControlServer) GetGlobalAccessPolicy(context.Context, *GetGlobalAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetGlobalAccessPolicy not implemented")
+}
+func (UnimplementedControlServer) CreateGlobalAccessPolicy(context.Context, *CreateGlobalAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateGlobalAccessPolicy not implemented")
+}
+func (UnimplementedControlServer) UpdateGlobalAccessPolicy(context.Context, *UpdateGlobalAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateGlobalAccessPolicy not implemented")
+}
+func (UnimplementedControlServer) GetAtespaceAccessPolicy(context.Context, *GetAtespaceAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAtespaceAccessPolicy not implemented")
+}
+func (UnimplementedControlServer) CreateAtespaceAccessPolicy(context.Context, *CreateAtespaceAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateAtespaceAccessPolicy not implemented")
+}
+func (UnimplementedControlServer) UpdateAtespaceAccessPolicy(context.Context, *UpdateAtespaceAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateAtespaceAccessPolicy not implemented")
+}
+func (UnimplementedControlServer) DeleteAtespaceAccessPolicy(context.Context, *DeleteAtespaceAccessPolicyRequest) (*AccessPolicy, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAtespaceAccessPolicy not implemented")
 }
 func (UnimplementedControlServer) mustEmbedUnimplementedControlServer() {}
 func (UnimplementedControlServer) testEmbeddedByValue()                 {}
@@ -820,24 +968,6 @@ func _Control_SuspendActor_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlServer).SuspendActor(ctx, req.(*SuspendActorRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Control_PauseActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PauseActorRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ControlServer).PauseActor(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Control_PauseActor_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlServer).PauseActor(ctx, req.(*PauseActorRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -968,38 +1098,20 @@ func _Control_DeleteActorEgressPolicy_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Control_MintActorJWT_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MintActorJWTRequest)
+func _Control_MintActorJwt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MintActorJwtRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ControlServer).MintActorJWT(ctx, in)
+		return srv.(ControlServer).MintActorJwt(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Control_MintActorJWT_FullMethodName,
+		FullMethod: Control_MintActorJwt_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlServer).MintActorJWT(ctx, req.(*MintActorJWTRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Control_MintActorCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MintActorCertificateRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ControlServer).MintActorCertificate(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Control_MintActorCertificate_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlServer).MintActorCertificate(ctx, req.(*MintActorCertificateRequest))
+		return srv.(ControlServer).MintActorJwt(ctx, req.(*MintActorJwtRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1202,6 +1314,42 @@ func _Control_DrainWorker_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_MarkWorkerAvailable_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkWorkerAvailableRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).MarkWorkerAvailable(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_MarkWorkerAvailable_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).MarkWorkerAvailable(ctx, req.(*MarkWorkerAvailableRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_MarkWorkerUnavailable_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkWorkerUnavailableRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).MarkWorkerUnavailable(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_MarkWorkerUnavailable_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).MarkWorkerUnavailable(ctx, req.(*MarkWorkerUnavailableRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Control_ListWorkerActorAssignments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListWorkerActorAssignmentsRequest)
 	if err := dec(in); err != nil {
@@ -1382,11 +1530,137 @@ func _Control_DeleteActorTemplate_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_GetGlobalAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetGlobalAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).GetGlobalAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_GetGlobalAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).GetGlobalAccessPolicy(ctx, req.(*GetGlobalAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_CreateGlobalAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateGlobalAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).CreateGlobalAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_CreateGlobalAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).CreateGlobalAccessPolicy(ctx, req.(*CreateGlobalAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_UpdateGlobalAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateGlobalAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).UpdateGlobalAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_UpdateGlobalAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).UpdateGlobalAccessPolicy(ctx, req.(*UpdateGlobalAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_GetAtespaceAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAtespaceAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).GetAtespaceAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_GetAtespaceAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).GetAtespaceAccessPolicy(ctx, req.(*GetAtespaceAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_CreateAtespaceAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAtespaceAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).CreateAtespaceAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_CreateAtespaceAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).CreateAtespaceAccessPolicy(ctx, req.(*CreateAtespaceAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_UpdateAtespaceAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateAtespaceAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).UpdateAtespaceAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_UpdateAtespaceAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).UpdateAtespaceAccessPolicy(ctx, req.(*UpdateAtespaceAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_DeleteAtespaceAccessPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteAtespaceAccessPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).DeleteAtespaceAccessPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_DeleteAtespaceAccessPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).DeleteAtespaceAccessPolicy(ctx, req.(*DeleteAtespaceAccessPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Control_ServiceDesc is the grpc.ServiceDesc for Control service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Control_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "ateapi.Control",
+	ServiceName: "substrate.ateapi.v1.Control",
 	HandlerType: (*ControlServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -1404,10 +1678,6 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SuspendActor",
 			Handler:    _Control_SuspendActor_Handler,
-		},
-		{
-			MethodName: "PauseActor",
-			Handler:    _Control_PauseActor_Handler,
 		},
 		{
 			MethodName: "ResumeActor",
@@ -1438,12 +1708,8 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_DeleteActorEgressPolicy_Handler,
 		},
 		{
-			MethodName: "MintActorJWT",
-			Handler:    _Control_MintActorJWT_Handler,
-		},
-		{
-			MethodName: "MintActorCertificate",
-			Handler:    _Control_MintActorCertificate_Handler,
+			MethodName: "MintActorJwt",
+			Handler:    _Control_MintActorJwt_Handler,
 		},
 		{
 			MethodName: "CreateTag",
@@ -1490,6 +1756,14 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_DrainWorker_Handler,
 		},
 		{
+			MethodName: "MarkWorkerAvailable",
+			Handler:    _Control_MarkWorkerAvailable_Handler,
+		},
+		{
+			MethodName: "MarkWorkerUnavailable",
+			Handler:    _Control_MarkWorkerUnavailable_Handler,
+		},
+		{
 			MethodName: "ListWorkerActorAssignments",
 			Handler:    _Control_ListWorkerActorAssignments_Handler,
 		},
@@ -1529,32 +1803,158 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "DeleteActorTemplate",
 			Handler:    _Control_DeleteActorTemplate_Handler,
 		},
+		{
+			MethodName: "GetGlobalAccessPolicy",
+			Handler:    _Control_GetGlobalAccessPolicy_Handler,
+		},
+		{
+			MethodName: "CreateGlobalAccessPolicy",
+			Handler:    _Control_CreateGlobalAccessPolicy_Handler,
+		},
+		{
+			MethodName: "UpdateGlobalAccessPolicy",
+			Handler:    _Control_UpdateGlobalAccessPolicy_Handler,
+		},
+		{
+			MethodName: "GetAtespaceAccessPolicy",
+			Handler:    _Control_GetAtespaceAccessPolicy_Handler,
+		},
+		{
+			MethodName: "CreateAtespaceAccessPolicy",
+			Handler:    _Control_CreateAtespaceAccessPolicy_Handler,
+		},
+		{
+			MethodName: "UpdateAtespaceAccessPolicy",
+			Handler:    _Control_UpdateAtespaceAccessPolicy_Handler,
+		},
+		{
+			MethodName: "DeleteAtespaceAccessPolicy",
+			Handler:    _Control_DeleteAtespaceAccessPolicy_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "ateapi.proto",
+	Metadata: "api/ateapi/v1/ateapi.proto",
 }
 
 const (
-	WorkerService_SetWorkerCapacity_FullMethodName = "/ateapi.WorkerService/SetWorkerCapacity"
+	WorkerService_AcquireWorkerEpoch_FullMethodName         = "/substrate.ateapi.v1.WorkerService/AcquireWorkerEpoch"
+	WorkerService_RegisterWorker_FullMethodName             = "/substrate.ateapi.v1.WorkerService/RegisterWorker"
+	WorkerService_SetWorkerSandboxRuntimes_FullMethodName   = "/substrate.ateapi.v1.WorkerService/SetWorkerSandboxRuntimes"
+	WorkerService_MintWorkerActorCertificate_FullMethodName = "/substrate.ateapi.v1.WorkerService/MintWorkerActorCertificate"
+	WorkerService_MintWorkerActorJwt_FullMethodName         = "/substrate.ateapi.v1.WorkerService/MintWorkerActorJwt"
+	WorkerService_RequestActorSuspend_FullMethodName        = "/substrate.ateapi.v1.WorkerService/RequestActorSuspend"
+	WorkerService_ReportActorSnapshotState_FullMethodName   = "/substrate.ateapi.v1.WorkerService/ReportActorSnapshotState"
+	WorkerService_ReportActorCrashed_FullMethodName         = "/substrate.ateapi.v1.WorkerService/ReportActorCrashed"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// WorkerService is how a Worker tells the control plane about itself. It is
+// WorkerService is how a Worker tells the control plane what it observes. It is
 // separate from Control because the two have different callers and different
 // authorization: Control is the client-facing API, while these RPCs are served
 // only to an atelet, and only for the Workers on its own node.
 type WorkerServiceClient interface {
-	// SetWorkerCapacity records what a Worker can hold. Capacity is the Worker's
-	// to report rather than the control plane's to infer: it is what the ateom
-	// can actually supply, only its node can observe it, and a fleet may run
-	// mixed ateom versions.
+	// AcquireWorkerEpoch hands out a new epoch for a worker process, the first
+	// step of its startup. Nothing becomes active until the process registers
+	// with the epoch through RegisterWorker, so an acquire from a process that
+	// exits before it sees the reply changes nothing the scheduler or the
+	// reconciler acts on.
+	//
+	// atelet calls this with its own client certificate, for a Worker on its own
+	// node. Not idempotent: each call hands out a new epoch.
+	AcquireWorkerEpoch(ctx context.Context, in *AcquireWorkerEpochRequest, opts ...grpc.CallOption) (*AcquireWorkerEpochResponse, error)
+	// RegisterWorker activates the epoch a worker process acquired and records
+	// its pod IPs and capacity, in one write. A worker process registers once.
+	// The epoch must be one AcquireWorkerEpoch handed out, and higher than the
+	// Worker's registered_epoch; once it is registered, the Actors that ran under
+	// an earlier epoch are crashed, and the Worker takes no Actors until the new
+	// worker process reports its sandbox runtimes. Capacity and IPs are the Worker's to report:
+	// only its node can observe them.
 	//
 	// atelet calls this with its own client certificate, as it does for
-	// MintCert. Idempotent: re-sending the same capacity is not a write.
-	SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error)
+	// MintCert. Re-sending the registered epoch with the same IPs and capacity is
+	// not a write. An older epoch, one that was never handed out, or the
+	// registered epoch with other IPs or capacity gets FailedPrecondition: an epoch's
+	// registration does not change once made.
+	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*RegisterWorkerResponse, error)
+	// SetWorkerSandboxRuntimes records the sandbox runtimes a registered worker
+	// process can run. A worker process reports them after it registers, and
+	// again whenever they change. The epoch must be the Worker's registered_epoch,
+	// so a report from a worker process that has since been replaced gets
+	// FailedPrecondition, as does an entry of another class than the one this
+	// worker process reported first.
+	//
+	// atelet calls this with its own client certificate. Re-sending the same
+	// runtimes is not a write.
+	SetWorkerSandboxRuntimes(ctx context.Context, in *SetWorkerSandboxRuntimesRequest, opts ...grpc.CallOption) (*SetWorkerSandboxRuntimesResponse, error)
+	// Create a Substrate-issued SPIFFE certificate that asserts a worker acting
+	// on behalf of a particular actor.
+	//
+	// SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}
+	//
+	// atelet calls this with its own client certificate, as it does for
+	// RequestActorSuspend, naming the Worker its caller proved itself to be.
+	// The control plane mints only for the Worker that the Actor is assigned
+	// to, and only to an atelet on that Worker's node. A request from any
+	// other node or Worker gets NotFound; one from the assigned Worker with a
+	// stale actor_uid gets Aborted. Unlike MintWorkerActorJwt, a SUSPENDED Actor
+	// gets NotFound, since it has no Worker to bind the certificate to.
+	MintWorkerActorCertificate(ctx context.Context, in *MintWorkerActorCertificateRequest, opts ...grpc.CallOption) (*MintWorkerActorCertificateResponse, error)
+	// MintWorkerActorJwt creates a Substrate-issued JWT that asserts a worker
+	// acting on behalf of a particular actor: the JWT counterpart of
+	// MintWorkerActorCertificate. atelet calls it with its own client
+	// certificate and hands the JWT to node-side plugins, which exchange it for
+	// credentials scoped to that actor.
+	//
+	// The token speaks for the worker, not the actor: its subject is
+	// `worker-for-actor/<atespace>/<name>` and its claims sit under
+	// `worker-for-actor.ate.dev`, see MintWorkerActorJwtResponse. The lifetime is
+	// fixed at one hour.
+	MintWorkerActorJwt(ctx context.Context, in *MintWorkerActorJwtRequest, opts ...grpc.CallOption) (*MintWorkerActorJwtResponse, error)
+	// RequestActorSuspend asks the control plane to suspend an Actor that the
+	// calling Worker hosts. Only the Worker can observe what makes an Actor
+	// worth reclaiming -- whether its workload still has anything to do -- and
+	// only the control plane can decide whether to act on that.
+	//
+	// This is a request, not a command. It runs the same suspend workflow
+	// Control.SuspendActor runs, behind the same preconditions, so a proposal
+	// that races a resume, suspend, or delete loses to it.
+	//
+	// atelet calls this with its own client certificate, as it does for
+	// RegisterWorker, naming the Worker its caller proved itself to be. The
+	// control plane serves it only for an Actor that is assigned to that Worker.
+	//
+	// Not idempotent, unlike Control.SuspendActor, which reports an
+	// already-suspended Actor as the success it is. A suspend releases the
+	// Worker it ran on, so the second request names an Actor the caller no
+	// longer hosts, and is refused as NotFound like any other. A Worker that
+	// retries a suspend it had already been granted therefore sees a failure
+	// rather than a repeat of its success.
+	RequestActorSuspend(ctx context.Context, in *RequestActorSuspendRequest, opts ...grpc.CallOption) (*RequestActorSuspendResponse, error)
+	// ReportActorSnapshotState reports an Actor's snapshot state on the caller's
+	// node. The control plane records two facts from it: an upload finished, and
+	// atelet detached the Actor from the node. Only atelet observes either.
+	//
+	// atelet calls this with its own client certificate, for an Actor on its
+	// node. Each report carries the whole state, so repeating one is safe.
+	// Returns ABORTED while another operation is changing the Actor; retry.
+	// Returns NOT_FOUND once the Actor is gone or no longer on the caller's
+	// node. Returns FAILED_PRECONDITION or INVALID_ARGUMENT when the report
+	// conflicts with the record; don't retry.
+	ReportActorSnapshotState(ctx context.Context, in *ReportActorSnapshotStateRequest, opts ...grpc.CallOption) (*ReportActorSnapshotStateResponse, error)
+	// ReportActorCrashed tells the control plane that the sandbox of an Actor
+	// the calling Worker hosts died on its own. Nothing else notices: the
+	// control plane only learns of a dead sandbox when an operation on the Actor
+	// fails.
+	//
+	// A RUNNING Actor is moved to ACTOR_STATE_CRASHED and its Worker is
+	// released. An Actor in any other state is left alone and the report is
+	// refused as FailedPrecondition: an operation in flight owns the Actor and
+	// fails on its own if the sandbox is gone. Authorized like
+	// RequestActorSuspend.
+	ReportActorCrashed(ctx context.Context, in *ReportActorCrashedRequest, opts ...grpc.CallOption) (*ReportActorCrashedResponse, error)
 }
 
 type workerServiceClient struct {
@@ -1565,10 +1965,80 @@ func NewWorkerServiceClient(cc grpc.ClientConnInterface) WorkerServiceClient {
 	return &workerServiceClient{cc}
 }
 
-func (c *workerServiceClient) SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error) {
+func (c *workerServiceClient) AcquireWorkerEpoch(ctx context.Context, in *AcquireWorkerEpochRequest, opts ...grpc.CallOption) (*AcquireWorkerEpochResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SetWorkerCapacityResponse)
-	err := c.cc.Invoke(ctx, WorkerService_SetWorkerCapacity_FullMethodName, in, out, cOpts...)
+	out := new(AcquireWorkerEpochResponse)
+	err := c.cc.Invoke(ctx, WorkerService_AcquireWorkerEpoch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*RegisterWorkerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterWorkerResponse)
+	err := c.cc.Invoke(ctx, WorkerService_RegisterWorker_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) SetWorkerSandboxRuntimes(ctx context.Context, in *SetWorkerSandboxRuntimesRequest, opts ...grpc.CallOption) (*SetWorkerSandboxRuntimesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetWorkerSandboxRuntimesResponse)
+	err := c.cc.Invoke(ctx, WorkerService_SetWorkerSandboxRuntimes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) MintWorkerActorCertificate(ctx context.Context, in *MintWorkerActorCertificateRequest, opts ...grpc.CallOption) (*MintWorkerActorCertificateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MintWorkerActorCertificateResponse)
+	err := c.cc.Invoke(ctx, WorkerService_MintWorkerActorCertificate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) MintWorkerActorJwt(ctx context.Context, in *MintWorkerActorJwtRequest, opts ...grpc.CallOption) (*MintWorkerActorJwtResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MintWorkerActorJwtResponse)
+	err := c.cc.Invoke(ctx, WorkerService_MintWorkerActorJwt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) RequestActorSuspend(ctx context.Context, in *RequestActorSuspendRequest, opts ...grpc.CallOption) (*RequestActorSuspendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RequestActorSuspendResponse)
+	err := c.cc.Invoke(ctx, WorkerService_RequestActorSuspend_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) ReportActorSnapshotState(ctx context.Context, in *ReportActorSnapshotStateRequest, opts ...grpc.CallOption) (*ReportActorSnapshotStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportActorSnapshotStateResponse)
+	err := c.cc.Invoke(ctx, WorkerService_ReportActorSnapshotState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) ReportActorCrashed(ctx context.Context, in *ReportActorCrashedRequest, opts ...grpc.CallOption) (*ReportActorCrashedResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportActorCrashedResponse)
+	err := c.cc.Invoke(ctx, WorkerService_ReportActorCrashed_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1579,19 +2049,110 @@ func (c *workerServiceClient) SetWorkerCapacity(ctx context.Context, in *SetWork
 // All implementations must embed UnimplementedWorkerServiceServer
 // for forward compatibility.
 //
-// WorkerService is how a Worker tells the control plane about itself. It is
+// WorkerService is how a Worker tells the control plane what it observes. It is
 // separate from Control because the two have different callers and different
 // authorization: Control is the client-facing API, while these RPCs are served
 // only to an atelet, and only for the Workers on its own node.
 type WorkerServiceServer interface {
-	// SetWorkerCapacity records what a Worker can hold. Capacity is the Worker's
-	// to report rather than the control plane's to infer: it is what the ateom
-	// can actually supply, only its node can observe it, and a fleet may run
-	// mixed ateom versions.
+	// AcquireWorkerEpoch hands out a new epoch for a worker process, the first
+	// step of its startup. Nothing becomes active until the process registers
+	// with the epoch through RegisterWorker, so an acquire from a process that
+	// exits before it sees the reply changes nothing the scheduler or the
+	// reconciler acts on.
+	//
+	// atelet calls this with its own client certificate, for a Worker on its own
+	// node. Not idempotent: each call hands out a new epoch.
+	AcquireWorkerEpoch(context.Context, *AcquireWorkerEpochRequest) (*AcquireWorkerEpochResponse, error)
+	// RegisterWorker activates the epoch a worker process acquired and records
+	// its pod IPs and capacity, in one write. A worker process registers once.
+	// The epoch must be one AcquireWorkerEpoch handed out, and higher than the
+	// Worker's registered_epoch; once it is registered, the Actors that ran under
+	// an earlier epoch are crashed, and the Worker takes no Actors until the new
+	// worker process reports its sandbox runtimes. Capacity and IPs are the Worker's to report:
+	// only its node can observe them.
 	//
 	// atelet calls this with its own client certificate, as it does for
-	// MintCert. Idempotent: re-sending the same capacity is not a write.
-	SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error)
+	// MintCert. Re-sending the registered epoch with the same IPs and capacity is
+	// not a write. An older epoch, one that was never handed out, or the
+	// registered epoch with other IPs or capacity gets FailedPrecondition: an epoch's
+	// registration does not change once made.
+	RegisterWorker(context.Context, *RegisterWorkerRequest) (*RegisterWorkerResponse, error)
+	// SetWorkerSandboxRuntimes records the sandbox runtimes a registered worker
+	// process can run. A worker process reports them after it registers, and
+	// again whenever they change. The epoch must be the Worker's registered_epoch,
+	// so a report from a worker process that has since been replaced gets
+	// FailedPrecondition, as does an entry of another class than the one this
+	// worker process reported first.
+	//
+	// atelet calls this with its own client certificate. Re-sending the same
+	// runtimes is not a write.
+	SetWorkerSandboxRuntimes(context.Context, *SetWorkerSandboxRuntimesRequest) (*SetWorkerSandboxRuntimesResponse, error)
+	// Create a Substrate-issued SPIFFE certificate that asserts a worker acting
+	// on behalf of a particular actor.
+	//
+	// SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}
+	//
+	// atelet calls this with its own client certificate, as it does for
+	// RequestActorSuspend, naming the Worker its caller proved itself to be.
+	// The control plane mints only for the Worker that the Actor is assigned
+	// to, and only to an atelet on that Worker's node. A request from any
+	// other node or Worker gets NotFound; one from the assigned Worker with a
+	// stale actor_uid gets Aborted. Unlike MintWorkerActorJwt, a SUSPENDED Actor
+	// gets NotFound, since it has no Worker to bind the certificate to.
+	MintWorkerActorCertificate(context.Context, *MintWorkerActorCertificateRequest) (*MintWorkerActorCertificateResponse, error)
+	// MintWorkerActorJwt creates a Substrate-issued JWT that asserts a worker
+	// acting on behalf of a particular actor: the JWT counterpart of
+	// MintWorkerActorCertificate. atelet calls it with its own client
+	// certificate and hands the JWT to node-side plugins, which exchange it for
+	// credentials scoped to that actor.
+	//
+	// The token speaks for the worker, not the actor: its subject is
+	// `worker-for-actor/<atespace>/<name>` and its claims sit under
+	// `worker-for-actor.ate.dev`, see MintWorkerActorJwtResponse. The lifetime is
+	// fixed at one hour.
+	MintWorkerActorJwt(context.Context, *MintWorkerActorJwtRequest) (*MintWorkerActorJwtResponse, error)
+	// RequestActorSuspend asks the control plane to suspend an Actor that the
+	// calling Worker hosts. Only the Worker can observe what makes an Actor
+	// worth reclaiming -- whether its workload still has anything to do -- and
+	// only the control plane can decide whether to act on that.
+	//
+	// This is a request, not a command. It runs the same suspend workflow
+	// Control.SuspendActor runs, behind the same preconditions, so a proposal
+	// that races a resume, suspend, or delete loses to it.
+	//
+	// atelet calls this with its own client certificate, as it does for
+	// RegisterWorker, naming the Worker its caller proved itself to be. The
+	// control plane serves it only for an Actor that is assigned to that Worker.
+	//
+	// Not idempotent, unlike Control.SuspendActor, which reports an
+	// already-suspended Actor as the success it is. A suspend releases the
+	// Worker it ran on, so the second request names an Actor the caller no
+	// longer hosts, and is refused as NotFound like any other. A Worker that
+	// retries a suspend it had already been granted therefore sees a failure
+	// rather than a repeat of its success.
+	RequestActorSuspend(context.Context, *RequestActorSuspendRequest) (*RequestActorSuspendResponse, error)
+	// ReportActorSnapshotState reports an Actor's snapshot state on the caller's
+	// node. The control plane records two facts from it: an upload finished, and
+	// atelet detached the Actor from the node. Only atelet observes either.
+	//
+	// atelet calls this with its own client certificate, for an Actor on its
+	// node. Each report carries the whole state, so repeating one is safe.
+	// Returns ABORTED while another operation is changing the Actor; retry.
+	// Returns NOT_FOUND once the Actor is gone or no longer on the caller's
+	// node. Returns FAILED_PRECONDITION or INVALID_ARGUMENT when the report
+	// conflicts with the record; don't retry.
+	ReportActorSnapshotState(context.Context, *ReportActorSnapshotStateRequest) (*ReportActorSnapshotStateResponse, error)
+	// ReportActorCrashed tells the control plane that the sandbox of an Actor
+	// the calling Worker hosts died on its own. Nothing else notices: the
+	// control plane only learns of a dead sandbox when an operation on the Actor
+	// fails.
+	//
+	// A RUNNING Actor is moved to ACTOR_STATE_CRASHED and its Worker is
+	// released. An Actor in any other state is left alone and the report is
+	// refused as FailedPrecondition: an operation in flight owns the Actor and
+	// fails on its own if the sandbox is gone. Authorized like
+	// RequestActorSuspend.
+	ReportActorCrashed(context.Context, *ReportActorCrashedRequest) (*ReportActorCrashedResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -1602,8 +2163,29 @@ type WorkerServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedWorkerServiceServer struct{}
 
-func (UnimplementedWorkerServiceServer) SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetWorkerCapacity not implemented")
+func (UnimplementedWorkerServiceServer) AcquireWorkerEpoch(context.Context, *AcquireWorkerEpochRequest) (*AcquireWorkerEpochResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcquireWorkerEpoch not implemented")
+}
+func (UnimplementedWorkerServiceServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*RegisterWorkerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
+}
+func (UnimplementedWorkerServiceServer) SetWorkerSandboxRuntimes(context.Context, *SetWorkerSandboxRuntimesRequest) (*SetWorkerSandboxRuntimesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetWorkerSandboxRuntimes not implemented")
+}
+func (UnimplementedWorkerServiceServer) MintWorkerActorCertificate(context.Context, *MintWorkerActorCertificateRequest) (*MintWorkerActorCertificateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MintWorkerActorCertificate not implemented")
+}
+func (UnimplementedWorkerServiceServer) MintWorkerActorJwt(context.Context, *MintWorkerActorJwtRequest) (*MintWorkerActorJwtResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MintWorkerActorJwt not implemented")
+}
+func (UnimplementedWorkerServiceServer) RequestActorSuspend(context.Context, *RequestActorSuspendRequest) (*RequestActorSuspendResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RequestActorSuspend not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReportActorSnapshotState(context.Context, *ReportActorSnapshotStateRequest) (*ReportActorSnapshotStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportActorSnapshotState not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReportActorCrashed(context.Context, *ReportActorCrashedRequest) (*ReportActorCrashedResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportActorCrashed not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 func (UnimplementedWorkerServiceServer) testEmbeddedByValue()                       {}
@@ -1626,20 +2208,146 @@ func RegisterWorkerServiceServer(s grpc.ServiceRegistrar, srv WorkerServiceServe
 	s.RegisterService(&WorkerService_ServiceDesc, srv)
 }
 
-func _WorkerService_SetWorkerCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetWorkerCapacityRequest)
+func _WorkerService_AcquireWorkerEpoch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcquireWorkerEpochRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(WorkerServiceServer).SetWorkerCapacity(ctx, in)
+		return srv.(WorkerServiceServer).AcquireWorkerEpoch(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: WorkerService_SetWorkerCapacity_FullMethodName,
+		FullMethod: WorkerService_AcquireWorkerEpoch_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(WorkerServiceServer).SetWorkerCapacity(ctx, req.(*SetWorkerCapacityRequest))
+		return srv.(WorkerServiceServer).AcquireWorkerEpoch(ctx, req.(*AcquireWorkerEpochRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterWorkerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).RegisterWorker(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_RegisterWorker_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).RegisterWorker(ctx, req.(*RegisterWorkerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_SetWorkerSandboxRuntimes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetWorkerSandboxRuntimesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).SetWorkerSandboxRuntimes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_SetWorkerSandboxRuntimes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).SetWorkerSandboxRuntimes(ctx, req.(*SetWorkerSandboxRuntimesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_MintWorkerActorCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MintWorkerActorCertificateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).MintWorkerActorCertificate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_MintWorkerActorCertificate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).MintWorkerActorCertificate(ctx, req.(*MintWorkerActorCertificateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_MintWorkerActorJwt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MintWorkerActorJwtRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).MintWorkerActorJwt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_MintWorkerActorJwt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).MintWorkerActorJwt(ctx, req.(*MintWorkerActorJwtRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_RequestActorSuspend_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RequestActorSuspendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).RequestActorSuspend(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_RequestActorSuspend_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).RequestActorSuspend(ctx, req.(*RequestActorSuspendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_ReportActorSnapshotState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportActorSnapshotStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReportActorSnapshotState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReportActorSnapshotState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReportActorSnapshotState(ctx, req.(*ReportActorSnapshotStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_ReportActorCrashed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportActorCrashedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReportActorCrashed(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReportActorCrashed_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReportActorCrashed(ctx, req.(*ReportActorCrashedRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1648,14 +2356,42 @@ func _WorkerService_SetWorkerCapacity_Handler(srv interface{}, ctx context.Conte
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var WorkerService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "ateapi.WorkerService",
+	ServiceName: "substrate.ateapi.v1.WorkerService",
 	HandlerType: (*WorkerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "SetWorkerCapacity",
-			Handler:    _WorkerService_SetWorkerCapacity_Handler,
+			MethodName: "AcquireWorkerEpoch",
+			Handler:    _WorkerService_AcquireWorkerEpoch_Handler,
+		},
+		{
+			MethodName: "RegisterWorker",
+			Handler:    _WorkerService_RegisterWorker_Handler,
+		},
+		{
+			MethodName: "SetWorkerSandboxRuntimes",
+			Handler:    _WorkerService_SetWorkerSandboxRuntimes_Handler,
+		},
+		{
+			MethodName: "MintWorkerActorCertificate",
+			Handler:    _WorkerService_MintWorkerActorCertificate_Handler,
+		},
+		{
+			MethodName: "MintWorkerActorJwt",
+			Handler:    _WorkerService_MintWorkerActorJwt_Handler,
+		},
+		{
+			MethodName: "RequestActorSuspend",
+			Handler:    _WorkerService_RequestActorSuspend_Handler,
+		},
+		{
+			MethodName: "ReportActorSnapshotState",
+			Handler:    _WorkerService_ReportActorSnapshotState_Handler,
+		},
+		{
+			MethodName: "ReportActorCrashed",
+			Handler:    _WorkerService_ReportActorCrashed_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "ateapi.proto",
+	Metadata: "api/ateapi/v1/ateapi.proto",
 }

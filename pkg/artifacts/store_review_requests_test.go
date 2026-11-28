@@ -610,16 +610,16 @@ func TestReviewRequestReaperStoreExpireAndPurge(t *testing.T) {
 		}
 
 		// CAS mismatch on updated_at does not expire.
-		expired, err := st.ExpireReviewRequest(ctx, a.ID, rr.ID, t0.Add(time.Second), "ttl", t0.Add(31*24*time.Hour), &reconcilerActor)
-		if err != nil || expired {
-			t.Fatalf("wrong updated_at expire = %v, %v; want false, nil", expired, err)
+		expired, removedGrant, err := st.ExpireReviewRequest(ctx, a.ID, rr.ID, t0.Add(time.Second), "ttl", t0.Add(31*24*time.Hour), &reconcilerActor)
+		if err != nil || expired || removedGrant != nil {
+			t.Fatalf("wrong updated_at expire = %v, %+v, %v; want false, nil, nil", expired, removedGrant, err)
 		}
 
 		// Matching updated_at expires and writes EventReviewRequestExpired.
 		expiredAt := t0.Add(31 * 24 * time.Hour)
-		expired, err = st.ExpireReviewRequest(ctx, a.ID, rr.ID, rr.UpdatedAt, "ttl", expiredAt, &reconcilerActor)
-		if err != nil || !expired {
-			t.Fatalf("expire = %v, %v; want true, nil", expired, err)
+		expired, removedGrant, err = st.ExpireReviewRequest(ctx, a.ID, rr.ID, rr.UpdatedAt, "ttl", expiredAt, &reconcilerActor)
+		if err != nil || !expired || removedGrant != nil {
+			t.Fatalf("expire = %v, %+v, %v; want true, nil, nil", expired, removedGrant, err)
 		}
 
 		// Purge before 90 days keeps the row.
@@ -631,6 +631,107 @@ func TestReviewRequestReaperStoreExpireAndPurge(t *testing.T) {
 		purged, err = st.PurgeClosedReviewRequests(ctx, expiredAt, 50)
 		if err != nil || purged != 1 {
 			t.Fatalf("90d purge = %d, %v; want 1, nil", purged, err)
+		}
+	})
+}
+
+// TestCreateOrRemindReviewRequest_ExpectPrecondition covers review round 2
+// finding 6 (m9): an Actor.Expect mismatch (stale scope or stale owner) inside
+// CreateOrRemindReviewRequest must fail with ErrStewardPrecondition and write
+// neither a review request row nor a grant.
+func TestCreateOrRemindReviewRequest_ExpectPrecondition(t *testing.T) {
+	forEachDraftBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		a, _, _, _ := seedArtifact(t, st, "")
+		t0 := time.Now().UTC().Truncate(time.Microsecond)
+
+		cases := []struct {
+			name        string
+			revRef      string
+			expect      Expect
+			withBounded bool
+		}{
+			{
+				name:        "stale scope without grant",
+				revRef:      "rev-stale-scope-existing",
+				expect:      Expect{ScopeRef: a.ScopeRef + "-stale", OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef},
+				withBounded: false,
+			},
+			{
+				name:        "stale owner without grant",
+				revRef:      "rev-stale-owner-existing",
+				expect:      Expect{ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef + "-stale"},
+				withBounded: false,
+			},
+			{
+				name:        "stale scope with bounded grant",
+				revRef:      "rev-stale-scope-bounded",
+				expect:      Expect{ScopeRef: a.ScopeRef + "-stale", OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef},
+				withBounded: true,
+			},
+			{
+				name:        "stale owner with bounded grant",
+				revRef:      "rev-stale-owner-bounded",
+				expect:      Expect{ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef + "-stale"},
+				withBounded: true,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				actor := &Actor{
+					Kind:      PrincipalKindAgent,
+					Ref:       a.OwnerRef,
+					Authority: AuthorityPublisher,
+					Expect:    tc.expect,
+				}
+				access := ReviewRequestAccessExisting
+				var grantOpt *ReviewRequestGrantOption
+				if tc.withBounded {
+					access = ReviewRequestAccessBounded
+					grantOpt = &ReviewRequestGrantOption{
+						Grant: &Grant{
+							ArtifactID:   a.ID,
+							SubjectKind:  SubjectPrincipal,
+							SubjectRef:   PrincipalRef(PrincipalKindUser, tc.revRef),
+							Permission:   GrantReview,
+							CreatedByRef: BoundedReviewCreator,
+							CreatedAt:    t0,
+						},
+						MaxGrants:        MaxGrantsPerArtifact,
+						Bounded:          true,
+						MaxBoundedGrants: MaxBoundedGrantsPerArtifact,
+						Actor:            actor,
+					}
+				}
+				_, _, err := st.CreateOrRemindReviewRequest(ctx, ReviewRequest{
+					ArtifactID:    a.ID,
+					ReviewerKind:  PrincipalKindUser,
+					ReviewerRef:   tc.revRef,
+					RequesterKind: PrincipalKindAgent,
+					RequesterRef:  a.OwnerRef,
+					Access:        access,
+				}, 24*time.Hour, t0, actor, grantOpt)
+				if !errors.Is(err, ErrStewardPrecondition) {
+					t.Fatalf("CreateOrRemindReviewRequest(%s) err = %v, want ErrStewardPrecondition", tc.name, err)
+				}
+				reqs, err := st.ListReviewRequests(ctx, a.ID, 50)
+				if err != nil {
+					t.Fatalf("ListReviewRequests: %v", err)
+				}
+				if len(reqs) != 0 {
+					t.Errorf("expected 0 review requests, got %+v", reqs)
+				}
+				gs, err := st.ListGrants(ctx, a.ID)
+				if err != nil {
+					t.Fatalf("ListGrants: %v", err)
+				}
+				for _, g := range gs {
+					if g.SubjectRef == PrincipalRef(PrincipalKindUser, tc.revRef) {
+						t.Errorf("expected no grant written for %s, got %+v", tc.revRef, g)
+					}
+				}
+			})
 		}
 	})
 }

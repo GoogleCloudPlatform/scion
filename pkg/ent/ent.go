@@ -124,7 +124,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegroupbudgetseed"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
@@ -308,7 +312,11 @@ func checkColumn(t, c string) error {
 			triggerevent.Table:                  triggerevent.ValidColumn,
 			triggerfire.Table:                   triggerfire.ValidColumn,
 			triggersubjectclaim.Table:           triggersubjectclaim.ValidColumn,
+			uploadsession.Table:                 uploadsession.ValidColumn,
+			usagebudgetstate.Table:              usagebudgetstate.ValidColumn,
 			usageevent.Table:                    usageevent.ValidColumn,
+			usagegroupbudgetseed.Table:          usagegroupbudgetseed.ValidColumn,
+			usagegrouprollupdaily.Table:         usagegrouprollupdaily.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
 			usagerollupdaily.Table:              usagerollupdaily.ValidColumn,
 			usagerolluphourly.Table:             usagerolluphourly.ValidColumn,

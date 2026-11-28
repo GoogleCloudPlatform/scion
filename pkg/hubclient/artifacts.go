@@ -425,6 +425,7 @@ type ArtifactWithdrawReviewRequestResponse struct {
 // ArtifactReviewRequestsInput is the body of POST /api/v1/artifacts/{id}/review-requests.
 type ArtifactReviewRequestsInput struct {
 	Reviewers []string `json:"reviewers"`
+	Delegator bool     `json:"delegator,omitempty"`
 	Note      string   `json:"note,omitempty"`
 }
 

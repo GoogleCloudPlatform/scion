@@ -65,11 +65,7 @@ func TestTemplateSourceCommit_InitialRemoteImportMultiTemplate(t *testing.T) {
 		{name: "repo-main/templates/beta/scion-agent.yaml", body: "schema_version: \"1\"\nharness: gemini\n"},
 	})
 
-	prevOverride := importDownloadOverride
-	importDownloadOverride = func(_ context.Context, _, _ string) ([]byte, error) {
-		return archive, nil
-	}
-	t.Cleanup(func() { importDownloadOverride = prevOverride })
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: archive})
 
 	names, err := srv.importFromRemote(
 		ctx, "", "https://github.com/acme/repo/tree/main/templates",
@@ -275,7 +271,7 @@ func TestResolveDerivedConfig_RecordsTemplateProvenance(t *testing.T) {
 		Name:          "agent-prov-1",
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
-	srv.resolveDerivedConfig(ctx, agent, nil, tmpl)
+	require.NoError(t, srv.resolveDerivedConfig(ctx, agent, nil, tmpl))
 
 	assert.Equal(t, tmpl.ID, agent.AppliedConfig.TemplateID)
 	assert.Equal(t, tmpl.ContentHash, agent.AppliedConfig.TemplateHash)

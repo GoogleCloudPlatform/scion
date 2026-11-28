@@ -1878,6 +1878,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	for _, w := range textWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
+	if finalAgent != nil && finalAgent.TrajectoryCapture != nil {
+		printTrajectoryCaptureNotice(finalAgent.TrajectoryCapture)
+	} else if resp.TrajectoryCapture != nil {
+		printTrajectoryCaptureNotice(resp.TrajectoryCapture)
+	}
 	printPendingSecretHint(context.Background(), os.Stderr, hubCtx.Client)
 	if startWaitReady {
 		if readyErr != nil {

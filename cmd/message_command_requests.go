@@ -197,7 +197,7 @@ func formatCommandRequestSendError(recipient string, err error) error {
 	}
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
-		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
+		return outboundMessageSendError(recipient, err)
 	}
 	switch {
 	case apiErr.Code == "experiment_disabled":
@@ -214,5 +214,5 @@ func formatCommandRequestSendError(recipient string, err error) error {
 			return errors.New(safeText(msg))
 		}
 	}
-	return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
+	return outboundMessageSendError(recipient, err)
 }

@@ -96,6 +96,7 @@ func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.Resol
 			DeprecationMessage: rs.DeprecationMessage,
 			ReplacementURI:     rs.ReplacementURI,
 			Optional:           ref.Optional,
+			downloadToken:      rs.DownloadToken,
 		})
 	}
 

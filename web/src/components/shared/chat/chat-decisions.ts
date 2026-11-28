@@ -455,9 +455,9 @@ export class ScionChatDecisions extends LitElement {
     }
 
     /*
-     * A set card's plain choices are native buttons (renderSetButton) drawn
-     * as a small sl-button using Shoelace's own rules and tokens, so both
-     * themes match the single card's sl-buttons.
+     * Plain choice controls (renderButton, renderSetButton) are native buttons
+     * drawn as small sl-buttons using Shoelace's own rules and tokens, so
+     * aria-pressed reaches assistive technology in both themes.
      */
     .sb {
       appearance: none;
@@ -2626,28 +2626,50 @@ export class ScionChatDecisions extends LitElement {
     e.stopPropagation();
   };
 
+  /**
+   * A plain single-choice control: a native button styled as a small
+   * `sl-button` (`.sb` rules) so `aria-pressed` (used when staging an
+   * override of an agent-interpreted answer) reaches assistive technology.
+   */
   private renderButton(d: DecisionView, c: ChoiceOption): TemplateResult {
     const s = this.singleChoiceAppearance(d, c);
-    const btn = html`<sl-button
-      size="small"
+    const look =
+      s.variant === 'primary'
+        ? s.outlined
+          ? 'outline'
+          : 'filled'
+        : s.outlined
+          ? 'subtle'
+          : 'default';
+    const hasPrefix = Boolean(s.loading || s.icon);
+    const btn = html`<button
+      type="button"
+      class="sb sb-${look}${hasPrefix ? ' has-prefix' : ''}"
       data-choice=${c.id}
-      variant=${s.variant}
-      ?outline=${s.outlined}
-      ?loading=${s.loading}
+      data-look=${look}
       ?disabled=${s.disabled}
+      ?data-loading=${s.loading}
       ?data-readonly=${!s.clickable && !s.disabled && !s.loading}
       aria-disabled=${s.disabled ? 'true' : nothing}
+      aria-busy=${s.loading ? 'true' : nothing}
       aria-pressed=${s.pressed ? 'true' : nothing}
       title=${s.title}
       @click=${() => {
         if (s.clickable) this.onSingleChoiceClick(d, c.id);
       }}
-      >${s.icon
-        ? html`<sl-icon slot="prefix" name=${s.icon}></sl-icon>`
-        : nothing}${c.label}${s.recommended
-        ? html`<span class="sr-only"> (recommended)</span>`
-        : nothing}${renderRecommendedMark(s.recommendedMuted)}</sl-button
-    >`;
+    >
+      ${s.loading
+        ? html`<span class="sb-prefix"><sl-spinner></sl-spinner></span>`
+        : s.icon
+          ? html`<span class="sb-prefix"
+              ><sl-icon name=${s.icon} aria-hidden="true"></sl-icon
+            ></span>`
+          : nothing}<span class="sb-label"
+        >${c.label}${s.recommended
+          ? html`<span class="sr-only"> (recommended)</span>`
+          : nothing}${renderRecommendedMark(s.recommendedMuted)}</span
+      >
+    </button>`;
     return s.notOwnerTip ? html`<sl-tooltip content=${s.notOwnerTip}>${btn}</sl-tooltip>` : btn;
   }
 

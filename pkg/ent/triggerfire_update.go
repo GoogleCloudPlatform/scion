@@ -198,6 +198,34 @@ func (_u *TriggerFireUpdate) SetNillableStatus(v *string) *TriggerFireUpdate {
 	return _u
 }
 
+// SetRateDecision sets the "rate_decision" field.
+func (_u *TriggerFireUpdate) SetRateDecision(v string) *TriggerFireUpdate {
+	_u.mutation.SetRateDecision(v)
+	return _u
+}
+
+// SetNillableRateDecision sets the "rate_decision" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableRateDecision(v *string) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetRateDecision(*v)
+	}
+	return _u
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (_u *TriggerFireUpdate) SetCounterFlushed(v bool) *TriggerFireUpdate {
+	_u.mutation.SetCounterFlushed(v)
+	return _u
+}
+
+// SetNillableCounterFlushed sets the "counter_flushed" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableCounterFlushed(v *bool) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetCounterFlushed(*v)
+	}
+	return _u
+}
+
 // SetError sets the "error" field.
 func (_u *TriggerFireUpdate) SetError(v string) *TriggerFireUpdate {
 	_u.mutation.SetError(v)
@@ -520,6 +548,11 @@ func (_u *TriggerFireUpdate) ExecX(ctx context.Context) {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *TriggerFireUpdate) check() error {
+	if v, ok := _u.mutation.RateDecision(); ok {
+		if err := triggerfire.RateDecisionValidator(v); err != nil {
+			return &ValidationError{Name: "rate_decision", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rate_decision": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.MatchedThrough(); ok {
 		if err := triggerfire.MatchedThroughValidator(v); err != nil {
 			return &ValidationError{Name: "matched_through", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.matched_through": %w`, err)}
@@ -600,6 +633,12 @@ func (_u *TriggerFireUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(triggerfire.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RateDecision(); ok {
+		_spec.SetField(triggerfire.FieldRateDecision, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CounterFlushed(); ok {
+		_spec.SetField(triggerfire.FieldCounterFlushed, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Error(); ok {
 		_spec.SetField(triggerfire.FieldError, field.TypeString, value)
@@ -889,6 +928,34 @@ func (_u *TriggerFireUpdateOne) SetStatus(v string) *TriggerFireUpdateOne {
 func (_u *TriggerFireUpdateOne) SetNillableStatus(v *string) *TriggerFireUpdateOne {
 	if v != nil {
 		_u.SetStatus(*v)
+	}
+	return _u
+}
+
+// SetRateDecision sets the "rate_decision" field.
+func (_u *TriggerFireUpdateOne) SetRateDecision(v string) *TriggerFireUpdateOne {
+	_u.mutation.SetRateDecision(v)
+	return _u
+}
+
+// SetNillableRateDecision sets the "rate_decision" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableRateDecision(v *string) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetRateDecision(*v)
+	}
+	return _u
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (_u *TriggerFireUpdateOne) SetCounterFlushed(v bool) *TriggerFireUpdateOne {
+	_u.mutation.SetCounterFlushed(v)
+	return _u
+}
+
+// SetNillableCounterFlushed sets the "counter_flushed" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableCounterFlushed(v *bool) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetCounterFlushed(*v)
 	}
 	return _u
 }
@@ -1228,6 +1295,11 @@ func (_u *TriggerFireUpdateOne) ExecX(ctx context.Context) {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *TriggerFireUpdateOne) check() error {
+	if v, ok := _u.mutation.RateDecision(); ok {
+		if err := triggerfire.RateDecisionValidator(v); err != nil {
+			return &ValidationError{Name: "rate_decision", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rate_decision": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.MatchedThrough(); ok {
 		if err := triggerfire.MatchedThroughValidator(v); err != nil {
 			return &ValidationError{Name: "matched_through", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.matched_through": %w`, err)}
@@ -1325,6 +1397,12 @@ func (_u *TriggerFireUpdateOne) sqlSave(ctx context.Context) (_node *TriggerFire
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(triggerfire.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RateDecision(); ok {
+		_spec.SetField(triggerfire.FieldRateDecision, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CounterFlushed(); ok {
+		_spec.SetField(triggerfire.FieldCounterFlushed, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Error(); ok {
 		_spec.SetField(triggerfire.FieldError, field.TypeString, value)

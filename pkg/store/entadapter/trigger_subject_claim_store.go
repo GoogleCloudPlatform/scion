@@ -43,6 +43,7 @@ func entTriggerSubjectClaimToStore(e *ent.TriggerSubjectClaim) *store.TriggerSub
 	out := &store.TriggerSubjectClaim{
 		ID:            e.ID.String(),
 		TriggerID:     e.TriggerID.String(),
+		ActionIndex:   e.ActionIndex,
 		Subject:       e.Subject,
 		State:         e.State,
 		EventID:       e.EventID.String(),
@@ -58,16 +59,22 @@ func entTriggerSubjectClaimToStore(e *ent.TriggerSubjectClaim) *store.TriggerSub
 	return out
 }
 
-// ClaimTriggerSubject atomically takes ownership of (triggerID, subject) via
-// INSERT ... ON CONFLICT DO NOTHING, or conditional UPDATE when the existing
+// ClaimTriggerSubject atomically takes ownership of (triggerID, actionIndex, subject)
+// via INSERT ... ON CONFLICT DO NOTHING, or conditional UPDATE when the existing
 // row is released or is an abandoned unbound claim (agent_id IS NULL AND
 // claimed_at < abandonedBefore). Returns (claimed, nil, nil) when taken, or
-// (nil, existing, nil) when another active claim holds the subject (Stage 2 §5.6).
+// (nil, existing, nil) when another active claim holds the subject (Stage 2 §5.6,
+// action-arrays §1).
 func (s *TriggerStore) ClaimTriggerSubject(
 	ctx context.Context,
-	triggerID, subject, eventID, fireID string,
+	triggerID string,
+	actionIndex int,
+	subject, eventID, fireID string,
 	now, abandonedBefore time.Time,
 ) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
+	if actionIndex < 0 {
+		return nil, nil, fmt.Errorf("%w: actionIndex must be non-negative", store.ErrInvalidInput)
+	}
 	if len(subject) > store.MaxTriggerSubjectBytes {
 		return nil, nil, fmt.Errorf("%w: subject exceeds %d bytes", store.ErrInvalidInput, store.MaxTriggerSubjectBytes)
 	}
@@ -93,6 +100,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		create := s.client.TriggerSubjectClaim.Create().
 			SetID(newID).
 			SetTriggerID(tid).
+			SetActionIndex(actionIndex).
 			SetSubject(subject).
 			SetState(store.TriggerSubjectClaimStateActive).
 			SetEventID(eid).
@@ -105,6 +113,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		if err := s.client.TriggerSubjectClaim.CreateBulk(create).
 			OnConflictColumns(
 				triggersubjectclaim.FieldTriggerID,
+				triggersubjectclaim.FieldActionIndex,
 				triggersubjectclaim.FieldSubject,
 			).
 			DoNothing().
@@ -115,6 +124,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		row, err := s.client.TriggerSubjectClaim.Query().
 			Where(
 				triggersubjectclaim.TriggerIDEQ(tid),
+				triggersubjectclaim.ActionIndexEQ(actionIndex),
 				triggersubjectclaim.SubjectEQ(subject),
 			).
 			Only(ctx)
@@ -142,6 +152,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		affected, err := s.client.TriggerSubjectClaim.Update().
 			Where(
 				triggersubjectclaim.TriggerIDEQ(tid),
+				triggersubjectclaim.ActionIndexEQ(actionIndex),
 				triggersubjectclaim.SubjectEQ(subject),
 				triggersubjectclaim.Or(
 					triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateReleased),
@@ -166,13 +177,14 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		}
 		if affected > 0 {
 			return &store.TriggerSubjectClaim{
-				ID:        row.ID.String(),
-				TriggerID: tid.String(),
-				Subject:   subject,
-				State:     store.TriggerSubjectClaimStateActive,
-				EventID:   eid.String(),
-				FireID:    fid.String(),
-				ClaimedAt: now,
+				ID:          row.ID.String(),
+				TriggerID:   tid.String(),
+				ActionIndex: actionIndex,
+				Subject:     subject,
+				State:       store.TriggerSubjectClaimStateActive,
+				EventID:     eid.String(),
+				FireID:      fid.String(),
+				ClaimedAt:   now,
 			}, nil, nil
 		}
 
@@ -180,6 +192,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		current, qErr := s.client.TriggerSubjectClaim.Query().
 			Where(
 				triggersubjectclaim.TriggerIDEQ(tid),
+				triggersubjectclaim.ActionIndexEQ(actionIndex),
 				triggersubjectclaim.SubjectEQ(subject),
 			).
 			Only(ctx)
@@ -196,7 +209,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 	}
 
 	// Effectively unreachable: hitting maxAttempts requires another replica to
-	// repeatedly purge or release-and-reclaim the exact same (trigger_id, subject)
+	// repeatedly purge or release-and-reclaim the exact same (trigger_id, action_index, subject)
 	// row between every INSERT/UPDATE and SELECT in this loop (sustained livelock).
 	return nil, nil, fmt.Errorf("%w: could not resolve trigger subject claim after concurrent retries", store.ErrVersionConflict)
 }
@@ -258,9 +271,9 @@ func (s *TriggerStore) ReleaseTriggerSubjectClaim(ctx context.Context, claimID, 
 	return affected > 0, nil
 }
 
-// GetActiveTriggerSubjectClaim returns the active claim row for (triggerID, subject),
-// or store.ErrNotFound if none is active.
-func (s *TriggerStore) GetActiveTriggerSubjectClaim(ctx context.Context, triggerID, subject string) (*store.TriggerSubjectClaim, error) {
+// GetActiveTriggerSubjectClaim returns the active claim row for
+// (triggerID, actionIndex, subject), or store.ErrNotFound if none is active.
+func (s *TriggerStore) GetActiveTriggerSubjectClaim(ctx context.Context, triggerID string, actionIndex int, subject string) (*store.TriggerSubjectClaim, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
 		return nil, err
@@ -268,6 +281,7 @@ func (s *TriggerStore) GetActiveTriggerSubjectClaim(ctx context.Context, trigger
 	row, err := s.client.TriggerSubjectClaim.Query().
 		Where(
 			triggersubjectclaim.TriggerIDEQ(tid),
+			triggersubjectclaim.ActionIndexEQ(actionIndex),
 			triggersubjectclaim.SubjectEQ(subject),
 			triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateActive),
 		).

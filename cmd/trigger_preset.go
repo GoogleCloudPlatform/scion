@@ -506,7 +506,7 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		return newUsageError("preset ID is required")
 	}
 
-	action, derivedUntrusted, err := validateTriggerPresetApplyAction(cmd, triggerPresetApplyDryRun)
+	action, _, err := validateTriggerPresetApplyAction(cmd, triggerPresetApplyDryRun)
 	if err != nil {
 		return err
 	}
@@ -600,8 +600,6 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	printDerivedUntrustedVars(derivedUntrusted)
-
 	created, err := hubCtx.Client.Triggers(projectID).Create(ctx, createReq)
 	if err != nil {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger from preset: %w", formatTriggerAPIError(err)))
@@ -676,7 +674,7 @@ func printCreatedPresetTrigger(created *hubclient.Trigger) {
 	if created.Subject.CoalesceWindow != "" {
 		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
-	printTriggerActionSummary(created.Action)
+	printTriggerActionsSummary(effectiveTriggerActions(created))
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(created.Status, created.StatusReason), false))
 }
 

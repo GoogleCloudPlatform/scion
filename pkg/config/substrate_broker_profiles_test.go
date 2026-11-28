@@ -37,7 +37,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.ate-system.svc:443
-      router_endpoint: http://atenet-router.ate-system.svc:80
+      router_endpoint: https://atenet-router.ate-system.svc
 profiles:
   substrate:
     runtime: substrate-prod

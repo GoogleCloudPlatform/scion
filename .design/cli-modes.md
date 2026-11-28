@@ -154,7 +154,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 |---------|:-------:|:-------:|
 | `attach` | Y | - |
 | `artifact list` | Y | Y (`--requested` is empty for agents; `--drafts` returns only the caller's own drafts, ptone/scion#9309) |
-| `artifact request-review` | Y | - (human-only in Phases 1–2a, ptone/scion#9306/#9307, including `--withdraw`; agent mode arrives in Phase 4) |
+| `artifact request-review` | Y | Y (owning-agent bounded requests, `--delegator` agent-only, and `--withdraw` for own requests, ptone/scion#5548) |
 | `artifact review-requests` | Y | Y (list review requests on an artifact; publishers see all, others see their own, ptone/scion#9307) |
 | `artifact dismiss-review` | Y | - (human-only: agents are never requested reviewers, ptone/scion#9306) |
 | `broker` (all) | Y | - |
@@ -179,6 +179,9 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `grove reconnect` | Y | - |
 | `grove service-accounts` (all except `show`) | Y | - |
 | `project service-accounts show` | Y | Y |
+| `project github status` | Y | Y |
+| `project github bind` | Y | - (hub-admin binding operation, ptone/scion#9327) |
+| `project github unbind` | Y | - (human/admin operation, ptone/scion#9327) |
 | `project leave` | Y | - (an agent must not drop its user's membership; the hub also refuses agent credentials, ptone/scion#7494) |
 | `harness-config` (all) | Y | - |
 | `hub status` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
@@ -199,6 +202,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `hub notifications` | Y | - |
 | `init` | Y | - |
 | `list` | Y | Y (also with a target-hub profile, as for `create`) |
+| `login` | Y | - |
 | `logs` | Y | Y (also with a target-hub profile, as for `create`) |
 | `look` | Y | Y (also with a target-hub profile, as for `create`) |
 | `message` | Y | Y (not with a target-hub profile) |

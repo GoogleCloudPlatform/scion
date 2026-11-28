@@ -1155,6 +1155,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1)
+			// before acquiring start claims or capacity so a refused start leaves the agent untouched.
+			if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+				if !writeTokenBudgetAdmissionError(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// From here the start no longer follows the client
 			// (ptone/scion#1961): a client that gives up must not cancel the
 			// broker launch, the rollback or the final status write. The
@@ -1175,7 +1183,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// started status while the claim is held.
 			startFromRest = !isBrokerQuotaCountedPhase(agent.Phase)
 			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true,
-				AcceptAsyncLaunch: startReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
+				BudgetChecked: true, AcceptAsyncLaunch: startReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
 			if dispatchErr == nil && launchAccepted {
 				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
 				return
@@ -1320,6 +1328,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			// Raw-token budget & unmeasured-harness admission gate (Tokenomics P3.2 B1)
+			// before the stop leg so a refused restart leaves the running agent untouched.
+			if err := s.checkTokenBudgetAdmission(ctx, agent, nil); err != nil {
+				if !writeTokenBudgetAdmissionError(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// Check the broker cap before the start claim, the run intent
 			// write and the stop leg (ptone/scion#2010): a restart refused
 			// at the cap must leave the agent as it was, with its container
@@ -1429,7 +1445,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			existing := restartClaim
 			restartClaim = nil
 			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true, SyncDispatchBound: true,
-				AcceptAsyncLaunch: restartReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
+				BudgetChecked: true, AcceptAsyncLaunch: restartReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
 			if dispatchErr == nil && launchAccepted {
 				// The start leg was accepted as an asynchronous restart
 				// launch: its end records running or stopped, keeps or
@@ -1501,6 +1517,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error. A required-skill resolution failure
 	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if writeTokenBudgetAdmissionError(w, dispatchErr) {
+			return
+		}
 		if writeBrokerPolicyError(w, r, dispatchErr) {
 			return
 		}

@@ -38,7 +38,11 @@ import {
 } from '../../client/secret-requests.js';
 import { agentSecretsEnabled } from '../../utils/feature-flags.js';
 import type { ActionInboxKindConfig } from '../shared/action-inbox-controller.js';
-import '../shared/action-inbox-page.js';
+import {
+  actionCardChatHref,
+  actionCardContextStyles,
+  renderOpenInChat,
+} from '../shared/action-inbox-page.js';
 import '../shared/chat/chat-secret-request.js';
 
 export const AGENT_SECRETS_API_PATH = '/api/v1/users/me/secret-requests';
@@ -79,6 +83,7 @@ export class ScionPageProfileAgentSecrets extends LitElement {
 
   private readonly kindConfig: ActionInboxKindConfig<SecretRequestCardResponse> = {
     kind: 'secret_request',
+    category: 'agent_secrets',
     tabId: 'agent-secrets',
     apiPath: AGENT_SECRETS_API_PATH,
     title: 'Agent Secrets',
@@ -90,61 +95,64 @@ export class ScionPageProfileAgentSecrets extends LitElement {
     renderCard: (card, ctx): TemplateResult => this.renderSecretRequestCard(card, ctx.onResolved),
   };
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    actionCardContextStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .card-wrapper {
-      display: flex;
-      flex-direction: column;
-      gap: 0.45rem;
-    }
+      .card-wrapper {
+        display: flex;
+        flex-direction: column;
+        gap: 0.45rem;
+      }
 
-    .card-context {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.4rem 0.9rem;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted);
-    }
+      .card-context {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem 0.9rem;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted);
+      }
 
-    .context-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-    }
+      .context-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
 
-    .context-item strong {
-      color: var(--scion-text);
-      font-weight: 600;
-    }
+      .context-item strong {
+        color: var(--scion-text);
+        font-weight: 600;
+      }
 
-    .waiting-others-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.3rem;
-      padding: 0.1rem 0.5rem;
-      border-radius: var(--scion-radius-full);
-      font-size: 0.75rem;
-      font-weight: 500;
-      background: var(--scion-warning-bg);
-      color: var(--scion-warning-text);
-    }
+      .waiting-others-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.1rem 0.5rem;
+        border-radius: var(--scion-radius-full);
+        font-size: 0.75rem;
+        font-weight: 500;
+        background: var(--scion-warning-bg);
+        color: var(--scion-warning-text);
+      }
 
-    .card-intro {
-      margin: 0;
-      padding: 0.6rem 0.8rem;
-      background: var(--scion-surface);
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
-      color: var(--scion-text);
-      font-size: 0.875rem;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-  `;
+      .card-intro {
+        margin: 0;
+        padding: 0.6rem 0.8rem;
+        background: var(--scion-surface);
+        border: 1px solid var(--scion-border);
+        border-radius: var(--scion-radius);
+        color: var(--scion-text);
+        font-size: 0.875rem;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -163,6 +171,12 @@ export class ScionPageProfileAgentSecrets extends LitElement {
   ): TemplateResult {
     const hasPending = card.rows.some((r) => isPendingSecretRequest(r));
     const waitingOnOthers = hasPending && !card.canRespond;
+    const chatHref = actionCardChatHref(
+      card.threadId,
+      card.projectId,
+      card.messageId,
+      card.promptAvailable
+    );
 
     return html`
       <article class="card-wrapper" data-secret-request-card=${card.messageId}>
@@ -191,6 +205,7 @@ export class ScionPageProfileAgentSecrets extends LitElement {
                 </span>
               `
             : nothing}
+          ${renderOpenInChat(chatHref, card.promptAvailable)}
         </div>
         ${card.intro ? html`<p class="card-intro">${card.intro}</p>` : nothing}
         <scion-chat-secret-request

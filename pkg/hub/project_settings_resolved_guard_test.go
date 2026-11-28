@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -785,8 +786,19 @@ func TestResolvedSettings_ResponseCoversRegistry(t *testing.T) {
 
 	// A zero Server has no OperationalSettings and no config, which is the
 	// file/SQLite path: hub presence is unknowable and must be reported as
-	// such rather than as absent.
-	resp := (&Server{}).resolvedProjectSettings(project)
+	// such rather than as absent. Enable experiment-gated project settings so
+	// every registered key is active for the full-registry coverage check.
+	var activeExps []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.TokenomicsUsageLedger || e.Name == experiments.TokenomicsTokenBudgets {
+			e.Default = true
+		}
+		activeExps = append(activeExps, e)
+	}
+	reg, err := experiments.NewRegistry(activeExps, nil)
+	require.NoError(t, err)
+	srv := &Server{experiments: reg}
+	resp := srv.resolvedProjectSettings(project)
 	require.NotNil(t, resp)
 
 	for _, key := range projectSettingKeys {
@@ -797,6 +809,18 @@ func TestResolvedSettings_ResponseCoversRegistry(t *testing.T) {
 	assert.Lenf(t, resp.Settings, len(projectSettingKeys),
 		"the resolved response has %d keys but the registry has %d",
 		len(resp.Settings), len(projectSettingKeys))
+
+	// With tokenomics.token_budgets disabled, the experiment-gated setting
+	// must be omitted from both Settings and Project even when stored.
+	projectWithPolicy := &store.Project{
+		ID:          "p-1",
+		Annotations: map[string]string{projectSettingUsageUnmeasuredPolicy: UsageUnmeasuredPolicyDeny},
+	}
+	offResp := (&Server{}).resolvedProjectSettings(projectWithPolicy)
+	require.NotNil(t, offResp)
+	assert.NotContains(t, offResp.Settings, projectSettingUsageUnmeasuredPolicy)
+	assert.Len(t, offResp.Settings, len(projectSettingKeys)-1)
+	assert.Empty(t, offResp.Project.UsageUnmeasuredPolicy)
 }
 
 // TestResolvedSettingsResponseShape_NoEffectiveValue is the negative drift

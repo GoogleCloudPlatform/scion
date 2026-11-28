@@ -188,9 +188,9 @@ func TestHandleSkillsDiscoverDirectory_StandardSkillsDir(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	const wantURL = "https://github.com/acme/repo/archive/refs/heads/main.tar.gz"
-	if requestedURL != wantURL {
-		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	const wantRawPrefix = "https://raw.githubusercontent.com/acme/repo/" + legacyTestDefaultSHA + "/skills/"
+	if !strings.HasPrefix(requestedURL, wantRawPrefix) {
+		t.Errorf("outbound download URL = %q, want prefix %q", requestedURL, wantRawPrefix)
 	}
 
 	resp := decodeDiscoverSkills(t, rec)
@@ -663,9 +663,9 @@ func TestHandleSkillsDiscoverDirectory_MixedCaseHost(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	const wantURL = "https://github.com/acme/repo/archive/refs/heads/main.tar.gz"
-	if requestedURL != wantURL {
-		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	const wantRawPrefix = "https://raw.githubusercontent.com/acme/repo/" + legacyTestDefaultSHA + "/skills/"
+	if !strings.HasPrefix(requestedURL, wantRawPrefix) {
+		t.Errorf("outbound download URL = %q, want prefix %q", requestedURL, wantRawPrefix)
 	}
 
 	resp := decodeDiscoverSkills(t, rec)
@@ -741,9 +741,9 @@ func TestHandleSkillsDiscoverDirectory_StripsURLCredentials(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	const wantURL = "https://github.com/acme/repo/archive/refs/heads/main.tar.gz"
-	if requestedURL != wantURL {
-		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	const wantRawPrefix = "https://raw.githubusercontent.com/acme/repo/" + legacyTestDefaultSHA + "/skills/"
+	if !strings.HasPrefix(requestedURL, wantRawPrefix) {
+		t.Errorf("outbound download URL = %q, want prefix %q", requestedURL, wantRawPrefix)
 	}
 	if strings.Contains(authHeader, "pasted-secret-4242") {
 		t.Errorf("pasted credential reached the wire as auth: %q", authHeader)
@@ -1102,17 +1102,23 @@ func TestHandleSkillsDiscoverDirectory_LogsCandidateWithoutQuery(t *testing.T) {
 	var logBuf bytes.Buffer
 	srv.resourceLog = slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	origNorm := discoverNormalizeSkillURI
+	t.Cleanup(func() { discoverNormalizeSkillURI = origNorm })
+	discoverNormalizeSkillURI = func(raw string) (string, error) {
+		return "", fmt.Errorf("invalid GitHub URL %q: unnormalizable", raw)
+	}
+
 	defer mockSkillTarball(t, map[string]string{
 		"repo-main/skills/alpha-skill/SKILL.md": "alpha",
 	})()
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
-		SourceURL: "https://github.com/ac~me/repo/tree/main/skills?token=GOOD_TOKEN&access_token=made-up-value-1",
+		SourceURL: "https://github.com/acme/repo/tree/main/skills?token=GOOD_TOKEN&access_token=made-up-value-1",
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if msg := decodeDiscoverError(t, rec).Message; msg != "no skills found at https://github.com/ac~me/repo/tree/main/skills" {
+	if msg := decodeDiscoverError(t, rec).Message; msg != "no skills found at https://github.com/acme/repo/tree/main/skills" {
 		t.Errorf("message = %q", msg)
 	}
 
@@ -1133,8 +1139,8 @@ func TestHandleSkillsDiscoverDirectory_LogsCandidateWithoutQuery(t *testing.T) {
 	}
 	want := []record{{
 		Msg:       "skipping discovered skill with unnormalizable URI",
-		SourceURL: "https://github.com/ac~me/repo/tree/main/skills/alpha-skill",
-		Error:     `invalid GitHub URL "https://github.com/ac~me/repo/tree/main/skills/alpha-skill": invalid owner "ac~me"`,
+		SourceURL: "https://github.com/acme/repo/tree/main/skills/alpha-skill",
+		Error:     `invalid GitHub URL "https://github.com/acme/repo/tree/main/skills/alpha-skill": unnormalizable`,
 	}}
 	if !slices.Equal(skipped, want) {
 		t.Errorf("skipped-skill log records = %+v, want %+v", skipped, want)

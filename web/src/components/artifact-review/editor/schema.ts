@@ -158,15 +158,21 @@ export function isMine(marks: readonly Mark[]): boolean {
 
 /**
  * The run identity of a node's critic mark: its key, plus whether it is
- * this session's for insertions, deletions and highlights, so that a new
- * suggestion next to an earlier one stays a separate mark. A replacement's
- * two sides are always one unit.
+ * this session's, so that a new suggestion next to an earlier one stays
+ * a separate mark (including adjacent substitutions).
  */
 export function runKeyOf(marks: readonly Mark[]): string | null {
   const k = markKeyOf(marks);
   if (k === null) return null;
-  if (k === 'subOld' || k === 'subNew') return k;
   return isMine(marks) ? `${k}:mine` : k;
+}
+
+/** Whether fromRun and toRun are the old and new sides of the same replacement. */
+export function isSubPair(fromRun: string | null, toRun: string | null): boolean {
+  return (
+    (fromRun === 'subOld' && toRun === 'subNew') ||
+    (fromRun === 'subOld:mine' && toRun === 'subNew:mine')
+  );
 }
 
 /** The critic mark key of a set of marks, or null. */

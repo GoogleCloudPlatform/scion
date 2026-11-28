@@ -15,13 +15,17 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // GET /api/v1/projects/{projectId}/settings/resolved
@@ -278,6 +282,9 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	projectSettingTelemetryEnabled: {
 		source: hubSourceTelemetryDefault,
 	},
+	projectSettingTrajectoryCapture: {
+		source: hubSourceNone,
+	},
 	projectSettingAutoExposePortsEnabled: {
 		source: hubSourceAutoExposePortsDefault,
 	},
@@ -363,6 +370,11 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		path:              []string{"default_agent_role"},
 		absentWhenMissing: false,
 	},
+
+	// Usage / token budget policy
+	projectSettingUsageUnmeasuredPolicy: {
+		source: hubSourceNone,
+	},
 }
 
 // handleProjectSettingsResolved serves GET
@@ -431,13 +443,17 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 	agentDefaults, agentDefaultsReadable := s.hubAgentDefaultsDoc()
 	ceilings := s.agentLimitCeilings()
 
+	trajCaptureOn := s.experimentEnabled(experiments.TokenomicsTrajectoryCapture)
 	settings := make(map[string]ResolvedProjectSetting, len(projectSettingKeys))
 	for _, key := range projectSettingKeys {
+		if key == projectSettingUsageUnmeasuredPolicy && !s.tokenBudgetsEnabled() {
+			continue
+		}
 		entry := ResolvedProjectSetting{
 			HubDefault: ResolvedHubDefaultUnknown,
 		}
 
-		if project.Annotations != nil {
+		if project.Annotations != nil && (key != projectSettingTrajectoryCapture || trajCaptureOn) {
 			if val, ok := project.Annotations[key]; ok && projectAnnotationInEffect(key, val) {
 				v := val
 				entry.ProjectSet = true
@@ -463,11 +479,24 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 				entry.StoredValue = false
 			}
 		}
+		if key == projectSettingTrajectoryCapture && trajCaptureOn {
+			status := s.resolveTrajectoryCapturePolicy(context.Background(), project)
+			if status.EnforcedByHub {
+				lockedBy := "hub"
+				entry.LockedBy = &lockedBy
+				entry.Effective = status.Policy
+				if project.Annotations != nil {
+					if raw := strings.TrimSpace(project.Annotations[projectSettingTrajectoryCapture]); raw == telemetrycontract.TrajectoryCapturePolicyMetadataOnly || raw == telemetrycontract.TrajectoryCapturePolicyOff {
+						entry.StoredValue = raw
+					}
+				}
+			}
+		}
 		settings[key] = entry
 	}
 
 	return &ResolvedProjectSettings{
-		Project:  projectSettingsFromAnnotations(project),
+		Project:  s.projectSettingsForResponse(project),
 		Settings: settings,
 	}
 }
@@ -501,6 +530,9 @@ func projectAnnotationInEffect(key, val string) bool {
 	if key == projectSettingDefaultThinkingLevel {
 		n, err := strconv.Atoi(val)
 		return err == nil && validDefaultThinkingLevel(n)
+	}
+	if key == projectSettingTrajectoryCapture {
+		return telemetrycontract.IsValidTrajectoryCapturePolicy(strings.TrimSpace(val))
 	}
 	return true
 }

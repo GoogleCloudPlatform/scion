@@ -170,6 +170,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/validate", RouteID: "auth.validate",
 		Classification: RoutePublic,
 	},
+	// Logout accepts an authenticated session or succeeds idempotently without
+	// one, matching isUnauthenticatedEndpoint in auth.go.
+	"/api/v1/auth/logout": {
+		Pattern: "/api/v1/auth/logout", RouteID: "auth.logout",
+		Classification: RoutePublic,
+	},
 	"/api/v1/auth/providers": {
 		Pattern: "/api/v1/auth/providers", RouteID: "auth.providers",
 		Classification: RoutePublic,
@@ -230,10 +236,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// -------------------------------------------------------------------------
 	// Authenticated: User session endpoints
 	// -------------------------------------------------------------------------
-	"/api/v1/auth/logout": {
-		Pattern: "/api/v1/auth/logout", RouteID: "auth.logout",
-		Classification: RouteAuthenticated,
-	},
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
@@ -334,6 +336,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/users/me/secret-requests": {
 		Pattern: "/api/v1/users/me/secret-requests", RouteID: "users.me.secretRequests",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/command-requests": {
+		Pattern: "/api/v1/users/me/command-requests", RouteID: "users.me.commandRequests",
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/users/me/inbox/summary": {
@@ -445,6 +451,18 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/teams/link/status": {
 		Pattern: "/api/v1/teams/link/status", RouteID: "teams.link.status",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/slack/link": {
+		Pattern: "/api/v1/slack/link", RouteID: "slack.link",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/slack/link/verify": {
+		Pattern: "/api/v1/slack/link/verify", RouteID: "slack.link.verify",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/slack/link/status": {
+		Pattern: "/api/v1/slack/link/status", RouteID: "slack.link.status",
 		Classification: RouteAuthenticated,
 	},
 

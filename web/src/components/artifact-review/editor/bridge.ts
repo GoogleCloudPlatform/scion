@@ -30,6 +30,7 @@
 import type { Mark, Node, Schema } from '@milkdown/prose/model';
 import { Transform } from '@milkdown/prose/transform';
 
+import { parseCritic } from '../../../utils/critic.js';
 import {
   criticToSentinelText,
   readTag,
@@ -38,14 +39,23 @@ import {
   tokenOf,
 } from '../../../utils/critic-sentinels.js';
 import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
-import { COMMENT, CRITIC_MARK_NAMES, MARKS, markKeyOf, runKeyOf } from './schema.js';
+import { COMMENT, CRITIC_MARK_NAMES, MARKS, isSubPair, markKeyOf, runKeyOf } from './schema.js';
 import type { MarkKey } from './schema.js';
+
+/** Per-sentinel ownership flags aligned with parseCritic(md) in source order. */
+export interface SentinelOwn {
+  /** One boolean per non-comment mark opener in source order. */
+  open: readonly boolean[];
+  /** One boolean per comment note in source order (indexed by note ordinal). */
+  note: readonly boolean[];
+}
 
 interface Edit {
   pos: number;
   /** Characters replaced (a note sentinel and its ordinal tag); 1 when absent. */
   len?: number;
   note?: string;
+  mine?: boolean;
   literal?: string;
   /** The consumed entry for this sentinel, marked held when it stays text. */
   entry?: Consumed;
@@ -99,7 +109,8 @@ export function applySentinels(
   tr: Transform,
   schema: Schema,
   notes: string[],
-  a: SentinelAlphabet
+  a: SentinelAlphabet,
+  own?: SentinelOwn
 ): SentinelResult {
   const tokenMap = tokenOf(a);
   const tok = (c: string): string => tokenMap.get(c) ?? c;
@@ -127,10 +138,12 @@ export function applySentinels(
   const insType = schema.marks[MARKS.ins];
   let state: MarkKey | null = null;
   let runStart = 0;
+  let runMine = false;
+  let openIdx = 0;
   let openEdit: Edit | null = null;
   let sepEdit: Edit | null = null;
-  let pending: { from: number; to: number; key: MarkKey }[] = [];
-  const ranges: { from: number; to: number; key: MarkKey }[] = [];
+  let pending: { from: number; to: number; key: MarkKey; mine: boolean }[] = [];
+  const ranges: { from: number; to: number; key: MarkKey; mine: boolean }[] = [];
   const edits: Edit[] = [];
   let noteIdx = 0;
   const attributeBlocks = new Set<number>();
@@ -171,7 +184,10 @@ export function applySentinels(
           i += tag?.digits ?? 0;
           continue;
         }
-        if (sentinels.has(c)) take(block, c, true);
+        if (sentinels.has(c)) {
+          if (open.has(c)) openIdx++;
+          take(block, c, true);
+        }
         restored += tok(c);
       }
       out[name] = restored;
@@ -226,12 +242,15 @@ export function applySentinels(
       if (c === a.note) {
         const tag = readTag(t, i, a);
         const len = 1 + (tag?.digits ?? 0);
-        const entry = takeNote(block, c, tag?.ordinal ?? -1, code);
+        const ordinal = tag?.ordinal ?? -1;
+        const entry = takeNote(block, c, ordinal, code);
         i += len - 1;
         if (code) edits.push({ pos: p, len, literal: `{>>${entry.note}<<}`, entry });
-        else edits.push({ pos: p, len, note: entry.note!, entry });
+        else
+          edits.push({ pos: p, len, note: entry.note!, mine: own?.note[ordinal] === true, entry });
         continue;
       }
+      const myOpenIdx = open.has(c) ? openIdx++ : -1;
       const entry = take(block, c);
       if (code) {
         entry.held = true;
@@ -242,18 +261,19 @@ export function applySentinels(
       if (key && state === null) {
         state = key;
         runStart = p + 1;
+        runMine = myOpenIdx >= 0 && own?.open[myOpenIdx] === true;
         openEdit = { pos: p, entry };
         sepEdit = null;
         pending = [];
         edits.push(openEdit);
       } else if (c === a.subSep && state === 'subOld') {
-        pending.push({ from: runStart, to: p, key: 'subOld' });
+        pending.push({ from: runStart, to: p, key: 'subOld', mine: runMine });
         state = 'subNew';
         runStart = p + 1;
         sepEdit = { pos: p, entry };
         edits.push(sepEdit);
       } else if (state !== null && c === closeOf[state]) {
-        pending.push({ from: runStart, to: p, key: state });
+        pending.push({ from: runStart, to: p, key: state, mine: runMine });
         const closeEdit: Edit = { pos: p, entry };
         edits.push(closeEdit);
         if (pending.some((r) => markable(r.from, r.to))) {
@@ -306,7 +326,13 @@ export function applySentinels(
     if (sepEdit) (sepEdit as Edit).literal = tok(a.subSep);
   }
   for (const r of ranges) {
-    if (r.to > r.from) tr.addMark(r.from, r.to, schema.marks[MARKS[r.key]].create());
+    if (r.to > r.from) {
+      tr.addMark(
+        r.from,
+        r.to,
+        schema.marks[MARKS[r.key]].create(r.mine ? { mine: true } : undefined)
+      );
+    }
   }
   for (const e of edits) if (e.literal !== undefined && e.entry) e.entry.held = true;
   for (const e of edits.reverse()) {
@@ -318,7 +344,15 @@ export function applySentinels(
       // The comment keeps the formatting marks it was written under (a
       // comment at the end of link or emphasis text stays inside it).
       const marks = formatting(tr.doc.nodeAt(e.pos)?.marks ?? []);
-      tr.replaceWith(e.pos, end, schema.nodes[COMMENT].create({ note: e.note }, null, marks));
+      tr.replaceWith(
+        e.pos,
+        end,
+        schema.nodes[COMMENT].create(
+          { note: e.note, ...(e.mine ? { mine: true } : {}) },
+          null,
+          marks
+        )
+      );
     } else {
       tr.delete(e.pos, end);
     }
@@ -382,7 +416,7 @@ export function docToSentinels(
     to: RunState | null
   ): { close: string; open: string; sep: string } => {
     if (from?.run === to?.run) return { close: '', open: '', sep: '' };
-    if (from?.key === 'subOld' && to?.key === 'subNew')
+    if (isSubPair(from?.run ?? null, to?.run ?? null))
       return { close: '', open: '', sep: a.subSep };
     return { close: from ? closeS[from.key] : '', open: to ? openS[to.key] : '', sep: '' };
   };
@@ -432,8 +466,7 @@ export function docToSentinels(
       while (
         j + 1 < items.length &&
         items[j + 1].run !== null &&
-        (items[j + 1].run === items[j].run ||
-          (items[j].key === 'subOld' && items[j + 1].key === 'subNew'))
+        (items[j + 1].run === items[j].run || isSubPair(items[j].run, items[j + 1].run))
       ) {
         j++;
       }
@@ -539,12 +572,24 @@ export function loadDocument(
   md: string,
   parse: (s: string) => Node,
   schema: Schema,
-  a: SentinelAlphabet
+  a: SentinelAlphabet,
+  ownStarts?: ReadonlySet<number>
 ): LoadedDoc | null {
   // The tagged form: each note sentinel carries its comment's ordinal.
   const { text, notes } = criticToSentinelText(md, a, true);
+  let own: SentinelOwn | undefined;
+  if (ownStarts && ownStarts.size > 0) {
+    const openOwn: boolean[] = [];
+    const noteOwn: boolean[] = [];
+    for (const s of parseCritic(md)) {
+      if (s.kind === 'text') continue;
+      if (s.kind === 'comment') noteOwn.push(ownStarts.has(s.start));
+      else openOwn.push(ownStarts.has(s.start));
+    }
+    own = { open: openOwn, note: noteOwn };
+  }
   const tr = new Transform(parse(text));
-  const r = applySentinels(tr, schema, notes, a);
+  const r = applySentinels(tr, schema, notes, a, own);
   if (r.notesUsed !== notes.length || sentinelLeft(tr.doc, a)) return null;
   return {
     doc: tr.doc,
@@ -558,9 +603,10 @@ export function loadDoc(
   md: string,
   parse: (s: string) => Node,
   schema: Schema,
-  a: SentinelAlphabet
+  a: SentinelAlphabet,
+  ownStarts?: ReadonlySet<number>
 ): Node | null {
-  return loadDocument(md, parse, schema, a)?.doc ?? null;
+  return loadDocument(md, parse, schema, a, ownStarts)?.doc ?? null;
 }
 
 /** Serializes a document to Markdown with CriticMarkup. */

@@ -8,6 +8,7 @@ Most stuck agents are recoverable without recreation. Always start with `scion l
 |---|---|---|
 | Transient API error in log | LLM provider rate-limit or timeout | `scion message <agent> "continue"` — do NOT recreate |
 | `STALLED` notice, or the screen shows the same thinking, loading or tool-call state with no new activity across two looks | Usually a slow or hung model call; this looks the same as a broker or network fault | If `scion look <agent>` shows output advancing (for example a long foreground build or test), wait rather than interrupting. Otherwise send `scion message <agent> "continue"`, and use `scion message <agent> --interrupt "continue"` only if that does not unstick the turn. Recreate only if nudges fail |
+| `HARNESS_ERROR` notice | The harness is alive but a model or API call failed, or a turn ended without output | `scion look <agent>`, then `scion message <agent> "continue"` (a new message retries). Recreate only if nudges fail |
 | `LIMITS_EXCEEDED` state | Context/rate limit hit | `scion message <agent> "continue"` |
 | `failed to verify token: error in cryptographic primitive` | Hub regenerated signing keys on restart, or multi-replica key mismatch | `scion message <agent> "continue"` — message delivery does not depend on the agent's own token. If looping between `login` and `session_expired`, escalate to an operator: the hub needs `SharedSigningSecret` (`SCION_SERVER_SESSION_SECRET`) pinned in deployment config so keys survive restarts |
 | `Token refresh failed … 401` repeating every 30s | Token expired; refresh deadlocked | `scion message <agent> "continue"` — if no effect, recreate |
@@ -37,3 +38,4 @@ Always `scion look <agent>` first to verify screen state before sending keystrok
 - **Recreating on first sign of trouble.** Most stuck states recover with `scion message <agent> "continue"`. Recreation destroys unpushed work and in-memory state.
 - **Sending keystrokes blind.** Always `scion look` first — `scion keys` input goes to whatever is on screen.
 - **Treating all 401s the same.** Hub token 401 (agent state) and GitHub token 401 (API auth) have different recovery paths.
+- **Reporting a fix as live because it merged.** A merged fix affects agents only once the Hub and brokers run a build that contains it. Before telling someone a fix is in effect, read the Hub's `scionVersion` from its `/healthz` endpoint (no credential needed) and confirm the merge commit is an ancestor of that build, with enough history fetched (see `git-operations`).

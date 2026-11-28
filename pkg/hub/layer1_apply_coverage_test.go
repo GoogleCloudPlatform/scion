@@ -199,6 +199,8 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.retention.hourly_rollups_days":  `{"retention":{"hourly_rollups_days":7}}`,
 	"telemetry.retention.daily_rollups_days":   `{"retention":{"daily_rollups_days":180}}`,
 	"telemetry.retention.scope_counters_days":  `{"retention":{"scope_counters_days":75}}`,
+	"telemetry.retention.group_rollups_days":   `{"retention":{"group_rollups_days":180}}`,
+	"telemetry.retention.budget_state_days":    `{"retention":{"budget_state_days":45}}`,
 	"telemetry.retention.meter_health_days":    `{"retention":{"meter_health_days":15}}`,
 	"telemetry.retention.sweep_interval":       `{"retention":{"sweep_interval":"12h"}}`,
 	"telemetry.retention.batch_size":           `{"retention":{"batch_size":2500}}`,
@@ -406,6 +408,30 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 		"server.hub.uploads.max_workspace_file_size": {section: opsettings.UploadsSectionName, doc: `{"max_workspace_file_size":83886080}`,
 			observe: func(s *Server, _ *OperationalSettings) any {
 				return s.ResolvedUploads().MaxWorkspaceFileSize
+			}},
+		"server.hub.uploads.chunk_bytes": {section: opsettings.UploadsSectionName, doc: `{"chunk_bytes":4194304}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.Uploads().ChunkBytes
+			}},
+		"server.hub.uploads.session_idle_ttl": {section: opsettings.UploadsSectionName, doc: `{"session_idle_ttl":"30m"}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.Uploads().SessionIdleTTL
+			}},
+		"server.hub.uploads.session_max_lifetime": {section: opsettings.UploadsSectionName, doc: `{"session_max_lifetime":"48h"}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.Uploads().SessionMaxLifetime
+			}},
+		"server.hub.uploads.max_sessions_per_user": {section: opsettings.UploadsSectionName, doc: `{"max_sessions_per_user":8}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.Uploads().MaxSessionsPerUser
+			}},
+		"server.hub.uploads.max_pending_bytes_per_user": {section: opsettings.UploadsSectionName, doc: `{"max_pending_bytes_per_user":4294967296}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.Uploads().MaxPendingBytesPerUser
+			}},
+		"server.hub.uploads.max_pending_bytes_hub": {section: opsettings.UploadsSectionName, doc: `{"max_pending_bytes_hub":34359738368}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.Uploads().MaxPendingBytesHub
 			}},
 	}
 	for path, doc := range telemetryProbeDocs {

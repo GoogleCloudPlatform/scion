@@ -53,6 +53,7 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 			ExternalRef: "123456789012345678",
 			ParentRef:   "guild-channel-99",
 			DisplayName: "#general",
+			Kind:        "group",
 		},
 	}
 
@@ -66,6 +67,7 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 	assert.Equal(t, "123456789012345678", pb.Conversation.ExternalRef)
 	assert.Equal(t, "guild-channel-99", pb.Conversation.ParentRef)
 	assert.Equal(t, "#general", pb.Conversation.DisplayName)
+	assert.Equal(t, "group", pb.Conversation.Kind)
 
 	roundTripped := ProtoToStructuredMessage(pb)
 	require.NotNil(t, roundTripped)
@@ -129,9 +131,47 @@ func TestStructuredMessageProtoSchema(t *testing.T) {
 	assert.Equal(t, protoreflect.FieldNumber(2), convDesc.Fields().ByName("external_ref").Number())
 	assert.Equal(t, protoreflect.FieldNumber(3), convDesc.Fields().ByName("parent_ref").Number())
 	assert.Equal(t, protoreflect.FieldNumber(4), convDesc.Fields().ByName("display_name").Number())
+	kindField := convDesc.Fields().ByName("kind")
+	require.NotNil(t, kindField)
+	assert.Equal(t, protoreflect.FieldNumber(5), kindField.Number())
 	assert.Nil(t, descriptor.Fields().ByName("visibility"))
 	assert.True(t, descriptor.ReservedRanges().Has(20))
 	assert.True(t, descriptor.ReservedNames().Has("visibility"))
+}
+
+func TestConversationKindWireRoundTrip(t *testing.T) {
+	// Native direct DM shape emitted by enrichConversation in P5a:
+	// surface="native", kind="direct", display_name set, external_ref/parent_ref empty.
+	original := &messages.StructuredMessage{
+		Version:        1,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "hello via DM",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-dm-1",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			DisplayName: "Direct Message",
+			Kind:        "direct",
+		},
+	}
+
+	pb := StructuredMessageToProto(original)
+	wire, err := proto.Marshal(pb)
+	require.NoError(t, err)
+
+	var decoded brokerv1.StructuredMessage
+	require.NoError(t, proto.Unmarshal(wire, &decoded))
+
+	got := ProtoToStructuredMessage(&decoded)
+	require.NotNil(t, got.Conversation)
+	assert.Equal(t, original.Conversation, got.Conversation)
+	assert.Equal(t, "native", got.Conversation.Surface)
+	assert.Equal(t, "direct", got.Conversation.Kind)
+	assert.Equal(t, "Direct Message", got.Conversation.DisplayName)
+	assert.Empty(t, got.Conversation.ExternalRef)
+	assert.Empty(t, got.Conversation.ParentRef)
 }
 
 func TestHealthStatusRoundTrip(t *testing.T) {

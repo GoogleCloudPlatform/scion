@@ -36,16 +36,38 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.${ATE_SYSTEM_NAMESPACE}.svc:443
-      router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
+      router_endpoint: https://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc
       token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
-      cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
-      sandbox_class: gvisor
-      sandbox_config_name: ${SANDBOX_CONFIG_NAME}
+      # Projected servicedns ClusterTrustBundle CA (rotated automatically by
+      # kubelet); verifies both ateapi and atenet-router unless router_ca_file
+      # overrides the router CA. Omit both ca_file and cluster_trust_bundle
+      # to resolve live ClusterTrustBundles via Kubernetes RBAC list instead.
+      ca_file: /run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem
+      # router_ca_file: /run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem
+      # Projected PodCertificate client identity presented to atenet-router
+      # for mTLS (re-read on every handshake).
+      router_client_cert_file: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+      # Optional TLS server name for atenet-router (defaults to
+      # router_endpoint's host) and CONNECT endpoint (defaults to <host>:8444).
+      # router_server_name: atenet-router.${ATE_SYSTEM_NAMESPACE}.svc
+      # router_connect_endpoint: atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:8444
+      # Optional mTLS client cert for ateapi (TokenRequest RBAC remains
+      # required because substrate.Dial attaches per-RPC bearer credentials
+      # alongside mTLS).
+      # api_client_cert_file: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+      # NOTE: Substrate v1.0.0 removed `sandbox_class` and
+      # `sandbox_config_name` from broker settings; they are now configured on
+      # the target WorkerPool (`spec.sandboxClasses[].configRef` in
+      # deploy/substrate/cluster/workerpool.yaml), selected via worker_selector.
+      #
       # Matched against the target WorkerPool object's own metadata.labels
       # -- see deploy/substrate/cluster/README.md, "worker_selector".
       worker_selector:
         ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
-      snapshot_storage: ${SNAPSHOT_STORAGE_URI}
+      # Optional: sent as snapshot_config.storage_location (requires
+      # Substrate's PerTemplateSnapshotLocation preview gate; omit to use
+      # ate-api's --snapshot-location).
+      snapshot_storage: "${SNAPSHOT_STORAGE_URI}"
       # Only public FQDNs (optionally wildcarded) are accepted, and
       # rejects IPs/CIDRs, catch-alls, and internal-shaped or non-ICANN
       # hostnames -- see README.md, "egress_allow entries are validated".

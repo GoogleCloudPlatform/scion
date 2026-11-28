@@ -147,6 +147,13 @@ allowed_paths=(
   # exclude operator-owned (embedded) brokers from CreatedBy attribution.
   "^pkg/brokerownership/backfill.go$"
 
+  # --- pkg/telemetrycontract/ ---
+  # Shared trajectory-capture policy contract: mirrors the existing hub-owned
+  # project setting annotation key scion.io/trajectory-capture (registered in
+  # pkg/hub/project_settings_handlers.go) so pkg/hub and pkg/store/entadapter
+  # share one key constant and policy resolver. No new key is introduced.
+  "^pkg/telemetrycontract/trajectory_notice.go$"
+
   # --- deploy/helm/ ---
   # Helm chart templates and values: uses scion.io/hub-id pod annotation for
   # hub identity. Golden test files mirror the rendered output.

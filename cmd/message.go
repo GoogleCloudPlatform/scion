@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -557,6 +558,35 @@ func messageResponseConversationID(resp *hubclient.MessageResponse) string {
 	return resp.ConversationID
 }
 
+// isSendTimeoutError reports whether err represents a client-side request
+// timeout (context deadline exceeded or a net.Error with Timeout() == true,
+// such as http.Client.Timeout). Hub HTTP error responses (apiclient.APIError)
+// return false.
+func isSendTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// outboundMessageSendError formats a failed outbound-message send. When the
+// request timed out on the client, delivery status is unknown because the hub
+// may still finish persisting or delivering the message (ptone/scion#9757).
+func outboundMessageSendError(recipient string, err error) error {
+	if isSendTimeoutError(err) {
+		return wrapHubError(fmt.Errorf("timed out waiting for Hub confirmation sending message to %s; delivery status is unknown (the Hub may still deliver it). Check the conversation before resending: %w", recipient, err))
+	}
+	return wrapHubError(fmt.Errorf("failed to send message to %s: %w", recipient, err))
+}
+
 // agentMessageSendError renders a failed agent-message send. A 404 with the
 // hub's agent_not_found code means the recipient does not exist (deleted,
 // reaped, or misspelled), so the error states that plainly and names the
@@ -570,6 +600,9 @@ func agentMessageSendError(agentName string, err error) error {
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) && apiErr.IsNotFound() && apiErr.Code == apiclient.ErrCodeAgentNotFound {
 		return wrapHubError(fmt.Errorf("agent '%s' not found; message not sent: %w", agentName, err))
+	}
+	if isSendTimeoutError(err) {
+		return wrapHubError(fmt.Errorf("timed out waiting for Hub confirmation sending message to agent '%s'; delivery status is unknown (the Hub may still be waking the agent or delivering the message). Check the conversation before resending: %w", agentName, err))
 	}
 	return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 }
@@ -608,7 +641,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		messages.DedupMentionNames(extractMentions(message)),
 		strings.TrimPrefix(sender, "agent:"), agentName)
 
-	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenWakeSendContext(context.Background())
 	if err != nil {
 		return err
 	}
@@ -679,7 +712,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 	// ProjectAgents("") produces /api/v1/agents/{uuid}/message which bypasses
 	// the project-scoped slug lookup and its project isolation check.
 	agentSvc := hubCtx.Client.ProjectAgents("")
-	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenWakeSendContext(context.Background())
 	if err != nil {
 		return err
 	}
@@ -688,6 +721,9 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		Interrupt: interrupt, Wake: wake, AttachmentIDs: attachmentIDs,
 	})
 	if err != nil {
+		if isSendTimeoutError(err) {
+			return wrapHubError(fmt.Errorf("timed out waiting for Hub confirmation sending cross-project message to agent '%s'; delivery status is unknown (the Hub may still be waking the agent or delivering the message). Check the conversation before resending: %w", agentSlug, err))
+		}
 		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
 	}
 
@@ -762,7 +798,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			// this path), just the body's @mentions, filtered of the sender
 			// and the primary for old-hub compatibility.
 			mentions := filterMentionNames(extractMentions(message), senderAgent, ref.Value)
-			attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+			attachmentIDs, sendCtx, sendCancel, err := uploadThenWakeSendContext(context.Background())
 			if err != nil {
 				return err
 			}
@@ -834,7 +870,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			}
 		}
 
-		ids, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+		ids, sendCtx, sendCancel, err := uploadThenWakeSendContext(context.Background())
 		if err != nil {
 			return err
 		}
@@ -904,7 +940,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// The hub ingests attachments, and so reports attachment warnings,
 	// only for agent senders; this human path has none to print. It can
 	// report an artifact warning.
-	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenWakeSendContext(context.Background())
 	if err != nil {
 		return err
 	}

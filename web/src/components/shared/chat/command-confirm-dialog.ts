@@ -101,12 +101,50 @@ export const commandConfirmDialogStyles = css`
   }
 
   .script-scroll {
+    position: relative;
     overflow-x: hidden;
     padding: 0.5rem 0;
     font-family: var(--scion-font-mono);
     font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--scion-text);
+  }
+
+  .script-scroll.collapsed::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2.25rem;
+    background: linear-gradient(to bottom, transparent, var(--scion-bg));
+    pointer-events: none;
+  }
+
+  .script-toggle-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    width: 100%;
+    padding: 0.35rem 0.65rem;
+    border: 0;
+    border-top: 1px solid var(--scion-border);
+    background: var(--scion-bg);
+    color: var(--scion-primary);
+    font-family: var(--scion-font-sans);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .script-toggle-bar:hover {
+    background: var(--scion-bg-subtle);
+  }
+
+  .script-toggle-bar sl-icon {
+    flex-shrink: 0;
+    font-size: 0.75rem;
   }
 
   .script-line {
@@ -204,26 +242,64 @@ export const commandConfirmDialogStyles = css`
     color: var(--scion-warning-text);
   }
 
+  .command-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .command-section + .command-section {
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--scion-border);
+  }
+
+  .command-section-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--scion-text-muted);
+  }
+
   .exec-container-line {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.4rem 0.6rem;
-    padding: 0.5rem 0.7rem;
-    border: 1px solid var(--scion-border);
-    border-radius: var(--scion-radius);
-    background: var(--scion-bg);
+    gap: 0.35rem 0.5rem;
     font-size: var(--chat-fs-sm, 0.875rem);
     color: var(--scion-text-secondary);
   }
 
   .exec-container-line sl-icon {
     flex-shrink: 0;
+    font-size: 0.9rem;
     color: var(--scion-text-muted);
   }
 
+  .exec-crumb {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .exec-crumb-part {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .exec-crumb-sep {
+    color: var(--scion-text-muted);
+  }
+
+  .exec-container-project {
+    color: var(--scion-text);
+  }
+
   .exec-container-name {
-    font-weight: 600;
     color: var(--scion-text);
   }
 
@@ -318,7 +394,27 @@ export function renderEscapedInlineValue(value: string): TemplateResult {
   })}`;
 }
 
-export function renderCommandScriptBlock(formatted: FormattedCommandScript): TemplateResult {
+/** Scripts with more than this many lines start collapsed with an expand toggle. */
+export const COMMAND_SCRIPT_COLLAPSE_LINE_LIMIT = 10;
+
+export interface CommandScriptCollapseOptions {
+  expanded: boolean;
+  onToggle: () => void;
+}
+
+export function renderCommandScriptBlock(
+  formatted: FormattedCommandScript,
+  collapseOpts?: CommandScriptCollapseOptions
+): TemplateResult {
+  const canCollapse = Boolean(
+    collapseOpts && formatted.lines.length > COMMAND_SCRIPT_COLLAPSE_LINE_LIMIT
+  );
+  const isCollapsed = Boolean(canCollapse && !collapseOpts?.expanded);
+  const visibleLines = isCollapsed
+    ? formatted.lines.slice(0, COMMAND_SCRIPT_COLLAPSE_LINE_LIMIT)
+    : formatted.lines;
+  const hiddenCount = formatted.lines.length - COMMAND_SCRIPT_COLLAPSE_LINE_LIMIT;
+
   return html`
     <div class="script-wrap" data-testid="command-script-block">
       ${formatted.nonAsciiCount > 0
@@ -333,8 +429,8 @@ export function renderCommandScriptBlock(formatted: FormattedCommandScript): Tem
             </div>
           `
         : nothing}
-      <div class="script-scroll">
-        ${formatted.lines.map(
+      <div class="script-scroll${isCollapsed ? ' collapsed' : ''}">
+        ${visibleLines.map(
           (line) => html`
             <div class="script-line">
               <span class="script-lineno" aria-hidden="true">${line.lineNumber}</span>
@@ -363,6 +459,25 @@ export function renderCommandScriptBlock(formatted: FormattedCommandScript): Tem
           `
         )}
       </div>
+      ${canCollapse && collapseOpts
+        ? html`
+            <button
+              type="button"
+              class="script-toggle-bar"
+              data-testid="script-expand-toggle"
+              aria-expanded=${String(collapseOpts.expanded)}
+              @click=${collapseOpts.onToggle}
+            >
+              <sl-icon
+                name=${isCollapsed ? 'chevron-down' : 'chevron-up'}
+                aria-hidden="true"
+              ></sl-icon>
+              ${isCollapsed
+                ? `Show all ${formatted.lineCount} lines (${hiddenCount} more)`
+                : 'Show fewer lines'}
+            </button>
+          `
+        : nothing}
       <div class="script-foot">
         <span
           >${formatted.lineCount} ${formatted.lineCount === 1 ? 'line' : 'lines'} ·
@@ -411,7 +526,7 @@ export function renderExecContainerLine(ec: CommandRequestExecContainerView): Te
   if (ec.state === 'unconfigured') {
     return html`
       <div class="exec-container-line" data-testid="exec-container-line">
-        <sl-icon name="terminal" aria-hidden="true"></sl-icon>
+        <span>Execution Container:</span>
         <span>No execution container configured.</span>
         <a class="exec-container-link" href="/profile/settings" data-testid="exec-setup-link">
           Set up an execution container
@@ -421,7 +536,6 @@ export function renderExecContainerLine(ec: CommandRequestExecContainerView): Te
   }
 
   const name = ec.agentName || ec.agentId || 'Execution container';
-  const projectSuffix = ec.projectName ? ` (${ec.projectName})` : '';
   const stateClass =
     ec.state === 'ready'
       ? 'ready'
@@ -433,8 +547,20 @@ export function renderExecContainerLine(ec: CommandRequestExecContainerView): Te
 
   return html`
     <div class="exec-container-line" data-testid="exec-container-line">
-      <sl-icon name="terminal" aria-hidden="true"></sl-icon>
-      <span class="exec-container-name">${name}${projectSuffix}</span>
+      <span>Execution Container:</span>
+      <span class="exec-crumb" data-testid="exec-container-breadcrumb">
+        ${ec.projectName
+          ? html`<span class="exec-crumb-part">
+                <sl-icon name="folder" aria-hidden="true"></sl-icon>
+                <span class="exec-container-project">${ec.projectName}</span>
+              </span>
+              <span class="exec-crumb-sep" aria-hidden="true">/</span>`
+          : nothing}
+        <span class="exec-crumb-part">
+          <sl-icon name="terminal" aria-hidden="true"></sl-icon>
+          <span class="exec-container-name">${name}</span>
+        </span>
+      </span>
       <span class="exec-state-chip ${stateClass}" data-testid="exec-container-state"
         >${ec.state}</span
       >
@@ -510,6 +636,7 @@ export interface RenderCommandConfirmDialogOptions {
   confirmLabel?: string;
   isConsoleFence?: boolean;
   formatted: FormattedCommandScript;
+  scriptCollapse?: CommandScriptCollapseOptions;
   workdir: string;
   workdirKind: CommandWorkdirKind;
   timeoutS: number;
@@ -548,40 +675,45 @@ export function renderCommandConfirmDialog(
       }}
     >
       <div class="confirm-dialog-body" data-testid="confirm-dialog-body">
-        ${opts.isConsoleFence
-          ? html`
-              <div class="banner warning" role="status" data-testid="console-fence-warning">
-                <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-                <span>
-                  This is a <code>console</code> block: every line shown below, including prompt
-                  prefixes and output lines, runs as a command.
-                </span>
-              </div>
-            `
-          : nothing}
-        ${renderCommandScriptBlock(opts.formatted)}
+        <section class="command-section" data-testid="section-what-runs">
+          <div class="command-section-label">What Runs</div>
+          ${opts.isConsoleFence
+            ? html`
+                <div class="banner warning" role="status" data-testid="console-fence-warning">
+                  <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                  <span>
+                    This is a <code>console</code> block: every line shown below, including prompt
+                    prefixes and output lines, runs as a command.
+                  </span>
+                </div>
+              `
+            : nothing}
+          ${renderCommandScriptBlock(opts.formatted, opts.scriptCollapse)}
+        </section>
 
-        <div class="meta-grid">
-          <span class="meta-item">
-            <sl-icon name="folder" aria-hidden="true"></sl-icon>
-            <span>Workdir:</span>
-            <span
-              class="workdir-badge${opts.workdirKind === 'workspace' ||
-              opts.workdirKind === 'shared_dir'
-                ? ' warn'
-                : ''}"
-              data-testid="confirm-workdir"
-              >${renderEscapedInlineValue(workdirLabel)}</span
-            >
-          </span>
-          <span class="meta-item">
-            <sl-icon name="clock" aria-hidden="true"></sl-icon>
-            <span>Timeout: ${formatCommandTimeout(opts.timeoutS)}</span>
-          </span>
-        </div>
-
-        ${renderCommandWorkdirWarning(opts.workdirKind, opts.formatted)}
-        ${opts.execContainer ? renderExecContainerLine(opts.execContainer) : nothing}
+        <section class="command-section" data-testid="section-exec-env">
+          <div class="command-section-label">Execution Environment</div>
+          ${opts.execContainer ? renderExecContainerLine(opts.execContainer) : nothing}
+          <div class="meta-grid">
+            <span class="meta-item">
+              <sl-icon name="folder" aria-hidden="true"></sl-icon>
+              <span>Workdir:</span>
+              <span
+                class="workdir-badge${opts.workdirKind === 'workspace' ||
+                opts.workdirKind === 'shared_dir'
+                  ? ' warn'
+                  : ''}"
+                data-testid="confirm-workdir"
+                >${renderEscapedInlineValue(workdirLabel)}</span
+              >
+            </span>
+            <span class="meta-item">
+              <sl-icon name="clock" aria-hidden="true"></sl-icon>
+              <span>Timeout: ${formatCommandTimeout(opts.timeoutS)}</span>
+            </span>
+          </div>
+          ${renderCommandWorkdirWarning(opts.workdirKind, opts.formatted)}
+        </section>
 
         <div class="share-output-row">
           <sl-checkbox
@@ -677,6 +809,9 @@ export class ScionCommandConfirmDialog extends LitElement {
   @state()
   private hashError = '';
 
+  @state()
+  private scriptExpanded = false;
+
   private hashSeq = 0;
 
   static override styles = css`
@@ -687,12 +822,16 @@ export class ScionCommandConfirmDialog extends LitElement {
     if (changed.has('open') && this.open) {
       this.shareOutputChecked = this.shareOutputDefault;
       this.hashError = '';
+      this.scriptExpanded = false;
       void this.refreshHash();
     } else if (
       this.open &&
       (changed.has('script') || changed.has('workdir') || changed.has('timeoutS'))
     ) {
       this.hashError = '';
+      if (changed.has('script')) {
+        this.scriptExpanded = false;
+      }
       void this.refreshHash();
     }
   }
@@ -761,6 +900,12 @@ export class ScionCommandConfirmDialog extends LitElement {
       confirmLabel: 'Approve & run',
       isConsoleFence: this.isConsoleFence,
       formatted,
+      scriptCollapse: {
+        expanded: this.scriptExpanded,
+        onToggle: (): void => {
+          this.scriptExpanded = !this.scriptExpanded;
+        },
+      },
       workdir: this.workdir,
       workdirKind,
       timeoutS: this.timeoutS,

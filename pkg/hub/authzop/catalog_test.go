@@ -15,6 +15,8 @@
 package authzop
 
 import (
+	"flag"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -27,6 +29,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
+
+var updateCatalogReport = flag.Bool("update", false, "regenerate .design/authorization-operation-catalog.md")
 
 // ---------------------------------------------------------------------------
 // Core catalog structural validation
@@ -432,33 +436,6 @@ func routeMetadataKeys(t *testing.T) map[string]bool {
 	return keys
 }
 
-// catalogAndExemptionPatterns returns the combined set of path patterns from
-// all catalog entry points and all entry-point exemptions. For catalog entry
-// points, only the Pattern (without method prefix) is used.
-func catalogAndExemptionPatterns() map[string]bool {
-	patterns := make(map[string]bool)
-
-	for _, spec := range Catalog {
-		for _, ep := range spec.EntryPoints {
-			patterns[ep.Pattern] = true
-			// Also add method-qualified pattern for matching route-metadata
-			// keys that use "METHOD /path" format.
-			if ep.Method != "" {
-				patterns[ep.Method+" "+ep.Pattern] = true
-			}
-		}
-	}
-	for _, ex := range EntryPointExemptions {
-		// Store both the raw pattern and the path-only form.
-		patterns[ex.Pattern] = true
-		pat := ex.Pattern
-		if idx := strings.Index(pat, " "); idx >= 0 {
-			patterns[pat[idx+1:]] = true
-		}
-	}
-	return patterns
-}
-
 // normalizeTrailingSlash converts a route-metadata trailing-slash pattern
 // to the base prefix for matching. "/api/v1/agents/" → "/api/v1/agents/".
 // Non-trailing-slash patterns are returned as-is.
@@ -469,26 +446,52 @@ func normalizeTrailingSlash(pattern string) (base string, hasTrailingSlash bool)
 	return pattern, false
 }
 
-// TestEntryPointsCoverRouteMetadata verifies every route-metadata entry is
-// covered by either a catalog entry-point pattern or an EntryPointExemption
-// pattern. This is the R2 automated bidirectional reconciliation gate.
+// TestEntryPointsCoverRouteMetadata verifies every route-metadata entry,
+// every trailing-slash prefix classification (fail-closed via
+// enumeratedSubRoutePrefixes / ownerOnlyTrailingSlashPrefixes), and every
+// concrete sub-route dispatched under the three enumerated prefixes
+// (artifacts, agents, projects) is covered by a catalog entry point, an
+// EntryPointExemption, or (for sub-routes) PendingBearerDispositions. This is
+// the R2 automated bidirectional reconciliation gate.
 //
-// Route-metadata trailing-slash patterns (e.g., "/api/v1/agents/") are
-// covered when any catalog or exemption pattern starts with the same prefix
-// (e.g., "/api/v1/agents/{id}", "/api/v1/agents/{id}/attach"). This accounts
-// for the parameterized-vs-trailing-slash difference documented in F-AF1-01.
+// Route-metadata trailing-slash patterns are checked with owner-scoped and
+// method-aware matching so a more-specific route or a different HTTP method
+// never masks an uncovered prefix. Concrete sub-routes under /api/v1/artifacts/,
+// /api/v1/agents/, and /api/v1/projects/ are verified individually; all other
+// trailing-slash prefixes must be explicitly listed in
+// ownerOnlyTrailingSlashPrefixes so any new prefix fails closed until
+// classified (ptone/scion#4883).
 func TestEntryPointsCoverRouteMetadata(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
-	covered := catalogAndExemptionPatterns()
+	cov := newRouteCoverageSet(Catalog, EntryPointExemptions, PendingBearerDispositions)
 
-	uncoveredRoutes := findUncoveredRoutes(routeKeys, covered)
+	uncoveredRoutes := findUncoveredRoutes(routeKeys, cov)
 	if len(uncoveredRoutes) > 0 {
 		t.Errorf("route-metadata entries not covered by any catalog operation or exemption (%d/%d):\n  %s",
 			len(uncoveredRoutes), len(routeKeys), strings.Join(uncoveredRoutes, "\n  "))
 	}
 
-	t.Logf("route-metadata reconciliation: %d routes, %d covered, %d catalog+exemption patterns",
-		len(routeKeys), len(routeKeys)-len(uncoveredRoutes), len(covered))
+	unclassifiedPrefixes, stalePrefixes := findUnclassifiedTrailingSlashPrefixes(
+		routeKeys, enumeratedSubRoutePrefixes, ownerOnlyTrailingSlashPrefixes,
+	)
+	if len(unclassifiedPrefixes) > 0 {
+		t.Errorf("trailing-slash route-metadata prefixes not classified in enumeratedSubRoutePrefixes or ownerOnlyTrailingSlashPrefixes (%d) — add a sub-route discoverer or explicitly classify with a reason:\n  %s",
+			len(unclassifiedPrefixes), strings.Join(unclassifiedPrefixes, "\n  "))
+	}
+	if len(stalePrefixes) > 0 {
+		t.Errorf("stale entries in enumeratedSubRoutePrefixes / ownerOnlyTrailingSlashPrefixes no longer in routeMetadataTable (%d):\n  %s",
+			len(stalePrefixes), strings.Join(stalePrefixes, "\n  "))
+	}
+
+	subRoutes := discoverPrefixSubRoutes(t, findRepoRoot(t))
+	uncoveredSubRoutes := findUncoveredSubRoutes(subRoutes, cov)
+	if len(uncoveredSubRoutes) > 0 {
+		t.Errorf("sub-routes under covered prefixes with no catalog entry, exemption, or pending entry (%d/%d):\n  %s",
+			len(uncoveredSubRoutes), len(subRoutes), strings.Join(uncoveredSubRoutes, "\n  "))
+	}
+
+	t.Logf("route-metadata reconciliation: %d routes (%d covered), %d prefix sub-routes (%d covered)",
+		len(routeKeys), len(routeKeys)-len(uncoveredRoutes), len(subRoutes), len(subRoutes)-len(uncoveredSubRoutes))
 }
 
 // TestStaleExemptionDetection verifies that no exemption pattern references a
@@ -778,44 +781,6 @@ func TestGenerateCoverageReport(t *testing.T) {
 // production-derived data and calls the same helper that the gate test uses.
 // ---------------------------------------------------------------------------
 
-// findUncoveredRoutes returns route-metadata keys not covered by any catalog
-// entry-point or exemption pattern. Used by TestEntryPointsCoverRouteMetadata
-// and TestProofUnclassifiedEntryPointDetected.
-func findUncoveredRoutes(routeKeys map[string]bool, covered map[string]bool) []string {
-	var uncovered []string
-	for route := range routeKeys {
-		// For method-prefixed routes ("GET /api/v1/foo"), check
-		// both the full key and the path-only form.
-		pathOnly := stripMethodPrefix(route)
-
-		base, hasSuffix := normalizeTrailingSlash(pathOnly)
-		if hasSuffix {
-			found := false
-			// Check trailing-slash match against covered patterns.
-			if covered[base] || covered[route] {
-				found = true
-			}
-			if !found {
-				for pat := range covered {
-					patPath := stripMethodPrefix(pat)
-					if strings.HasPrefix(patPath, base) {
-						found = true
-						break
-					}
-				}
-			}
-			if !found {
-				uncovered = append(uncovered, route)
-			}
-		} else {
-			if !covered[route] && !covered[pathOnly] {
-				uncovered = append(uncovered, route)
-			}
-		}
-	}
-	return uncovered
-}
-
 // knownNonRouteExemptions lists exemption patterns that are valid but do not
 // correspond to routeMetadataTable keys (OIDC, agent identity token).
 var knownNonRouteExemptions = map[string]bool{
@@ -899,34 +864,73 @@ func collectTestRefs(catalog []OperationSpec) map[string][]OperationID {
 // nonexistent packages or functions. Used by TestCatalogTestRefsExist and
 // TestProofNonexistentTestRefDetected.
 func findMissingTestRefs(repoRoot string, refs map[string][]OperationID) []string {
-	var missing []string
-	for ref, ops := range refs {
-		parts := strings.SplitN(ref, ":", 2)
-		pkg, fn := parts[0], parts[1]
+	type pkgIndex struct {
+		exists bool
+		funcs  map[string]bool
+	}
+	cache := make(map[string]pkgIndex)
 
+	loadPkg := func(pkg string) pkgIndex {
+		if idx, ok := cache[pkg]; ok {
+			return idx
+		}
 		pkgDir := filepath.Join(repoRoot, pkg)
 		if _, err := os.Stat(pkgDir); os.IsNotExist(err) {
-			missing = append(missing, "test ref package "+pkg+" does not exist (referenced by "+opIDsStr(ops)+")")
-			continue
+			idx := pkgIndex{exists: false}
+			cache[pkg] = idx
+			return idx
 		}
-
-		found := false
+		funcs := make(map[string]bool)
 		testFiles, _ := filepath.Glob(filepath.Join(pkgDir, "*_test.go"))
 		for _, tf := range testFiles {
 			content, err := os.ReadFile(tf)
 			if err != nil {
 				continue
 			}
-			if strings.Contains(string(content), "func "+fn+"(") {
-				found = true
-				break
-			}
+			indexDeclaredFuncs(string(content), funcs)
 		}
-		if !found {
+		idx := pkgIndex{exists: true, funcs: funcs}
+		cache[pkg] = idx
+		return idx
+	}
+
+	var missing []string
+	for ref, ops := range refs {
+		parts := strings.SplitN(ref, ":", 2)
+		pkg, fn := parts[0], parts[1]
+
+		idx := loadPkg(pkg)
+		if !idx.exists {
+			missing = append(missing, "test ref package "+pkg+" does not exist (referenced by "+opIDsStr(ops)+")")
+			continue
+		}
+		if !idx.funcs[fn] {
 			missing = append(missing, "test function "+fn+" not found in package "+pkg+" (referenced by "+opIDsStr(ops)+")")
 		}
 	}
 	return missing
+}
+
+// indexDeclaredFuncs scans src for "func <name>(" occurrences and records each
+// <name> in out. Scanning each test file once per package avoids O(refs * files)
+// disk reads in findMissingTestRefs.
+func indexDeclaredFuncs(src string, out map[string]bool) {
+	const prefix = "func "
+	for {
+		i := strings.Index(src, prefix)
+		if i < 0 {
+			return
+		}
+		src = src[i+len(prefix):]
+		paren := strings.IndexByte(src, '(')
+		if paren <= 0 {
+			continue
+		}
+		name := src[:paren]
+		if !strings.ContainsAny(name, " \t\r\n") {
+			out[name] = true
+		}
+	}
 }
 
 func opIDsStr(ops []OperationID) string {
@@ -1096,35 +1100,142 @@ func findEnclosingFunc(fset *token.FileSet, file *ast.File, pos token.Pos) strin
 // Generated report staleness gate
 // ---------------------------------------------------------------------------
 
+const regenerateCatalogCmd = "go test -buildvcs=false ./pkg/hub/authzop/... -run TestCatalogReportStaleness -update"
+
+// checkCatalogReportStaleness compares the checked-in catalog report at
+// reportPath against generated. When update is false, it never modifies
+// reportPath and returns a descriptive error with a concise diff summary and
+// regeneration instructions on mismatch or missing file. When update is true,
+// it writes generated to reportPath.
+func checkCatalogReportStaleness(reportPath, generated string, update bool) error {
+	if update {
+		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+			return fmt.Errorf("cannot create catalog report directory: %w", err)
+		}
+		if err := os.WriteFile(reportPath, []byte(generated), 0644); err != nil {
+			return fmt.Errorf("cannot write catalog report: %w", err)
+		}
+		return nil
+	}
+
+	existing, err := os.ReadFile(reportPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("catalog report %s does not exist; regenerate with:\n  %s", reportPath, regenerateCatalogCmd)
+		}
+		return fmt.Errorf("cannot read catalog report: %w", err)
+	}
+
+	if string(existing) != generated {
+		return fmt.Errorf("catalog report %s is stale (%s).\nRegenerate with:\n  %s",
+			reportPath, summarizeLineDiff(string(existing), generated), regenerateCatalogCmd)
+	}
+	return nil
+}
+
+// summarizeLineDiff returns a compact description of the first line where
+// existing and generated differ, plus line counts, without dumping the full
+// document.
+func summarizeLineDiff(existing, generated string) string {
+	gotLines := strings.Split(existing, "\n")
+	wantLines := strings.Split(generated, "\n")
+	limit := min(len(gotLines), len(wantLines))
+	for i := range limit {
+		if gotLines[i] != wantLines[i] {
+			return fmt.Sprintf("first difference at line %d (checked-in %d lines, generated %d lines):\n  checked-in: %q\n  generated:  %q",
+				i+1, len(gotLines), len(wantLines), gotLines[i], wantLines[i])
+		}
+	}
+	return fmt.Sprintf("line count mismatch at line %d (checked-in %d lines, generated %d lines)",
+		limit+1, len(gotLines), len(wantLines))
+}
+
 // TestCatalogReportStaleness verifies the generated catalog report matches
-// the checked-in version. If no report is checked in yet, this test creates
-// the baseline.
+// the checked-in version without mutating tracked files. Pass -update to
+// regenerate .design/authorization-operation-catalog.md intentionally.
 func TestCatalogReportStaleness(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	reportPath := filepath.Join(repoRoot, ".design", "authorization-operation-catalog.md")
 
 	generated := RenderMarkdown(Catalog)
-
-	existing, err := os.ReadFile(reportPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// First generation — write the baseline
-			if err := os.WriteFile(reportPath, []byte(generated), 0644); err != nil {
-				t.Fatalf("cannot write catalog report: %v", err)
-			}
-			t.Logf("generated initial catalog report at %s", reportPath)
-			return
-		}
-		t.Fatalf("cannot read catalog report: %v", err)
+	if err := checkCatalogReportStaleness(reportPath, generated, *updateCatalogReport); err != nil {
+		t.Fatal(err)
 	}
+}
 
-	if string(existing) != generated {
-		// Update the file so the diff is visible in git
-		if err := os.WriteFile(reportPath, []byte(generated), 0644); err != nil {
-			t.Logf("WARNING: could not update catalog report: %v", err)
+// TestCheckCatalogReportStaleness_DoesNotMutateOnFailure verifies that the
+// staleness check fails cleanly without rewriting or creating the file when
+// update is false, and writes the file when update is true.
+func TestCheckCatalogReportStaleness_DoesNotMutateOnFailure(t *testing.T) {
+	generated := RenderMarkdown([]OperationSpec{validSpec()})
+
+	t.Run("stale file fails without rewriting", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "authorization-operation-catalog.md")
+		stale := "# Authorization Operation Catalog\n\n**Operations:** 999\n"
+		if err := os.WriteFile(p, []byte(stale), 0644); err != nil {
+			t.Fatal(err)
 		}
-		t.Error("catalog report is stale — regenerated. Run 'go test ./pkg/hub/authzop/...' and commit the updated report.")
-	}
+
+		err := checkCatalogReportStaleness(p, generated, false)
+		if err == nil {
+			t.Fatal("expected staleness error, got nil")
+		}
+		if !strings.Contains(err.Error(), "first difference at line") {
+			t.Errorf("expected diff summary in error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), regenerateCatalogCmd) {
+			t.Errorf("expected regeneration command in error, got: %v", err)
+		}
+
+		after, readErr := os.ReadFile(p)
+		if readErr != nil {
+			t.Fatalf("read file after check: %v", readErr)
+		}
+		if string(after) != stale {
+			t.Errorf("staleness check mutated file on disk:\ngot:  %q\nwant: %q", string(after), stale)
+		}
+	})
+
+	t.Run("missing file fails without creating", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "missing.md")
+
+		err := checkCatalogReportStaleness(p, generated, false)
+		if err == nil {
+			t.Fatal("expected missing-file error, got nil")
+		}
+		if !strings.Contains(err.Error(), regenerateCatalogCmd) {
+			t.Errorf("expected regeneration command in error, got: %v", err)
+		}
+		if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+			t.Errorf("staleness check created missing file (stat err: %v)", statErr)
+		}
+	})
+
+	t.Run("matching file passes", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "authorization-operation-catalog.md")
+		if err := os.WriteFile(p, []byte(generated), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := checkCatalogReportStaleness(p, generated, false); err != nil {
+			t.Fatalf("expected matching file to pass, got: %v", err)
+		}
+	})
+
+	t.Run("update mode writes generated file", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "nested", "authorization-operation-catalog.md")
+		if err := checkCatalogReportStaleness(p, generated, true); err != nil {
+			t.Fatalf("expected update mode to succeed, got: %v", err)
+		}
+
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read updated file: %v", err)
+		}
+		if string(got) != generated {
+			t.Error("updated file content does not match generated output")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,14 +1491,14 @@ func TestCatalogBasePermissionSemanticsAssertive(t *testing.T) {
 // derived route keys and calls findUncoveredRoutes.
 func TestProofUnclassifiedEntryPointDetected(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
-	covered := catalogAndExemptionPatterns()
+	cov := newRouteCoverageSet(Catalog, EntryPointExemptions, PendingBearerDispositions)
 
 	// Inject a fake route into production-derived data
 	fakeRoute := "/api/v1/proof/unclassified-route"
 	routeKeys[fakeRoute] = true
 
 	// Call the same production helper used by TestEntryPointsCoverRouteMetadata
-	uncovered := findUncoveredRoutes(routeKeys, covered)
+	uncovered := findUncoveredRoutes(routeKeys, cov)
 
 	found := false
 	for _, u := range uncovered {

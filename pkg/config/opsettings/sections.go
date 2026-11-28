@@ -54,6 +54,15 @@ type MaintenanceSettings struct {
 	MaintenanceMessage string `json:"maintenance_message,omitempty"`
 }
 
+// TelemetryTrajectorySettings holds Hub-level Track 2 trajectory capture
+// operational settings (DB-only; not in broker settings.yaml).
+type TelemetryTrajectorySettings struct {
+	// AllowProjectOptOut controls whether projects may lower
+	// telemetry.trajectory.capture to metadata_only or off.
+	// Nil (unset) defaults to true.
+	AllowProjectOptOut *bool `json:"allow_project_opt_out,omitempty"`
+}
+
 // TelemetrySettings holds the Layer-1 telemetry configuration.
 // It reuses the existing V1TelemetryConfig to preserve full fidelity.
 type TelemetrySettings struct {
@@ -61,6 +70,9 @@ type TelemetrySettings struct {
 	// Enforced makes telemetry mandatory for every agent this hub dispatches:
 	// project policy and requester on/off cannot disable it. Requires Enabled=true.
 	Enforced bool `json:"enforced,omitempty"`
+	// Trajectory holds Hub-level Track 2 trajectory capture policy settings
+	// (DB-only opsettings keys; not in broker settings.yaml).
+	Trajectory *TelemetryTrajectorySettings `json:"trajectory,omitempty"`
 }
 
 // Resolve validates the telemetry operational settings and returns the resolved
@@ -573,13 +585,19 @@ const BrandingSectionName = "branding"
 // UploadsSectionName is the Layer-1 opsettings section name for server.hub.uploads.
 const UploadsSectionName = "uploads"
 
-// UploadsSettings holds Layer-1 web upload limits (server.hub.uploads),
-// applied live across replicas via OperationalSettings. Nil fields keep their
-// default (10 MiB for legacy chat attachments, 50 MiB for workspace/shared-dir
-// files).
+// UploadsSettings holds Layer-1 web upload limits and resumable chunked upload
+// settings (server.hub.uploads, ptone/scion#9619 & ptone/scion#8654 §3.11),
+// applied live across replicas via OperationalSettings. Every field is
+// optional; omitted/nil fields take their compiled defaults.
 type UploadsSettings struct {
-	MaxAttachmentSize    *int64 `json:"max_attachment_size,omitempty"`
-	MaxWorkspaceFileSize *int64 `json:"max_workspace_file_size,omitempty"`
+	MaxAttachmentSize      *int64 `json:"max_attachment_size,omitempty"`
+	MaxWorkspaceFileSize   *int64 `json:"max_workspace_file_size,omitempty"`
+	ChunkBytes             *int64 `json:"chunk_bytes,omitempty"`
+	SessionIdleTTL         string `json:"session_idle_ttl,omitempty"`
+	SessionMaxLifetime     string `json:"session_max_lifetime,omitempty"`
+	MaxSessionsPerUser     *int   `json:"max_sessions_per_user,omitempty"`
+	MaxPendingBytesPerUser *int64 `json:"max_pending_bytes_per_user,omitempty"`
+	MaxPendingBytesHub     *int64 `json:"max_pending_bytes_hub,omitempty"`
 }
 
 // BrandingSettings holds Layer-1 Hub-wide UI branding configuration

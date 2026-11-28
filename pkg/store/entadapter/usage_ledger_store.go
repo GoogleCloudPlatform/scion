@@ -35,9 +35,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/meterhealth"
+	entproject "github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // defaultRunAttributionBackfillPageSize bounds each paged batch in
@@ -88,12 +90,55 @@ func (s *AgentStore) RunAttributionConfigInstalled() bool {
 	return s.runAttribution.load() != nil
 }
 
+// trajectoryCaptureStateSlot holds the Hub-provided TrajectoryCaptureStateFunc
+// atomically so AgentStore and UsageLedgerStore can stamp capture_policy and
+// notice_version on newly created run_attribution rows without locking or
+// querying the outer store pool inside a transaction.
+type trajectoryCaptureStateSlot struct {
+	v atomic.Pointer[store.TrajectoryCaptureStateFunc]
+}
+
+func newTrajectoryCaptureStateSlot() *trajectoryCaptureStateSlot {
+	return &trajectoryCaptureStateSlot{}
+}
+
+func (slot *trajectoryCaptureStateSlot) load() store.TrajectoryCaptureStateFunc {
+	if slot == nil {
+		return nil
+	}
+	fn := slot.v.Load()
+	if fn == nil {
+		return nil
+	}
+	return *fn
+}
+
+func (slot *trajectoryCaptureStateSlot) store(fn store.TrajectoryCaptureStateFunc) {
+	if slot == nil {
+		return
+	}
+	if fn == nil {
+		slot.v.Store(nil)
+		return
+	}
+	cp := fn
+	slot.v.Store(&cp)
+}
+
+// SetTrajectoryCaptureState installs (non-nil) or clears (nil) the Hub state
+// reader used to stamp capture_policy and notice_version on new run_attribution
+// rows. Shared between AgentStore and UsageLedgerStore on CompositeStore.
+func (c *CompositeStore) SetTrajectoryCaptureState(fn store.TrajectoryCaptureStateFunc) {
+	c.AgentStore.trajectoryCapture.store(fn)
+}
+
 // UsageLedgerStore implements store.UsageLedgerStore using the Ent ORM.
 type UsageLedgerStore struct {
 	client                 *ent.Client
 	inTx                   bool
 	hourlyCoverageRecorded *atomic.Bool
 	legacyBackfillMu       *sync.Mutex
+	trajectoryCapture      *trajectoryCaptureStateSlot
 }
 
 // NewUsageLedgerStore creates a new Ent-backed UsageLedgerStore.
@@ -102,6 +147,7 @@ func NewUsageLedgerStore(client *ent.Client) *UsageLedgerStore {
 		client:                 client,
 		hourlyCoverageRecorded: &atomic.Bool{},
 		legacyBackfillMu:       &sync.Mutex{},
+		trajectoryCapture:      newTrajectoryCaptureStateSlot(),
 	}
 }
 
@@ -401,11 +447,50 @@ func resolveBillingUserIDTx(ctx context.Context, client *ent.Client, ownerID, cr
 	return nil, nil
 }
 
+// resolveRunAttributionCaptureFields resolves (capture_policy, notice_version)
+// for a newly created run_attribution row inside client's active transaction.
+// When trajectory capture is disabled (stateFn nil or enabled == false), both
+// values are empty. When enabled, capture_policy is the effective policy for
+// projectID ("full", "metadata_only", or "off"), and notice_version is stamped
+// with telemetrycontract.TrajectoryNoticeVersion iff capture is effective
+// (policy != "off").
+func resolveRunAttributionCaptureFields(ctx context.Context, client *ent.Client, projectID uuid.UUID, stateFn store.TrajectoryCaptureStateFunc) (string, string) {
+	if stateFn == nil {
+		return "", ""
+	}
+	enabled, allowProjectOptOut := stateFn()
+	if !enabled {
+		return "", ""
+	}
+	var annotation string
+	if allowProjectOptOut && projectID != uuid.Nil {
+		proj, err := client.Project.Query().
+			Where(entproject.IDEQ(projectID)).
+			Select(entproject.FieldAnnotations).
+			Only(ctx)
+		if err != nil {
+			// Never attest full/v1 when the project's capture policy could not
+			// be read: a project annotated "off" or "metadata_only" must not
+			// receive a permanent immutable "full"/"v1" row.
+			return "", ""
+		}
+		if proj != nil && proj.Annotations != nil {
+			annotation = proj.Annotations[telemetrycontract.TrajectoryCaptureProjectAnnotation]
+		}
+	}
+	status := telemetrycontract.ResolveTrajectoryCapturePolicy(allowProjectOptOut, annotation)
+	noticeVersion := ""
+	if telemetrycontract.IsTrajectoryCaptureEffective(status.Policy) {
+		noticeVersion = telemetrycontract.TrajectoryNoticeVersion
+	}
+	return status.Policy, noticeVersion
+}
+
 // buildRunAttributionFromAgentRow constructs the immutable run_attribution
 // snapshot for runID from an Ent Agent row inside the caller's transaction.
 // overrideLaunchID, when non-empty (e.g. from SettleLaunchedRun's fence),
 // takes precedence over the row's launch_id match.
-func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, row *ent.Agent, runID, priorRunID, hubID, overrideLaunchID string) (*store.RunAttribution, error) {
+func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, row *ent.Agent, runID, priorRunID, hubID, overrideLaunchID string, captureState store.TrajectoryCaptureStateFunc) (*store.RunAttribution, error) {
 	var ownerIDStr, createdByStr string
 	var ownerIDPtr, createdByPtr *string
 	if row.OwnerID != nil {
@@ -448,6 +533,8 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 		gen = 1
 	}
 
+	capturePolicy, noticeVersion := resolveRunAttributionCaptureFields(ctx, client, row.ProjectID, captureState)
+
 	return &store.RunAttribution{
 		RunID:         runID,
 		LaunchID:      launchID,
@@ -464,6 +551,8 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 		Harness:       harness,
 		HarnessConfig: harnessConfig,
 		Template:      row.Template,
+		CapturePolicy: capturePolicy,
+		NoticeVersion: noticeVersion,
 		LabelsAtLaunch: func() map[string]string {
 			if len(row.Labels) == 0 {
 				return nil
@@ -480,7 +569,7 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 
 // ensureRunAttributionForAgentTx reads the agent row in client's transaction
 // and inserts an immutable run_attribution row for runID via ON CONFLICT DO NOTHING.
-func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid uuid.UUID, runID, priorRunID, hubID, overrideLaunchID string, beforeInsert func(ctx context.Context, runID string) error) error {
+func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid uuid.UUID, runID, priorRunID, hubID, overrideLaunchID string, captureState store.TrajectoryCaptureStateFunc, beforeInsert func(ctx context.Context, runID string) error) error {
 	if runID == "" {
 		return nil
 	}
@@ -491,7 +580,7 @@ func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid
 	if err != nil {
 		return mapError(err)
 	}
-	attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, priorRunID, hubID, overrideLaunchID)
+	attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, priorRunID, hubID, overrideLaunchID, captureState)
 	if err != nil {
 		return err
 	}
@@ -712,7 +801,10 @@ func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Contex
 			if err := ctx.Err(); err != nil {
 				return inserted, err
 			}
-			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID, "")
+			// Pass nil for captureState on backfill: runs already active when the
+			// ledger is enabled predate the notice, so backfill must not attest
+			// notice_version (or retroactively stamp live capture_policy).
+			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID, "", nil)
 			if err != nil {
 				slog.Warn("run_attribution backfill: failed to build attribution for agent",
 					"agent_id", row.ID.String(), "run_id", row.RunID, "error", err)

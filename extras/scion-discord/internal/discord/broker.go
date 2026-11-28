@@ -698,12 +698,20 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 	convTarget := plugin.ResolveConversationTarget(msg)
 
-	// Only an all-digit ExternalRef is a Discord channel or thread ID. Any
-	// other ExternalRef (such as a Scion direct-message conversation key) is
-	// never sent to Discord as a channel ID: the message is resolved to the
-	// addressed user's own Discord channel below and is never broadcast.
-	recipientRouted := convTarget.ExternalRef != "" && !isDiscordSnowflake(convTarget.ExternalRef)
+	// A direct or native-surface conversation addressed to a user is always
+	// recipient-routed (P5a/P5b O1). Agent-to-agent conversations (observer
+	// copies) are NOT recipient-routed so they reach Priority 3 and are
+	// filtered per link by ShowAgentToAgent.
+	// Against a pre-P5a hub (Conversation == nil), any non-snowflake ExternalRef
+	// (such as a Scion "dm:..." conversation key) is also treated as recipient-
+	// routed so it is never sent to Discord as a channel ID or broadcast.
+	isNativeSurface := msg.Conversation != nil && msg.Conversation.Surface == "native"
+	recipientRouted := ((convTarget.Kind == "direct" || isNativeSurface) && strings.HasPrefix(msg.Recipient, "user:")) ||
+		(msg.Conversation == nil && convTarget.ExternalRef != "" && !isDiscordSnowflake(convTarget.ExternalRef))
 	discordThreadID := convTarget.ExternalRef
+	if convTarget.Kind == "direct" {
+		discordThreadID = ""
+	}
 	if recipientRouted {
 		discordThreadID = ""
 		if !strings.HasPrefix(msg.Recipient, "user:") {
@@ -2032,11 +2040,18 @@ func (b *DiscordBroker) handleRoutedInbound(
 
 // --- Hub delivery ---
 
-// discordInboundConversation derives the Phase 11 top-level conversation
-// addressing (surface, external_ref, parent_ref) for an inbound Discord message.
+// discordInboundConversation derives the Phase 11 / P5 top-level conversation
+// addressing (surface, external_ref, parent_ref, legacy_ref) for an inbound
+// Discord message. Surface is always set to "discord" even when external_ref
+// is empty, and legacy_ref carries the exact msg.ThreadID value for the hub's
+// read-only Phase-5 continuity fallback.
 func (b *DiscordBroker) discordInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
 	if msg == nil {
 		return plugin.InboundConversation{}
+	}
+	conv := plugin.InboundConversation{
+		Surface:   "discord",
+		LegacyRef: msg.ThreadID,
 	}
 	var channelID, parentID string
 	if msg.Metadata != nil {
@@ -2047,7 +2062,7 @@ func (b *DiscordBroker) discordInboundConversation(msg *messages.StructuredMessa
 		channelID = msg.ThreadID
 	}
 	if channelID == "" {
-		return plugin.InboundConversation{}
+		return conv
 	}
 	if parentID == "" {
 		b.mu.RLock()
@@ -2059,11 +2074,9 @@ func (b *DiscordBroker) discordInboundConversation(msg *messages.StructuredMessa
 	if parentID == channelID {
 		parentID = ""
 	}
-	return plugin.InboundConversation{
-		Surface:     "discord",
-		ExternalRef: channelID,
-		ParentRef:   parentID,
-	}
+	conv.ExternalRef = channelID
+	conv.ParentRef = parentID
+	return conv
 }
 
 // deliverInbound sends a message to the hub API or InboundHandler.

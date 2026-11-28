@@ -1222,6 +1222,15 @@ func (s *BrokerAuthService) requireLiveBroker(ctx context.Context, brokerID stri
 	return nil
 }
 
+// maxBrokerSignedJSONBodySize matches the 2 MiB HMAC signed-request ceiling
+// enforced by BrokerAuthMiddleware (apiclient.MaxSignedRequestBodyBytes) so
+// broker-authenticated JSON ingest endpoints never silently drop below the
+// signed ceiling.
+const (
+	maxBrokerSignedJSONBodySize = apiclient.MaxSignedRequestBodyBytes
+	brokerSignedBodyTooLargeMsg = apiclient.SignedBodyTooLargeMessage
+)
+
 // limitBrokerAuthBody bounds r's body before the verifier reads it to build
 // the canonical string. The verifiers have no response writer, so the cap is
 // installed with a nil writer; an over-cap declared length is refused

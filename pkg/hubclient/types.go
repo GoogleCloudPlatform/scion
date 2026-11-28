@@ -19,46 +19,51 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // Agent represents an agent from the Hub API.
 type Agent struct {
-	ID                string            `json:"id"`          // Hub UUID (database primary key)
-	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per project)
-	ContainerID       string            `json:"containerId"` // Runtime container ID (ephemeral)
-	Name              string            `json:"name"`
-	Template          string            `json:"template,omitempty"`
-	HarnessConfig     string            `json:"harnessConfig,omitempty"`
-	HarnessAuth       string            `json:"harnessAuth,omitempty"`
-	ProjectID         string            `json:"projectId,omitempty"`
-	Project           string            `json:"project,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
-	Annotations       map[string]string `json:"annotations,omitempty"`
-	Phase             string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
-	Activity          string            `json:"activity,omitempty"` // Runtime activity (working, thinking, executing, waiting_for_input, completed)
-	Status            string            `json:"status"`             // Legacy/fallback status field
-	ConnectionState   string            `json:"connectionState,omitempty"`
-	ContainerStatus   string            `json:"containerStatus,omitempty"`
-	RuntimeState      string            `json:"runtimeState,omitempty"`
-	Image             string            `json:"image,omitempty"`
-	Generation        int               `json:"generation,omitempty"`
-	Detached          bool              `json:"detached,omitempty"`
-	Runtime           string            `json:"runtime,omitempty"`
-	RuntimeBrokerID   string            `json:"runtimeBrokerId,omitempty"`
-	RuntimeBrokerName string            `json:"runtimeBrokerName,omitempty"`
-	RuntimeBrokerType string            `json:"runtimeBrokerType,omitempty"`
-	WebPTYEnabled     bool              `json:"webPtyEnabled,omitempty"`
-	TaskSummary       string            `json:"taskSummary,omitempty"`
-	AppliedConfig     *AgentConfig      `json:"appliedConfig,omitempty"`
-	DirectConnect     *DirectConnect    `json:"directConnect,omitempty"`
-	Kubernetes        *KubernetesInfo   `json:"kubernetes,omitempty"`
-	Created           time.Time         `json:"created"`
-	Updated           time.Time         `json:"updated"`
-	LastSeen          time.Time         `json:"lastSeen,omitempty"`
-	LastActivityEvent time.Time         `json:"lastActivityEvent,omitempty"`
-	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
-	CreatedBy         string            `json:"createdBy,omitempty"`
-	OwnerID           string            `json:"ownerId,omitempty"`
+	ID                 string            `json:"id"`          // Hub UUID (database primary key)
+	Slug               string            `json:"slug"`        // URL-safe slug identifier (unique per project)
+	ContainerID        string            `json:"containerId"` // Runtime container ID (ephemeral)
+	Name               string            `json:"name"`
+	Template           string            `json:"template,omitempty"`
+	HarnessConfig      string            `json:"harnessConfig,omitempty"`
+	HarnessAuth        string            `json:"harnessAuth,omitempty"`
+	ProjectID          string            `json:"projectId,omitempty"`
+	Project            string            `json:"project,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
+	Annotations        map[string]string `json:"annotations,omitempty"`
+	Phase              string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
+	Activity           string            `json:"activity,omitempty"` // Runtime activity (working, thinking, executing, waiting_for_input, completed)
+	Status             string            `json:"status"`             // Legacy/fallback status field
+	ConnectionState    string            `json:"connectionState,omitempty"`
+	ContainerStatus    string            `json:"containerStatus,omitempty"`
+	RuntimeState       string            `json:"runtimeState,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	Generation         int               `json:"generation,omitempty"`
+	Detached           bool              `json:"detached,omitempty"`
+	Runtime            string            `json:"runtime,omitempty"`
+	RuntimeBrokerID    string            `json:"runtimeBrokerId,omitempty"`
+	RuntimeBrokerName  string            `json:"runtimeBrokerName,omitempty"`
+	RuntimeBrokerType  string            `json:"runtimeBrokerType,omitempty"`
+	WebPTYEnabled      bool              `json:"webPtyEnabled,omitempty"`
+	TaskSummary        string            `json:"taskSummary,omitempty"`
+	AppliedConfig      *AgentConfig      `json:"appliedConfig,omitempty"`
+	DirectConnect      *DirectConnect    `json:"directConnect,omitempty"`
+	Kubernetes         *KubernetesInfo   `json:"kubernetes,omitempty"`
+	Created            time.Time         `json:"created"`
+	Updated            time.Time         `json:"updated"`
+	StartedAt          time.Time         `json:"startedAt,omitempty"`
+	LastSeen           time.Time         `json:"lastSeen,omitempty"`
+	LastActivityEvent  time.Time         `json:"lastActivityEvent,omitempty"`
+	ActivitySince      *time.Time        `json:"activitySince,omitempty"`
+	IdleSuspendAt      *time.Time        `json:"idleSuspendAt,omitempty"`
+	LastReincarnatedAt *time.Time        `json:"lastReincarnatedAt,omitempty"`
+	DeletedAt          time.Time         `json:"deletedAt,omitempty"`
+	CreatedBy          string            `json:"createdBy,omitempty"`
+	OwnerID            string            `json:"ownerId,omitempty"`
 	// Ancestry is the ordered chain of ancestor principal IDs (users and/or
 	// agents) recorded at creation time, used for transitive relationship
 	// queries such as `scion list --ancestors` (ptone/scion#2146).
@@ -114,6 +119,12 @@ type Agent struct {
 	// on full-view listed agents when ListAgentsOptions.IncludeCapabilities
 	// is set.
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
+
+	// TrajectoryCapture reports the effective Track 2 trajectory capture policy
+	// for the agent's project and whether the Hub opt-out lock enforces it.
+	// Set on single-agent Get only when experiment tokenomics.trajectory_capture
+	// is enabled on the Hub.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
@@ -270,6 +281,7 @@ type ProjectSettings struct {
 	DefaultModel           string  `json:"defaultModel,omitempty"`
 	DefaultThinkingLevel   *int    `json:"defaultThinkingLevel,omitempty"`
 	TelemetryEnabled       *bool   `json:"telemetryEnabled,omitempty"`
+	TrajectoryCapture      string  `json:"trajectoryCapture,omitempty"`
 	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
@@ -303,6 +315,14 @@ type ProjectSettings struct {
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
+
+	// Usage / token budget policy (gated by tokenomics.token_budgets).
+	// UsageUnmeasuredPolicy controls admission when an active non-zero token
+	// cap applies and the agent's harness does not report live token usage
+	// (unmeasured, unknown, or calls_only per usage.yaml). Valid values:
+	// "" / "allow" (default — launch proceeds with coverage warning) or "deny"
+	// (launch refused with 403 budget_unmeasured).
+	UsageUnmeasuredPolicy string `json:"usageUnmeasuredPolicy,omitempty"`
 }
 
 // ProjectGCPIdentityDefaultsUpdate is a partial project settings PUT body

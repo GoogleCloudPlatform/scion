@@ -433,6 +433,17 @@ step_gcloud() {
 }
 
 step_kubectl() {
+  if [ -n "${KUBECTL_VERSION:-}${KUBECTL_SHA256_AMD64:-}${KUBECTL_SHA256_ARM64:-}" ]; then
+    local want="${KUBECTL_VERSION:-}" sha
+    case "$(deb_arch)" in
+    amd64) sha="${KUBECTL_SHA256_AMD64:-}" ;;
+    arm64) sha="${KUBECTL_SHA256_ARM64:-}" ;;
+    *) echo "FAIL: unsupported architecture for pinned kubectl" >&2; return 1 ;;
+    esac
+    install_pinned_tool kubectl "$want" "$sha" \
+      "https://dl.k8s.io/release/v${want}/bin/linux/$(deb_arch)/kubectl" ""
+    return
+  fi
   if command -v kubectl >/dev/null 2>&1; then
     skip "kubectl already present ($(command -v kubectl))"
     return 0
@@ -545,6 +556,19 @@ helm_version_of() {
 }
 
 step_golangci_lint() {
+  if [ -n "${GOLANGCI_LINT_VERSION:-}${GOLANGCI_LINT_SHA256_AMD64:-}${GOLANGCI_LINT_SHA256_ARM64:-}" ]; then
+    local want="${GOLANGCI_LINT_VERSION:-}" sha arch
+    arch="$(deb_arch)"
+    case "$arch" in
+    amd64) sha="${GOLANGCI_LINT_SHA256_AMD64:-}" ;;
+    arm64) sha="${GOLANGCI_LINT_SHA256_ARM64:-}" ;;
+    *) echo "FAIL: unsupported architecture for pinned golangci-lint" >&2; return 1 ;;
+    esac
+    install_pinned_tool golangci-lint "$want" "$sha" \
+      "https://github.com/golangci/golangci-lint/releases/download/v${want}/golangci-lint-${want}-linux-${arch}.tar.gz" \
+      "golangci-lint-${want}-linux-${arch}/golangci-lint"
+    return
+  fi
   if command -v golangci-lint >/dev/null 2>&1; then
     skip "golangci-lint already present"
     return 0
@@ -552,6 +576,37 @@ step_golangci_lint() {
   log "installing golangci-lint"
   curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh |
     sh -s -- -b /usr/local/bin
+}
+
+# Optional manifest-derived pins are exact, even if another version is present.
+install_pinned_tool() {
+  local name="$1" want="$2" sha="$3" url="$4" member="$5" download_dir source
+  if [[ ! "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! "$sha" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "FAIL: pinned $name requires a concrete version and architecture SHA256" >&2
+    return 1
+  fi
+  download_dir="$(mktemp -d)"
+  source="$download_dir/download"
+  if ! curl -fsSL "$url" -o "$source" ||
+    ! printf '%s  %s\n' "$sha" "$source" | sha256sum -c - >/dev/null; then
+    echo "FAIL: download or SHA256 verification failed for pinned $name $want" >&2
+    rm -r "$download_dir"
+    return 1
+  fi
+  if [ -n "$member" ]; then
+    if ! tar -xzf "$source" -C "$download_dir" "$member"; then
+      echo "FAIL: extracting pinned $name $want" >&2
+      rm -r "$download_dir"
+      return 1
+    fi
+    source="$download_dir/$member"
+  fi
+  if ! install -o root -g root -m 0755 "$source" "/usr/local/bin/$name"; then
+    echo "FAIL: installing pinned $name $want" >&2
+    rm -r "$download_dir"
+    return 1
+  fi
+  rm -r "$download_dir"
 }
 
 step_npm_global() {

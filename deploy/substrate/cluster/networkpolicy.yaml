@@ -30,18 +30,16 @@
 # top of that controller-generated baseline; see each policy's own comment
 # for exactly what it restricts.
 
-# Router ingress restriction (.design/kubernetes/substrate-runtime.md §5.2
-# fallback requirement): the bootstrap nonce fallback ("first bootstrap
-# wins") is only acceptable with this in place, restricting the router to
-# broker-namespace callers.
+# Router ingress restriction (.design/kubernetes/substrate-runtime.md §5.2):
+# layers network-level namespace isolation on top of Substrate v1.0.0's
+# mandatory SPIFFE mTLS (`ATE_INGRESS_ALLOWED_SPIFFE_IDS`) on the router's TLS
+# listeners, restricting router ingress to broker-namespace callers on TLS
+# ports only.
 #
-# Verified against the upstream install manifests
-# (github.com/agent-substrate/substrate, manifests/ate-install/atenet-router.yaml
-# @ default branch, fetched 2026-09-23):
-#   - the router pod is labeled app: atenet-router in ate-system;
-#   - its Service exposes 80->8080 (http), 443->8443 (https), 8081 (connect),
-#     8444 (connect-tls), 4040 (status) — these are the client-facing ports
-#     this policy must keep open to the broker;
+# In Substrate v1.0.0, all router traffic is TLS/mTLS:
+#   - its Service exposes 443->8443 (https, for actor control port 80) and
+#     8444 (connect-tls, for non-80 TCP/HTTP ports);
+#   - plaintext ports (80->8080, 8081) are NOT permitted by this policy;
 #   - readiness/liveness probes hit port 9090 on the router container itself
 #     (kubelet-originated; exempt from NetworkPolicy on GKE, by design, on
 #     both enforcement backends — Calico and Dataplane V2 — but verify on
@@ -74,19 +72,15 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # The substrate broker: bootstrap/exec calls to actor control servers via
-    # ate-target-actor, plus health/readiness checks the broker itself makes.
+    # The substrate broker: mTLS control/exec calls (443->8443) and CONNECT
+    # tunnels (8444) to actor containers via ate-target-actor.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ${BROKER_NAMESPACE}
       ports:
         - protocol: TCP
-          port: 8080
-        - protocol: TCP
           port: 8443
-        - protocol: TCP
-          port: 8081
         - protocol: TCP
           port: 8444
     # kubelet's own readiness/liveness probes (port 9090) and Google Managed

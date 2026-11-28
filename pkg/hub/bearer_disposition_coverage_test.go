@@ -94,12 +94,76 @@ func (c bearerCoverage) hasPath(n string) bool {
 	return c.catalogPaths[n] || c.exemptPaths[n] || c.pendingPaths[n]
 }
 
+// hasMethodPath reports whether a catalog entry point, a pending entry or a
+// non-user exemption covers (method, normalizedPath).
+func (c bearerCoverage) hasMethodPath(method, n string) bool {
+	if c.exemptCovers(n) {
+		return true
+	}
+	for k := range c.catalog {
+		if k.Method == method && k.Pattern == n {
+			return true
+		}
+	}
+	for k := range c.pending {
+		if k.Method == method && k.Pattern == n {
+			return true
+		}
+	}
+	return false
+}
+
 // hasPrefix reports whether a catalog entry point, an exemption or a
 // pending entry has a normalized path equal to prefix or below it.
 func (c bearerCoverage) hasPrefix(prefix string) bool {
 	for _, set := range []map[string]bool{c.catalogPaths, c.exemptPaths, c.pendingPaths} {
 		for p := range set {
 			if p == prefix || strings.HasPrefix(p, prefix+"/") || (strings.HasSuffix(prefix, "/") && strings.HasPrefix(p, prefix)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bearerRouteOwner returns the most-specific normalized routeMetadataTable
+// path that owns candidate under Go's longest-prefix ServeMux rules.
+func bearerRouteOwner(candidate string, exactRoutes map[string]bool, sortedPrefixes []string) string {
+	if exactRoutes[candidate] {
+		return candidate
+	}
+	for _, p := range sortedPrefixes {
+		if strings.HasPrefix(candidate, p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// hasOwnedPrefix reports whether a catalog entry point, exemption or pending
+// entry covers (method, prefix) without being shadowed by a more-specific
+// routeMetadataTable entry (ptone/scion#4883). When method is non-empty, a
+// catalog or pending entry must also match method.
+func (c bearerCoverage) hasOwnedPrefix(method, prefix string, exactRoutes map[string]bool, sortedPrefixes []string) bool {
+	if c.exemptPaths[prefix] {
+		return true
+	}
+	if method != "" {
+		for k := range c.catalog {
+			if k.Method == method && strings.HasPrefix(k.Pattern, prefix) && bearerRouteOwner(k.Pattern, exactRoutes, sortedPrefixes) == prefix {
+				return true
+			}
+		}
+		for k := range c.pending {
+			if k.Method == method && strings.HasPrefix(k.Pattern, prefix) && bearerRouteOwner(k.Pattern, exactRoutes, sortedPrefixes) == prefix {
+				return true
+			}
+		}
+		return false
+	}
+	for _, set := range []map[string]bool{c.catalogPaths, c.exemptPaths, c.pendingPaths} {
+		for p := range set {
+			if p == prefix || (strings.HasPrefix(p, prefix) && bearerRouteOwner(p, exactRoutes, sortedPrefixes) == prefix) {
 				return true
 			}
 		}
@@ -125,58 +189,108 @@ func (c bearerCoverage) exemptCovers(n string) bool {
 //
 //   - Every routeMetadataTable pattern. An exact pattern needs a record on
 //     the same path (and the same method when the key names one). A prefix
-//     pattern needs a record below the prefix.
-//   - Every agentSubRouteTable row, by its catalog pattern (the agent
-//     prefix "/api/v1/agents/" is covered row by row, not by prefix).
+//     pattern needs a record owned by that prefix (not shadowed by a
+//     more-specific routeMetadataTable pattern, and matching the method when
+//     the key names one).
+//   - Every agentSubRouteTable row, by its catalog pattern and per declared
+//     HTTP method in row.ops (the agent prefix "/api/v1/agents/" is covered
+//     row by row and method by method, not by prefix).
 //   - Every projectSubRouteTable segment (the project prefix
 //     "/api/v1/projects/" is covered segment by segment, plus the project
 //     resource itself).
+//   - Every prefixSubRouteTable row, by its normalized pattern and per
+//     declared HTTP method (all 44 active trailing-slash prefix dispatchers
+//     outside agents/, projects/, and artifacts/ are covered row by row and
+//     method by method, not by prefix).
 //
 // Limitations:
-//   - Coverage is checked per path, not per method. A route metadata key
-//     without a method, every agent and project sub-route and every
-//     exemption match a record on the same path whatever its method, so a
-//     new method on a covered path needs a method-level check to be caught.
-//   - The other prefix dispatchers (users/, groups/, templates/, skills/,
-//     harness-configs/, runtime-brokers/, gcp-service-accounts/, admin/*)
-//     are covered by prefix. A new action segment on one of them is caught
-//     only when its pattern is added to route metadata or the catalog.
+//   - For route metadata keys without a method and project sub-routes,
+//     coverage is checked per path/segment rather than per method.
+//   - Artifact sub-routes under /api/v1/artifacts/ are additionally checked
+//     per-method by TestEntryPointsCoverRouteMetadata in pkg/hub/authzop.
 //   - Project sub-routes are enumerated by first segment only. A new
 //     second-level branch inside a listed project segment (for example
 //     settings/<name> or metrics/<name>) is caught only when its pattern is
 //     added to route metadata or the catalog.
 func TestBearerDisposition_EveryRoutePatternCovered(t *testing.T) {
 	c := newBearerCoverage()
+	uncovered := findUncoveredBearerRoutes(c, routeMetadataTable, agentSubRouteTable, projectSubRouteTable, prefixSubRouteTable)
+	if len(uncovered) > 0 {
+		t.Errorf("live routes with no catalog entry point, exemption or pending entry (%d):\n  %s",
+			len(uncovered), strings.Join(uncovered, "\n  "))
+	}
+}
+
+func findUncoveredBearerRoutes(
+	c bearerCoverage,
+	routes map[string]RouteMetadata,
+	agentRows []agentSubRouteRow,
+	projectSegs map[string]projectSubRouteKind,
+	prefixRows []prefixSubRouteRow,
+) []string {
 	var uncovered []string
 
-	keys := make([]string, 0, len(routeMetadataTable))
-	for k := range routeMetadataTable {
-		keys = append(keys, k)
+	prefixRowOwners := make(map[string]bool)
+	for _, row := range prefixRows {
+		prefixRowOwners[row.prefix] = true
 	}
+
+	exactRoutes := make(map[string]bool)
+	prefixSet := make(map[string]bool)
+	keys := make([]string, 0, len(routes))
+	for k := range routes {
+		keys = append(keys, k)
+		_, p := splitRouteKey(k)
+		n := normalizeBearerPattern(p)
+		if strings.HasSuffix(n, "/") && len(n) > 1 {
+			prefixSet[n] = true
+		} else {
+			exactRoutes[n] = true
+		}
+	}
+	sortedPrefixes := make([]string, 0, len(prefixSet))
+	for p := range prefixSet {
+		sortedPrefixes = append(sortedPrefixes, p)
+	}
+	sort.Slice(sortedPrefixes, func(i, j int) bool {
+		if len(sortedPrefixes[i]) != len(sortedPrefixes[j]) {
+			return len(sortedPrefixes[i]) > len(sortedPrefixes[j])
+		}
+		return sortedPrefixes[i] < sortedPrefixes[j]
+	})
 	sort.Strings(keys)
+
 	for _, key := range keys {
 		method, path := splitRouteKey(key)
+		n := normalizeBearerPattern(path)
 		switch {
-		case path == "/api/v1/agents/" || path == "/api/v1/projects/":
+		case path == "/api/v1/agents/" || path == "/api/v1/projects/" || prefixRowOwners[key]:
 			continue // covered row by row below
 		case strings.HasSuffix(path, "/"):
-			if !c.hasPrefix(path) {
+			if !c.hasOwnedPrefix(method, n, exactRoutes, sortedPrefixes) {
 				uncovered = append(uncovered, "route prefix "+key)
 			}
 		case method != "":
-			n := normalizeBearerPattern(path)
-			if _, ok := c.catalog[bearerEntryKey{method, n, ""}]; !ok && !c.pending[bearerEntryKey{method, n, ""}] && !c.exemptPaths[n] {
+			if !c.hasMethodPath(method, n) {
 				uncovered = append(uncovered, "route "+key)
 			}
 		default:
-			if !c.hasPath(normalizeBearerPattern(path)) {
+			if !c.hasPath(n) {
 				uncovered = append(uncovered, "route "+key)
 			}
 		}
 	}
 
-	for _, row := range agentSubRouteTable {
+	for _, row := range agentRows {
 		n := normalizeBearerPattern(row.catalogPattern(false))
+		if len(row.ops) > 0 {
+			for method := range row.ops {
+				if !c.hasMethodPath(method, n) && !(row.opaque && c.hasMethodPath(method, n+"/{}")) {
+					uncovered = append(uncovered, fmt.Sprintf("agent sub-route %s (%s %s)", row.id, method, n))
+				}
+			}
+			continue
+		}
 		if !c.hasPath(n) && !c.hasPath(n+"/{}") {
 			uncovered = append(uncovered, fmt.Sprintf("agent sub-route %s (%s)", row.id, n))
 		}
@@ -185,17 +299,207 @@ func TestBearerDisposition_EveryRoutePatternCovered(t *testing.T) {
 	if !c.hasPath("/api/v1/projects/{}") {
 		uncovered = append(uncovered, "project resource /api/v1/projects/{}")
 	}
-	for seg := range projectSubRouteTable {
+	for seg := range projectSegs {
 		prefix := "/api/v1/projects/{}/" + seg
 		if !c.hasPrefix(prefix) {
 			uncovered = append(uncovered, "project sub-route segment "+seg)
 		}
 	}
 
+	for _, row := range prefixRows {
+		n := normalizeBearerPattern(row.pattern)
+		for _, method := range row.methods {
+			if !c.hasMethodPath(method, n) {
+				uncovered = append(uncovered, fmt.Sprintf("prefix sub-route %s (%s %s)", row.prefix, method, n))
+			}
+		}
+	}
+
 	sort.Strings(uncovered)
-	if len(uncovered) > 0 {
-		t.Errorf("live routes with no catalog entry point, exemption or pending entry (%d):\n  %s",
-			len(uncovered), strings.Join(uncovered, "\n  "))
+	return uncovered
+}
+
+// TestBearerDisposition_PrefixMaskingRejected proves that a more-specific
+// route or a different HTTP method does not mask an uncovered prefix or agent
+// sub-route method (ptone/scion#4883).
+func TestBearerDisposition_PrefixMaskingRejected(t *testing.T) {
+	t.Run("more-specific child prefix does not cover parent prefix", func(t *testing.T) {
+		c := bearerCoverage{
+			catalog:      map[bearerEntryKey]authzop.OperationID{},
+			catalogPaths: map[string]bool{},
+			exemptPaths:  map[string]bool{"/api/v1/artifacts/shared/": true},
+			pending:      map[bearerEntryKey]bool{},
+			pendingPaths: map[string]bool{},
+		}
+		routes := map[string]RouteMetadata{
+			"/api/v1/artifacts/":        {Pattern: "/api/v1/artifacts/"},
+			"/api/v1/artifacts/shared/": {Pattern: "/api/v1/artifacts/shared/"},
+		}
+		got := findUncoveredBearerRoutes(c, routes, nil, nil, nil)
+		found := false
+		for _, u := range got {
+			if u == "route prefix /api/v1/artifacts/" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected /api/v1/artifacts/ to be reported uncovered, got %v", got)
+		}
+	})
+
+	t.Run("GET on prefix does not cover PUT on same prefix", func(t *testing.T) {
+		c := bearerCoverage{
+			catalog:      map[bearerEntryKey]authzop.OperationID{{Method: "GET", Pattern: "/api/v1/github-app/installations/{}"}: "hub.githubapp.read"},
+			catalogPaths: map[string]bool{"/api/v1/github-app/installations/{}": true},
+			exemptPaths:  map[string]bool{},
+			pending:      map[bearerEntryKey]bool{},
+			pendingPaths: map[string]bool{},
+		}
+		routes := map[string]RouteMetadata{
+			"GET /api/v1/github-app/installations/": {Pattern: "GET /api/v1/github-app/installations/"},
+			"PUT /api/v1/github-app/installations/": {Pattern: "PUT /api/v1/github-app/installations/"},
+		}
+		got := findUncoveredBearerRoutes(c, routes, nil, nil, nil)
+		found := false
+		for _, u := range got {
+			if u == "route prefix PUT /api/v1/github-app/installations/" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected PUT /api/v1/github-app/installations/ to be reported uncovered, got %v", got)
+		}
+	})
+
+	t.Run("missing method on agent sub-route is caught", func(t *testing.T) {
+		c := bearerCoverage{
+			catalog:      map[bearerEntryKey]authzop.OperationID{{Method: "GET", Pattern: "/api/v1/agents/{}"}: "agent.read"},
+			catalogPaths: map[string]bool{"/api/v1/agents/{}": true},
+			exemptPaths:  map[string]bool{},
+			pending:      map[bearerEntryKey]bool{},
+			pendingPaths: map[string]bool{},
+		}
+		rows := []agentSubRouteRow{
+			{id: AgentRouteRoot, form: agentFormByID, ops: map[string]authzop.OperationID{
+				http.MethodGet:   "agent.read",
+				http.MethodPatch: "agent.update",
+			}},
+		}
+		got := findUncoveredBearerRoutes(c, nil, rows, nil, nil)
+		found := false
+		for _, u := range got {
+			if strings.Contains(u, "PATCH /api/v1/agents/{}") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected PATCH /api/v1/agents/{} to be reported uncovered, got %v", got)
+		}
+	})
+
+	t.Run("missing sibling operation on prefixSubRouteTable row is caught", func(t *testing.T) {
+		c := bearerCoverage{
+			catalog:      map[bearerEntryKey]authzop.OperationID{{Method: "GET", Pattern: "/api/v1/groups/{}"}: "group.read"},
+			catalogPaths: map[string]bool{"/api/v1/groups/{}": true},
+			exemptPaths:  map[string]bool{},
+			pending:      map[bearerEntryKey]bool{},
+			pendingPaths: map[string]bool{},
+		}
+		routes := map[string]RouteMetadata{
+			"/api/v1/groups/": {Pattern: "/api/v1/groups/"},
+		}
+		prefixRows := []prefixSubRouteRow{
+			{prefix: "/api/v1/groups/", pattern: "/api/v1/groups/{id}", methods: []string{http.MethodGet}},
+			{prefix: "/api/v1/groups/", pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}", methods: []string{http.MethodDelete}},
+		}
+		got := findUncoveredBearerRoutes(c, routes, nil, nil, prefixRows)
+		found := false
+		for _, u := range got {
+			if strings.Contains(u, "DELETE /api/v1/groups/{}/members/{}/{}") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected DELETE /api/v1/groups/{}/members/{}/{} to be reported uncovered, got %v", got)
+		}
+	})
+}
+
+// TestPrefixSubRoutes_TableConsistency verifies that prefixSubRouteTable is
+// internally consistent, matches live routeMetadataTable ownership, and covers
+// every catalog and pending HTTP entry point owned by an enumerated prefix.
+func TestPrefixSubRoutes_TableConsistency(t *testing.T) {
+	exactRoutes := make(map[string]bool)
+	prefixSet := make(map[string]bool)
+	for k := range routeMetadataTable {
+		_, p := splitRouteKey(k)
+		n := normalizeBearerPattern(p)
+		if strings.HasSuffix(n, "/") && len(n) > 1 {
+			prefixSet[n] = true
+		} else {
+			exactRoutes[n] = true
+		}
+	}
+	sortedPrefixes := make([]string, 0, len(prefixSet))
+	for p := range prefixSet {
+		sortedPrefixes = append(sortedPrefixes, p)
+	}
+	sort.Slice(sortedPrefixes, func(i, j int) bool {
+		if len(sortedPrefixes[i]) != len(sortedPrefixes[j]) {
+			return len(sortedPrefixes[i]) > len(sortedPrefixes[j])
+		}
+		return sortedPrefixes[i] < sortedPrefixes[j]
+	})
+
+	type methodPath struct {
+		method  string
+		pattern string
+	}
+	listed := make(map[methodPath]bool)
+	for _, row := range prefixSubRouteTable {
+		if _, ok := routeMetadataTable[row.prefix]; !ok {
+			t.Errorf("prefixSubRouteTable row prefix %q is not in routeMetadataTable", row.prefix)
+		}
+		norm := normalizeBearerPattern(row.pattern)
+		if owner := bearerRouteOwner(norm, exactRoutes, sortedPrefixes); owner != row.prefix && !(exactRoutes[norm] && strings.HasPrefix(norm, row.prefix)) {
+			t.Errorf("prefixSubRouteTable row %q declares prefix %q, but routeMetadataTable owner is %q", row.pattern, row.prefix, owner)
+		}
+		for _, m := range row.methods {
+			mp := methodPath{method: m, pattern: norm}
+			if listed[mp] {
+				t.Errorf("duplicate prefixSubRouteTable entry: %s %s", m, norm)
+			}
+			listed[mp] = true
+		}
+	}
+
+	// Reverse check: every HTTP-like catalog or pending entry whose owning
+	// routeMetadataTable prefix is in enumeratedPrefixSet() must be listed in
+	// prefixSubRouteTable.
+	enumPrefixes := enumeratedPrefixSet()
+	checkEntry := func(source, method, pattern string) {
+		norm := normalizeBearerPattern(pattern)
+		owner := bearerRouteOwner(norm, exactRoutes, sortedPrefixes)
+		if !enumPrefixes[owner] {
+			return
+		}
+		if !listed[methodPath{method: method, pattern: norm}] {
+			t.Errorf("%s entry %s %s (owned by %s) is missing from prefixSubRouteTable", source, method, pattern, owner)
+		}
+	}
+	for _, spec := range authzop.Catalog {
+		for _, ep := range spec.EntryPoints {
+			if !bearerHTTPLikeKinds[ep.Kind] {
+				continue
+			}
+			checkEntry("catalog "+string(spec.ID), ep.Method, ep.Pattern)
+		}
+	}
+	for _, pe := range authzop.PendingBearerDispositions {
+		if !bearerHTTPLikeKinds[pe.Kind] {
+			continue
+		}
+		checkEntry("pending", pe.Method, pe.Pattern)
 	}
 }
 

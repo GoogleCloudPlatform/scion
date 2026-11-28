@@ -215,6 +215,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_preview.go:resolveSinglePrincipal:GetEffectiveGroupsForAgent":            "preview: selects principals a constraint would narrow",
 	"handlers_agent_message_mode.go:handleSetMessageMode:GetProjectMembership":                  "narrowing: denies project admins (D7); can only refuse, never grant",
 	"quota.go:resolveEffectiveLimitWithSource:GetUserGroups":                                    "restriction: quota limits by group",
+	"quota.go:loadSubjectBindings:GetUserGroups":                                                "restriction: token budget limits by group",
 	"membership_loss.go:membershipExpiryScan:ListAllRoleBindings":                               "revocation: finds expired bindings to process membership loss",
 	"handlers_groups.go:authorizeGroupMemberGrant:GetGroupMembership":                           "group governance: the caller's group role (not a role binding); the grant itself goes through CanDelegate with the grantee",
 	"handlers_groups.go:removeGroupMember:GetGroupMembership":                                   "group governance: the caller's group role for a removal",
@@ -299,6 +300,12 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"seed.go:removeProjectMembersGroupRoleBindings:ListRoleBindingsForPrincipal":      "startup: members-group binding cleanup",
 	"seed.go:removeSystemHubMembershipTx:GetGroupMembership":                          "mutation: hub grant sync",
 	"seed.go:warnOwnerOnlyLegacyProject:ListRoleBindingsForScope":                     "startup: legacy owner warning",
+
+	// Tokenomics pooled-group billing read (never grants authorization).
+	"token_budget_groups.go:ResolveForUsers:GetEffectiveGroupsForUsers":                      "billing: billing user's effective groups for pooled-group token budget charging; never grants authorization",
+	"handlers_group_usage_budgets.go:handleGroupUsageBudgets:QueryGroupMemberUsageBreakdown": "display: per-member token usage breakdown for group budgets response; never decides authority",
+	"handlers_group_usage_budgets.go:authorizeGroupUsageBudgets:GetGroupMembership":          "decision: group owner/admin membership for pooled-group budget breakdown; enforces scoped-UAT quota.read ceiling/boundary and testAdminPrincipalLive clamp",
+	"handlers_group_usage_budgets.go:authorizeGroupUsageBudgets:GetEffectiveGroups":          "decision: effective group membership for pooled-group budget pool totals; enforces scoped-UAT quota.read ceiling/boundary and testAdminPrincipalLive clamp",
 }
 
 // testAdminAdminEmailsCensus classifies every function that reads the

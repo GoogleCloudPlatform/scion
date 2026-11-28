@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -224,6 +225,10 @@ type ServerConfig struct {
 	// opened only on a route this node can renew (design §3.5). Only used
 	// behind the hub.conduit experiment.
 	ConduitTargetStreamDeadlines string
+	// ConduitEarlyResolveGuardForTest, when true (tests only), arms the
+	// early-resolve guard from the start of New so any hub.conduit resolution
+	// before SetConduitDeploymentDefault panics.
+	ConduitEarlyResolveGuardForTest bool
 	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
 	// response headers on the conduit port proxy, the WebSocket handshake
 	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
@@ -417,6 +422,11 @@ type ServerConfig struct {
 	// dispatches when experiment agent_policy.telemetry_enforcement is on.
 	// Read through Server.telemetryEnforced().
 	TelemetryEnforced bool
+	// TrajectoryAllowProjectOptOut controls whether projects may lower
+	// telemetry.trajectory.capture below "full" when experiment
+	// tokenomics.trajectory_capture is on. Nil (unset) defaults to true.
+	// Read through Server.trajectoryAllowProjectOptOut().
+	TrajectoryAllowProjectOptOut *bool
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool
@@ -2324,6 +2334,8 @@ type Server struct {
 	// signing-ring purpose of its own in keyring mode, one fixed key of its
 	// own otherwise; separate from every other key.
 	portViewKeys capabilityKeys
+	// githubScopeKeys HMAC-keys GitHub credential scopes (github_credential.go).
+	githubScopeKeys capabilityKeys
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 
@@ -2331,8 +2343,11 @@ type Server struct {
 	trajectoryCapturePolicyOverride func(context.Context, *store.Project) string
 	trajectoryMaxSegmentRawBytes    int64
 	trajectoryMaxRunRawBytes        int64
+	trajectoryMaxRunSegments        int64
 	trajectoryPrepareTTL            time.Duration
 	trajectoryUploadURLExpiry       time.Duration
+	trajectoryDownloadURLExpiry     time.Duration
+	trajectoryClock                 func() time.Time
 	trajectoryCommitAfterVerifyHook func(context.Context, *store.TrajectorySegment)
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
@@ -2383,6 +2398,15 @@ type Server struct {
 	// (SetConduitRelayStartFailure): the setting key that caused it, or ""
 	// when the cause was not one setting. nil: no failure recorded.
 	conduitStartFailure atomic.Pointer[string]
+	// conduitDeploymentDefault overrides the compiled default of hub.conduit
+	// for this deployment when non-nil (SetConduitDeploymentDefault). Set
+	// once at startup after newCommandBus and before startConduit; stored
+	// overrides and a malformed experiments document still take precedence.
+	conduitDeploymentDefault atomic.Pointer[conduitDeploymentDefault]
+	// conduitGuardEarlyResolve, when enabled by tests
+	// (SetConduitEarlyResolveGuardForTest), panics if hub.conduit is
+	// resolved before SetConduitDeploymentDefault has run.
+	conduitGuardEarlyResolve atomic.Bool
 	// conduitExternal is the hub's conduit runtime in external relay mode
 	// (conduit_external.go): routing to separate relays, no relay of its
 	// own. At most one of conduit and conduitExternal is set.
@@ -2659,6 +2683,9 @@ type Server struct {
 
 	// Teams link service for code-based account linking (nil = disabled)
 	teamsLinkService *TeamsLinkService
+
+	// Slack link service for code-based account linking (nil = disabled)
+	slackLinkService *SlackLinkService
 
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
@@ -3072,9 +3099,9 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// templateSourceFetcher downloads template sources for reimport. nil
-	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
-	templateSourceFetcher templateSourceFetcher
+	// templateGitHubClient fetches GitHub template sources for reimport. nil
+	// selects the default client (newTemplateGitHubClient); tests replace it.
+	templateGitHubClient *githubfetch.Client
 
 	// templateDrift holds the caches and optional test seams for the Hub-side
 	// template drift check at agent creation (template_drift.go).
@@ -3094,6 +3121,13 @@ type Server struct {
 	// githubAccessCache caches GitHub-side repository access checks made
 	// with a project creator's own token (github_app_association_authz.go).
 	githubAccessCache githubRepoAccessCache
+	// githubReadModelInconclusive is a short read-model-only negative cache
+	// for inconclusive creator-access checks so project readers cannot force
+	// repeated creator-token GitHub calls (github_app_association_authz.go).
+	githubReadModelInconclusive githubReadModelInconclusiveCache
+	// githubReadModelSF collapses concurrent cold-cache creator-access checks
+	// for the same access-cache key on GET /api/v1/projects/{id}/github.
+	githubReadModelSF singleflight.Group
 	// githubAssociationReportCache bounds the admin association report
 	// (github_app_association_authz.go).
 	githubAssociationReportCache githubAssociationReportCache
@@ -3329,6 +3363,11 @@ type Server struct {
 	// answer is written. Only tests set it, on their own Server.
 	legacyPortTunnelReturnedTestHook func()
 
+	// mintCandidatesTestHook, when non-nil under a test binary, adjusts
+	// the candidate scopes returned by mintCandidateScopes inside
+	// AuthorizeAgentToken. Only tests set it, on their own Server.
+	mintCandidatesTestHook func(agent *store.Agent, candidates []AgentTokenScope) []AgentTokenScope
+
 	// hubRestartReservedAt is the UnixNano time Restart Hub reserved the
 	// hub-binary exclusive group (0: none); see reserveHubRestart.
 	hubRestartReservedAt atomic.Int64
@@ -3349,6 +3388,21 @@ type Server struct {
 	// usageRetention holds the bounded Hub DB retention sweeper for Track 1
 	// usage tables (usage_retention.go).
 	usageRetention *UsageRetentionSweeper
+
+	// tokenBudgetEvaluator evaluates raw-token budget consumption after usage
+	// ingest commits (token_budget_evaluator.go).
+	tokenBudgetEvaluator *TokenBudgetEvaluator
+
+	// pooledGroupResolver caches effective pooled-budget group memberships per
+	// billing user on this replica (token_budget_groups.go).
+	pooledGroupResolver *PooledGroupResolver
+
+	// groupBudgetSeeder manages D6 mid-window seeding for pooled group budgets
+	// via durablequeue (token_budget_group_seeder.go).
+	groupBudgetSeeder      *GroupBudgetSeeder
+	groupBudgetSeedDrainer *durablequeue.Drainer
+	groupBudgetSeedCancel  context.CancelFunc
+	groupBudgetSeedDone    chan struct{}
 
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
@@ -3563,11 +3617,21 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	if cfg.ConduitEarlyResolveGuardForTest {
+		srv.conduitGuardEarlyResolve.Store(true)
+	}
 	srv.conversationFeed = eventfeed.NewFeed(s, &feedWaker{events: srv.getEventPublisher})
 	if setter, ok := s.(interface {
 		SetMessagePublisher(entadapter.MessagePublisher)
 	}); ok {
 		setter.SetMessagePublisher(&feedNotifier{events: srv.getEventPublisher})
+	}
+	if setter, ok := s.(interface {
+		SetTrajectoryCaptureState(store.TrajectoryCaptureStateFunc)
+	}); ok {
+		setter.SetTrajectoryCaptureState(func() (bool, bool) {
+			return srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture), srv.trajectoryAllowProjectOptOut()
+		})
 	}
 
 	// A New that fails part-way must not leak what it already started: the
@@ -3720,6 +3784,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 
+	// Initialize the dedicated GitHub credential scope HMAC key.
+	if err := srv.initGitHubScopeKey(ctx); err != nil {
+		return nil, err
+	}
+
 	// Initialize invite code service
 	srv.inviteService = NewInviteService(s)
 
@@ -3731,6 +3800,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize Teams link service
 	srv.teamsLinkService = NewTeamsLinkService()
+
+	// Initialize Slack link service
+	srv.slackLinkService = NewSlackLinkService()
 
 	// Validate OIDC login configuration at startup (fail fast).
 	if cfg.OIDCLogin.Enabled {
@@ -5484,6 +5556,9 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.SetStore(s.chatLinkStore)
 		}
+		if s.slackLinkService != nil {
+			s.slackLinkService.SetStore(s.chatLinkStore)
+		}
 	}
 
 	s.mu.Unlock()
@@ -6605,6 +6680,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			!state.Activity(agent.Activity).IsSuspendEligible() ||
 			agent.ActivitySince == nil ||
 			!agent.ActivitySince.Before(cutoff) ||
+			(agent.LastDeliveryAt != nil && !agent.LastDeliveryAt.Before(cutoff)) ||
 			agent.LastSeen.IsZero() ||
 			agent.LastSeen.Before(heartbeatCutoff) {
 			slog.Info("Scheduler: skipping idle auto-suspend; agent no longer eligible in the same run",
@@ -7732,6 +7808,15 @@ func (s *Server) registerSchedulerHandlers() {
 		store.LockUsageRetention,
 		s.usageRetentionHandler(),
 	)
+	// Pooled user-group budget seed reconciliation (tokenomics.token_budgets,
+	// ptone/scion#9243, D6): runs nightly (24h) as a singleton to enqueue any
+	// missing or incomplete pre-activation seeds; never re-SETs finalized seeds.
+	s.scheduler.RegisterRecurringSingleton(
+		usageGroupSeedReconcileJobName,
+		24*60,
+		store.LockUsageGroupSeedReconcile,
+		s.usageGroupSeedReconcileHandler(),
+	)
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
@@ -7746,6 +7831,10 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	// Resumable upload session expiry and staging cleanup (ptone/scion#8654 §3.7):
+	// runs every minute regardless of hub.large_uploads state so in-flight
+	// sessions still drain if the experiment is turned off.
+	s.scheduler.RegisterRecurringSingleton(uploadSessionSweepJobName, 1, store.LockUploadSessionSweep, s.uploadSessionSweepHandler())
 	// Daily (24 h) report-only scan for orphaned agent directories on mounted
 	// shared NFS project storage (ptone/scion#7932); gated by
 	// hub.runtime_orphan_reconcile.
@@ -8021,6 +8110,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Reconcile Tokenomics usage ledger attribution hook and idempotent active-run backfill.
 	s.reconcileUsageLedger(ctx)
+
+	// Reconcile Tokenomics raw-token budget limit definitions when enabled (P3.1, D5).
+	s.reconcileTokenBudgets(ctx)
 
 	// Start the trigger.event queue drainer when hub.triggers is enabled.
 	s.startTriggerDrainer(ctx)
@@ -8305,6 +8397,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		}
 		s.stopUserDeletionWork(ctx)
 		s.stopTriggerDrainer(ctx)
+		s.stopGroupBudgetSeedDrainer(ctx)
 		s.stopScheduledDetachedFires(ctx)
 		s.stopScheduledExecRuns(ctx)
 		s.stopCommandRuns(ctx)
@@ -8325,6 +8418,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		}
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.Close()
+		}
+		if s.slackLinkService != nil {
+			s.slackLinkService.Close()
 		}
 		// Stop the B3 preview engine's nonce cleanup goroutine.
 		if s.previewService != nil {
@@ -8659,6 +8755,9 @@ func (s *Server) registerRoutes() {
 	// Profile secret requests roll-up across member projects and DMs (/users/me/secret-requests)
 	s.mux.HandleFunc("/api/v1/users/me/secret-requests", s.guarded("/api/v1/users/me/secret-requests", s.handleUserMeActionInbox(&secretRequestActionInboxKind{srv: s})))
 
+	// Profile command requests roll-up for the caller as named approver (/users/me/command-requests)
+	s.mux.HandleFunc("/api/v1/users/me/command-requests", s.guarded("/api/v1/users/me/command-requests", s.handleUserMeActionInbox(&commandRequestActionInboxKind{srv: s})))
+
 	// Profile inbox summary across categories (/users/me/inbox/summary)
 	s.mux.HandleFunc("/api/v1/users/me/inbox/summary", s.guarded("/api/v1/users/me/inbox/summary", s.handleUserMeInboxSummary))
 
@@ -8935,6 +9034,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/teams/link/verify", s.guarded("/api/v1/teams/link/verify", s.handleTeamsLinkVerify))
 	s.mux.HandleFunc("/api/v1/teams/link/status", s.guarded("/api/v1/teams/link/status", s.handleTeamsLinkStatus))
 
+	// Slack account linking endpoints
+	s.mux.HandleFunc("/api/v1/slack/link", s.guarded("/api/v1/slack/link", s.handleSlackLink))
+	s.mux.HandleFunc("/api/v1/slack/link/verify", s.guarded("/api/v1/slack/link/verify", s.handleSlackLinkVerify))
+	s.mux.HandleFunc("/api/v1/slack/link/status", s.guarded("/api/v1/slack/link/status", s.handleSlackLinkStatus))
+
 	// Unified resource import endpoint (templates + harness-configs, global + project)
 	s.mux.HandleFunc("/api/v1/resources/import", s.guarded("/api/v1/resources/import", s.handleResourcesImport))
 	s.mux.HandleFunc("/api/v1/resources/discover", s.guarded("/api/v1/resources/discover", s.handleResourcesDiscover))
@@ -9067,6 +9171,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
+
+	// Apply the sandbox page policy to every response on agent-port proxy
+	// routes before CORS, auth or routing runs, so every hub-generated
+	// response carries it even on a hub-only listener (ptone/scion#5944).
+	h = agentPortPolicyMiddleware(h)
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
 	// Requests whose path carries a bearer credential (artifact share-link

@@ -248,18 +248,19 @@ func (s *Server) wakeAgentForDMAuthorized(ctx context.Context, agent *store.Agen
 		// (SyncDispatchBound) and, when the caller has a deadline, by that
 		// deadline too (KeepCallerDeadline; the earlier wins). The caller's
 		// deadline also shortens the readiness wait below. This path is
-		// shared by the user and agent direct messages and the live and
-		// scheduled chat wakes; only the chat wakes carry a deadline today
-		// (their resume budget).
+		// shared by the user and agent direct messages (whose callers pass a
+		// detached context bounded by dmWakeWriteBudget, or a tighter caller
+		// deadline, ptone/scion#9757) and the live and scheduled chat wakes
+		// (whose callers carry their resume budget deadline).
 		//
 		// A wake request that already ended (cancelled, or its time budget
 		// ran out) during the admission checks or the start gate gets no
-		// resume. On the direct-message and scheduled-chat paths the
-		// message is persisted on the caller's context after the wake, so
-		// nobody would receive it; the live chat wake persists on a
-		// detached context (DetachWake) but answers the sender with an
-		// error once its wake budget is spent. Either way the resume would
-		// serve nobody. Nothing is claimed, dispatched or written.
+		// resume. Direct-message callers also pre-check ctx.Err() before
+		// detaching from client cancellation, and scheduled-chat wakes
+		// persist on the caller's context after the wake; the live chat wake
+		// persists on a detached context (DetachWake) but answers the sender
+		// with an error once its wake budget is spent. Either way the resume
+		// would serve nobody. Nothing is claimed, dispatched or written.
 		if err := ctx.Err(); err != nil {
 			s.messageLog.Info("wake: skipped, the wake request ended or its time budget ran out before the resume",
 				"agent_id", agent.ID, "error", err)
@@ -376,6 +377,9 @@ func (s *Server) wakeAgentForDMAuthorized(ctx context.Context, agent *store.Agen
 			return nil
 		}})
 		if err != nil {
+			if dmErr := tokenBudgetAdmissionDMError(err); dmErr != nil {
+				return nil, dmErr
+			}
 			if dmErr := brokerPolicyDMError(launchCtx, err); dmErr != nil {
 				return nil, dmErr
 			}

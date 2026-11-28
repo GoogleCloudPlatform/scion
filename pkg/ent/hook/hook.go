@@ -1353,6 +1353,30 @@ func (f TriggerSubjectClaimFunc) Mutate(ctx context.Context, m ent.Mutation) (en
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerSubjectClaimMutation", m)
 }
 
+// The UploadSessionFunc type is an adapter to allow the use of ordinary
+// function as UploadSession mutator.
+type UploadSessionFunc func(context.Context, *ent.UploadSessionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UploadSessionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UploadSessionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UploadSessionMutation", m)
+}
+
+// The UsageBudgetStateFunc type is an adapter to allow the use of ordinary
+// function as UsageBudgetState mutator.
+type UsageBudgetStateFunc func(context.Context, *ent.UsageBudgetStateMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageBudgetStateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageBudgetStateMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageBudgetStateMutation", m)
+}
+
 // The UsageEventFunc type is an adapter to allow the use of ordinary
 // function as UsageEvent mutator.
 type UsageEventFunc func(context.Context, *ent.UsageEventMutation) (ent.Value, error)
@@ -1363,6 +1387,30 @@ func (f UsageEventFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, 
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageEventMutation", m)
+}
+
+// The UsageGroupBudgetSeedFunc type is an adapter to allow the use of ordinary
+// function as UsageGroupBudgetSeed mutator.
+type UsageGroupBudgetSeedFunc func(context.Context, *ent.UsageGroupBudgetSeedMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageGroupBudgetSeedFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageGroupBudgetSeedMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageGroupBudgetSeedMutation", m)
+}
+
+// The UsageGroupRollupDailyFunc type is an adapter to allow the use of ordinary
+// function as UsageGroupRollupDaily mutator.
+type UsageGroupRollupDailyFunc func(context.Context, *ent.UsageGroupRollupDailyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageGroupRollupDailyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageGroupRollupDailyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageGroupRollupDailyMutation", m)
 }
 
 // The UsageReservationFunc type is an adapter to allow the use of ordinary

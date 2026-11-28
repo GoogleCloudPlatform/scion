@@ -65,6 +65,7 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "chat.userdecisions.list", Method: "GET", Pattern: "/api/v1/users/me/decisions"}:                                          "handleUserMeDecisions (decisions_profile.go) answers 404 while the web.decisions experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestUserMeDecisions_TokenAndCallerAuthz enables it and drives GET",
 	{OperationID: "chat.userdecisions.suggestions", Method: "GET", Pattern: "/api/v1/users/me/decisions/suggestions"}:                       "handleUserMeDecisionSuggestions (decisions_suggestions.go) answers 404 while web.decisions is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestUserMeDecisionSuggestions_AuthzScopeAndValidation enables web.decisions and drives GET",
 	{OperationID: "chat.usersecretrequests.list", Method: "GET", Pattern: "/api/v1/users/me/secret-requests"}:                               "handleUserMeActionInbox (action_inbox.go) answers 404 while the hub.agent_secrets experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestUserMeSecretRequests_AuthorizationAndScope enables it and drives GET",
+	{OperationID: "chat.usercommandrequests.list", Method: "GET", Pattern: "/api/v1/users/me/command-requests"}:                             "handleUserMeActionInbox (action_inbox.go) answers 404 while the hub.command_requests experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestUserMeCommandRequests_AuthorizationAndScope enables it and drives GET",
 	{OperationID: "chat.conversation.decisions.topic", Method: "GET", Pattern: "/api/v1/chat/conversations/{id}/decisions"}:                 "handleConversationDecisions (decisions_conversation.go) answers 404 while the web.decisions experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestConversationDecisions_Authz enables it and drives GET",
 	{OperationID: "chat.conversation.decisions.dm", Method: "GET", Pattern: "/api/v1/chat/conversations/{id}/decisions"}:                    "handleConversationDecisions (decisions_conversation.go) answers 404 while the web.decisions experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestConversationDecisions_Authz enables it and drives GET",
 	{OperationID: "inbox.summary.read", Method: "GET", Pattern: "/api/v1/users/me/inbox/summary"}:                                           "handleUserMeInboxSummary (inbox_summary.go) answers 404 while the web.inbox_dashboard experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestUserMeInboxSummary_AuthAndValidation enables it and drives GET",
@@ -82,6 +83,7 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/adapters"}:                                   "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneAdapters_CapabilitiesAndNoIO enables it and drives GET",
 	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/instances"}:                                  "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneInstances_CRUDAndProbe enables it and drives GET",
 	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/instances/{name}"}:                           "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneInstances_CRUDAndProbe enables it and drives GET",
+	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/instances/{name}/projects"}:                  "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneInstanceProjects_AuthzAndList enables it and drives GET",
 	{OperationID: "systemone.instance.create", Method: "POST", Pattern: "/api/v1/admin/system-one/instances"}:                               "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneInstances_CRUDAndProbe enables it and drives POST",
 	{OperationID: "systemone.instance.delete", Method: "DELETE", Pattern: "/api/v1/admin/system-one/instances/{name}"}:                      "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneInstances_CredentialSeparationAndSecretIsolation enables it and drives DELETE",
 	{OperationID: "systemone.instance.execute", Method: "POST", Pattern: "/api/v1/admin/system-one/instances/{name}/probe"}:                 "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestSystemOneInstances_CRUDAndProbe enables it and drives POST",
@@ -105,6 +107,7 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "project.systemoneinstances.manage", Method: "PUT", Pattern: "/api/v1/projects/{id}/system-one/instances"}:                "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate enables it and drives PUT",
 	{OperationID: "project.systemoneinstances.manage", Method: "PUT", Pattern: "/api/v1/projects/{id}/system-one/instances/{name}"}:         "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate enables it and drives PUT",
 	{OperationID: "project.systemoneinstances.manage", Method: "DELETE", Pattern: "/api/v1/projects/{id}/system-one/instances/{name}"}:      "experimentEnabled(experiments.SystemOne) answers 404 while the hub.system_one experiment is off, which is the case in this test server; TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate enables it and drives DELETE",
+	{OperationID: "project.systemoneinstances.available", Method: "GET", Pattern: "/api/v1/projects/{id}/system-one/available-instances"}:   "experimentEnabled(experiments.SystemOne) && experimentEnabled(experiments.MessagePolicies) answers 404 while either experiment is off, which is the case in this test server; TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage enables both and drives GET",
 	{OperationID: "chat.decisionprompt.dismiss", Method: "POST", Pattern: "/api/v1/decision-prompts/{messageId}/dismiss"}:                   "handleDecisionPromptRoutes (decisions_batch.go) answers 404 while the web.decisions experiment is off, which is the case in this test server; TestDecisionPromptDismiss_MinimumAgeAndDelivery drives POST with it on",
 	{OperationID: "chat.secretrequest.read", Method: "GET", Pattern: "/api/v1/secret-requests/{messageId}"}:                                 "handleSecretRequestRoutes (secret_requests_handlers.go) answers 404 while the hub.agent_secrets experiment is off, which is the case in this test server; TestSecretRequests_EndToEnd drives GET with it on",
 	{OperationID: "chat.secretrequest.fulfill", Method: "POST", Pattern: "/api/v1/secret-requests/{messageId}/fulfill"}:                     "handleSecretRequestRoutes (secret_requests_handlers.go) answers 404 while the hub.agent_secrets experiment is off, which is the case in this test server; TestSecretRequests_EndToEnd drives POST with it on",
@@ -119,6 +122,16 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "agent.screen.read", Method: "GET", Pattern: "/api/v1/agents/{id}/screen"}:                                                "handleAgentScreen (suspend_screen.go) answers 404 while the hub.suspend_screen experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestSuspendScreen_ManualSuspendAndRBACAndLook enables it and drives GET",
 	{OperationID: "agent.screen.read", Method: "GET", Pattern: "/api/v1/projects/{projectId}/agents/{id}/screen"}:                           "handleProjectAgentScreen (suspend_screen.go) answers 404 while the hub.suspend_screen experiment is off, which is the case in this test server (unsupported methods still get 405, so the control check runs); TestSuspendScreen_ManualSuspendAndRBACAndLook enables it and drives GET",
 	{OperationID: "schedule.event.read", Method: "GET", Pattern: "/api/v1/projects/{projectId}/scheduled-events/{id}/output"}:               "getScheduledEventOutput (handlers_scheduled_exec_output.go) answers 404 when the event is not an exec event with a capture run, which is the case for the default message f.scheduledEvent in this fixture (unsupported methods still get 405, so the control check runs); TestScheduledExecCapture_OneShotJSONIntegration drives 200",
+	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}:                        "handleProjectWorkspaceUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestWorkspaceUploads_HappyPathSHA256AndPartialHidden enables it and drives GET",
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads"}:                            "handleProjectWorkspaceUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestWorkspaceUploads_HappyPathSHA256AndPartialHidden enables it and drives POST",
+	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}:                       "handleProjectWorkspaceUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestWorkspaceUploads_HappyPathSHA256AndPartialHidden enables it and drives PUT",
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}/complete"}:             "handleProjectWorkspaceUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestWorkspaceUploads_HappyPathSHA256AndPartialHidden enables it and drives POST complete",
+	{OperationID: "project.workspace.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}:                    "handleProjectWorkspaceUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestWorkspaceUploads_HappyPathSHA256AndPartialHidden enables it and drives DELETE",
+	{OperationID: "project.shareddir.read", Method: "GET", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}:               "handleProjectSharedDirUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestSharedDirUploads_HappyPathSHA256AndPartialHidden enables it and drives GET",
+	{OperationID: "project.shareddir.write", Method: "POST", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads"}:                   "handleProjectSharedDirUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestSharedDirUploads_HappyPathSHA256AndPartialHidden enables it and drives POST",
+	{OperationID: "project.shareddir.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}:              "handleProjectSharedDirUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestSharedDirUploads_HappyPathSHA256AndPartialHidden enables it and drives PUT",
+	{OperationID: "project.shareddir.write", Method: "POST", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}/complete"}:    "handleProjectSharedDirUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestSharedDirUploads_HappyPathSHA256AndPartialHidden enables it and drives POST complete",
+	{OperationID: "project.shareddir.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}:           "handleProjectSharedDirUploads (uploads_handlers.go) answers 404 while the hub.large_uploads experiment is off, which is the case in this test server; TestSharedDirUploads_HappyPathSHA256AndPartialHidden enables it and drives DELETE",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -133,6 +146,7 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/adapters"}:                                   "same as the GET /api/v1/admin/system-one/instances entry below: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off; TestSystemOneAdapters_CapabilitiesAndNoIO drives 405 checks with it on",
 	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/instances"}:                                  "experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestSystemOneInstances_AuthzAndGating drives 405 checks with it on",
 	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/instances/{name}"}:                           "same as the GET /api/v1/admin/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off; TestSystemOneInstances_AuthzAndGating drives 405 checks with it on",
+	{OperationID: "systemone.instance.read", Method: "GET", Pattern: "/api/v1/admin/system-one/instances/{name}/projects"}:                  "same as the GET /api/v1/admin/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off; TestSystemOneInstanceProjects_AuthzAndList drives 405 checks with it on",
 	{OperationID: "systemone.instance.create", Method: "POST", Pattern: "/api/v1/admin/system-one/instances"}:                               "same as the GET /api/v1/admin/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off; TestSystemOneInstances_AuthzAndGating drives 405 checks with it on",
 	{OperationID: "systemone.instance.delete", Method: "DELETE", Pattern: "/api/v1/admin/system-one/instances/{name}"}:                      "same as the GET /api/v1/admin/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off; TestSystemOneInstances_AuthzAndGating drives 405 checks with it on",
 	{OperationID: "systemone.instance.execute", Method: "POST", Pattern: "/api/v1/admin/system-one/instances/{name}/probe"}:                 "same as the GET /api/v1/admin/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off; TestSystemOneInstances_AuthzAndGating drives 405 checks with it on",
@@ -151,6 +165,7 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "project.systemoneinstances.manage", Method: "PUT", Pattern: "/api/v1/projects/{id}/system-one/instances"}:                "same as the GET /api/v1/projects/{id}/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off",
 	{OperationID: "project.systemoneinstances.manage", Method: "PUT", Pattern: "/api/v1/projects/{id}/system-one/instances/{name}"}:         "same as the GET /api/v1/projects/{id}/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off",
 	{OperationID: "project.systemoneinstances.manage", Method: "DELETE", Pattern: "/api/v1/projects/{id}/system-one/instances/{name}"}:      "same as the GET /api/v1/projects/{id}/system-one/instances entry above: experimentEnabled(experiments.SystemOne) answers 404 to every method while hub.system_one is off",
+	{OperationID: "project.systemoneinstances.available", Method: "GET", Pattern: "/api/v1/projects/{id}/system-one/available-instances"}:   "experimentEnabled(experiments.SystemOne) && experimentEnabled(experiments.MessagePolicies) answers 404 to every method while either experiment is off; TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage drives 405 checks with both on",
 	{OperationID: "role.binding.effectivepermissions", Method: "GET", Pattern: "/api/v1/admin/effective-permissions"}:                       "requireExperiment(experiments.EffectivePermissions) answers 404 to every method while hub.effective_permissions is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestAdminEffectivePermissions_CallerGates drives 405 checks with it on",
 	{OperationID: "role.binding.effectivepermissions", Method: "HEAD", Pattern: "/api/v1/admin/effective-permissions"}:                      "same as the GET /api/v1/admin/effective-permissions entry above: requireExperiment(experiments.EffectivePermissions) answers 404 to every method while hub.effective_permissions is off; TestAdminEffectivePermissions_CallerGates drives 405 checks with it on",
 	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                                     "proxyAgentPort forwards every HTTP method to the tunnel (see the entry's own comment in catalog.go); the only method-based step is that GET and HEAD of the bare .../proxy URL get a 308 to .../proxy/ (ptone/scion#5566), so there is still no unsupported method to control against",
@@ -164,7 +179,7 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "agent.secrets.access", Method: "DELETE", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                                   "same as the GET .../secrets control entry above",
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                                       "handlePolicies (handlers_policies.go) answers 410 Gone for every method by design; there is no unsupported method to control against",
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                                  "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every method by design, the same as the GET /api/v1/policies entry above",
-	{OperationID: "user.session.logout", Method: "POST", Pattern: "/api/v1/auth/logout"}:                                                    "every method on /api/v1/auth/logout gets the same route-guard answer, so there is no unsupported method to control against",
+	{OperationID: "user.session.logout", Method: "POST", Pattern: "/api/v1/auth/logout"}:                                                    "handleAuthLogout accepts every method idempotently, so there is no unsupported method to control against",
 	{OperationID: "broker.messagefailures.report", Method: "POST", Pattern: "/api/v1/runtime-brokers/{id}/message-failures"}:                "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"message-failures\" && method==POST as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
 	{OperationID: "broker.heartbeat", Method: "POST", Pattern: "/api/v1/runtime-brokers/{id}/heartbeat"}:                                    "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"heartbeat\" && method==POST as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
 	{OperationID: "broker.read", Method: "GET", Pattern: "/api/v1/runtime-brokers/{id}/projects"}:                                           "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"projects\" && method==GET as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
@@ -178,6 +193,16 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "chat.commandrequest.output", Method: "GET", Pattern: "/api/v1/command-requests/{id}/output"}:                             "handleCommandRequestRoutes (command_requests_handlers.go) answers 404 to every method while hub.command_requests is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestCommandRequestOutput_AuthzAndSharing drives the route with it on",
 	{OperationID: "chat.commandrequest.frommessage", Method: "POST", Pattern: "/api/v1/command-requests/from-message"}:                      "handleCommandRequestRoutes (command_requests_handlers.go) answers 404 to every method while hub.command_requests is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestCommandRequests_FromMessage_EndToEnd drives the route with it on",
 	{OperationID: "chat.commandrequest.dismiss", Method: "POST", Pattern: "/api/v1/command-requests/{id}/dismiss"}:                          "handleCommandRequestRoutes (command_requests_handlers.go) answers 404 to every method while hub.command_requests is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestCommandRequests_DismissAndWithdraw drives the route with it on",
+	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}:                        "handleProjectWorkspaceUploads (uploads_handlers.go) answers 404 to every method while hub.large_uploads is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestWorkspaceUploads_HappyPathSHA256AndPartialHidden drives the route with it on",
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads"}:                            "same as the GET workspace/uploads/{sid} entry above: handleProjectWorkspaceUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}:                       "same as the GET workspace/uploads/{sid} entry above: handleProjectWorkspaceUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}/complete"}:             "same as the GET workspace/uploads/{sid} entry above: handleProjectWorkspaceUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.workspace.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/workspace/uploads/{sid}"}:                    "same as the GET workspace/uploads/{sid} entry above: handleProjectWorkspaceUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.shareddir.read", Method: "GET", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}:               "handleProjectSharedDirUploads (uploads_handlers.go) answers 404 to every method while hub.large_uploads is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestSharedDirUploads_HappyPathSHA256AndPartialHidden drives the route with it on",
+	{OperationID: "project.shareddir.write", Method: "POST", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads"}:                   "same as the GET shared-dirs/{name}/uploads/{sid} entry above: handleProjectSharedDirUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.shareddir.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}:              "same as the GET shared-dirs/{name}/uploads/{sid} entry above: handleProjectSharedDirUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.shareddir.write", Method: "POST", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}/complete"}:    "same as the GET shared-dirs/{name}/uploads/{sid} entry above: handleProjectSharedDirUploads answers 404 to every method while hub.large_uploads is off",
+	{OperationID: "project.shareddir.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}"}:           "same as the GET shared-dirs/{name}/uploads/{sid} entry above: handleProjectSharedDirUploads answers 404 to every method while hub.large_uploads is off",
 }
 
 // suffixCheckExclusions lists HTTP catalog entry points for which
@@ -605,4 +630,114 @@ func TestLiveInventoryExclusionsNoRepeatedKeys(t *testing.T) {
 			seen[key] = pos
 		}
 	}
+}
+
+type undeclaredMethodKey struct {
+	Method  string
+	Pattern string
+}
+
+// prefixUndeclaredMethodExclusions lists (method, pattern) pairs on
+// prefixSubRouteTable rows where sending an undeclared standard HTTP method
+// returns a status other than 404/405 for a documented pre-dispatch reason
+// (for example, an unconfigured backend returning 501/503 before method
+// dispatch, or a handler that runs a pre-method auth/validation check).
+var prefixUndeclaredMethodExclusions = map[undeclaredMethodKey]string{
+	{Method: http.MethodDelete, Pattern: "/api/v1/admin/invites/stats"}: "handleAdminInviteByID (admin_invites.go) matches id == \"stats\" only on GET; DELETE falls through to the declared sibling route DELETE /api/v1/admin/invites/{id} with id=\"stats\"",
+}
+
+// TestPrefixSubRoutes_LiveUndeclaredMethodCheck probes every row in
+// prefixSubRouteTable with every standard HTTP method (GET, POST, PUT, PATCH,
+// DELETE) NOT declared in row.methods and requires the live server mux to
+// reject it with 404 or 405 (unless explicitly excluded in
+// prefixUndeclaredMethodExclusions with a specific reason).
+//
+// This closes the method-completeness gap of the static AST guard: adding a
+// new HTTP method (e.g. PUT) to an existing prefix dispatcher without adding
+// it to prefixSubRouteTable (and the authz catalog) fails this test.
+//
+// Boundary: for experiment-gated routes whose experiment is off in testServer,
+// the handler returns 404 to every method, so this probe cannot distinguish
+// undeclared methods until the experiment is enabled.
+func TestPrefixSubRoutes_LiveUndeclaredMethodCheck(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	f := seedLiveInventoryFixtures(t, ctx, srv, s)
+	patternFallback := patternOverrides(f)
+	opFallback := make(map[string]map[string]string)
+	for k, v := range opPatternOverrides(f) {
+		if _, exists := opFallback[k.Pattern]; !exists {
+			opFallback[k.Pattern] = v
+		}
+	}
+	queryFor := queryOverrides(f)
+
+	standardMethods := []string{
+		http.MethodGet,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+	}
+
+	// Track valid (undeclared) keys for staleness checking of
+	// prefixUndeclaredMethodExclusions.
+	validUndeclared := make(map[undeclaredMethodKey]bool)
+
+	checked, excluded := 0, 0
+	for _, row := range prefixSubRouteTable {
+		declared := make(map[string]bool, len(row.methods))
+		for _, m := range row.methods {
+			declared[m] = true
+		}
+
+		params := patternFallback[row.pattern]
+		if params == nil {
+			params = opFallback[row.pattern]
+		}
+		path := substituteLiveInventoryParams(row.pattern, params)
+		if q, ok := queryFor[row.pattern]; ok {
+			path += "?" + q
+		}
+
+		for _, method := range standardMethods {
+			if declared[method] {
+				continue
+			}
+			key := undeclaredMethodKey{Method: method, Pattern: row.pattern}
+			validUndeclared[key] = true
+
+			if reason, skip := prefixUndeclaredMethodExclusions[key]; skip {
+				t.Logf("undeclared-method check skipped for %s %s: %s", method, path, reason)
+				excluded++
+				continue
+			}
+
+			var body interface{}
+			switch method {
+			case http.MethodPost, http.MethodPut, http.MethodPatch:
+				body = map[string]interface{}{}
+			}
+
+			rec := doRequest(t, srv, method, path, body)
+			checked++
+			if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s (prefix %s, pattern %s): undeclared method returned %d, want 404 or 405 — either add %s to prefixSubRouteTable and the authz catalog, or document a pre-dispatch reason in prefixUndeclaredMethodExclusions",
+					method, path, row.prefix, row.pattern, rec.Code, method)
+			}
+		}
+	}
+
+	for key := range prefixUndeclaredMethodExclusions {
+		if !validUndeclared[key] {
+			t.Errorf("stale prefixUndeclaredMethodExclusions entry: %s %s is either not in prefixSubRouteTable or is already declared",
+				key.Method, key.Pattern)
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("no undeclared methods were probed on prefixSubRouteTable — this test is broken")
+	}
+	t.Logf("prefix sub-route undeclared-method check: %d probes passed (%d excluded)", checked, excluded)
 }

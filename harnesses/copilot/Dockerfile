@@ -39,16 +39,22 @@ COPY --chown=scion:scion home/.copilot/settings.json /home/scion/.copilot/settin
 RUN printf '{\n  "trustedFolders": ["/workspace"]\n}\n' > /home/scion/.copilot/config.json && \
     chown scion:scion /home/scion/.copilot/config.json
 
-# Install copilot binary (glibc variant — scion-base is Debian bookworm).
-# The binary is a self-contained Node.js SEA — no npm/node dependency needed.
-RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
-    if [ "$COPILOT_CLI_VERSION" = "latest" ]; then \
-      URL="https://github.com/github/copilot-cli/releases/latest/download/copilot-linux-${ARCH}.tar.gz"; \
-    else \
-      URL="https://github.com/github/copilot-cli/releases/download/v${COPILOT_CLI_VERSION}/copilot-linux-${ARCH}.tar.gz"; \
-    fi && \
-    curl -fsSL "$URL" | tar xz -C /usr/local/bin && \
-    chmod +x /usr/local/bin/copilot
+# Install the Copilot CLI from npm (@github/copilot), as the claude harness
+# installs Claude Code. npm verifies each tarball against the registry's
+# sha512 integrity, and the package pulls the binary for this platform as an
+# optional dependency: npm installs only the one matching the build's CPU and
+# libc (@github/copilot-linux-x64 or -linux-arm64 on scion-base, which is
+# glibc-based Debian trixie). It uses the npm mirror chosen when core-base was
+# built (--build-arg NPM_REGISTRY, exported as NPM_CONFIG_REGISTRY, which takes
+# precedence over a registry= line in .npmrc). A mirror that needs credentials
+# gets them from an .npmrc passed with --secret id=npmrc,src=<path>; the secret
+# is never written into a layer. COPILOT_CLI_VERSION=latest resolves to the
+# newest published release.
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm cache clean --force \
+  && npm install -g "@github/copilot@${COPILOT_CLI_VERSION}" \
+  && npm cache clean --force \
+  && command -v copilot
 
 # Build-time smoke check: parse the bundle launch flags from config.yaml and
 # invoke copilot with --version (which validates all flags before exiting and

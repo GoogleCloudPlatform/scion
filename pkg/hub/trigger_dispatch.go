@@ -54,7 +54,8 @@ type triggerRuntime struct {
 	cancel               context.CancelFunc
 	done                 chan struct{}
 	started              bool
-	projectCapNotify     map[string]time.Time // per-trigger 1h cooldown for project live-agent cap notification (§7.4)
+	projectCapNotify     map[string]time.Time // per-trigger 1h cooldown for project live-agent cap warning log (§7.4)
+	notifyNow            func() time.Time     // optional clock override for notify-on-failure tests
 }
 
 // SetTriggerTemplateRefusalAuditSink overrides the audit sink used for
@@ -131,13 +132,21 @@ var (
 	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
 	_ trigger.PreFireRefuser       = serverTriggerCore{}
 	_ trigger.RetryTargetChecker   = serverTriggerCore{}
+	_ trigger.FireOutcomeNotifier  = serverTriggerCore{}
 )
 
-func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (string, string, bool) {
+func (c serverTriggerCore) NotifyFireOutcome(ctx context.Context, tr *store.Trigger, fire *store.TriggerFire, outcome hubfire.FireOutcome) {
+	if c.srv == nil {
+		return
+	}
+	c.srv.notifyTriggerFire(ctx, tr, fire, outcome)
+}
+
+func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, actionType string, ev *hubfire.FireEvent) (string, string, bool) {
 	if c.srv == nil || tr == nil || ev == nil {
 		return "", "", false
 	}
-	if !trigger.ActionSubjectToPreFireGuards(tr.ActionType) {
+	if !trigger.ActionSubjectToPreFireGuards(actionType) {
 		return "", "", false
 	}
 	if refusal, auditReason := c.srv.githubBotSenderRefusal(ctx, ev); refusal != nil {
@@ -274,25 +283,50 @@ func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireReq
 	}
 
 	// 1. Per-trigger fire rate (max_fires_per_minute).
+	// When trig.RateDecision is attached (trigger dispatcher path), the rate
+	// decision is made once per matched (trigger, event) and shared across all
+	// sibling actions so concurrent drainers never split one matched event
+	// (action-arrays §3.5).
 	if trig.MaxFiresPerMinute > 0 && triggerID != "" {
-		maxPerMin := min(trig.MaxFiresPerMinute, store.MaxTriggerFiresPerMinute)
-		since := time.Now().UTC().Add(-time.Minute)
-		var recent int
-		err := s.store.WithTx(ctx, func(tx store.Store) error {
-			if req.ProjectID != "" {
-				if lErr := tx.LockTriggerQuota(ctx, req.ProjectID); lErr != nil {
-					return lErr
-				}
+		if trig.RateDecision != nil && trig.RateDecision.Decided {
+			if trig.RateDecision.Skipped {
+				return trigger.ErrFireRateLimit, nil
 			}
-			var cErr error
-			recent, cErr = tx.CountRecentTriggerFires(ctx, triggerID, since, req.Authority.FireID)
-			return cErr
-		})
-		if err != nil {
-			return "", fmt.Errorf("count recent trigger fires: %w", err)
-		}
-		if recent >= maxPerMin {
-			return trigger.ErrFireRateLimit, nil
+		} else {
+			maxPerMin := min(trig.MaxFiresPerMinute, store.MaxTriggerFiresPerMinute)
+			since := time.Now().UTC().Add(-time.Minute)
+			var recent int
+			err := s.store.WithTx(ctx, func(tx store.Store) error {
+				if req.ProjectID != "" {
+					if lErr := tx.LockTriggerQuota(ctx, req.ProjectID); lErr != nil {
+						return lErr
+					}
+				}
+				var cErr error
+				recent, cErr = tx.CountRecentTriggerFires(ctx, triggerID, since, req.Authority.FireID)
+				if cErr != nil {
+					return cErr
+				}
+				if req.Authority.FireID != "" {
+					decision := store.TriggerFireRateDecisionAdmitted
+					if recent >= maxPerMin {
+						decision = store.TriggerFireRateDecisionLimited
+					}
+					return tx.RecordTriggerFireRateDecision(ctx, req.Authority.FireID, decision)
+				}
+				return nil
+			})
+			if err != nil {
+				return "", fmt.Errorf("count recent trigger fires: %w", err)
+			}
+			skipped := recent >= maxPerMin
+			if trig.RateDecision != nil {
+				trig.RateDecision.Decided = true
+				trig.RateDecision.Skipped = skipped
+			}
+			if skipped {
+				return trigger.ErrFireRateLimit, nil
+			}
 		}
 	}
 
@@ -406,7 +440,8 @@ func (s *Server) notifyTriggerProjectCapReached(ctx context.Context, req hubfire
 	rt.projectCapNotify[triggerID] = now
 	rt.mu.Unlock()
 
-	// P7 hook point: invoke notifyFireOutcome(ctx, req, FireOutcome{Status: skipped, Error: "project trigger-agent cap"}, ...) here.
+	// Hub user/agent failure notification (§10) is dispatched outside any WithTx
+	// by serverTriggerCore.NotifyFireOutcome once the skipped fire row commits.
 	slog.WarnContext(ctx, "trigger dispatch skipped: project live trigger-agent cap reached",
 		"project_id", req.ProjectID,
 		"trigger_id", triggerID,

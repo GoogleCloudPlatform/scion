@@ -46,6 +46,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   VIEW_AS_MEMBER_FLAG,
   agentSecretsEnabled,
+  commandRequestsEnabled,
   decisionsEnabled,
   isFeatureEnabled,
   isInboxDashboardEnabled,
@@ -102,6 +103,7 @@ const PROFILE_SECTIONS: NavSection[] = [
     items: [
       { path: '/profile/telegram', label: 'Telegram', icon: 'send' },
       { path: '/profile/teams', label: 'Microsoft Teams', icon: 'chat-square' },
+      { path: '/profile/slack', label: 'Slack', icon: 'hash' },
     ],
   },
 ];
@@ -150,6 +152,10 @@ export class ScionProfileNav extends LitElement {
   /** Whether `hub.agent_secrets` is enabled. */
   @state()
   private agentSecretsFlagEnabled = false;
+
+  /** Whether `hub.command_requests` is enabled. */
+  @state()
+  private commandRequestsFlagEnabled = false;
 
   /** Whether `web.inbox_dashboard` is enabled. */
   @state()
@@ -218,6 +224,10 @@ export class ScionProfileNav extends LitElement {
     const nextAgentSecrets = agentSecretsEnabled();
     if (nextAgentSecrets !== this.agentSecretsFlagEnabled) {
       this.agentSecretsFlagEnabled = nextAgentSecrets;
+    }
+    const nextCommandRequests = commandRequestsEnabled();
+    if (nextCommandRequests !== this.commandRequestsFlagEnabled) {
+      this.commandRequestsFlagEnabled = nextCommandRequests;
     }
     const nextInbox = isInboxDashboardEnabled();
     if (nextInbox !== this.inboxEnabled) {
@@ -750,6 +760,7 @@ export class ScionProfileNav extends LitElement {
     }
     this.decisionsEnabled = decisionsEnabled();
     this.agentSecretsFlagEnabled = agentSecretsEnabled();
+    this.commandRequestsFlagEnabled = commandRequestsEnabled();
     this.inboxEnabled = isInboxDashboardEnabled();
     if (this.decisionsEnabled || this.inboxEnabled) {
       this.ensureProfileStateScope();
@@ -976,7 +987,8 @@ export class ScionProfileNav extends LitElement {
               </div>
             `
           : (this.decisionsEnabled && this.decisionsNavVisibility === 'visible') ||
-              this.agentSecretsFlagEnabled
+              this.agentSecretsFlagEnabled ||
+              this.commandRequestsFlagEnabled
             ? html`
                 <div class="nav-section nav-section-decisions">
                   <ul class="nav-list">
@@ -1009,6 +1021,22 @@ export class ScionProfileNav extends LitElement {
                             >
                               <sl-icon name="shield-lock"></sl-icon>
                               <span class="nav-link-text">Agent Secrets</span>
+                            </a>
+                          </li>
+                        `
+                      : nothing}
+                    ${this.commandRequestsFlagEnabled
+                      ? html`
+                          <li class="nav-item">
+                            <a
+                              href="/profile/agent-executions"
+                              data-agent-executions-nav-link
+                              class="nav-link ${this.isActive('/profile/agent-executions')
+                                ? 'active'
+                                : ''}"
+                            >
+                              <sl-icon name="terminal"></sl-icon>
+                              <span class="nav-link-text">Agent Executions</span>
                             </a>
                           </li>
                         `

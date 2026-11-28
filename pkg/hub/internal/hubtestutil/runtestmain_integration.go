@@ -38,13 +38,9 @@ func RunTestMain(m *testing.M) int {
 	teardown := testutil.IsolateHome("scion-hub-test-home-*")
 	SilenceSciontoolLog()
 	ClearAmbientGCPProjectEnv()
-	restoreLsRemote := InstallHermeticGitLsRemote()
-	restoreSparseCheckout := InstallHermeticGitSparseCheckout()
 	enttest.MainSetup()
 	code := m.Run()
 	enttest.MainTeardown()
-	restoreSparseCheckout()
-	restoreLsRemote()
 	teardown()
 	stopMemGuard()
 	return code

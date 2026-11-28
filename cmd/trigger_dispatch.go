@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -67,7 +66,7 @@ func bindDispatchAgentFlags(fs *pflag.FlagSet, v *dispatchAgentFlagValues) {
 	fs.StringVar(&v.ackComment, "ack-comment", "", "GitHub acknowledgement comment template posted after dispatch-agent succeeds (requires --github)")
 	fs.StringVar(&v.githubToken, "github-token", "", "GitHub token precedence for dispatched agents (installation or user_preferred)")
 	fs.StringVar(&v.agentRole, "agent-role", "", "Explicit role for dispatched agents (optional; defaults to project/hub ladder)")
-	fs.StringArrayVar(&v.allow, "allow", nil, "Explicitly opt in an untrusted event variable path (or trailing .*) for template rendering (repeatable; derived automatically when omitted)")
+	fs.StringArrayVar(&v.allow, "allow", nil, "Optional narrowing list of allowed untrusted event variable paths (or trailing .*) for template rendering (repeatable; derived by the Hub when omitted)")
 }
 
 func normalizeTriggerActionKind(raw string) (string, error) {
@@ -117,68 +116,6 @@ func parseTriggerLabels(rawArgs []string) (map[string]string, error) {
 		out[key] = raw[idx+1:]
 	}
 	return out, nil
-}
-
-// deriveDispatchUntrustedVars parses every template slot on a dispatch_agent
-// action using pkg/triggertemplate and returns the deduplicated untrusted
-// placeholder paths in first-appearance order (Stage 2 D-S2-5).
-func deriveDispatchUntrustedVars(action *hubclient.TriggerActionSpec) ([]string, error) {
-	var (
-		derived []string
-		seen    = make(map[string]bool)
-	)
-	collect := func(raw, slot string) error {
-		if raw == "" {
-			return nil
-		}
-		tmpl, err := triggertemplate.Parse(raw, slot)
-		if err != nil {
-			var pe *triggertemplate.ParseError
-			if errors.As(err, &pe) {
-				return newUsageError("invalid template in slot %q at byte offset %d: %s",
-					triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
-			}
-			return newUsageError("invalid template in slot %q: %v", triggerTerminalText(slot, false), err)
-		}
-		for _, p := range tmpl.Untrusted() {
-			if !seen[p] {
-				seen[p] = true
-				derived = append(derived, p)
-			}
-		}
-		return nil
-	}
-
-	if err := collect(action.Task, triggertemplate.SlotTask); err != nil {
-		return nil, err
-	}
-	if err := collect(action.AgentName, triggertemplate.SlotName); err != nil {
-		return nil, err
-	}
-	if err := collect(action.Branch, triggertemplate.SlotBranch); err != nil {
-		return nil, err
-	}
-	if len(action.Labels) > 0 {
-		keys := make([]string, 0, len(action.Labels))
-		for k := range action.Labels {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if err := collect(action.Labels[k], triggertemplate.SlotLabel); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err := collect(action.ReuseMessage, triggertemplate.SlotMessage); err != nil {
-		return nil, err
-	}
-	if action.AckComment != nil && action.AckComment.Body != "" {
-		if err := collect(action.AckComment.Body, hub.TriggerTemplateSlotGitHubAckCommentBody); err != nil {
-			return nil, err
-		}
-	}
-	return derived, nil
 }
 
 // deriveGitHubCommentUntrustedVars parses a github.comment body template using
@@ -316,37 +253,6 @@ func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) err
 	return nil
 }
 
-// deriveMessageUntrustedVars parses a message-action template using
-// triggertemplate.SlotMessage and returns the deduplicated untrusted
-// placeholder paths in first-appearance order (Stage 2 §5.7, D-S2-5).
-func deriveMessageUntrustedVars(raw string) ([]string, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	tmpl, err := triggertemplate.Parse(raw, triggertemplate.SlotMessage)
-	if err != nil {
-		var pe *triggertemplate.ParseError
-		if errors.As(err, &pe) {
-			return nil, newUsageError("invalid template in slot %q at byte offset %d: %s",
-				triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
-		}
-		return nil, newUsageError("invalid template in slot %q: %v", triggertemplate.SlotMessage, err)
-	}
-	untrusted := tmpl.Untrusted()
-	if len(untrusted) == 0 {
-		return nil, nil
-	}
-	seen := make(map[string]bool, len(untrusted))
-	derived := make([]string, 0, len(untrusted))
-	for _, p := range untrusted {
-		if !seen[p] {
-			seen[p] = true
-			derived = append(derived, p)
-		}
-	}
-	return derived, nil
-}
-
 func parseTriggerQueueTTL(raw string) (int, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
@@ -419,23 +325,18 @@ func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool
 		AgentRole:    strings.TrimSpace(v.agentRole),
 	}
 
-	var derived []string
 	if allowExplicit || len(v.allow) > 0 {
 		action.UntrustedVars = append([]string(nil), v.allow...)
-	} else {
-		derived, err = deriveDispatchUntrustedVars(&action)
-		if err != nil {
-			return hubclient.TriggerActionSpec{}, nil, err
-		}
-		if len(derived) > 0 {
-			action.UntrustedVars = derived
-		}
 	}
 
-	return action, derived, nil
+	return action, nil, nil
 }
 
 func printDerivedUntrustedVars(paths []string) {
+	printDerivedUntrustedVarsIndented("", paths)
+}
+
+func printDerivedUntrustedVarsIndented(prefix string, paths []string) {
 	if len(paths) == 0 || isTriggerJSONOutput() {
 		return
 	}
@@ -443,7 +344,7 @@ func printDerivedUntrustedVars(paths []string) {
 	for i, p := range paths {
 		safe[i] = triggerTerminalText(p, false)
 	}
-	fmt.Printf("Event values that will be inserted as data: %s\n", strings.Join(safe, ", "))
+	fmt.Printf("%sEvent values that will be inserted as data: %s\n", prefix, strings.Join(safe, ", "))
 }
 
 // formatTriggerAPIError maps structured Hub trigger authoring errors (rules,
@@ -561,15 +462,19 @@ var (
 	triggerUpdateMaxConcurrent     int
 	triggerUpdateRevision          int
 
-	triggerUpdateAction    string
-	triggerUpdateAgent     string
-	triggerUpdateMessage   string
-	triggerUpdateInterrupt bool
-	triggerUpdateWake      bool
-	triggerUpdatePlain     bool
-	triggerUpdateOffline   string
-	triggerUpdateQueueTTL  string
-	triggerUpdateDispatch  dispatchAgentFlagValues
+	triggerUpdateAction      string
+	triggerUpdateAgent       string
+	triggerUpdateMessage     string
+	triggerUpdateInterrupt   bool
+	triggerUpdateWake        bool
+	triggerUpdatePlain       bool
+	triggerUpdateOffline     string
+	triggerUpdateQueueTTL    string
+	triggerUpdateDispatch    dispatchAgentFlagValues
+	updateActionCollector    triggerActionGroupCollector
+	triggerUpdateNotifyUser  bool
+	triggerUpdateNotifyAgent string
+	triggerUpdateNotifyOn    []string
 )
 
 var triggerUpdateCmd = &cobra.Command{
@@ -590,6 +495,7 @@ Note: agent callers cannot PATCH trigger definitions.`,
 }
 
 func runTriggerUpdate(cmd *cobra.Command, args []string) error {
+	defer updateActionCollector.reset()
 	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
 	if err != nil {
 		return err
@@ -632,6 +538,34 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		}
 		v := triggerUpdateMaxConcurrent
 		req.MaxConcurrentDispatches = &v
+		anyChange = true
+	}
+	if flags.Changed("notify-user") || flags.Changed("notify-agent") || flags.Changed("notify-on") {
+		patch := &hubclient.TriggerNotifyPatchSpec{}
+		if flags.Changed("notify-user") {
+			v := triggerUpdateNotifyUser
+			patch.UserNotice = &v
+		}
+		if flags.Changed("notify-agent") {
+			ref := strings.TrimSpace(triggerUpdateNotifyAgent)
+			empty := ""
+			if ref == "" {
+				patch.AgentID = &empty
+				patch.AgentName = &empty
+			} else if uuid.Validate(ref) == nil {
+				patch.AgentID = &ref
+			} else {
+				patch.AgentName = &ref
+			}
+		}
+		if flags.Changed("notify-on") {
+			outcomes, nErr := parseTriggerNotifyOutcomes(triggerUpdateNotifyOn)
+			if nErr != nil {
+				return nErr
+			}
+			patch.OnOutcomes = &outcomes
+		}
+		req.Notify = patch
 		anyChange = true
 	}
 	if flags.Changed("webhook") || flags.Changed("github") {
@@ -702,7 +636,6 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		flags.Changed("on-name-conflict") || flags.Changed("branch") || flags.Changed("label") || flags.Changed("ephemeral") ||
 		flags.Changed("reuse-message") || flags.Changed("ack-comment") || flags.Changed("github-token") || flags.Changed("agent-role") || flags.Changed("allow")
 
-	var derivedUntrusted []string
 	if actionFlagsChanged {
 		existing, gErr := hubCtx.Client.Triggers(projectID).Get(ctx, fullID)
 		if gErr != nil {
@@ -712,206 +645,221 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 			rev := existing.AuthorizationRevision
 			req.ExpectedRevision = &rev
 		}
-		targetType := existing.Action.Type
-		if flags.Changed("action") {
-			normalized, nErr := normalizeTriggerActionKind(triggerUpdateAction)
-			if nErr != nil {
-				return nErr
+		if updateActionCollector.isMulti() {
+			isGitHub := existing.Source.Kind == "github"
+			if flags.Changed("github") && triggerUpdateGitHub {
+				isGitHub = true
+			} else if flags.Changed("webhook") {
+				isGitHub = false
 			}
-			targetType = normalized
-		}
+			specs, _, gErr := buildActionSpecsFromGroups(updateActionCollector.groups, isGitHub)
+			if gErr != nil {
+				return gErr
+			}
+			req.Actions = &specs
+			anyChange = true
+		} else {
+			existingActions := effectiveTriggerActions(existing)
+			var existingFirst hubclient.TriggerActionSpec
+			if len(existingActions) > 0 {
+				existingFirst = existingActions[0]
+			}
+			if !flags.Changed("action") && len(existingActions) > 1 {
+				return newUsageError("updating actions on a multi-action trigger requires passing --action for each action in the replacement list")
+			}
+			targetType := existingFirst.Type
+			if flags.Changed("action") {
+				normalized, nErr := normalizeTriggerActionKind(triggerUpdateAction)
+				if nErr != nil {
+					return nErr
+				}
+				targetType = normalized
+			}
 
-		if err := validateUpdateCrossActionFlags(flags, targetType); err != nil {
-			return err
-		}
+			if err := validateUpdateCrossActionFlags(flags, targetType); err != nil {
+				return err
+			}
 
-		switch targetType {
-		case "message":
-			spec := hubclient.TriggerActionSpec{Type: "message"}
-			if existing.Action.Type == "message" {
-				spec.AgentID = existing.Action.AgentID
-				spec.AgentName = existing.Action.AgentName
-				spec.Message = existing.Action.Message
-				spec.Interrupt = existing.Action.Interrupt
-				spec.Plain = existing.Action.Plain
-				spec.Wake = existing.Action.Wake
-				spec.Offline = existing.Action.Offline
-				spec.QueueTTLSeconds = existing.Action.QueueTTLSeconds
-				if existing.Action.UntrustedVars != nil {
-					spec.UntrustedVars = append([]string(nil), existing.Action.UntrustedVars...)
-				}
-			}
-			if flags.Changed("agent") {
-				agentRef := strings.TrimSpace(triggerUpdateAgent)
-				if agentRef == "" {
-					return newUsageError("--agent cannot be empty")
-				}
-				if uuid.Validate(agentRef) == nil {
-					spec.AgentID = agentRef
-					spec.AgentName = ""
-				} else {
-					spec.AgentName = agentRef
-					spec.AgentID = ""
-				}
-			}
-			if flags.Changed("message") {
-				spec.Message = triggerUpdateMessage
-			}
-			if flags.Changed("interrupt") {
-				spec.Interrupt = triggerUpdateInterrupt
-			}
-			if flags.Changed("wake") {
-				spec.Wake = triggerUpdateWake
-			}
-			if flags.Changed("plain") {
-				spec.Plain = triggerUpdatePlain
-			}
-			if flags.Changed("offline") {
-				offline := strings.TrimSpace(triggerUpdateOffline)
-				if offline != "" && offline != "skip" && offline != "queue" {
-					return newUsageError("invalid --offline %q (supported: skip, queue)", triggerTerminalText(offline, false))
-				}
-				spec.Offline = offline
-				if offline != "queue" {
-					spec.QueueTTLSeconds = 0
-				}
-			}
-			if flags.Changed("queue-ttl") {
-				rawTTL := strings.TrimSpace(triggerUpdateQueueTTL)
-				if rawTTL == "" {
-					spec.QueueTTLSeconds = 0
-				} else {
-					if spec.Offline != "queue" {
-						return newUsageError("--queue-ttl requires --offline queue")
-					}
-					secs, tErr := parseTriggerQueueTTL(rawTTL)
-					if tErr != nil {
-						return tErr
-					}
-					spec.QueueTTLSeconds = secs
-				}
-			}
-			if flags.Changed("allow") {
-				spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
-			} else if flags.Changed("message") || flags.Changed("action") {
-				derived, dErr := deriveMessageUntrustedVars(spec.Message)
-				if dErr != nil {
-					return dErr
-				}
-				spec.UntrustedVars = derived
-				derivedUntrusted = derived
-			}
-			req.Action = &spec
-
-		case "dispatch_agent":
-			if flags.Changed("task") && flags.Changed("task-file") {
-				return newUsageError("--task and --task-file cannot be used together")
-			}
-			spec := hubclient.TriggerActionSpec{Type: "dispatch_agent"}
-			if existing.Action.Type == "dispatch_agent" {
-				spec.AgentName = existing.Action.AgentName
-				spec.NameConflict = existing.Action.NameConflict
-				spec.Template = existing.Action.Template
-				spec.Task = existing.Action.Task
-				spec.Branch = existing.Action.Branch
-				spec.Ephemeral = existing.Action.Ephemeral
-				spec.GithubToken = existing.Action.GithubToken
-				spec.AgentRole = existing.Action.AgentRole
-				spec.ReuseMessage = existing.Action.ReuseMessage
-				if existing.Action.AckComment != nil {
-					cp := *existing.Action.AckComment
-					spec.AckComment = &cp
-				}
-				spec.NoAuth = existing.Action.NoAuth
-				if existing.Action.Labels != nil {
-					spec.Labels = make(map[string]string, len(existing.Action.Labels))
-					for k, v := range existing.Action.Labels {
-						spec.Labels[k] = v
+			switch targetType {
+			case "message":
+				spec := hubclient.TriggerActionSpec{Type: "message"}
+				if existingFirst.Type == "message" && len(existingActions) <= 1 {
+					spec.AgentID = existingFirst.AgentID
+					spec.AgentName = existingFirst.AgentName
+					spec.Message = existingFirst.Message
+					spec.Interrupt = existingFirst.Interrupt
+					spec.Plain = existingFirst.Plain
+					spec.Wake = existingFirst.Wake
+					spec.Offline = existingFirst.Offline
+					spec.QueueTTLSeconds = existingFirst.QueueTTLSeconds
+					if existingFirst.UntrustedVars != nil {
+						spec.UntrustedVars = append([]string(nil), existingFirst.UntrustedVars...)
 					}
 				}
-				if existing.Action.UntrustedVars != nil {
-					spec.UntrustedVars = append([]string(nil), existing.Action.UntrustedVars...)
+				if flags.Changed("agent") {
+					agentRef := strings.TrimSpace(triggerUpdateAgent)
+					if agentRef == "" {
+						return newUsageError("--agent cannot be empty")
+					}
+					if uuid.Validate(agentRef) == nil {
+						spec.AgentID = agentRef
+						spec.AgentName = ""
+					} else {
+						spec.AgentName = agentRef
+						spec.AgentID = ""
+					}
 				}
-			}
-			if flags.Changed("template") {
-				spec.Template = strings.TrimSpace(triggerUpdateDispatch.template)
-			}
-			if flags.Changed("task") {
-				spec.Task = triggerUpdateDispatch.task
-			}
-			if flags.Changed("task-file") {
-				content, fErr := readTriggerTaskFile(strings.TrimSpace(triggerUpdateDispatch.taskFile))
-				if fErr != nil {
-					return fErr
+				if flags.Changed("message") {
+					spec.Message = triggerUpdateMessage
 				}
-				spec.Task = content
-			}
-			if flags.Changed("agent-name") {
-				spec.AgentName = strings.TrimSpace(triggerUpdateDispatch.agentName)
-			}
-			if flags.Changed("on-name-conflict") {
-				nc := strings.TrimSpace(triggerUpdateDispatch.onNameConflict)
-				if nc != "" && nc != "suffix" && nc != "skip" {
-					return newUsageError("invalid --on-name-conflict %q (supported: suffix, skip)", triggerTerminalText(nc, false))
+				if flags.Changed("interrupt") {
+					spec.Interrupt = triggerUpdateInterrupt
 				}
-				spec.NameConflict = nc
-			}
-			if flags.Changed("branch") {
-				spec.Branch = strings.TrimSpace(triggerUpdateDispatch.branch)
-			}
-			if flags.Changed("label") {
-				labelsMap, lErr := parseTriggerLabels(triggerUpdateDispatch.labels)
-				if lErr != nil {
-					return lErr
+				if flags.Changed("wake") {
+					spec.Wake = triggerUpdateWake
 				}
-				spec.Labels = labelsMap
-			}
-			if flags.Changed("ephemeral") {
-				spec.Ephemeral = triggerUpdateDispatch.ephemeral
-			}
-			if flags.Changed("reuse-message") {
-				spec.ReuseMessage = triggerUpdateDispatch.reuseMessage
-			}
-			if flags.Changed("ack-comment") {
-				if strings.TrimSpace(triggerUpdateDispatch.ackComment) == "" {
-					spec.AckComment = nil
-				} else {
-					spec.AckComment = &hubclient.DispatchAgentAckComment{Body: triggerUpdateDispatch.ackComment}
+				if flags.Changed("plain") {
+					spec.Plain = triggerUpdatePlain
 				}
-			}
-			if flags.Changed("github-token") {
-				gt := strings.TrimSpace(triggerUpdateDispatch.githubToken)
-				if gt != "" && gt != "installation" && gt != "user_preferred" {
-					return newUsageError("invalid --github-token %q (supported: installation, user_preferred)", triggerTerminalText(gt, false))
+				if flags.Changed("offline") {
+					offline := strings.TrimSpace(triggerUpdateOffline)
+					if offline != "" && offline != "skip" && offline != "queue" {
+						return newUsageError("invalid --offline %q (supported: skip, queue)", triggerTerminalText(offline, false))
+					}
+					spec.Offline = offline
+					if offline != "queue" {
+						spec.QueueTTLSeconds = 0
+					}
 				}
-				spec.GithubToken = gt
-			}
-			if flags.Changed("agent-role") {
-				spec.AgentRole = strings.TrimSpace(triggerUpdateDispatch.agentRole)
-			}
-			if flags.Changed("allow") {
-				spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
-			} else {
-				derived, dErr := deriveDispatchUntrustedVars(&spec)
-				if dErr != nil {
-					return dErr
+				if flags.Changed("queue-ttl") {
+					rawTTL := strings.TrimSpace(triggerUpdateQueueTTL)
+					if rawTTL == "" {
+						spec.QueueTTLSeconds = 0
+					} else {
+						if spec.Offline != "queue" {
+							return newUsageError("--queue-ttl requires --offline queue")
+						}
+						secs, tErr := parseTriggerQueueTTL(rawTTL)
+						if tErr != nil {
+							return tErr
+						}
+						spec.QueueTTLSeconds = secs
+					}
 				}
-				spec.UntrustedVars = derived
-				derivedUntrusted = derived
-			}
-			req.Action = &spec
+				if flags.Changed("allow") {
+					spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
+				} else if flags.Changed("message") || flags.Changed("action") {
+					// Omit untrustedVars when templates change without --allow so the Hub re-derives.
+					spec.UntrustedVars = nil
+				}
+				req.Action = &spec
 
-		default:
-			return newUsageError("unsupported action type %q for update", triggerTerminalText(targetType, false))
+			case "dispatch_agent":
+				if flags.Changed("task") && flags.Changed("task-file") {
+					return newUsageError("--task and --task-file cannot be used together")
+				}
+				spec := hubclient.TriggerActionSpec{Type: "dispatch_agent"}
+				if existingFirst.Type == "dispatch_agent" && len(existingActions) <= 1 {
+					spec.AgentName = existingFirst.AgentName
+					spec.NameConflict = existingFirst.NameConflict
+					spec.Template = existingFirst.Template
+					spec.Task = existingFirst.Task
+					spec.Branch = existingFirst.Branch
+					spec.Ephemeral = existingFirst.Ephemeral
+					spec.GithubToken = existingFirst.GithubToken
+					spec.AgentRole = existingFirst.AgentRole
+					spec.ReuseMessage = existingFirst.ReuseMessage
+					if existingFirst.AckComment != nil {
+						cp := *existingFirst.AckComment
+						spec.AckComment = &cp
+					}
+					spec.NoAuth = existingFirst.NoAuth
+					if existingFirst.Labels != nil {
+						spec.Labels = make(map[string]string, len(existingFirst.Labels))
+						for k, v := range existingFirst.Labels {
+							spec.Labels[k] = v
+						}
+					}
+					if existingFirst.UntrustedVars != nil {
+						spec.UntrustedVars = append([]string(nil), existingFirst.UntrustedVars...)
+					}
+				}
+				if flags.Changed("template") {
+					spec.Template = strings.TrimSpace(triggerUpdateDispatch.template)
+				}
+				if flags.Changed("task") {
+					spec.Task = triggerUpdateDispatch.task
+				}
+				if flags.Changed("task-file") {
+					content, fErr := readTriggerTaskFile(strings.TrimSpace(triggerUpdateDispatch.taskFile))
+					if fErr != nil {
+						return fErr
+					}
+					spec.Task = content
+				}
+				if flags.Changed("agent-name") {
+					spec.AgentName = strings.TrimSpace(triggerUpdateDispatch.agentName)
+				}
+				if flags.Changed("on-name-conflict") {
+					nc := strings.TrimSpace(triggerUpdateDispatch.onNameConflict)
+					if nc != "" && nc != "suffix" && nc != "skip" {
+						return newUsageError("invalid --on-name-conflict %q (supported: suffix, skip)", triggerTerminalText(nc, false))
+					}
+					spec.NameConflict = nc
+				}
+				if flags.Changed("branch") {
+					spec.Branch = strings.TrimSpace(triggerUpdateDispatch.branch)
+				}
+				if flags.Changed("label") {
+					labelsMap, lErr := parseTriggerLabels(triggerUpdateDispatch.labels)
+					if lErr != nil {
+						return lErr
+					}
+					spec.Labels = labelsMap
+				}
+				if flags.Changed("ephemeral") {
+					spec.Ephemeral = triggerUpdateDispatch.ephemeral
+				}
+				if flags.Changed("reuse-message") {
+					spec.ReuseMessage = triggerUpdateDispatch.reuseMessage
+				}
+				if flags.Changed("ack-comment") {
+					if strings.TrimSpace(triggerUpdateDispatch.ackComment) == "" {
+						spec.AckComment = nil
+					} else {
+						spec.AckComment = &hubclient.DispatchAgentAckComment{Body: triggerUpdateDispatch.ackComment}
+					}
+				}
+				if flags.Changed("github-token") {
+					gt := strings.TrimSpace(triggerUpdateDispatch.githubToken)
+					if gt != "" && gt != "installation" && gt != "user_preferred" {
+						return newUsageError("invalid --github-token %q (supported: installation, user_preferred)", triggerTerminalText(gt, false))
+					}
+					spec.GithubToken = gt
+				}
+				if flags.Changed("agent-role") {
+					spec.AgentRole = strings.TrimSpace(triggerUpdateDispatch.agentRole)
+				}
+				if flags.Changed("allow") {
+					spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
+				} else if flags.Changed("action") || flags.Changed("task") || flags.Changed("task-file") ||
+					flags.Changed("agent-name") || flags.Changed("branch") || flags.Changed("label") ||
+					flags.Changed("reuse-message") || flags.Changed("ack-comment") {
+					// Omit untrustedVars when template slots change without --allow so the Hub re-derives.
+					spec.UntrustedVars = nil
+				}
+				req.Action = &spec
+
+			default:
+				return newUsageError("unsupported action type %q for update", triggerTerminalText(targetType, false))
+			}
+			anyChange = true
 		}
-		anyChange = true
 	}
 
 	if !anyChange {
 		return newUsageError("at least one field flag is required to update a trigger")
 	}
-
-	printDerivedUntrustedVars(derivedUntrusted)
 
 	updated, err := hubCtx.Client.Triggers(projectID).Update(ctx, fullID, req)
 	if err != nil {
@@ -923,9 +871,36 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Trigger updated: %s (revision %d)\n", triggerTerminalText(updated.ID, false), updated.AuthorizationRevision)
-	printTriggerActionSummary(updated.Action)
+	printTriggerActionsSummary(effectiveTriggerActions(updated))
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(updated.Status, updated.StatusReason), false))
 	return nil
+}
+
+func printTriggerActionsSummary(actions []hubclient.TriggerActionSpec) {
+	if len(actions) == 1 {
+		printTriggerActionSummary(actions[0])
+		printDerivedUntrustedVars(actions[0].UntrustedVars)
+		return
+	}
+	if len(actions) == 0 {
+		return
+	}
+	fmt.Printf("  Actions: %d\n", len(actions))
+	for i, act := range actions {
+		switch act.Type {
+		case "dispatch_agent":
+			fmt.Printf("    %d/%d [dispatch_agent] template=%s\n", i+1, len(actions), triggerTerminalText(act.Template, false))
+		case "message":
+			agentLabel := act.AgentName
+			if agentLabel == "" {
+				agentLabel = act.AgentID
+			}
+			fmt.Printf("    %d/%d [message] agent=%s\n", i+1, len(actions), triggerTerminalText(agentLabel, false))
+		default:
+			fmt.Printf("    %d/%d [%s]\n", i+1, len(actions), triggerTerminalText(act.Type, false))
+		}
+		printDerivedUntrustedVarsIndented("      ", act.UntrustedVars)
+	}
 }
 
 func printTriggerActionSummary(action hubclient.TriggerActionSpec) {
@@ -982,15 +957,19 @@ func init() {
 	f.StringVar(&triggerUpdateCoalesceWindow, "coalesce", "", "Updated coalescing window duration (0 or 0s clears, max 10m, e.g. 30s)")
 	f.IntVar(&triggerUpdateMaxFiresPerMinute, "max-per-minute", 0, "Updated maximum fires per minute (0 = unlimited; max 600)")
 	f.IntVar(&triggerUpdateMaxConcurrent, "max-concurrent", 0, "Updated maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
+	f.BoolVar(&triggerUpdateNotifyUser, "notify-user", true, "Notify the trigger creator on failure (use --notify-user=false to disable)")
+	f.StringVar(&triggerUpdateNotifyAgent, "notify-agent", "", "Updated agent ID or name to message on failure (empty clears)")
+	f.StringSliceVar(&triggerUpdateNotifyOn, "notify-on", nil, "Updated comma-separated outcomes to notify on (failed,refused,expired[,skipped])")
 	f.IntVar(&triggerUpdateRevision, "revision", 0, "Expected authorization revision for optimistic concurrency")
 
-	f.StringVar(&triggerUpdateAction, "action", "", "Action kind (message or dispatch-agent)")
-	f.StringVar(&triggerUpdateAgent, "agent", "", "Target agent name or ID (message action)")
-	f.StringVar(&triggerUpdateMessage, "message", "", "Message text (message action)")
-	f.BoolVar(&triggerUpdateInterrupt, "interrupt", false, "Interrupt target agent (message action)")
-	f.BoolVar(&triggerUpdateWake, "wake", false, "Resume target agent if suspended (message action)")
-	f.BoolVar(&triggerUpdatePlain, "plain", false, "Deliver message text without sender prefix (message action)")
-	f.StringVar(&triggerUpdateOffline, "offline", "", "Updated offline target policy for message actions (skip or queue)")
-	f.StringVar(&triggerUpdateQueueTTL, "queue-ttl", "", "Updated wait duration when --offline queue is set (e.g. 30m, 24h; 60s..48h)")
-	bindDispatchAgentFlags(f, &triggerUpdateDispatch)
+	bindGroupedTriggerActionFlags(
+		f,
+		&updateActionCollector,
+		&triggerUpdateAction, "",
+		&triggerUpdateAgent, &triggerUpdateMessage,
+		&triggerUpdateInterrupt, &triggerUpdateWake, &triggerUpdatePlain,
+		&triggerUpdateOffline, &triggerUpdateQueueTTL,
+		&triggerUpdateDispatch,
+		nil, nil,
+	)
 }

@@ -79,6 +79,9 @@ const (
 	// ActionChatPost covers posting messages into a project's chat
 	// threads (project.chat_post).
 	ActionChatPost Action = "chat_post"
+	// ActionTrajectoryRead covers listing and downloading unredacted Track 2
+	// raw agent trajectory segments for a project (project.trajectory.read).
+	ActionTrajectoryRead Action = "trajectory_read"
 	// ActionAdmin covers access constraint administration
 	// (access_constraint.admin).
 	ActionAdmin Action = "admin"

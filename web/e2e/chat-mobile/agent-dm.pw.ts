@@ -40,7 +40,14 @@ async function openAgentDM(page: Page, peerName = 'Coder One'): Promise<void> {
         json: {
           humans: [],
           agents: [
-            { id: AGENT_MEMBER_ID, kind: 'agent', displayName: peerName, slug: 'coder-one' },
+            {
+              id: AGENT_MEMBER_ID,
+              kind: 'agent',
+              displayName: peerName,
+              slug: 'coder-one',
+              phase: 'running',
+              activity: 'working',
+            },
           ],
         },
       })
@@ -166,7 +173,7 @@ test.describe('promote DM to thread dialog', () => {
   });
 });
 
-/** Geometry of the conversation header, its title lines and its visible buttons. */
+/** Geometry of the conversation header, its title, right-hand agent context and visible buttons. */
 async function measureHeader(page: Page) {
   return page.locator('.v2-thread-header').evaluate((header) => {
     const line = (selector: string) => {
@@ -176,14 +183,16 @@ async function measureHeader(page: Page) {
       const rect = el.getBoundingClientRect();
       return {
         left: rect.left,
+        right: rect.right,
+        width: rect.width,
         height: rect.height,
         fontSize: parseFloat(cs.fontSize),
         truncated: el.scrollWidth > el.clientWidth,
         textOverflow: cs.textOverflow,
       };
     };
-    const avatar = header.querySelector<HTMLElement>('.conv-name > :first-child');
-    const crumbBox = header.querySelector<HTMLElement>('.conv-crumb');
+    const titleBox = header.querySelector<HTMLElement>('.conv-title');
+    const contextBox = header.querySelector<HTMLElement>('.conv-agent-context');
     const actions = header.querySelector<HTMLElement>('.header-actions')!;
     const buttons = [...header.querySelectorAll<HTMLElement>('sl-icon-button')]
       .filter((b) => b.getClientRects().length > 0)
@@ -192,14 +201,34 @@ async function measureHeader(page: Page) {
         return { label: b.getAttribute('label') ?? '', left: r.left, right: r.right };
       });
     const h = header.getBoundingClientRect();
+    const a = actions.getBoundingClientRect();
+    const statusBadgeEl = header.querySelector<HTMLElement>('scion-status-badge.conv-agent-status');
     return {
       height: h.height,
       left: h.left,
       right: h.right,
       innerWidth: window.innerWidth,
-      avatarRight: avatar ? avatar.getBoundingClientRect().right : null,
-      crumbLeft: crumbBox ? crumbBox.getBoundingClientRect().left : null,
+      titleRight: titleBox ? titleBox.getBoundingClientRect().right : null,
+      contextLeft: contextBox ? contextBox.getBoundingClientRect().left : null,
+      contextRight: contextBox ? contextBox.getBoundingClientRect().right : null,
+      actionsLeft: a.left,
+      statusBadge: statusBadgeEl
+        ? {
+            status: statusBadgeEl.getAttribute('status'),
+            right: statusBadgeEl.getBoundingClientRect().right,
+          }
+        : null,
+      breadcrumbLeft:
+        header.querySelector('.conv-agent-breadcrumb')?.getBoundingClientRect().left ?? null,
+      hasEmoji: Boolean(header.textContent?.includes('🤖')),
+      projectHref:
+        header.querySelector<HTMLAnchorElement>('a.conv-crumb')?.getAttribute('href') ?? null,
+      agentHref:
+        header.querySelector<HTMLAnchorElement>('a.conv-agent-crumb')?.getAttribute('href') ?? null,
+      folderIcon: header.querySelector('.conv-crumb sl-icon')?.getAttribute('name') ?? null,
+      robotIcon: header.querySelector('.conv-agent-crumb sl-icon')?.getAttribute('name') ?? null,
       crumb: line('.conv-crumb .conv-text'),
+      agentCrumb: line('.conv-agent-crumb .conv-text'),
       name: line('.conv-name .conv-text'),
       actionsOverflowX: getComputedStyle(actions).overflowX,
       buttons,
@@ -229,19 +258,26 @@ test.describe('agent DM header', () => {
     test(`stays one compact row with ${what}, with every button on screen`, async ({ page }) => {
       await openAgentDM(page, peerName);
       const m = await measureHeader(page);
-      expect(m.height, 'header height').toBeLessThanOrEqual(72);
-      expectOneLine(m.crumb, 'the project breadcrumb');
+      expect(m.height, 'header height').toBeLessThanOrEqual(76);
       expectOneLine(m.name, 'the agent name');
-      expect(m.crumbLeft, 'the project breadcrumb is rendered').not.toBeNull();
-      expect(m.avatarRight, 'the avatar is rendered').not.toBeNull();
+      expectOneLine(m.crumb, 'the project breadcrumb');
+      expect(m.statusBadge?.status, 'agent status badge rendered').toBe('working');
       expect(
-        m.crumbLeft!,
-        'the project breadcrumb sits to the right of the avatar'
-      ).toBeGreaterThan(m.avatarRight!);
-      expect(
-        Math.abs(m.crumbLeft! - m.name!.left),
-        'the project breadcrumb aligns with the conversation name left edge'
-      ).toBeLessThanOrEqual(0.5);
+        m.statusBadge!.right,
+        'agent status badge sits to the left of the agent breadcrumb'
+      ).toBeLessThanOrEqual(m.breadcrumbLeft! + 0.5);
+      expect(m.hasEmoji, 'no standalone robot emoji in the header').toBe(false);
+      expect(m.projectHref, 'project breadcrumb links to project overview').toBe(
+        `/projects/${PROJECT_A.id}`
+      );
+      expect(m.agentHref, 'agent breadcrumb links to agent detail').toBe(
+        `/agents/${AGENT_MEMBER_ID}`
+      );
+      expect(m.folderIcon, 'project breadcrumb uses folder icon').toBe('folder');
+      expect(m.robotIcon, 'agent breadcrumb uses robot icon').toBe('robot');
+      expect(m.contextRight, 'agent context stays inside the header').toBeLessThanOrEqual(
+        m.right + 0.5
+      );
       expect(m.crumb!.truncated, 'the long project slug is cut short').toBe(true);
       expect(m.actionsOverflowX, 'the actions row is not a sideways scroller').toBe('visible');
       for (const b of m.buttons) {
@@ -372,7 +408,7 @@ test.describe('agent DM header in touch landscape (844x390)', () => {
     test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
     await openAgentDM(page, LONG_AGENT_NAME);
     const m = await measureHeader(page);
-    expect(m.height, 'header height').toBeLessThanOrEqual(72);
+    expect(m.height, 'header height').toBeLessThanOrEqual(76);
     expectOneLine(m.crumb, 'the project breadcrumb');
     expectOneLine(m.name, 'the agent name');
     for (const b of m.buttons) {
@@ -453,13 +489,42 @@ test.describe('agent DM header in touch landscape (844x390)', () => {
 });
 
 test.describe('agent DM header on a wide desktop', () => {
-  test('keeps the full row of actions, with no More menu', async ({ page }, testInfo) => {
+  test('keeps the full row of actions with status badge and linked breadcrumb immediately left of terminal', async ({
+    page,
+  }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop-1440', 'the wide layout');
     await openAgentDM(page, LONG_AGENT_NAME);
     const m = await measureHeader(page);
     expectOneLine(m.name, 'the agent name');
+    expectOneLine(m.crumb, 'the project breadcrumb');
+    expectOneLine(m.agentCrumb, 'the agent breadcrumb');
+    expect(m.statusBadge?.status, 'agent status badge rendered').toBe('working');
+    expect(
+      m.statusBadge!.right,
+      'agent status badge sits to the left of the agent breadcrumb'
+    ).toBeLessThanOrEqual(m.breadcrumbLeft! + 0.5);
+    expect(m.hasEmoji, 'no standalone robot emoji rendered').toBe(false);
+    expect(m.projectHref, 'project breadcrumb links to project overview').toBe(
+      `/projects/${PROJECT_A.id}`
+    );
+    expect(m.agentHref, 'agent breadcrumb links to agent detail').toBe(
+      `/agents/${AGENT_MEMBER_ID}`
+    );
+    expect(m.folderIcon, 'folder icon rendered').toBe('folder');
+    expect(m.robotIcon, 'robot icon rendered').toBe('robot');
+    const terminalBtn = m.buttons.find((b) => b.label === 'Open terminal');
+    expect(terminalBtn, 'terminal button is visible').toBeDefined();
+    expect(
+      m.contextRight,
+      'agent context sits immediately left of the terminal button'
+    ).toBeLessThanOrEqual(terminalBtn!.left + 0.5);
+    expect(
+      terminalBtn!.left - m.contextRight!,
+      'agent context is adjacent to the terminal button'
+    ).toBeLessThanOrEqual(24);
     const labels = m.buttons.map((b) => b.label);
     for (const label of [
+      'Open terminal',
       'Promote to thread',
       'Options',
       'Export conversation',
@@ -471,5 +536,103 @@ test.describe('agent DM header on a wide desktop', () => {
     for (const b of m.buttons) {
       expect(b.right, `${b.label} ends inside the header`).toBeLessThanOrEqual(m.right + 0.5);
     }
+
+    // Clicking the breadcrumb segments navigates to the console pages.
+    await page.locator('.v2-thread-header a.conv-crumb').click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_A.id}$`));
+    await page.goBack();
+    await expect(page.locator('.v2-thread-header a.conv-agent-crumb')).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.locator('.v2-thread-header a.conv-agent-crumb').click();
+    await expect(page).toHaveURL(new RegExp(`/agents/${AGENT_MEMBER_ID}$`));
+  });
+
+  test('group conversation with default agent uses the same right-hand status badge + linked breadcrumb layout', async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop-1440', 'the wide layout');
+    await openChatRail(page, async (p) => {
+      await p.route(/\/api\/v1\/chat\/spaces\/([^/]+)\/threads/, async (route) => {
+        await route.fulfill({
+          json: {
+            threads: [
+              {
+                id: 'thread-01',
+                name: 'general',
+                isGeneral: true,
+                pinned: false,
+                hasUnread: false,
+                hasUnreadMention: false,
+                defaultAgent: 'coder-one',
+              },
+            ],
+          },
+        });
+      });
+      await p.route(/\/api\/v1\/chat\/spaces\/([^/]+)\/members/, (route) =>
+        route.fulfill({
+          json: {
+            humans: [],
+            agents: [
+              {
+                id: AGENT_MEMBER_ID,
+                kind: 'agent',
+                displayName: 'Coder One',
+                slug: 'coder-one',
+                phase: 'running',
+                activity: 'working',
+              },
+            ],
+          },
+        })
+      );
+      await p.route(/\/api\/v1\/chat\/topics\//, (route) =>
+        route.fulfill({ json: { id: 'thread-01', name: 'general', defaultAgent: 'coder-one' } })
+      );
+    });
+    await openGeneralThread(page);
+    await expect(page.locator('.v2-thread-header .conv-crumb')).toHaveAttribute(
+      'title',
+      PROJECT_A.slug,
+      { timeout: 15_000 }
+    );
+    const m = await measureHeader(page);
+    expectOneLine(m.name, 'the thread name');
+    expectOneLine(m.crumb, 'the project breadcrumb');
+    expectOneLine(m.agentCrumb, 'the default agent breadcrumb');
+    expect(m.statusBadge?.status, 'agent status badge rendered').toBe('working');
+    expect(
+      m.statusBadge!.right,
+      'agent status badge sits to the left of the agent breadcrumb'
+    ).toBeLessThanOrEqual(m.breadcrumbLeft! + 0.5);
+    expect(m.hasEmoji, 'no standalone robot emoji rendered').toBe(false);
+    expect(m.projectHref, 'project breadcrumb links to project overview').toBe(
+      `/projects/${PROJECT_A.id}`
+    );
+    expect(m.agentHref, 'agent breadcrumb links to agent detail').toBe(
+      `/agents/${AGENT_MEMBER_ID}`
+    );
+    expect(m.folderIcon, 'folder icon rendered').toBe('folder');
+    expect(m.robotIcon, 'robot icon rendered').toBe('robot');
+    const terminalBtn = m.buttons.find((b) => b.label === 'Open terminal');
+    expect(terminalBtn, 'terminal button is visible').toBeDefined();
+    expect(
+      m.contextRight,
+      'agent context sits immediately left of the terminal button'
+    ).toBeLessThanOrEqual(terminalBtn!.left + 0.5);
+  });
+
+  test('group conversation without default agent shows no robot emoji or breadcrumb', async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop-1440', 'the wide layout');
+    await openChatRail(page);
+    await openGeneralThread(page);
+    const m = await measureHeader(page);
+    expectOneLine(m.name, 'the thread name');
+    expect(m.hasEmoji, 'no robot emoji without default agent').toBe(false);
+    expect(m.crumb, 'no project breadcrumb without default agent').toBeNull();
+    expect(m.agentCrumb, 'no agent breadcrumb without default agent').toBeNull();
   });
 });

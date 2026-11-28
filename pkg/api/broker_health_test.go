@@ -77,6 +77,7 @@ func TestNormalizeBrokerHealthReport_CheckValuesFixed(t *testing.T) {
 			"word_utf8":  "healthyé",
 			"word_dot":   "available.",
 			"word_cause": "unavailable (no runtime)",
+			"warn_owner": "warning: owner_mismatch (agent uid:gid 1000:1000 differs from recorded project storage owner 2000:1000)",
 		},
 	})
 	want := map[string]string{
@@ -91,6 +92,7 @@ func TestNormalizeBrokerHealthReport_CheckValuesFixed(t *testing.T) {
 		"word_utf8":  "unknown",
 		"word_dot":   "unknown",
 		"word_cause": "unavailable",
+		"warn_owner": "warning",
 	}
 	if !reflect.DeepEqual(got.Checks, want) {
 		t.Errorf("checks = %v, want %v", got.Checks, want)

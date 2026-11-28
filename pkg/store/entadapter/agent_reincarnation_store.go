@@ -407,3 +407,60 @@ func (s *AgentReincarnationStore) SetAgentReincarnationSourceCleanup(ctx context
 	}
 	return nil
 }
+
+// LatestCompletedAgentReincarnationAt returns CompletedAt of the agent's most
+// recent reincarnation in state "completed", or (nil, nil) when it has none.
+func (s *AgentReincarnationStore) LatestCompletedAgentReincarnationAt(ctx context.Context, agentID string) (*time.Time, error) {
+	row, err := s.client.AgentReincarnation.Query().
+		Where(
+			agentreincarnation.AgentIDEQ(agentID),
+			agentreincarnation.StateEQ(agentreincarnation.StateCompleted),
+			agentreincarnation.CompletedAtNotNil(),
+		).
+		Order(ent.Desc(agentreincarnation.FieldCompletedAt)).
+		Select(agentreincarnation.FieldCompletedAt).
+		First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, mapError(err)
+	}
+	if row.CompletedAt == nil {
+		return nil, nil
+	}
+	t := row.CompletedAt.UTC()
+	return &t, nil
+}
+
+// LatestCompletedAgentReincarnationsAt returns a map from agentID to the
+// newest CompletedAt among "completed" reincarnation rows for each agentID
+// in agentIDs that has one.
+func (s *AgentReincarnationStore) LatestCompletedAgentReincarnationsAt(ctx context.Context, agentIDs []string) (map[string]time.Time, error) {
+	out := make(map[string]time.Time)
+	if len(agentIDs) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		AgentID string `json:"agent_id"`
+		Latest  string `json:"latest"`
+	}
+	err := s.client.AgentReincarnation.Query().
+		Where(
+			agentreincarnation.AgentIDIn(agentIDs...),
+			agentreincarnation.StateEQ(agentreincarnation.StateCompleted),
+			agentreincarnation.CompletedAtNotNil(),
+		).
+		GroupBy(agentreincarnation.FieldAgentID).
+		Aggregate(ent.As(ent.Max(agentreincarnation.FieldCompletedAt), "latest")).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, r := range rows {
+		if ts := parseAggregateTime(r.Latest); !ts.IsZero() {
+			out[r.AgentID] = ts.UTC()
+		}
+	}
+	return out, nil
+}

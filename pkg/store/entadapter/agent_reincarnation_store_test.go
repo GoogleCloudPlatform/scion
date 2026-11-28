@@ -617,3 +617,74 @@ func TestAgentReincarnation_HomeResetRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got.HomeReset)
 }
+
+func TestLatestCompletedAgentReincarnationAt(t *testing.T) {
+	s := newTestAgentReincarnationStore(t)
+	ctx := context.Background()
+
+	// No records at all -> (nil, nil).
+	got, err := s.LatestCompletedAgentReincarnationAt(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// Non-completed records (pending, failed) and another agent's completed record are ignored.
+	otherCompleted := time.Date(2026, 11, 28, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-other", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStateCompleted, CompletedAt: &otherCompleted,
+	}))
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStateFailed,
+	}))
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStatePending,
+	}))
+	// Completed row without CompletedAt is ignored.
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStateCompleted,
+	}))
+
+	got, err = s.LatestCompletedAgentReincarnationAt(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// Multiple completed records -> returns the newest CompletedAt.
+	t1 := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 11, 28, 11, 30, 0, 0, time.UTC)
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStateCompleted, CompletedAt: &t1,
+	}))
+	require.NoError(t, s.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: "agent-1", FromGeneration: 2, ToGeneration: 3,
+		State: store.AgentReincarnationStateCompleted, CompletedAt: &t2,
+	}))
+	// A later failed attempt must not shadow the completed timestamp.
+	laterFailed := &store.AgentReincarnation{
+		AgentID: "agent-1", FromGeneration: 3, ToGeneration: 4,
+		State:       store.AgentReincarnationStateFailed,
+		RequestedAt: t2.Add(10 * time.Minute),
+	}
+	require.NoError(t, s.CreateAgentReincarnation(ctx, laterFailed))
+
+	got, err = s.LatestCompletedAgentReincarnationAt(ctx, "agent-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Equal(t2), "expected %v, got %v", t2, got)
+
+	// Batched query returns only agents with completed reincarnations and picks the newest per agent.
+	empty, err := s.LatestCompletedAgentReincarnationsAt(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	batch, err := s.LatestCompletedAgentReincarnationsAt(ctx, []string{"agent-1", "agent-other", "agent-none"})
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	assert.True(t, batch["agent-1"].Equal(t2))
+	assert.True(t, batch["agent-other"].Equal(otherCompleted))
+	_, hasNone := batch["agent-none"]
+	assert.False(t, hasNone)
+}

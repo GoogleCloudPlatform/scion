@@ -376,7 +376,7 @@ const (
 	execReasonShuttingDown             = "hub shutting down"
 	execReasonNotDispatched            = "hub restarted before dispatch"
 	execReasonSourceNotReplayProtected = "source not replay protected"
-	execReasonRateLimit                = "rate limit"
+	execReasonRateLimit                = "exec rate limit"
 	execReasonSubjectBusy              = "subject busy"
 	execReasonContextInvalid           = "trigger context invalid"
 	execReasonContextUnsupported       = "sciontool lacks exec_context.v1"

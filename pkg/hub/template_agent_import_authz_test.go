@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -36,18 +35,6 @@ import (
 )
 
 const agentTestTemplateSource = "https://github.com/acme/repo/tree/main/templates"
-
-type agentTestFetcher struct {
-	body []byte
-}
-
-func (f *agentTestFetcher) FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error) {
-	return &remotefetch.Result{Body: f.body}, nil
-}
-
-func (f *agentTestFetcher) FetchBytesAuthorized(ctx context.Context, rawURL, _ string) (*remotefetch.Result, error) {
-	return &remotefetch.Result{Body: f.body}, nil
-}
 
 func buildAgentTestTarGz(t *testing.T, files map[string]string) []byte {
 	t.Helper()
@@ -194,12 +181,12 @@ func TestAgentTemplateImportDiscoverReimport_FullRoleOwnProject(t *testing.T) {
 	// 5. Reimport tmpl-a without sourceUrl override (/api/v1/templates/{id}/reimport)
 	tmplA, err := s.GetTemplateBySlug(ctx, "tmpl-a", store.TemplateScopeProject, project.ID)
 	require.NoError(t, err)
-	srv.templateSourceFetcher = &agentTestFetcher{
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{
 		body: buildAgentTestTarGz(t, map[string]string{
 			"repo-main/templates/tmpl-a/scion-agent.yaml": "schema_version: \"1\"\nharness: claude\n",
 			"repo-main/templates/tmpl-a/README.md":        "refreshed content",
 		}),
-	}
+	})
 	rec = doAgentRequest(t, srv, fullToken, http.MethodPost, "/api/v1/templates/"+tmplA.ID+"/reimport", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
@@ -474,11 +461,13 @@ func TestAgentD6Restrictions_ReimportOverrideAndCreateOnly(t *testing.T) {
 		assert.Equal(t, "sha256:original", got.ContentHash)
 
 		// Human user can still override sourceUrl as before.
-		srv.templateSourceFetcher = &agentTestFetcher{
+		prevClient := srv.templateGitHubClient
+		t.Cleanup(func() { srv.templateGitHubClient = prevClient })
+		srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{
 			body: buildAgentTestTarGz(t, map[string]string{
 				"repo-main/templates/existing-tmpl/scion-agent.yaml": "schema_version: \"1\"\nharness: claude\n",
 			}),
-		}
+		})
 		newURL := "https://github.com/acme/other/tree/main/templates/existing-tmpl"
 		rec = doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", ReimportTemplateRequest{
 			SourceURL: newURL,

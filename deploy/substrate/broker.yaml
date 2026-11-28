@@ -30,6 +30,9 @@ metadata:
   labels:
     app.kubernetes.io/name: scion-substrate-broker
     app.kubernetes.io/part-of: scion-substrate-integration
+    # Substrate v1.0.0 gates network access to ateapi on caller namespace
+    # label ate.dev/api-access: "true".
+    ate.dev/api-access: "true"
 ---
 # The broker's own identity. It authenticates to ateapi (api.ate-system.svc)
 # by minting a token for *itself* via the Kubernetes TokenRequest API
@@ -70,30 +73,30 @@ roleRef:
   name: scion-substrate-broker-tokenrequest
   apiGroup: rbac.authorization.k8s.io
 ---
-# ClusterTrustBundle is cluster-scoped, so verifying ateapi TLS against one
-# (pkg/runtime/substrate/dialer.go, when substrate.cluster_trust_bundle is
-# set — the router hop is plaintext today and is not covered by this)
-# needs a ClusterRole, not a namespaced Role. Only needed if you use
-# cluster_trust_bundle instead of ca_file — keep both anyway, since it's
-# read-only and harmless if unused.
+# ClusterTrustBundle is cluster-scoped. The Deployment below projects the
+# servicedns CA bundle directly into the pod via Kubernetes projected
+# volumes (referenced by `ca_file` in settings.yaml), which kubelet rotates
+# on disk automatically. Keeping read-only `get` and `list` on
+# `clustertrustbundles` supports both explicit `cluster_trust_bundle` lookups
+# (`get`) and the default fallback in pkg/runtime/substrate/tlssource.go when
+# `ca_file` and `cluster_trust_bundle` are both unset (`list` matching signer
+# `servicedns.podcert.ate.dev/identity` and label
+# `podcert.ate.dev/canarying=live`; Kubernetes RBAC `list` cannot be scoped
+# with `resourceNames`).
 #
-# certificates.k8s.io/v1beta1 vs v1: GKE 1.37+ may have promoted
-# ClusterTrustBundle to v1 — RBAC rules key on group+resource, not API
-# version, so this Role works either way. Verify which version your cluster
-# actually serves with:
+# certificates.k8s.io/v1beta1 vs v1: pkg/runtime/substrate/tlssource.go tries
+# v1 first and falls back to v1beta1 — RBAC rules key on group+resource, not
+# API version, so this ClusterRole works either way. Verify which version
+# your cluster serves with:
 #   kubectl api-resources --api-group=certificates.k8s.io
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: scion-substrate-broker-ctb-reader
 rules:
-  # resourceNames pins this to the one ClusterTrustBundle substrate.cluster_trust_bundle
-  # actually names, for least privilege — the broker cannot read any other
-  # cluster's/tenant's trust bundle.
   - apiGroups: ["certificates.k8s.io"]
     resources: ["clustertrustbundles"]
-    resourceNames: ["${CLUSTER_TRUST_BUNDLE_NAME}"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -157,11 +160,29 @@ data:
         type: substrate
         substrate:
           api_endpoint: api.${ATE_SYSTEM_NAMESPACE}.svc:443
-          router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
+          router_endpoint: https://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc
           token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
-          cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
-          sandbox_class: gvisor
-          sandbox_config_name: ${SANDBOX_CONFIG_NAME}
+          # Projected servicedns ClusterTrustBundle CA (rotated automatically
+          # by kubelet without subPath); used to verify both ateapi and
+          # atenet-router unless router_ca_file overrides the router CA.
+          ca_file: /run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem
+          # Projected PodCertificate client identity bundle (key + cert chain)
+          # presented to atenet-router for mandatory mTLS; re-read on every
+          # handshake.
+          router_client_cert_file: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+          # Optional overrides; router_server_name defaults to router_endpoint's
+          # host, and router_connect_endpoint defaults to <host>:8444.
+          # router_ca_file: /run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem
+          # router_server_name: atenet-router.${ATE_SYSTEM_NAMESPACE}.svc
+          # router_connect_endpoint: atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:8444
+          # Optional mTLS client cert for ateapi (TokenRequest RBAC remains
+          # required because substrate.Dial attaches per-RPC bearer credentials
+          # alongside mTLS).
+          # api_client_cert_file: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+          # NOTE: Substrate v1.0.0 removed sandbox_class and sandbox_config_name
+          # from broker settings; they are now configured on WorkerPool
+          # (spec.sandboxClasses[].configRef) in deploy/substrate/cluster/workerpool.yaml.
+          #
           # workerSelector is matched against the target WorkerPool custom
           # resource's own metadata.labels — NOT any Kubernetes Pod label,
           # and NOT the ate.dev/worker-pool label atecontroller stamps onto
@@ -177,7 +198,7 @@ data:
           # correct value off the actual WorkerPool object.
           worker_selector:
             ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
-          snapshot_storage: ${SNAPSHOT_STORAGE_URI}
+          snapshot_storage: "${SNAPSHOT_STORAGE_URI}"
           egress_allow: []
           template_ready_timeout: 10m
     profiles:
@@ -247,9 +268,11 @@ spec:
     spec:
       serviceAccountName: scion-substrate-broker
       # subPath ConfigMap/Secret mounts below only replace the individual
-      # files they name; fsGroup makes sure the broker (running as a
-      # non-root image UID, if the branch-built image sets one) can still
-      # read them and write elsewhere under $HOME/.scion (state, logs).
+      # files they name (settings, hub-credentials); substrate-tls mounts a
+      # full directory without subPath so kubelet propagates PodCertificate
+      # and ClusterTrustBundle rotations automatically. fsGroup ensures the
+      # broker can read mounted files and write under $HOME/.scion (state,
+      # logs).
       securityContext:
         fsGroup: 1000
       containers:
@@ -325,6 +348,9 @@ spec:
               mountPath: /home/scion/.scion/hub-credentials/${HUB_CONNECTION_NAME}.json
               subPath: ${HUB_CONNECTION_NAME}.json
               readOnly: true
+            - name: substrate-tls
+              mountPath: /run/podidentity.podcert.ate.dev
+              readOnly: true
       volumes:
         - name: settings
           configMap:
@@ -333,6 +359,19 @@ spec:
           secret:
             secretName: scion-substrate-broker-hub-credentials
             defaultMode: 0400
+        - name: substrate-tls
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: servicedns-ca/trust-bundle.pem
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
 ---
 # The router ingress NetworkPolicy (atenet-router-restrict-ingress) lives in
 # deploy/substrate/cluster/networkpolicy.yaml, alongside the worker-namespace

@@ -106,6 +106,8 @@ const (
 	StartHead Start = "head"
 	// StartBeginning replays retained history from the first message.
 	StartBeginning Start = "beginning"
+	// StartTail delivers up to Limit newest messages in chronological order.
+	StartTail Start = "tail"
 )
 
 // PollRequest configures one Poll or Watch call.
@@ -113,7 +115,7 @@ type PollRequest struct {
 	ConversationID string
 	Cursor         Cursor        // resume point; empty -> AfterMessageID / Start
 	AfterMessageID string        // alternative resume point: resolve to that message's seq
-	Start          Start         // head (default) | beginning
+	Start          Start         // head (default) | beginning | tail
 	Filter         Filter        // others (default) | all | addressed
 	Limit          int           // 1..200, default 50
 	Wait           time.Duration // 0 = immediate; clamped to MaxWait

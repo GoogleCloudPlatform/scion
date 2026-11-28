@@ -269,15 +269,21 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
     const box = el.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
     const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
 
-    // Apply a valid filter first
+    // Typing alone does not re-filter until Enter or blur.
     input.value = 'ext:ts';
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    await el.updateComplete;
+    expect(renderedPaths(el)).toEqual(['src/a.ts', 'src/b.go']);
+
+    // Commit valid filter on Enter.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await el.updateComplete;
     expect(renderedPaths(el)).toEqual(['src/a.ts']);
 
     // Now type an invalid query ("ext:ts OR ext:go") — last valid filter ("ext:ts") stays applied
     input.value = 'ext:ts OR ext:go';
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await el.updateComplete;
     expect(renderedPaths(el)).toEqual(['src/a.ts']);
   });

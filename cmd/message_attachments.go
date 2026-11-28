@@ -291,20 +291,42 @@ func groupHasAgent(recipients []messages.GroupRecipient) bool {
 	return false
 }
 
-// msgSendTimeout bounds one send request. Tests shorten it.
+// msgSendTimeout bounds one non-waking send request (such as group fan-out
+// or user-only outbound sends). Tests shorten it.
 var msgSendTimeout = 30 * time.Second
+
+// msgWakeSendTimeout bounds a direct send request that may wake a suspended
+// target agent (explicit --wake or server-side auto-wake of an idle-suspended
+// agent). It must outlast the hub's DM wake write budget (dmWakeWriteBudget =
+// 180s resume dispatch + 30s readiness wait + 30s slack = 240s,
+// ptone/scion#9757). Tests shorten it.
+var msgWakeSendTimeout = 4*time.Minute + 30*time.Second
 
 // uploadThenSendContext uploads the --attach files for one recipient send
 // when they go to the hub as artifacts (attachmentIDsForSend, with its own
-// bound), and only then starts the send's own timeout, so a slow upload
-// never uses up the time of the send that names it. parent is the context
-// the send belongs to (a group send's fan-out context, or the background).
-// On error the returned cancel is a no-op.
+// bound), and only then starts the send's own timeout (msgSendTimeout), so a
+// slow upload never uses up the time of the send that names it. parent is the
+// context the send belongs to (a group send's fan-out context, or the
+// background). On error the returned cancel is a no-op.
 func uploadThenSendContext(parent context.Context) ([]string, context.Context, context.CancelFunc, error) {
+	return uploadThenSendContextWithTimeout(parent, msgSendTimeout)
+}
+
+// uploadThenWakeSendContext is uploadThenSendContext for direct sends that
+// may wake a suspended target agent (explicit --wake or hub auto-wake). It
+// uses msgWakeSendTimeout and sets apiclient.WithRequestTimeout so the hub
+// client's default 30s HTTP timeout does not cut the wake short
+// (ptone/scion#9757).
+func uploadThenWakeSendContext(parent context.Context) ([]string, context.Context, context.CancelFunc, error) {
+	return uploadThenSendContextWithTimeout(parent, msgWakeSendTimeout)
+}
+
+func uploadThenSendContextWithTimeout(parent context.Context, timeout time.Duration) ([]string, context.Context, context.CancelFunc, error) {
 	ids, err := attachmentIDsForSend(parent)
 	if err != nil {
 		return nil, parent, func() {}, err
 	}
-	ctx, cancel := context.WithTimeout(parent, msgSendTimeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	ctx = apiclient.WithRequestTimeout(ctx, timeout)
 	return ids, ctx, cancel, nil
 }

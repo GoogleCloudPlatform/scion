@@ -31,6 +31,8 @@ func TestResolveTelemetryRetention_Defaults(t *testing.T) {
 	assert.Equal(t, 14, got.HourlyRollupsDays)
 	assert.Equal(t, 365, got.DailyRollupsDays)
 	assert.Equal(t, 90, got.ScopeCountersDays)
+	assert.Equal(t, 365, got.GroupRollupsDays)
+	assert.Equal(t, 90, got.BudgetStateDays)
 	assert.Equal(t, 30, got.MeterHealthDays)
 	assert.Equal(t, 365, got.RunAttributionDays)
 	assert.Equal(t, 24*time.Hour, got.SweepInterval)
@@ -44,12 +46,16 @@ func TestResolveTelemetryRetention_UnlimitedAndDerivedRunAttribution(t *testing.
 			HourlyRollupsDays: intPtr(0),
 			DailyRollupsDays:  intPtr(0),
 			ScopeCountersDays: intPtr(0),
+			GroupRollupsDays:  intPtr(0),
+			BudgetStateDays:   intPtr(0),
 			MeterHealthDays:   intPtr(0),
 		})
 		assert.Equal(t, 0, got.UsageEventsDays)
 		assert.Equal(t, 0, got.HourlyRollupsDays)
 		assert.Equal(t, 0, got.DailyRollupsDays)
 		assert.Equal(t, 0, got.ScopeCountersDays)
+		assert.Equal(t, 0, got.GroupRollupsDays)
+		assert.Equal(t, 0, got.BudgetStateDays)
 		assert.Equal(t, 0, got.MeterHealthDays)
 		assert.Equal(t, 0, got.RunAttributionDays)
 	})
@@ -103,6 +109,9 @@ func TestValidateTelemetryRetention(t *testing.T) {
 		{name: "hourly_rollups negative", cfg: &api.TelemetryRetentionConfig{HourlyRollupsDays: intPtr(-1)}, wantErr: "hourly_rollups_days"},
 		{name: "daily_rollups below min", cfg: &api.TelemetryRetentionConfig{DailyRollupsDays: intPtr(89)}, wantErr: "daily_rollups_days"},
 		{name: "scope_counters below min", cfg: &api.TelemetryRetentionConfig{ScopeCountersDays: intPtr(64)}, wantErr: "scope_counters_days"},
+		{name: "group_rollups below min", cfg: &api.TelemetryRetentionConfig{GroupRollupsDays: intPtr(89)}, wantErr: "group_rollups_days"},
+		{name: "group_rollups negative", cfg: &api.TelemetryRetentionConfig{GroupRollupsDays: intPtr(-1)}, wantErr: "group_rollups_days"},
+		{name: "budget_state negative", cfg: &api.TelemetryRetentionConfig{BudgetStateDays: intPtr(-1)}, wantErr: "budget_state_days"},
 		{name: "meter_health negative", cfg: &api.TelemetryRetentionConfig{MeterHealthDays: intPtr(-5)}, wantErr: "meter_health_days"},
 		{name: "sweep_interval too short", cfg: &api.TelemetryRetentionConfig{SweepInterval: "30s"}, wantErr: "sweep_interval"},
 		{name: "sweep_interval invalid", cfg: &api.TelemetryRetentionConfig{SweepInterval: "nightly"}, wantErr: "sweep_interval"},

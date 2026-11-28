@@ -346,6 +346,16 @@ type ListAgentCommandRequestsResult struct {
 	NextCursor string
 }
 
+// CommandRequestHistoryQuery configures ListResolvedCommandRequests.
+type CommandRequestHistoryQuery struct {
+	ViewerID        string
+	FilterProjectID string
+	FilterAgentID   string
+	CursorTime      *time.Time
+	CursorID        string
+	Limit           int
+}
+
 // CommandRequestStore defines persistence operations for human-approved command
 // requests and their single-execution command_runs rows (ptone/scion#9278).
 type CommandRequestStore interface {
@@ -365,6 +375,21 @@ type CommandRequestStore interface {
 	// filtered by key), ordered newest-first, together with any associated run
 	// rows keyed by request ID.
 	ListAgentCommandRequests(ctx context.Context, opts *ListAgentCommandRequestsOptions) (*ListAgentCommandRequestsResult, error)
+
+	// ListOpenCommandRequests returns pending, unexpired, non-markdown command
+	// requests with a non-nil message_id whose approver_user_id equals viewerID,
+	// ordered (created_at DESC, id DESC), up to limit rows.
+	ListOpenCommandRequests(ctx context.Context, viewerID string, now time.Time, limit int) ([]*CommandRequest, error)
+
+	// ListResolvedCommandRequests returns resolved (approved, dismissed,
+	// withdrawn, expired) non-markdown command requests with non-nil
+	// resolved_at and message_id whose approver_user_id equals q.ViewerID,
+	// ordered (resolved_at DESC, id DESC), strictly after the keyset cursor.
+	ListResolvedCommandRequests(ctx context.Context, q CommandRequestHistoryQuery) ([]*CommandRequest, error)
+
+	// GetCommandRequestsByIDs batch-loads command_requests rows by ID.
+	// Missing or malformed IDs are omitted from the returned map.
+	GetCommandRequestsByIDs(ctx context.Context, ids []string) (map[string]*CommandRequest, error)
 
 	// ApproveCommandRequest atomically transitions a pending, non-expired
 	// command_requests row matching CommandSHA256 from pending -> approved and
@@ -486,6 +511,10 @@ type CommandRequestStore interface {
 	// HasActionRunOutput reports whether an exec_run_outputs row with
 	// owner_kind='action_run' exists for runID without reading its content.
 	HasActionRunOutput(ctx context.Context, runID string) (bool, error)
+
+	// HasActionRunOutputs reports which runIDs have an exec_run_outputs row
+	// with owner_kind='action_run' without reading output content.
+	HasActionRunOutputs(ctx context.Context, runIDs []string) (map[string]bool, error)
 
 	// PurgeOldActionRunOutputs deletes exec_run_outputs rows with
 	// owner_kind='action_run' whose created_at is older than olderThan.

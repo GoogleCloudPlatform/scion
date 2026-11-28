@@ -139,10 +139,11 @@ type Layer1Snapshot struct {
 	HasMaintenanceRow bool
 
 	// Telemetry
-	TelemetryEnabled         *bool
-	TelemetryEnforced        bool
-	TelemetryEnforcedInvalid bool
-	TelemetryConfig          *config.V1TelemetryConfig
+	TelemetryEnabled             *bool
+	TelemetryEnforced            bool
+	TelemetryEnforcedInvalid     bool
+	TrajectoryAllowProjectOptOut *bool
+	TelemetryConfig              *config.V1TelemetryConfig
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
@@ -163,6 +164,7 @@ type Layer1Snapshot struct {
 
 	// Uploads (uploads section: server.hub.uploads); zero fields mean default.
 	Uploads         config.HubUploadsConfig
+	UploadsSettings opsettings.UploadsSettings
 	UploadsInDB     bool
 	UploadsFromFile bool
 
@@ -762,13 +764,18 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 			if json.Unmarshal(rawTel, &probe) == nil && probe.Enforced {
 				snap.TelemetryEnforcedInvalid = true
 			}
-		} else if resolved, err := ts.Resolve(); err != nil {
-			slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
-			if ts.Enforced {
-				snap.TelemetryEnforcedInvalid = true
-			}
 		} else {
-			snap.TelemetryEnforced = resolved.Enforced
+			if ts.Trajectory != nil {
+				snap.TrajectoryAllowProjectOptOut = copyBoolPtr(ts.Trajectory.AllowProjectOptOut)
+			}
+			if resolved, err := ts.Resolve(); err != nil {
+				slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
+				if ts.Enforced {
+					snap.TelemetryEnforcedInvalid = true
+				}
+			} else {
+				snap.TelemetryEnforced = resolved.Enforced
+			}
 		}
 	}
 	_, snap.BrandingInDB = dbSections[opsettings.BrandingSectionName]
@@ -1419,6 +1426,28 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists(config.HubUploadsMaxWorkspaceFileSizeKey) {
 		snap.Uploads.MaxWorkspaceFileSize = k.Int64(config.HubUploadsMaxWorkspaceFileSizeKey)
 	}
+	if k.Exists(config.HubUploadsChunkBytesKey) {
+		v := k.Int64(config.HubUploadsChunkBytesKey)
+		snap.UploadsSettings.ChunkBytes = &v
+	}
+	if k.Exists(config.HubUploadsSessionIdleTTLKey) {
+		snap.UploadsSettings.SessionIdleTTL = k.String(config.HubUploadsSessionIdleTTLKey)
+	}
+	if k.Exists(config.HubUploadsSessionMaxLifetimeKey) {
+		snap.UploadsSettings.SessionMaxLifetime = k.String(config.HubUploadsSessionMaxLifetimeKey)
+	}
+	if k.Exists(config.HubUploadsMaxSessionsPerUserKey) {
+		v := k.Int(config.HubUploadsMaxSessionsPerUserKey)
+		snap.UploadsSettings.MaxSessionsPerUser = &v
+	}
+	if k.Exists(config.HubUploadsMaxPendingBytesPerUserKey) {
+		v := k.Int64(config.HubUploadsMaxPendingBytesPerUserKey)
+		snap.UploadsSettings.MaxPendingBytesPerUser = &v
+	}
+	if k.Exists(config.HubUploadsMaxPendingBytesHubKey) {
+		v := k.Int64(config.HubUploadsMaxPendingBytesHubKey)
+		snap.UploadsSettings.MaxPendingBytesHub = &v
+	}
 
 	// Branding
 	brandSub := k.Cut(config.BrandingSectionKey)
@@ -1846,6 +1875,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "telemetry_enforced")
 	}
 	s.config.TelemetryEnforced = telemetryEnforced
+	trajectoryAllowOptOut := copyBoolPtr(s.config.TrajectoryAllowProjectOptOut)
+	if snap.FromOperationalSettings {
+		trajectoryAllowOptOut = copyBoolPtr(snap.TrajectoryAllowProjectOptOut)
+	}
+	if !boolPtrEqual(s.config.TrajectoryAllowProjectOptOut, trajectoryAllowOptOut) {
+		applied = append(applied, "telemetry_trajectory_allow_project_opt_out")
+	}
+	s.config.TrajectoryAllowProjectOptOut = trajectoryAllowOptOut
 	telemetryConfig := s.config.TelemetryConfig
 	if snap.TelemetryConfig != nil {
 		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
@@ -2398,6 +2435,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.reconcileLifecycleEvents(context.Background())
 	s.reconcileTriggerDrainer(context.Background())
 	s.reconcileUsageLedgerAsync(context.Background())
+	s.reconcileTokenBudgets(context.Background())
 
 	return map[string]interface{}{
 		"applied":          applied,
@@ -2675,6 +2713,31 @@ func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
 		// check existed) turns remote images off. Say so once per revision.
 		slog.Warn("artifacts settings: remote images are off because a remote image setting is invalid",
 			"problem", cfg.RemoteImagesInvalid, "revision", state.Revision)
+	}
+	return cfg
+}
+
+// Uploads returns the resolved resumable chunked upload settings (the
+// "uploads" section, ptone/scion#8654 §3.11). It returns
+// opsettings.DefaultUploadsConfig when the section is absent, and
+// opsettings.MalformedUploadsConfig (compiled defaults with Malformed=true)
+// when the stored document is unreadable or invalid.
+//
+// Hot-reloadable: reads from the DB-backed cache on every request.
+func (o *OperationalSettings) Uploads() opsettings.UploadsConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.UploadsSectionName]
+	if !ok {
+		return opsettings.DefaultUploadsConfig()
+	}
+	if state.Malformed {
+		return opsettings.MalformedUploadsConfig()
+	}
+	cfg, err := opsettings.ParseUploadsDoc(state.Value)
+	if err != nil {
+		return opsettings.MalformedUploadsConfig()
 	}
 	return cfg
 }

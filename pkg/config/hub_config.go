@@ -1404,6 +1404,9 @@ type GlobalConfig struct {
 	// --role relay; server.relay).
 	Relay RelayServerConfig `json:"relay,omitzero" yaml:"relay,omitempty" koanf:"relay"`
 
+	// MCP holds settings for the MCP server listener (server.mcp).
+	MCP MCPServerConfig `json:"mcp,omitzero" yaml:"mcp,omitempty" koanf:"mcp"`
+
 	// Runtime Broker API server settings
 	RuntimeBroker RuntimeBrokerConfig `json:"runtimeBroker" yaml:"runtimeBroker" koanf:"runtimeBroker"`
 
@@ -1739,6 +1742,32 @@ type StorageConfig struct {
 	Provider  string `json:"provider" yaml:"provider" koanf:"provider"`
 	Bucket    string `json:"bucket" yaml:"bucket" koanf:"bucket"`
 	LocalPath string `json:"localPath" yaml:"localPath" koanf:"localPath"`
+}
+
+// MCPServerConfig holds settings for the Scion MCP server listener (server.mcp).
+type MCPServerConfig struct {
+	Enabled                bool          `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Host                   string        `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	Port                   int           `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Path                   string        `json:"path,omitempty" yaml:"path,omitempty" koanf:"path"`
+	PublicURL              string        `json:"publicUrl,omitempty" yaml:"publicUrl,omitempty" koanf:"publicUrl"`
+	HubEndpoint            string        `json:"hubEndpoint,omitempty" yaml:"hubEndpoint,omitempty" koanf:"hubEndpoint"`
+	AllowedOrigins         []string      `json:"allowedOrigins,omitempty" yaml:"allowedOrigins,omitempty" koanf:"allowedOrigins"`
+	MaxStreamsPerPrincipal int           `json:"maxStreamsPerPrincipal,omitempty" yaml:"maxStreamsPerPrincipal,omitempty" koanf:"maxStreamsPerPrincipal"`
+	StreamWait             time.Duration `json:"streamWait,omitempty" yaml:"streamWait,omitempty" koanf:"streamWait"`
+}
+
+// IsZero reports whether MCPServerConfig has no non-default fields set.
+func (c MCPServerConfig) IsZero() bool {
+	return !c.Enabled &&
+		c.Host == "" &&
+		c.Port == 0 &&
+		c.Path == "" &&
+		c.PublicURL == "" &&
+		c.HubEndpoint == "" &&
+		len(c.AllowedOrigins) == 0 &&
+		c.MaxStreamsPerPrincipal == 0 &&
+		c.StreamWait == 0
 }
 
 // DefaultBrokerHost is the built-in runtime broker listen host

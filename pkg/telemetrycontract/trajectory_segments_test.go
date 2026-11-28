@@ -15,6 +15,7 @@
 package telemetrycontract
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -78,5 +79,29 @@ func TestValidateTrajectoryRelativePath(t *testing.T) {
 		if err := ValidateTrajectoryRelativePath(tc.harness, tc.path); err == nil {
 			t.Errorf("%s: expected error for (%q, %q), got nil", tc.name, tc.harness, tc.path)
 		}
+	}
+}
+
+func TestTrajectoryCapturePolicyValidationAndStatusJSON(t *testing.T) {
+	for _, valid := range []string{TrajectoryCapturePolicyFull, TrajectoryCapturePolicyMetadataOnly, TrajectoryCapturePolicyOff} {
+		if !IsValidTrajectoryCapturePolicy(valid) {
+			t.Errorf("IsValidTrajectoryCapturePolicy(%q) = false, want true", valid)
+		}
+	}
+	for _, invalid := range []string{"", "FULL", "partial", "on", "disabled"} {
+		if IsValidTrajectoryCapturePolicy(invalid) {
+			t.Errorf("IsValidTrajectoryCapturePolicy(%q) = true, want false", invalid)
+		}
+	}
+
+	raw, err := json.Marshal(TrajectoryCapturePolicyStatus{
+		Policy:        TrajectoryCapturePolicyFull,
+		EnforcedByHub: false,
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got, want := string(raw), `{"policy":"full","enforced_by_hub":false}`; got != want {
+		t.Errorf("JSON = %s, want %s", got, want)
 	}
 }

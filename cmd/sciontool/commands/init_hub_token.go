@@ -65,6 +65,18 @@ func stageHubToken(staged string, uid, gid int) (kept bool, err error) {
 	return false, nil
 }
 
+// stageHubTokenForShell stages the hub credential under shell isolation: it
+// unlinks any pre-existing handoff file (no-follow) first and skips the
+// keep-if-newer iat comparison so a file planted on a persistent home by a
+// previous workload can never override the fresh staged credential. Written
+// with owner 0:0 before the environ-purge re-exec.
+func stageHubTokenForShell(staged string) error {
+	if err := hub.RemoveTokenFile(); err != nil {
+		return fmt.Errorf("remove pre-existing handoff token file: %w", err)
+	}
+	return runWriteTokenFile(staged, 0, 0)
+}
+
 // runWriteTokenFile is hub.WriteTokenFile; a test may replace it.
 var runWriteTokenFile = hub.WriteTokenFile
 

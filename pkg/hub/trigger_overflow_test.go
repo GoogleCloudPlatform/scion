@@ -622,8 +622,8 @@ func TestTriggerOverflow_GitHubComment_OutOfLineParity(t *testing.T) {
 				DefinitionID:   trRow.ID,
 				FireID:         fireID,
 			},
-			ActionType: trRow.ActionType,
-			Payload:    trRow.ActionPayload,
+			ActionType: firstTriggerAction(*trRow).Type,
+			Payload:    firstTriggerAction(*trRow).Payload,
 			Event: &hubfire.FireEvent{
 				ID:           evID,
 				ProjectID:    f.projectID,

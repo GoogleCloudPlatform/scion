@@ -31,12 +31,14 @@ var ErrTrajectorySegmentModified = errors.New("trajectory segment modified befor
 
 // TrajectorySegmentCommitExpectation binds CommitTrajectorySegment to the
 // exact verified snapshot so a concurrent pending refresh cannot cause a row
-// to be committed with unverified hashes or byte range.
+// to be committed with unverified hashes, byte range, or manifest metadata.
 type TrajectorySegmentCommitExpectation struct {
 	ByteEnd          int64
 	RawSHA256        string
 	CompressedSize   int64
 	CompressedSHA256 string
+	IncompleteTail   bool
+	SessionID        string
 }
 
 // TrajectorySegmentIdentity is the unique natural key of a raw trajectory
@@ -66,6 +68,7 @@ type TrajectorySegment struct {
 	ByteEnd            int64      `json:"byteEnd"`
 	RawSHA256          string     `json:"rawSha256"`
 	CompressedSize     int64      `json:"compressedSize"`
+	ChargedBytes       int64      `json:"chargedBytes"`
 	CompressedSHA256   string     `json:"compressedSha256"`
 	IncompleteTail     bool       `json:"incompleteTail"`
 	SessionID          string     `json:"sessionId,omitempty"`
@@ -109,8 +112,36 @@ type TrajectorySegmentStore interface {
 	// modified concurrently after verification.
 	CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time, expect TrajectorySegmentCommitExpectation) (*TrajectorySegment, error)
 
-	// SumTrajectoryRunRawBytes returns the total raw bytes (byte_end - byte_start)
-	// across committed segments (and non-expired pending segments at now) for
+	// SumTrajectoryRunRawBytes returns the total charged bytes —
+	// MAX(charged_bytes, byte_end - byte_start, compressed_size) per row —
+	// across all committed and pending segments (regardless of prepare_expires_at)
+	// for (agentID, runID), excluding excludeID if non-empty. Each row's
+	// charged_bytes is a monotonic high-water mark that never decreases on
+	// pending refresh, bounding orphaned uncommitted object storage per run (no
+	// retention sweep exists in P5, so pending charges persist for the lifetime
+	// of the run). Re-preparing the same identity reuses the existing row and
+	// passes its ID as excludeID so retries and probes do not double-count.
+	SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string) (int64, error)
+
+	// CountTrajectoryRunSegments returns the number of trajectory_segments rows
+	// (committed and pending, regardless of prepare_expires_at) for
 	// (agentID, runID), excluding excludeID if non-empty.
-	SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string, now time.Time) (int64, error)
+	CountTrajectoryRunSegments(ctx context.Context, agentID, runID, excludeID string) (int64, error)
+
+	// ListCommittedTrajectorySegments returns committed segments for an agent
+	// matching filter in deterministic (run_id, native_relative_path, generation,
+	// byte_start, id) order, along with hasMore indicating whether additional
+	// rows exist beyond filter.Offset+len(result).
+	ListCommittedTrajectorySegments(ctx context.Context, filter TrajectorySegmentListFilter) ([]*TrajectorySegment, bool, error)
+}
+
+// TrajectorySegmentListFilter scopes committed trajectory segment listing for an agent.
+type TrajectorySegmentListFilter struct {
+	ProjectID          string
+	AgentID            string
+	RunID              string
+	Generation         *int
+	NativeRelativePath string
+	Limit              int
+	Offset             int
 }

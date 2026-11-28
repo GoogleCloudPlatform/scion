@@ -53,6 +53,11 @@ var ErrRequestClosed = errors.New("artifacts: review request is no longer open")
 // artifact has no published version yet (current_seq == 0).
 var ErrNothingToReview = errors.New("artifacts: artifact has no published version")
 
+// ErrBoundedGrantConflict is returned by CreateOrRemindReviewRequest when the
+// bounded-grant path encounters an existing unexpired ordinary grant that
+// cannot be overwritten by an agent.
+var ErrBoundedGrantConflict = errors.New("artifacts: cannot write bounded grant over existing grant")
+
 // ReviewRequest is one row of artifact_review_request.
 type ReviewRequest struct {
 	ID             string
@@ -74,6 +79,12 @@ type ReviewRequest struct {
 	UpdatedAt      time.Time
 	RemindedAt     *time.Time
 	ResolvedAt     *time.Time
+
+	// RemovedGrant is non-persisted; populated when WithdrawReviewRequest or
+	// DismissReviewRequest deletes a still-role-gated bounded review grant in
+	// the same transaction so the handler can emit the grant_removed decision
+	// log.
+	RemovedGrant *Grant
 }
 
 // migrationReviewRequests adds the artifact_review_request table and its three
@@ -192,10 +203,12 @@ type ReviewRequestKey struct {
 // Put is populated on return with the GrantPut outcome (created, changed, or
 // unchanged) so the caller can emit the matching decision-log entry.
 type ReviewRequestGrantOption struct {
-	Grant     *Grant
-	MaxGrants int
-	Actor     *Actor
-	Put       GrantPut
+	Grant            *Grant
+	MaxGrants        int
+	Bounded          bool
+	MaxBoundedGrants int
+	Actor            *Actor
+	Put              GrantPut
 }
 
 // CreateOrRemindReviewRequest implements Store.
@@ -221,6 +234,9 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 	if err := s.refuseAttachmentTx(ctx, tx, req.ArtifactID); err != nil {
 		return ReviewRequest{}, "", err
 	}
+	if err := s.checkExpect(ctx, tx, req.ArtifactID, actor); err != nil {
+		return ReviewRequest{}, "", err
+	}
 
 	var currentSeq int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COALESCE(current_seq, 0) FROM artifact WHERE id = ?`), req.ArtifactID).Scan(&currentSeq); err != nil {
@@ -230,10 +246,10 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 		return ReviewRequest{}, "", ErrNothingToReview
 	}
 
-	// If the caller is raising the reviewer's access to review (design §4.3
-	// step 5b), apply the grant in the same lockLiveArtifact transaction
-	// through putGrantTx and under maxGrants.
-	var raisedGrantID string
+	// If the caller is raising (step 5b) or bounding (step 5c) the reviewer's
+	// access to review, apply the grant in the same lockLiveArtifact
+	// transaction through putGrantTx and under maxGrants / maxBoundedGrants.
+	var writtenGrantID string
 	if grantOpt != nil && grantOpt.Grant != nil {
 		g := grantOpt.Grant
 		g.ArtifactID = req.ArtifactID
@@ -243,23 +259,23 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 		if g.CreatedAt.IsZero() {
 			g.CreatedAt = at
 		}
-		put, _, err := s.putGrantTx(ctx, tx, g, grantOpt.MaxGrants, false, grantOpt.Actor, false, at)
+		put, _, err := s.putGrantTx(ctx, tx, g, grantOpt.MaxGrants, false, grantOpt.Actor, false, at, true, grantOpt.Bounded, grantOpt.MaxBoundedGrants)
 		if err != nil {
 			return ReviewRequest{}, "", err
 		}
 		grantOpt.Put = put
-		raisedGrantID = g.ID
+		writtenGrantID = g.ID
 	}
 
 	remindExisting := func(existing ReviewRequest) (ReviewRequest, string, error) {
 		nextAccess := existing.Access
 		nextGrantID := existing.GrantID
-		if raisedGrantID != "" {
-			nextAccess = ReviewRequestAccessRaised
-			nextGrantID = raisedGrantID
+		if writtenGrantID != "" {
+			nextAccess = req.Access
+			nextGrantID = writtenGrantID
 		}
 		if existing.RemindedAt != nil && at.Sub(*existing.RemindedAt) < remindCooldown {
-			if raisedGrantID != "" {
+			if writtenGrantID != "" {
 				res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
 					SET access = ?, grant_id = ?, updated_at = ?
 					WHERE id = ? AND state = ?`),
@@ -336,8 +352,8 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 	if out.ID == "" {
 		out.ID = uuid.NewString()
 	}
-	if raisedGrantID != "" {
-		out.GrantID = raisedGrantID
+	if writtenGrantID != "" {
+		out.GrantID = writtenGrantID
 	}
 	out.RequestedSeq = currentSeq
 	out.State = ReviewRequestStateOpen
@@ -394,7 +410,10 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 	return out, ReviewRequestOutcomeCreated, nil
 }
 
-// DismissReviewRequest implements Store.
+// DismissReviewRequest implements Store: transitions the caller's open review
+// request to dismissed under lockLiveArtifact + CAS on state='open' (design
+// §4.6 writer 2). A still-role-gated bounded review grant is deleted in the
+// same transaction; raised grants and human-owned grants are left in place.
 func (s *sqlStore) DismissReviewRequest(ctx context.Context, artifactID, reviewerKind, reviewerRef, responseNote string, now time.Time, actor *Actor) (ReviewRequest, error) {
 	if artifactID == "" || reviewerKind == "" || reviewerRef == "" {
 		return ReviewRequest{}, errors.New("artifacts: DismissReviewRequest missing required fields")
@@ -418,12 +437,29 @@ func (s *sqlStore) DismissReviewRequest(ctx context.Context, artifactID, reviewe
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return ReviewRequest{}, err
+	}
+
+	locked, err := scanReviewRequest(tx.QueryRowContext(ctx, s.rebind(`SELECT `+reviewRequestColumns+`
+		FROM artifact_review_request
+		WHERE id = ? AND artifact_id = ?`), existing.ID, artifactID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ReviewRequest{}, ErrNotFound
+	}
+	if err != nil {
+		return ReviewRequest{}, fmt.Errorf("artifacts: query review request for dismiss: %w", err)
+	}
+	if locked.State != ReviewRequestStateOpen {
+		return ReviewRequest{}, ErrRequestClosed
+	}
+
 	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
 		SET state = ?, response_note = ?, resolved_by_kind = ?, resolved_by_ref = ?,
 		    resolved_at = ?, updated_at = ?
-		WHERE id = ? AND state = ?`),
+		WHERE id = ? AND artifact_id = ? AND state = ?`),
 		ReviewRequestStateDismissed, responseNote, actor.Kind, actor.Ref,
-		s.timeArg(at), s.timeArg(at), existing.ID, ReviewRequestStateOpen)
+		s.timeArg(at), s.timeArg(at), locked.ID, artifactID, ReviewRequestStateOpen)
 	if err != nil {
 		return ReviewRequest{}, fmt.Errorf("artifacts: dismiss review request: %w", err)
 	}
@@ -435,10 +471,15 @@ func (s *sqlStore) DismissReviewRequest(ctx context.Context, artifactID, reviewe
 		return ReviewRequest{}, ErrRequestClosed
 	}
 
+	removedGrant, err := s.cleanupBoundedRequestGrantTx(ctx, tx, locked, actor, at)
+	if err != nil {
+		return ReviewRequest{}, err
+	}
+
 	detail := map[string]any{
-		"requestId":    existing.ID,
-		"reviewerKind": existing.ReviewerKind,
-		"reviewerRef":  existing.ReviewerRef,
+		"requestId":    locked.ID,
+		"reviewerKind": locked.ReviewerKind,
+		"reviewerRef":  locked.ReviewerRef,
 	}
 	if err := s.insertEvent(ctx, tx, artifactID, EventReviewRequestDismissed, actor, at, detail); err != nil {
 		return ReviewRequest{}, err
@@ -447,13 +488,14 @@ func (s *sqlStore) DismissReviewRequest(ctx context.Context, artifactID, reviewe
 		return ReviewRequest{}, fmt.Errorf("artifacts: commit dismiss review request: %w", err)
 	}
 
-	out := *existing
+	out := locked
 	out.State = ReviewRequestStateDismissed
 	out.ResponseNote = responseNote
 	out.ResolvedByKind = actor.Kind
 	out.ResolvedByRef = actor.Ref
 	out.ResolvedAt = &at
 	out.UpdatedAt = at
+	out.RemovedGrant = removedGrant
 	return out, nil
 }
 
@@ -651,11 +693,9 @@ func (s *sqlStore) WithdrawReviewRequest(ctx context.Context, artifactID, reques
 		return ReviewRequest{}, ErrRequestClosed
 	}
 
-	// Phase 4 hook: bounded grants (ReviewRequestAccessBounded) do not exist
-	// until Phase 4; when they do, delete existing.GrantID here if its
-	// created_by_ref is still BoundedReviewCreator. Raised grants are
-	// intentionally left in place (design §4.4).
-	if err := s.cleanupWithdrawnRequestGrantTx(ctx, tx, existing, actor, at); err != nil {
+	// Clean up a still-role-gated bounded grant; see cleanupBoundedRequestGrantTx.
+	removedGrant, err := s.cleanupBoundedRequestGrantTx(ctx, tx, existing, actor, at)
+	if err != nil {
 		return ReviewRequest{}, err
 	}
 
@@ -677,14 +717,56 @@ func (s *sqlStore) WithdrawReviewRequest(ctx context.Context, artifactID, reques
 	out.ResolvedByRef = actor.Ref
 	out.ResolvedAt = &at
 	out.UpdatedAt = at
+	out.RemovedGrant = removedGrant
 	return out, nil
 }
 
-// cleanupWithdrawnRequestGrantTx is the Phase 4 hook for deleting a
-// still-role-gated bounded grant when its review request is withdrawn.
-// Raised grants are intentionally left in place.
-func (s *sqlStore) cleanupWithdrawnRequestGrantTx(_ context.Context, _ *sql.Tx, _ ReviewRequest, _ *Actor, _ time.Time) error {
-	return nil
+// cleanupBoundedRequestGrantTx deletes a still-role-gated bounded grant when
+// its review request is withdrawn, dismissed, or expired (design §4.4, §4.6
+// writers 2, 3, and 7). If a human edited the grant (replacing created_by_ref
+// or changing permission) or it was already removed, the grant is left
+// untouched. Raised and existing grants are intentionally left in place.
+func (s *sqlStore) cleanupBoundedRequestGrantTx(ctx context.Context, tx *sql.Tx, existing ReviewRequest, actor *Actor, at time.Time) (*Grant, error) {
+	if existing.Access != ReviewRequestAccessBounded || existing.GrantID == "" {
+		return nil, nil
+	}
+	var subjectKind, subjectRef, perm string
+	err := tx.QueryRowContext(ctx, s.rebind(`SELECT subject_kind, subject_ref, permission
+		FROM artifact_grant
+		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND created_by_ref = ? AND permission = ?`),
+		existing.GrantID, existing.ArtifactID, SubjectPrincipal, BoundedReviewCreator, GrantReview).Scan(&subjectKind, &subjectRef, &perm)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: find bounded grant for cleanup: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
+		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND created_by_ref = ? AND permission = ?`),
+		existing.GrantID, existing.ArtifactID, SubjectPrincipal, BoundedReviewCreator, GrantReview)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: delete bounded grant: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: delete bounded grant: %w", err)
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	if err := s.insertEvent(ctx, tx, existing.ArtifactID, EventGrantRemoved, actor, at, map[string]any{
+		"grantId": existing.GrantID, "subjectKind": subjectKind, "subjectRef": subjectRef, "permission": perm,
+	}); err != nil {
+		return nil, err
+	}
+	return &Grant{
+		ID:           existing.GrantID,
+		ArtifactID:   existing.ArtifactID,
+		SubjectKind:  subjectKind,
+		SubjectRef:   subjectRef,
+		Permission:   perm,
+		CreatedByRef: BoundedReviewCreator,
+	}, nil
 }
 
 // ListOpenReviewRequests implements Store: walks open review requests in
@@ -732,34 +814,42 @@ func (s *sqlStore) ListOpenReviewRequests(ctx context.Context, after *ReviewRequ
 }
 
 // ExpireReviewRequest implements Store: CAS-transitions an open review request
-// to expired only if its state is still 'open' and updated_at matches
-// expectUpdatedAt (design §4.6 writer 7).
-func (s *sqlStore) ExpireReviewRequest(ctx context.Context, artifactID, requestID string, expectUpdatedAt time.Time, reason string, now time.Time, actor *Actor) (bool, error) {
+// to expired under the artifact row lock only if its state is still 'open' and
+// updated_at matches expectUpdatedAt (design §4.6 writer 7). A still-role-gated
+// bounded review grant is deleted in the same transaction; raised grants and
+// human-owned grants are left in place.
+func (s *sqlStore) ExpireReviewRequest(ctx context.Context, artifactID, requestID string, expectUpdatedAt time.Time, reason string, now time.Time, actor *Actor) (bool, *Grant, error) {
 	if artifactID == "" || requestID == "" {
-		return false, errors.New("artifacts: ExpireReviewRequest missing required fields")
+		return false, nil, errors.New("artifacts: ExpireReviewRequest missing required fields")
 	}
 	if !actor.valid() {
-		return false, errNoActor
+		return false, nil, errNoActor
 	}
 	at := now.UTC().Truncate(time.Microsecond)
 	expAt := expectUpdatedAt.UTC().Truncate(time.Microsecond)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("artifacts: begin expire review request: %w", err)
+		return false, nil, fmt.Errorf("artifacts: begin expire review request: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var reviewerKind, reviewerRef string
-	err = tx.QueryRowContext(ctx, s.rebind(`SELECT reviewer_kind, reviewer_ref
+	// Lock the artifact row first to serialize grant mutations and cap checks
+	// with putGrantTx / withdraw / dismiss, without failing on a soft-deleted
+	// artifact (reason == "artifact_deleted").
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET id = id WHERE id = ?`), artifactID); err != nil {
+		return false, nil, fmt.Errorf("artifacts: lock artifact for expire: %w", err)
+	}
+
+	existing, err := scanReviewRequest(tx.QueryRowContext(ctx, s.rebind(`SELECT `+reviewRequestColumns+`
 		FROM artifact_review_request
 		WHERE id = ? AND artifact_id = ? AND state = ? AND updated_at = ?`),
-		requestID, artifactID, ReviewRequestStateOpen, s.timeArg(expAt)).Scan(&reviewerKind, &reviewerRef)
+		requestID, artifactID, ReviewRequestStateOpen, s.timeArg(expAt)))
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, nil, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("artifacts: query review request for expire: %w", err)
+		return false, nil, fmt.Errorf("artifacts: query review request for expire: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
@@ -769,31 +859,36 @@ func (s *sqlStore) ExpireReviewRequest(ctx context.Context, artifactID, requestI
 		ReviewRequestStateExpired, actor.Kind, actor.Ref,
 		s.timeArg(at), s.timeArg(at), requestID, artifactID, ReviewRequestStateOpen, s.timeArg(expAt))
 	if err != nil {
-		return false, fmt.Errorf("artifacts: expire review request: %w", err)
+		return false, nil, fmt.Errorf("artifacts: expire review request: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("artifacts: expire review request: %w", err)
+		return false, nil, fmt.Errorf("artifacts: expire review request: %w", err)
 	}
 	if n == 0 {
-		return false, nil
+		return false, nil, nil
+	}
+
+	removedGrant, err := s.cleanupBoundedRequestGrantTx(ctx, tx, existing, actor, at)
+	if err != nil {
+		return false, nil, err
 	}
 
 	detail := map[string]any{
 		"requestId":    requestID,
-		"reviewerKind": reviewerKind,
-		"reviewerRef":  reviewerRef,
+		"reviewerKind": existing.ReviewerKind,
+		"reviewerRef":  existing.ReviewerRef,
 	}
 	if reason != "" {
 		detail["reason"] = reason
 	}
 	if err := s.insertEvent(ctx, tx, artifactID, EventReviewRequestExpired, actor, at, detail); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("artifacts: commit expire review request: %w", err)
+		return false, nil, fmt.Errorf("artifacts: commit expire review request: %w", err)
 	}
-	return true, nil
+	return true, removedGrant, nil
 }
 
 // PurgeClosedReviewRequests implements Store: deletes up to limit closed

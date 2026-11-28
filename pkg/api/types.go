@@ -462,6 +462,8 @@ type TelemetryRetentionConfig struct {
 	HourlyRollupsDays *int   `json:"hourly_rollups_days,omitempty" yaml:"hourly_rollups_days,omitempty"`
 	DailyRollupsDays  *int   `json:"daily_rollups_days,omitempty" yaml:"daily_rollups_days,omitempty"`
 	ScopeCountersDays *int   `json:"scope_counters_days,omitempty" yaml:"scope_counters_days,omitempty"`
+	GroupRollupsDays  *int   `json:"group_rollups_days,omitempty" yaml:"group_rollups_days,omitempty"`
+	BudgetStateDays   *int   `json:"budget_state_days,omitempty" yaml:"budget_state_days,omitempty"`
 	MeterHealthDays   *int   `json:"meter_health_days,omitempty" yaml:"meter_health_days,omitempty"`
 	SweepInterval     string `json:"sweep_interval,omitempty" yaml:"sweep_interval,omitempty"`
 	BatchSize         *int   `json:"batch_size,omitempty" yaml:"batch_size,omitempty"`
@@ -790,12 +792,13 @@ type AgentInfo struct {
 	Launch *AgentLaunch `json:"launch,omitempty"`
 
 	// Runtime configuration
-	Image      string            `json:"image,omitempty"`
-	Generation int               `json:"generation,omitempty"` // Reincarnation generation (starts at 1; 0 when unknown)
-	Detached   bool              `json:"detached,omitempty"`
-	Runtime    string            `json:"runtime,omitempty"`
-	Profile    string            `json:"profile,omitempty"`
-	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	Generation         int               `json:"generation,omitempty"`         // Reincarnation generation (starts at 1; 0 when unknown)
+	LastReincarnatedAt *time.Time        `json:"lastReincarnatedAt,omitempty"` // Most recent completed reincarnation timestamp (Hub agents only)
+	Detached           bool              `json:"detached,omitempty"`
+	Runtime            string            `json:"runtime,omitempty"`
+	Profile            string            `json:"profile,omitempty"`
+	Kubernetes         *AgentK8sMetadata `json:"kubernetes,omitempty"`
 	// VanishedPodReport marks an entry a Kubernetes runtime List() reports
 	// for an agent pod already removed by a preemption or eviction, rather
 	// than for a pod that still exists (see runtime.IsVanishedPodReport).

@@ -248,7 +248,10 @@ func TestBelowFloor_CurrentFloorAgainstReleases(t *testing.T) {
 		target       Ref
 		below, known bool
 	}{
-		{"nightly-20261126 contains guarded migrations", Ref{Version: "nightly-20261126", Date: day("2026-11-26T03:03:00Z")}, false, true},
+		{"nightly-20261129 contains guarded migrations", Ref{Version: "nightly-20261129", Date: day("2026-11-29T03:03:00Z")}, false, true},
+		{"nightly-20261128 predates guarded migrations", Ref{Version: "nightly-20261128", Date: day("2026-11-28T03:03:00Z")}, true, true},
+		{"nightly-20261127 predates guarded migrations", Ref{Version: "nightly-20261127", Date: day("2026-11-27T03:03:00Z")}, true, true},
+		{"nightly-20261126 predates guarded migrations", Ref{Version: "nightly-20261126", Date: day("2026-11-26T03:03:00Z")}, true, true},
 		{"nightly-20261125 predates guarded migrations", Ref{Version: "nightly-20261125", Date: day("2026-11-25T03:17:06Z")}, true, true},
 		{"nightly-20261124 predates guarded migrations", Ref{Version: "nightly-20261124", Date: day("2026-11-24T03:03:00Z")}, true, true},
 		{"nightly-20261123 predates guarded migrations", Ref{Version: "nightly-20261123", Date: day("2026-11-23T03:17:06Z")}, true, true},

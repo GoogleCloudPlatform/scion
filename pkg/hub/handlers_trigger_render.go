@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/gitref"
@@ -182,10 +183,31 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 		Errors: []TriggerRenderError{},
 	}
 
-	switch tr.ActionType {
+	actions, actErr := triggerActions(*tr)
+	if actErr != nil || len(actions) == 0 {
+		resp.Errors = append(resp.Errors, TriggerRenderError{
+			Slot:    "action",
+			Kind:    "invalid_payload",
+			Message: "stored trigger actions could not be decoded",
+		})
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	actionIdx := 0
+	if rawIdx := strings.TrimSpace(r.URL.Query().Get("actionIndex")); rawIdx != "" {
+		parsedIdx, pErr := strconv.Atoi(rawIdx)
+		if pErr != nil || parsedIdx < 0 || parsedIdx >= len(actions) {
+			ValidationError(w, "actionIndex out of range", map[string]any{"field": "actionIndex"})
+			return
+		}
+		actionIdx = parsedIdx
+	}
+	selectedAction := actions[actionIdx]
+
+	switch selectedAction.Type {
 	case store.TriggerActionDispatchAgent:
 		var p DispatchAgentEventPayload
-		if err := json.Unmarshal([]byte(tr.ActionPayload), &p); err != nil {
+		if err := json.Unmarshal([]byte(selectedAction.Payload), &p); err != nil {
 			resp.Errors = append(resp.Errors, TriggerRenderError{
 				Slot:    "action",
 				Kind:    "invalid_payload",
@@ -292,7 +314,7 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	case store.TriggerActionMessage:
 		var p MessageEventPayload
-		if err := json.Unmarshal([]byte(tr.ActionPayload), &p); err != nil {
+		if err := json.Unmarshal([]byte(selectedAction.Payload), &p); err != nil {
 			resp.Errors = append(resp.Errors, TriggerRenderError{
 				Slot:    "action",
 				Kind:    "invalid_payload",
@@ -326,7 +348,7 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	case store.TriggerActionGitHubComment:
 		var p GitHubCommentActionPayload
-		if err := json.Unmarshal([]byte(tr.ActionPayload), &p); err != nil {
+		if err := json.Unmarshal([]byte(selectedAction.Payload), &p); err != nil {
 			resp.Errors = append(resp.Errors, TriggerRenderError{
 				Slot:    "action",
 				Kind:    "invalid_payload",

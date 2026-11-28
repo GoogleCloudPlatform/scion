@@ -805,6 +805,9 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 	if err := dropTemplateLegacyColumns(ctx, client); err != nil {
 		return err
 	}
+	if err := dropLegacyTriggerUniqueIndexes(ctx, client); err != nil {
+		return err
+	}
 	if err := MigrateSkillCoreScope(ctx, client); err != nil {
 		return err
 	}

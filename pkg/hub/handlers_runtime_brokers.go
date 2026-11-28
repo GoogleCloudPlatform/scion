@@ -994,8 +994,9 @@ type brokerHeartbeatRequest struct {
 	Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
 	// Version is the broker's build token (version.Short()), refreshing the
 	// stored version when the heartbeat comes from the broker itself.
-	// Omitted by an older broker, in which case the stored version is left
-	// unchanged (see hubclient.BrokerHeartbeat.Version).
+	// When omitted, empty, or unusable (for example "dev"), a self-heartbeat
+	// clears the stored version so a stale tag is not kept (ptone/scion#6382;
+	// see hubclient.BrokerHeartbeat.Version).
 	Version string `json:"version,omitempty"`
 	// Capabilities refreshes the broker's stored capabilities on every
 	// heartbeat (design §3.4 Amendment A2.2(b); see
@@ -1417,8 +1418,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	}
 
 	var heartbeat brokerHeartbeatRequest
-	if err := readJSON(r, &heartbeat); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &heartbeat) {
 		return
 	}
 	// This Hub reads the report hashes and asks for the full report when
@@ -1487,9 +1487,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// ProfileSAMappings likewise. Health (the broker's self-reported
 	// health) follows the same rule; it is stored next to Status and never
 	// changes it, so a degraded broker stays online and keeps reconciling.
-	// Version follows the same rule, but only from the broker itself: a
-	// user heartbeat never sets it, and an omitted or empty version keeps
-	// the stored one (ptone/scion#5972).
+	// Version is refreshed only from the broker itself: a user heartbeat
+	// never sets or clears it, while a self-heartbeat whose version is
+	// omitted, empty, or normalizes to empty (for example "dev") clears any
+	// stale stored version so the hub reports it as unknown rather than
+	// comparing an old tag (ptone/scion#5972, ptone/scion#6382).
 	heartbeatVersion := ""
 	if brokerSelf {
 		heartbeatVersion = brokerVersionToken(heartbeat.Version)
@@ -1503,7 +1505,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			"broker_id", id)
 		heartbeat.WorkloadIdentityTargets = nil
 	}
-	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 || heartbeat.WorkloadIdentityTargets != nil {
+	if brokerSelf || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 || heartbeat.WorkloadIdentityTargets != nil {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -1552,7 +1554,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			refresh := func(b *store.RuntimeBroker) bool {
 				healthChanged, saRequested = false, false
 				changed := false
-				if heartbeatVersion != "" && b.Version != heartbeatVersion {
+				if brokerSelf && b.Version != heartbeatVersion {
 					b.Version = heartbeatVersion
 					changed = true
 				}

@@ -59,11 +59,15 @@ var (
 	triggerDispatch          dispatchAgentFlagValues
 	triggerComment           string
 	triggerReplyInThread     bool
+	createActionCollector    triggerActionGroupCollector
 	triggerSubjectExpr       string
 	triggerOnSubject         string
 	triggerCoalesceWindow    string
 	triggerMaxFiresPerMinute int
 	triggerMaxConcurrent     int
+	triggerNotifyUser        bool
+	triggerNotifyAgent       string
+	triggerNotifyOn          []string
 
 	triggerListSource  string
 	triggerListWebhook string
@@ -496,6 +500,35 @@ func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, 
 	}
 }
 
+func parseTriggerNotifyOutcomes(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		for _, part := range strings.Split(item, ",") {
+			v := strings.TrimSpace(part)
+			if v == "" {
+				continue
+			}
+			switch v {
+			case "failed", "refused", "expired", "skipped":
+				if !seen[v] {
+					seen[v] = true
+					out = append(out, v)
+				}
+			default:
+				return nil, newUsageError("invalid --notify-on value %q (supported: failed, refused, expired, skipped)", triggerTerminalText(v, false))
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, newUsageError("--notify-on must contain at least one outcome (failed, refused, expired, skipped)")
+	}
+	return out, nil
+}
+
 func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 	req, _, err := buildCreateTriggerRequestWithFlags(false, false, false, false)
 	return req, err
@@ -506,6 +539,10 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 }
 
 func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
+	return buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, false)
+}
+
+func buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, notifyUserExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
 	name := strings.TrimSpace(triggerName)
 	if name == "" {
 		return nil, nil, newUsageError("--name is required")
@@ -521,128 +558,128 @@ func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentEx
 		return nil, nil, newUsageError("--type is required when --github is set")
 	}
 
-	commentSet := commentExplicit || triggerComment != ""
-	ackCommentSet := ackCommentExplicit || triggerDispatch.ackComment != ""
-	if triggerReplyInThread && !commentSet {
-		return nil, nil, newUsageError("--reply-in-thread requires --comment")
-	}
-
-	rawAction := strings.TrimSpace(triggerAction)
-	if commentSet {
-		if actionExplicit && rawAction != "github.comment" {
-			return nil, nil, newUsageError("--comment cannot be used with --action %s", triggerTerminalText(rawAction, false))
-		}
-		rawAction = "github.comment"
-	}
-
-	actionKind, err := normalizeTriggerActionKind(rawAction)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if actionKind == "github.comment" && !triggerGitHubSource {
-		return nil, nil, newUsageError("--comment requires --github")
-	}
-	if ackCommentSet && !triggerGitHubSource {
-		return nil, nil, newUsageError("--ack-comment requires --github")
-	}
-
 	var (
 		action           hubclient.TriggerActionSpec
+		actions          []hubclient.TriggerActionSpec
 		derivedUntrusted []string
 	)
-	switch actionKind {
-	case "message":
-		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
-			return nil, nil, newUsageError("%s cannot be used with --action message", badFlag)
+	if createActionCollector.isMulti() {
+		var gErr error
+		actions, derivedUntrusted, gErr = buildActionSpecsFromGroups(createActionCollector.groups, triggerGitHubSource)
+		if gErr != nil {
+			return nil, nil, gErr
 		}
-		if ackCommentExplicit {
-			return nil, nil, newUsageError("--ack-comment cannot be used with --action message")
+	} else {
+		commentSet := commentExplicit || triggerComment != ""
+		ackCommentSet := ackCommentExplicit || triggerDispatch.ackComment != ""
+		if triggerReplyInThread && !commentSet {
+			return nil, nil, newUsageError("--reply-in-thread requires --comment")
 		}
-		agentRef := strings.TrimSpace(triggerAgent)
-		if agentRef == "" {
-			return nil, nil, newUsageError("--agent is required")
-		}
-		if strings.TrimSpace(triggerMessage) == "" {
-			return nil, nil, newUsageError("--message is required")
-		}
-		offline := strings.TrimSpace(triggerOffline)
-		if offline != "" && offline != "skip" && offline != "queue" {
-			return nil, nil, newUsageError("invalid --offline %q (supported: skip, queue)", triggerTerminalText(offline, false))
-		}
-		var queueTTLSeconds int
-		if rawTTL := strings.TrimSpace(triggerQueueTTL); rawTTL != "" {
-			if offline != "queue" {
-				return nil, nil, newUsageError("--queue-ttl requires --offline queue")
+
+		rawAction := strings.TrimSpace(triggerAction)
+		if commentSet {
+			if actionExplicit && rawAction != "github.comment" {
+				return nil, nil, newUsageError("--comment cannot be used with --action %s", triggerTerminalText(rawAction, false))
 			}
-			secs, tErr := parseTriggerQueueTTL(rawTTL)
-			if tErr != nil {
-				return nil, nil, tErr
-			}
-			queueTTLSeconds = secs
+			rawAction = "github.comment"
 		}
-		action = hubclient.TriggerActionSpec{
-			Type:            "message",
-			Message:         triggerMessage,
-			Interrupt:       triggerInterrupt,
-			Wake:            triggerWake,
-			Plain:           triggerPlain,
-			Offline:         offline,
-			QueueTTLSeconds: queueTTLSeconds,
-		}
-		if allowExplicit || len(triggerDispatch.allow) > 0 {
-			action.UntrustedVars = append([]string(nil), triggerDispatch.allow...)
-		} else {
-			derived, dErr := deriveMessageUntrustedVars(action.Message)
-			if dErr != nil {
-				return nil, nil, dErr
-			}
-			if len(derived) > 0 {
-				action.UntrustedVars = derived
-				derivedUntrusted = derived
-			}
-		}
-		if uuid.Validate(agentRef) == nil {
-			action.AgentID = agentRef
-		} else {
-			action.AgentName = agentRef
-		}
-	case "dispatch_agent":
-		if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
-			return nil, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
-		}
-		if strings.TrimSpace(triggerOffline) != "" {
-			return nil, nil, newUsageError("--offline cannot be used with --action dispatch-agent")
-		}
-		if strings.TrimSpace(triggerQueueTTL) != "" {
-			return nil, nil, newUsageError("--queue-ttl cannot be used with --action dispatch-agent")
-		}
-		if ackCommentExplicit && strings.TrimSpace(triggerDispatch.ackComment) == "" {
-			return nil, nil, newUsageError("--ack-comment cannot be empty")
-		}
-		action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
+
+		actionKind, err := normalizeTriggerActionKind(rawAction)
 		if err != nil {
 			return nil, nil, err
 		}
-	case "github.comment":
-		if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
-			return nil, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+
+		if actionKind == "github.comment" && !triggerGitHubSource {
+			return nil, nil, newUsageError("--comment requires --github")
 		}
-		if strings.TrimSpace(triggerOffline) != "" {
-			return nil, nil, newUsageError("--offline cannot be used with --action github.comment")
+		if ackCommentSet && !triggerGitHubSource {
+			return nil, nil, newUsageError("--ack-comment requires --github")
 		}
-		if strings.TrimSpace(triggerQueueTTL) != "" {
-			return nil, nil, newUsageError("--queue-ttl cannot be used with --action github.comment")
-		}
-		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
-			return nil, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
-		}
-		if ackCommentExplicit {
-			return nil, nil, newUsageError("--ack-comment cannot be used with --action github.comment")
-		}
-		action, derivedUntrusted, err = buildGitHubCommentActionSpec(triggerComment, triggerReplyInThread, triggerDispatch.allow, allowExplicit)
-		if err != nil {
-			return nil, nil, err
+
+		switch actionKind {
+		case "message":
+			if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
+				return nil, nil, newUsageError("%s cannot be used with --action message", badFlag)
+			}
+			if ackCommentExplicit {
+				return nil, nil, newUsageError("--ack-comment cannot be used with --action message")
+			}
+			agentRef := strings.TrimSpace(triggerAgent)
+			if agentRef == "" {
+				return nil, nil, newUsageError("--agent is required")
+			}
+			if strings.TrimSpace(triggerMessage) == "" {
+				return nil, nil, newUsageError("--message is required")
+			}
+			offline := strings.TrimSpace(triggerOffline)
+			if offline != "" && offline != "skip" && offline != "queue" {
+				return nil, nil, newUsageError("invalid --offline %q (supported: skip, queue)", triggerTerminalText(offline, false))
+			}
+			var queueTTLSeconds int
+			if rawTTL := strings.TrimSpace(triggerQueueTTL); rawTTL != "" {
+				if offline != "queue" {
+					return nil, nil, newUsageError("--queue-ttl requires --offline queue")
+				}
+				secs, tErr := parseTriggerQueueTTL(rawTTL)
+				if tErr != nil {
+					return nil, nil, tErr
+				}
+				queueTTLSeconds = secs
+			}
+			action = hubclient.TriggerActionSpec{
+				Type:            "message",
+				Message:         triggerMessage,
+				Interrupt:       triggerInterrupt,
+				Wake:            triggerWake,
+				Plain:           triggerPlain,
+				Offline:         offline,
+				QueueTTLSeconds: queueTTLSeconds,
+			}
+			if allowExplicit || len(triggerDispatch.allow) > 0 {
+				action.UntrustedVars = append([]string(nil), triggerDispatch.allow...)
+			}
+			if uuid.Validate(agentRef) == nil {
+				action.AgentID = agentRef
+			} else {
+				action.AgentName = agentRef
+			}
+		case "dispatch_agent":
+			if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
+				return nil, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
+			}
+			if strings.TrimSpace(triggerOffline) != "" {
+				return nil, nil, newUsageError("--offline cannot be used with --action dispatch-agent")
+			}
+			if strings.TrimSpace(triggerQueueTTL) != "" {
+				return nil, nil, newUsageError("--queue-ttl cannot be used with --action dispatch-agent")
+			}
+			if ackCommentExplicit && strings.TrimSpace(triggerDispatch.ackComment) == "" {
+				return nil, nil, newUsageError("--ack-comment cannot be empty")
+			}
+			action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
+			if err != nil {
+				return nil, nil, err
+			}
+		case "github.comment":
+			if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
+				return nil, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+			}
+			if strings.TrimSpace(triggerOffline) != "" {
+				return nil, nil, newUsageError("--offline cannot be used with --action github.comment")
+			}
+			if strings.TrimSpace(triggerQueueTTL) != "" {
+				return nil, nil, newUsageError("--queue-ttl cannot be used with --action github.comment")
+			}
+			if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
+				return nil, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+			}
+			if ackCommentExplicit {
+				return nil, nil, newUsageError("--ack-comment cannot be used with --action github.comment")
+			}
+			action, derivedUntrusted, err = buildGitHubCommentActionSpec(triggerComment, triggerReplyInThread, triggerDispatch.allow, allowExplicit)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
@@ -662,6 +699,7 @@ func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentEx
 		Description: triggerDescription,
 		Source:      source,
 		Action:      action,
+		Actions:     actions,
 	}
 
 	whereFile := strings.TrimSpace(triggerWhereFile)
@@ -707,15 +745,40 @@ func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentEx
 	req.MaxFiresPerMinute = triggerMaxFiresPerMinute
 	req.MaxConcurrentDispatches = triggerMaxConcurrent
 
+	notifyAgentRef := strings.TrimSpace(triggerNotifyAgent)
+	if notifyUserExplicit || notifyAgentRef != "" || len(triggerNotifyOn) > 0 {
+		outcomes, nErr := parseTriggerNotifyOutcomes(triggerNotifyOn)
+		if nErr != nil {
+			return nil, nil, nErr
+		}
+		ns := &hubclient.TriggerNotifySpec{
+			OnOutcomes: outcomes,
+		}
+		if notifyUserExplicit {
+			v := triggerNotifyUser
+			ns.UserNotice = &v
+		}
+		if notifyAgentRef != "" {
+			if uuid.Validate(notifyAgentRef) == nil {
+				ns.AgentID = notifyAgentRef
+			} else {
+				ns.AgentName = notifyAgentRef
+			}
+		}
+		req.Notify = ns
+	}
+
 	return req, derivedUntrusted, nil
 }
 
 func runTriggerCreate(cmd *cobra.Command, args []string) error {
+	defer createActionCollector.reset()
 	allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
 	actionExplicit := cmd != nil && cmd.Flags().Changed("action")
 	commentExplicit := cmd != nil && cmd.Flags().Changed("comment")
 	ackCommentExplicit := cmd != nil && cmd.Flags().Changed("ack-comment")
-	req, derivedUntrusted, err := buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit)
+	notifyUserExplicit := cmd != nil && cmd.Flags().Changed("notify-user")
+	req, _, err := buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, notifyUserExplicit)
 	if err != nil {
 		return err
 	}
@@ -725,8 +788,6 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer cancel()
-
-	printDerivedUntrustedVars(derivedUntrusted)
 
 	created, err := hubCtx.Client.Triggers(projectID).Create(ctx, req)
 	if err != nil {
@@ -756,7 +817,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	if created.Subject.CoalesceWindow != "" {
 		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
-	printTriggerActionSummary(created.Action)
+	printTriggerActionsSummary(effectiveTriggerActions(created))
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
 	return nil
 }
@@ -814,15 +875,26 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		agentLabel := tr.Action.AgentName
-		if tr.Action.Type == "dispatch_agent" {
-			agentLabel = "dispatch:" + tr.Action.Template
-		} else if tr.Action.Type == "github.comment" {
-			agentLabel = "github.comment"
-		} else if agentLabel == "" {
-			agentLabel = tr.Action.AgentID
-			if len(agentLabel) > 8 {
-				agentLabel = agentLabel[:8]
+		actions := effectiveTriggerActions(&tr)
+		agentLabel := "-"
+		if len(actions) > 0 {
+			first := actions[0]
+			switch first.Type {
+			case "dispatch_agent":
+				agentLabel = "dispatch:" + first.Template
+			case "github.comment":
+				agentLabel = "github.comment"
+			default:
+				agentLabel = first.AgentName
+				if agentLabel == "" {
+					agentLabel = first.AgentID
+					if len(agentLabel) > 8 {
+						agentLabel = agentLabel[:8]
+					}
+				}
+			}
+			if len(actions) > 1 {
+				agentLabel = fmt.Sprintf("%s (+%d)", agentLabel, len(actions)-1)
 			}
 		}
 		lastFire := "-"
@@ -958,7 +1030,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("FIRE HISTORY (%d of %d fires)\n", len(resp.Fires), resp.TotalCount)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tMATCHED\tDIALECT\tSUBJECT\tSTARTED\tFINISHED\tWAIT UNTIL\tERROR")
+	_, _ = fmt.Fprintln(w, "ID\tEVENT\tACTION\tSTATUS\tMATCHED\tDIALECT\tSUBJECT\tSTARTED\tFINISHED\tWAIT UNTIL\tERROR")
 	for _, fire := range resp.Fires {
 		shortID := fire.ID
 		if len(shortID) > 8 {
@@ -967,6 +1039,10 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		shortEvent := fire.EventID
 		if len(shortEvent) > 8 {
 			shortEvent = shortEvent[:8]
+		}
+		actionCol := fmt.Sprintf("#%d", fire.ActionIndex)
+		if fire.ActionType != "" {
+			actionCol = fmt.Sprintf("#%d:%s", fire.ActionIndex, fire.ActionType)
 		}
 		matchedThrough := fire.MatchedThrough
 		if matchedThrough == "" {
@@ -993,9 +1069,10 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		if errMsg == "" {
 			errMsg = "-"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			triggerTerminalText(shortID, false),
 			triggerTerminalText(shortEvent, false),
+			triggerTerminalText(actionCol, false),
 			triggerTerminalText(fire.Status, false),
 			triggerTerminalText(matchedThrough, false),
 			triggerTerminalText(decidedDialect, false),
@@ -1178,22 +1255,24 @@ func init() {
 	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received for --webhook; required for --github)")
 	triggerCreateCmd.Flags().StringArrayVar(&triggerWhereRules, "where", nil, "Ordered match rule [<dialect>:]<expr> (repeatable, 1-8 rules, <= 4096B each; put cheap CEL guards first; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
 	triggerCreateCmd.Flags().StringVar(&triggerWhereFile, "where-file", "", "Path to JSON file containing an ordered array of {dialect, expr} match rules")
-	triggerCreateCmd.Flags().StringVar(&triggerAction, "action", "message", "Action kind (message, dispatch-agent, or github.comment)")
-	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required for --action message)")
-	triggerCreateCmd.Flags().StringVar(&triggerMessage, "message", "", "Message delivered to the target agent (required for --action message)")
-	triggerCreateCmd.Flags().BoolVar(&triggerInterrupt, "interrupt", false, "Interrupt the target agent")
-	triggerCreateCmd.Flags().BoolVar(&triggerWake, "wake", false, "Resume the target agent if suspended when the trigger fires")
-	triggerCreateCmd.Flags().BoolVar(&triggerPlain, "plain", false, "Deliver message text without sender prefix")
-	triggerCreateCmd.Flags().StringVar(&triggerOffline, "offline", "", "Offline target policy for message actions (skip or queue; default skip)")
-	triggerCreateCmd.Flags().StringVar(&triggerQueueTTL, "queue-ttl", "", "Maximum wait duration when --offline queue is set (e.g. 30m, 24h; 60s..48h, default 24h)")
-	bindDispatchAgentFlags(triggerCreateCmd.Flags(), &triggerDispatch)
-	triggerCreateCmd.Flags().StringVar(&triggerComment, "comment", "", "Post a GitHub comment with this body template (shorthand for --action github.comment; requires --github)")
-	triggerCreateCmd.Flags().BoolVar(&triggerReplyInThread, "reply-in-thread", false, "Reply under the review comment thread instead of the PR/issue conversation (requires --comment)")
+	bindGroupedTriggerActionFlags(
+		triggerCreateCmd.Flags(),
+		&createActionCollector,
+		&triggerAction, "message",
+		&triggerAgent, &triggerMessage,
+		&triggerInterrupt, &triggerWake, &triggerPlain,
+		&triggerOffline, &triggerQueueTTL,
+		&triggerDispatch,
+		&triggerComment, &triggerReplyInThread,
+	)
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new, skip, or reuse; default new)")
 	triggerCreateCmd.Flags().StringVar(&triggerCoalesceWindow, "coalesce", "", "Coalescing window duration (0s disables, max 10m, e.g. 30s)")
 	triggerCreateCmd.Flags().IntVar(&triggerMaxFiresPerMinute, "max-per-minute", 0, "Maximum fires per minute for this trigger (0 = unlimited; max 600)")
 	triggerCreateCmd.Flags().IntVar(&triggerMaxConcurrent, "max-concurrent", 0, "Maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
+	triggerCreateCmd.Flags().BoolVar(&triggerNotifyUser, "notify-user", true, "Notify the trigger creator on failure (use --notify-user=false to disable)")
+	triggerCreateCmd.Flags().StringVar(&triggerNotifyAgent, "notify-agent", "", "Agent ID or name to message on trigger failure")
+	triggerCreateCmd.Flags().StringSliceVar(&triggerNotifyOn, "notify-on", nil, "Comma-separated outcomes to notify on (failed,refused,expired[,skipped])")
 
 	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (webhook or github)")
 	triggerListCmd.Flags().StringVar(&triggerListWebhook, "webhook", "", "Filter by webhook endpoint ID or name")

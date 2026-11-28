@@ -253,6 +253,8 @@ describe('<scion-chat-command-request>', () => {
 
     // Suspended container with canWake=true shows wake note + non-persistent home note + Approve enabled
     const ecLine = el.shadowRoot?.querySelector('[data-testid="exec-container-line"]');
+    expect(ecLine?.textContent).toContain('Execution Container:');
+    expect(ecLine?.textContent).toContain('alpha');
     expect(ecLine?.textContent).toContain('alice-shell');
     expect(ecLine?.textContent).toContain('Will be resumed when you approve.');
     expect(el.shadowRoot?.querySelector('[data-testid="exec-home-nonpersistent"]')).not.toBeNull();
@@ -265,6 +267,122 @@ describe('<scion-chat-command-request>', () => {
 
     // Dismiss hidden until P5 sets canDismiss: true
     expect(el.shadowRoot?.querySelector('[data-testid="dismiss-btn"]')).toBeNull();
+  });
+
+  it('organizes card into What Runs and Execution Environment sections with container breadcrumb above metadata', async () => {
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.currentUserId = 'user-1';
+    el.detail = makeDetail({
+      exec_container: {
+        state: 'ready',
+        agentId: 'exec-1',
+        agentName: 'ptone-exec',
+        projectId: 'proj-1',
+        projectName: 'scion-fork',
+        homePersistent: true,
+      },
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const whatRuns = el.shadowRoot?.querySelector('[data-testid="section-what-runs"]');
+    const execEnv = el.shadowRoot?.querySelector('[data-testid="section-exec-env"]');
+    expect(whatRuns).not.toBeNull();
+    expect(execEnv).not.toBeNull();
+
+    // What Runs contains heading, description, and script block
+    expect(whatRuns?.querySelector('.command-section-label')?.textContent?.trim()).toBe(
+      'What Runs'
+    );
+    expect(whatRuns?.querySelector('[data-testid="command-description"]')).not.toBeNull();
+    expect(whatRuns?.querySelector('[data-testid="command-script-block"]')).not.toBeNull();
+
+    // Execution Environment contains heading, Line 1 breadcrumb, and Line 2 metadata grid in order
+    expect(execEnv?.querySelector('.command-section-label')?.textContent?.trim()).toBe(
+      'Execution Environment'
+    );
+    const ecLine = execEnv?.querySelector('[data-testid="exec-container-line"]') as HTMLElement;
+    const metaGrid = execEnv?.querySelector('.meta-grid') as HTMLElement;
+    expect(ecLine).not.toBeNull();
+    expect(metaGrid).not.toBeNull();
+    expect(
+      Boolean(ecLine.compareDocumentPosition(metaGrid) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true);
+
+    // Line 1: Execution Container: <folder>scion-fork / <terminal>ptone-exec ready
+    const crumb = ecLine.querySelector('[data-testid="exec-container-breadcrumb"]');
+    expect(crumb).not.toBeNull();
+    const icons = [...(crumb?.querySelectorAll('sl-icon') ?? [])].map((i) =>
+      i.getAttribute('name')
+    );
+    expect(icons).toEqual(['folder', 'terminal']);
+    expect(crumb?.querySelector('.exec-container-project')?.textContent).toBe('scion-fork');
+    expect(crumb?.querySelector('.exec-crumb-sep')?.textContent).toBe('/');
+    expect(crumb?.querySelector('.exec-container-name')?.textContent).toBe('ptone-exec');
+    expect(ecLine.querySelector('[data-testid="exec-container-state"]')?.textContent).toBe('ready');
+
+    // Line 2: Workdir, Timeout, Approver
+    expect(metaGrid.querySelector('[data-testid="command-workdir"]')?.textContent).toBe('$HOME');
+    expect(metaGrid.querySelector('[data-testid="command-timeout"]')?.textContent).toContain('10m');
+    expect(metaGrid.querySelector('[data-testid="command-approver"]')?.textContent).toContain(
+      'you'
+    );
+
+    // Approve button has no ellipsis and no second confirm dialog is rendered
+    const approveBtn = el.shadowRoot?.querySelector('[data-testid="approve-btn"]');
+    expect(approveBtn?.textContent?.trim()).toBe('Approve & run');
+    expect(el.shadowRoot?.querySelector('sl-dialog.confirm-dialog')).toBeNull();
+
+    // Execution container name is not bold
+    expect(ScionChatCommandRequest.styles.cssText).not.toMatch(
+      /\.exec-container-name\s*\{[^}]*font-weight:\s*(?:600|700|bold)/
+    );
+  });
+
+  it('collapses scripts over 10 lines by default and toggles expand/collapse', async () => {
+    const tenLineScript = Array.from({ length: 10 }, (_, i) => `echo line-${i + 1}`).join('\n');
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.detail = makeDetail({
+      request: makeRequest({ rowId: 'row-10', script: `${tenLineScript}\n` }),
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Exactly 10 lines -> rendered in full, no toggle bar
+    expect(el.shadowRoot?.querySelectorAll('.script-line')).toHaveLength(10);
+    expect(el.shadowRoot?.querySelector('[data-testid="script-expand-toggle"]')).toBeNull();
+
+    // 14 lines -> collapsed by default to 10 lines with expand toggle
+    const fourteenLineScript = Array.from({ length: 14 }, (_, i) => `echo line-${i + 1}`).join(
+      '\n'
+    );
+    el.detail = makeDetail({
+      request: makeRequest({ rowId: 'row-14', script: `${fourteenLineScript}\n` }),
+    });
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelectorAll('.script-line')).toHaveLength(10);
+    expect(el.shadowRoot?.querySelector('.script-scroll.collapsed')).not.toBeNull();
+    const toggle = el.shadowRoot?.querySelector(
+      '[data-testid="script-expand-toggle"]'
+    ) as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.textContent?.trim()).toBe('Show all 14 lines (4 more)');
+
+    // Expand -> all 14 lines visible
+    toggle.click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('.script-line')).toHaveLength(14);
+    expect(el.shadowRoot?.querySelector('.script-scroll.collapsed')).toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.textContent?.trim()).toBe('Show fewer lines');
+
+    // Collapse again -> back to 10 lines
+    toggle.click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('.script-line')).toHaveLength(10);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('disables Approve for suspended container when canWake is false (R2)', async () => {
@@ -308,15 +426,13 @@ describe('<scion-chat-command-request>', () => {
     document.body.appendChild(el);
     await el.updateComplete;
 
-    (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
-    await el.updateComplete;
-
-    const dialogBody = el.shadowRoot?.querySelector('[data-testid="confirm-dialog-body"]');
-    const dialogCode = dialogBody?.querySelector('.script-code');
-    expect(dialogCode?.textContent).toContain('; echo PAYLOAD');
+    const cardCode = el.shadowRoot?.querySelector(
+      '[data-testid="command-script-block"] .script-code'
+    );
+    expect(cardCode?.textContent).toContain('; echo PAYLOAD');
   });
 
-  it('renders escaped script tokens, homoglyph workdir, SHA-256, and container details inside the confirm dialog (R3, O1)', async () => {
+  it('renders escaped script tokens, homoglyph workdir, and approves directly with verified SHA-256 (R3, O1)', async () => {
     const trickyScript = '\techo "é\u2800\u{E0100}"  \n';
     const homoglyphWorkdir = '/w\u043Erkspace/app';
     const expectedHash = canonicalHashSync(trickyScript, homoglyphWorkdir, 600);
@@ -366,40 +482,32 @@ describe('<scion-chat-command-request>', () => {
     document.body.appendChild(el);
     await el.updateComplete;
 
+    // M1.2/R3/O1 invariants directly on the card
+    const cardScriptBlock = el.shadowRoot?.querySelector('[data-testid="command-script-block"]');
+    const cardEscapes = [
+      ...(cardScriptBlock?.querySelectorAll('[data-testid="escape-token"]') ?? []),
+    ].map((n) => n.textContent);
+    expect(cardEscapes).toEqual(['\\u{00E9}', '\\u{2800}', '\\u{E0100}']);
+    expect(cardScriptBlock?.querySelector('.ws-token.tab')?.textContent).toBe('\\t');
+    expect(cardScriptBlock?.querySelectorAll('.ws-token.trailing-space')).toHaveLength(2);
+    expect(cardScriptBlock?.textContent).not.toContain('é');
+    expect(cardScriptBlock?.textContent).not.toContain('\u2800');
+    expect(cardScriptBlock?.textContent).not.toContain('\u{E0100}');
+
     // O1 on card: homoglyph workdir escaped, raw Cyrillic 'о' absent
     const cardWorkdir = el.shadowRoot?.querySelector('[data-testid="command-workdir"]');
     expect(cardWorkdir?.textContent).toContain('\\u{043E}');
     expect(cardWorkdir?.textContent).not.toContain('\u043E');
 
-    // Open confirm dialog and verify every M1.2/R3/O1 invariant inside it
+    // Card displays timeout and container breadcrumb
+    expect(el.shadowRoot?.textContent).toContain('Timeout: 10m');
+    expect(el.shadowRoot?.textContent).toContain('alice-shell');
+
+    // Clicking Approve & run submits directly without raising a second confirm dialog
     (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
     await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[data-testid="confirm-dialog-body"]')).toBeNull();
 
-    const dialogBody = el.shadowRoot?.querySelector('[data-testid="confirm-dialog-body"]');
-    expect(dialogBody).not.toBeNull();
-
-    const dialogScriptBlock = dialogBody?.querySelector('[data-testid="command-script-block"]');
-    const dialogEscapes = [
-      ...(dialogScriptBlock?.querySelectorAll('[data-testid="escape-token"]') ?? []),
-    ].map((n) => n.textContent);
-    expect(dialogEscapes).toEqual(['\\u{00E9}', '\\u{2800}', '\\u{E0100}']);
-    expect(dialogScriptBlock?.querySelector('.ws-token.tab')?.textContent).toBe('\\t');
-    expect(dialogScriptBlock?.querySelectorAll('.ws-token.trailing-space')).toHaveLength(2);
-    expect(dialogScriptBlock?.textContent).not.toContain('é');
-    expect(dialogScriptBlock?.textContent).not.toContain('\u2800');
-    expect(dialogScriptBlock?.textContent).not.toContain('\u{E0100}');
-
-    // O1 on confirm dialog workdir
-    const dialogWorkdir = dialogBody?.querySelector('[data-testid="confirm-workdir"]');
-    expect(dialogWorkdir?.textContent).toContain('\\u{043E}');
-    expect(dialogWorkdir?.textContent).not.toContain('\u043E');
-
-    // Dialog displays timeout, container, and exact SHA-256 matching what gets POSTed
-    expect(dialogBody?.textContent).toContain('Timeout: 10m');
-    expect(dialogBody?.textContent).toContain('alice-shell');
-    expect(dialogBody?.textContent).toContain(`SHA-256: ${expectedHash}`);
-
-    (el.shadowRoot?.querySelector('[data-testid="confirm-approve-btn"]') as HTMLElement).click();
     await vi.waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -457,7 +565,7 @@ describe('<scion-chat-command-request>', () => {
     expect(setupLink?.getAttribute('href')).toBe('/profile/settings');
   });
 
-  it('opens confirm dialog, approves, and updates run status live via SSE', async () => {
+  it('approves directly without a second confirm dialog and updates run status live via SSE', async () => {
     const queuedRun: CommandRequestRunView = {
       runId: 'run-1',
       requestId: 'row-cmd-1',
@@ -492,14 +600,10 @@ describe('<scion-chat-command-request>', () => {
     document.body.appendChild(el);
     await el.updateComplete;
 
-    // Open confirm dialog
+    // Click Approve & run directly (no second confirm dialog)
     (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
     await el.updateComplete;
-
-    const confirmBtn = el.shadowRoot?.querySelector(
-      '[data-testid="confirm-approve-btn"]'
-    ) as HTMLElement;
-    confirmBtn.click();
+    expect(el.shadowRoot?.querySelector('[data-testid="confirm-dialog-body"]')).toBeNull();
 
     await vi.waitFor(() => {
       expect(
@@ -638,11 +742,8 @@ describe('<scion-chat-command-request>', () => {
     await el.updateComplete;
 
     (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
-    await el.updateComplete;
-
-    (el.shadowRoot?.querySelector('[data-testid="confirm-approve-btn"]') as HTMLElement).click();
     await vi.waitFor(() => {
-      const err = el.shadowRoot?.querySelector('[data-testid="confirm-error-banner"]');
+      const err = el.shadowRoot?.querySelector('[data-testid="command-error-banner"]');
       expect(err?.textContent).toContain('Command hash verification failed');
     });
     expect(fetchMock).not.toHaveBeenCalled();

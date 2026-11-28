@@ -1,2 +1,3 @@
 [safe]
 	directory = /workspace
+	directory = /workspace/*

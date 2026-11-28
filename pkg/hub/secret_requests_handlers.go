@@ -482,17 +482,18 @@ func (s *Server) handleSecretRequestGet(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeJSON(w, http.StatusOK, SecretRequestCardResponse{
-		MessageID:      msgID,
-		ProjectID:      rows[0].ProjectID,
-		ProjectName:    projectName,
-		AgentID:        rows[0].AgentID,
-		AgentName:      rows[0].AgentName,
-		ConversationID: rows[0].ConversationID,
-		ThreadID:       chatKey,
-		Intro:          intro,
-		Rows:           s.secretRequestViewsFor(ctx, rows),
-		CanRespond:     canRespond,
-		Reason:         reason,
+		MessageID:       msgID,
+		ProjectID:       rows[0].ProjectID,
+		ProjectName:     projectName,
+		AgentID:         rows[0].AgentID,
+		AgentName:       rows[0].AgentName,
+		ConversationID:  rows[0].ConversationID,
+		ThreadID:        chatKey,
+		Intro:           intro,
+		Rows:            s.secretRequestViewsFor(ctx, rows),
+		CanRespond:      canRespond,
+		PromptAvailable: promptMsg != nil,
+		Reason:          reason,
 	})
 }
 

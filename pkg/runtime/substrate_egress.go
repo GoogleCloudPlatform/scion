@@ -20,11 +20,12 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // hardcodedModelEgressHosts are the harness model API hosts this runtime
@@ -249,10 +250,10 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 			// on why the trusted hub host skips NormalizeEgressAllowEntry),
 			// including the short and mixed-radix inet_aton spellings
 			// ("127.1", "0x7f000001", "2130706433") netip alone misses,
-			// would otherwise reach CreateActorEgressPolicy as a
-			// HostnameRule pattern and fail only there, with an opaque
-			// control-plane error — Substrate's HostnameRule explicitly
-			// does not support IP addresses, only hostname patterns (see
+			// would otherwise reach CreateActorEgressPolicy as a rule
+			// hostname and fail only there, with an opaque control-plane
+			// error — Substrate's egress rules explicitly do not support
+			// IP addresses, only hostname patterns (see
 			// ValidateEgressAllow's own doc comment). Fail here instead,
 			// as a clear config error naming the offending value, rather
 			// than let that failure surface three layers down.
@@ -342,9 +343,11 @@ func hostFromURLEnv(env map[string]string, keys ...string) string {
 	return ""
 }
 
-// hostFromURL extracts the hostname from a URL string, tolerating bare
-// host[:port] values (no scheme) as well as full URLs.
+// hostFromURL extracts the normalized (lowercase, no trailing dot) hostname
+// from a URL string, tolerating bare host[:port] values (no scheme) as well
+// as full URLs.
 func hostFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
@@ -356,23 +359,165 @@ func hostFromURL(raw string) string {
 	if err != nil || u.Hostname() == "" {
 		return ""
 	}
-	return u.Hostname()
+	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 }
 
+// substrateEgressPort is one (protocol, port) group of an egress policy.
+type substrateEgressPort struct {
+	protocol string // "http", "https" or "tls_passthrough"
+	port     int32
+}
+
+const (
+	substrateEgressProtoHTTP           = "http"
+	substrateEgressProtoHTTPS          = "https"
+	substrateEgressProtoTLSPassthrough = "tls_passthrough"
+)
+
+// substrateEgressProtocolOrder fixes the order rules are emitted in, so the
+// policy is deterministic.
+var substrateEgressProtocolOrder = map[string]int{
+	substrateEgressProtoHTTP:           0,
+	substrateEgressProtoHTTPS:          1,
+	substrateEgressProtoTLSPassthrough: 2,
+}
+
+// substratePublicEgressPort is the port public hosts are reached on.
+const substratePublicEgressPort = 443
+
 // buildEgressPolicy builds the CreateActorEgressPolicyRequest for actor
-// atespace/actorName, with a single EgressRule matching any of hostnames
-// (substrate-runtime.md §7). "default" is the only permitted egress
-// policy resource name per the EgressPolicy proto comment.
-func buildEgressPolicy(atespace, actorName string, hostnames []string) *ateapipb.CreateActorEgressPolicyRequest {
+// atespace/actorName (substrate-runtime.md §7) as Substrate v1 protocol- and
+// port-aware rules. "default" is the only permitted egress policy resource
+// name, and v1 denies any traffic no rule matches.
+//
+//   - Public hosts (hostnames, from substrateEgressHostnames) are reached on
+//     443: as TlsPassthrough when egress_trust_bundle is unset (the actor
+//     has no gateway CA, so interception would break TLS), or as Https
+//     (gateway-intercepted) when it is "egress-mitm.ate.dev".
+//   - The trusted hub endpoint (trustedHubEndpoint, operator-controlled)
+//     gets an explicit-port rule matching its scheme: Http for http://, the
+//     public treatment above on its own port for https://.
+//
+// Rules are grouped by (protocol, port) with no hostname repeated on the
+// same port: Substrate rejects two rules with the same pattern on the same
+// port at admission. The same host on the same port under two different
+// protocols is a configuration conflict and an error.
+func buildEgressPolicy(atespace, actorName string, hostnames []string, trustedHubEndpoint string, sc config.V1SubstrateConfig) (*ateapipb.CreateActorEgressPolicyRequest, error) {
+	publicProtocol := substrateEgressProtoTLSPassthrough
+	if sc.EgressTrustBundle != "" {
+		publicProtocol = substrateEgressProtoHTTPS
+	}
+
+	groups := make(map[substrateEgressPort][]string)
+	owner := make(map[string]string) // "host|port" -> protocol
+	add := func(protocol, host string, port int32) error {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			return nil
+		}
+		key := fmt.Sprintf("%s|%d", host, port)
+		if prev, ok := owner[key]; ok {
+			if prev == protocol {
+				return nil
+			}
+			return fmt.Errorf("substrate: egress host %q port %d is configured as both %s and %s", host, port, prev, protocol)
+		}
+		owner[key] = protocol
+		g := substrateEgressPort{protocol: protocol, port: port}
+		groups[g] = append(groups[g], host)
+		return nil
+	}
+
+	hubHost, hubPort, hubProtocol, err := trustedHubEgress(trustedHubEndpoint, publicProtocol)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range hostnames {
+		if h == hubHost && (hubProtocol != publicProtocol || hubPort != substratePublicEgressPort) {
+			// The hub's own explicit-port rule below replaces the default
+			// public 443 rule for it.
+			continue
+		}
+		if err := add(publicProtocol, h, substratePublicEgressPort); err != nil {
+			return nil, err
+		}
+	}
+	if hubHost != "" {
+		if err := add(hubProtocol, hubHost, hubPort); err != nil {
+			return nil, err
+		}
+	}
+
+	keys := make([]substrateEgressPort, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].protocol != keys[j].protocol {
+			return substrateEgressProtocolOrder[keys[i].protocol] < substrateEgressProtocolOrder[keys[j].protocol]
+		}
+		return keys[i].port < keys[j].port
+	})
+
+	rules := make([]*ateapipb.EgressRule, 0, len(keys))
+	for _, k := range keys {
+		hosts := groups[k]
+		sort.Strings(hosts)
+		ports := &ateapipb.Ports{Numbers: []int32{k.port}}
+		switch k.protocol {
+		case substrateEgressProtoHTTP:
+			rules = append(rules, &ateapipb.EgressRule{Http: &ateapipb.HttpRule{Hostnames: hosts, Ports: ports}})
+		case substrateEgressProtoHTTPS:
+			rules = append(rules, &ateapipb.EgressRule{Https: &ateapipb.HttpsRule{Hostnames: hosts, Ports: ports}})
+		case substrateEgressProtoTLSPassthrough:
+			rules = append(rules, &ateapipb.EgressRule{TlsPassthrough: &ateapipb.TlsPassthroughRule{Hostnames: hosts, Ports: ports}})
+		default:
+			return nil, fmt.Errorf("substrate: unsupported egress protocol %q", k.protocol)
+		}
+	}
+
 	return &ateapipb.CreateActorEgressPolicyRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
 		EgressPolicy: &ateapipb.EgressPolicy{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"},
-			Rules: []*ateapipb.EgressRule{
-				{
-					Hostnames: &ateapipb.HostnameRule{Patterns: hostnames},
-				},
-			},
+			Rules:    rules,
 		},
+	}, nil
+}
+
+// trustedHubEgress resolves the trusted hub endpoint into its normalized
+// egress host, explicit port and protocol: http:// is cleartext Http
+// (default port 80); https:// (or no scheme) is publicProtocol (default
+// port 443). Returns an empty host and nil error when the endpoint is
+// unset, and returns an error when the URL cannot be parsed or carries a
+// non-numeric or out-of-range port (must be 1..65535).
+func trustedHubEgress(endpoint, publicProtocol string) (host string, port int32, protocol string, err error) {
+	raw := strings.TrimSpace(endpoint)
+	if raw == "" {
+		return "", 0, "", nil
 	}
+	candidate := raw
+	if !strings.Contains(candidate, "://") {
+		candidate = "https://" + candidate
+	}
+	u, parseErr := url.Parse(candidate)
+	if parseErr != nil {
+		return "", 0, "", fmt.Errorf("substrate: invalid trusted hub endpoint %q: %w", endpoint, parseErr)
+	}
+	host = strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return "", 0, "", nil
+	}
+	protocol, port = publicProtocol, substratePublicEgressPort
+	if strings.EqualFold(u.Scheme, "http") {
+		protocol, port = substrateEgressProtoHTTP, 80
+	}
+	if p := u.Port(); p != "" {
+		n, perr := strconv.ParseInt(p, 10, 32)
+		if perr != nil || n < 1 || n > 65535 {
+			return "", 0, "", fmt.Errorf("substrate: trusted hub endpoint %q has invalid port %q (must be 1..65535)", endpoint, p)
+		}
+		port = int32(n)
+	}
+	return host, port, protocol, nil
 }

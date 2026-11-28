@@ -41,7 +41,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/experiments":                                   "authenticated:experiments",
 	"/api/v1/profiling":                                     "authenticated:profiling",
 	"/api/v1/auth/admin-status":                             "authenticated:user",
-	"/api/v1/auth/logout":                                   "authenticated:user",
+	"/api/v1/auth/logout":                                   "public:auth",
 	"/api/v1/auth/me":                                       "authenticated:user",
 	"/api/v1/auth/tokens":                                   "authenticated:user-token",
 	"/api/v1/auth/tokens/":                                  "authenticated:user-token",
@@ -112,6 +112,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/decisions":                            "authenticated:user-decisions",
 	"/api/v1/users/me/decisions/suggestions":                "authenticated:user-decisions",
 	"/api/v1/users/me/secret-requests":                      "authenticated:user-secret-requests",
+	"/api/v1/users/me/command-requests":                     "authenticated:user-command-requests",
 	"/api/v1/users/me/inbox/summary":                        "authenticated:user-inbox-summary",
 	"/api/v1/users/me/delegations":                          "authenticated:agent-delegations",
 	"/api/v1/users/me/delegations/revoke-all":               "authenticated:agent-delegations",
@@ -242,6 +243,9 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/teams/link":                                    "authenticated:account-link",
 	"/api/v1/teams/link/verify":                             "authenticated:account-link",
 	"/api/v1/teams/link/status":                             "authenticated:account-link",
+	"/api/v1/slack/link":                                    "authenticated:account-link",
+	"/api/v1/slack/link/verify":                             "authenticated:account-link",
+	"/api/v1/slack/link/status":                             "authenticated:account-link",
 	"/api/v1/resources/import":                              "policy:resource-import",
 	"/api/v1/resources/discover":                            "policy:resource-import",
 	"/api/v1/skills/discover-directory":                     "policy:skill",
@@ -420,6 +424,33 @@ func TestRegisteredRoutesHaveRouteMetadata(t *testing.T) {
 	}
 }
 
+// TestUnauthenticatedEndpointsAgreeWithRouteMetadata guards against the
+// middleware/route-guard contradiction where isUnauthenticatedEndpoint skips
+// UnifiedAuthMiddleware (leaving no identity in context) while routeMetadataTable
+// classifies the same route as requiring an identity attached by middleware.
+func TestUnauthenticatedEndpointsAgreeWithRouteMetadata(t *testing.T) {
+	var conflicts []string
+	for pattern, meta := range routeMetadataTable {
+		path := pattern
+		if _, p, ok := strings.Cut(pattern, " "); ok {
+			path = p
+		}
+		if !isUnauthenticatedEndpoint(path) {
+			continue
+		}
+		switch meta.Classification {
+		case RoutePublic, RouteBrokerHMAC, RouteWebhook:
+			// Pass-through in routeGuard; handler performs its own auth or none.
+		default:
+			conflicts = append(conflicts, pattern+" (isUnauthenticatedEndpoint=true, routeMetadataTable="+string(meta.Classification)+")")
+		}
+	}
+	sort.Strings(conflicts)
+	if len(conflicts) > 0 {
+		t.Fatalf("routes skipped by UnifiedAuthMiddleware disagree with routeMetadataTable:\n%s", strings.Join(conflicts, "\n"))
+	}
+}
+
 func TestRouteMetadataPermissionsAreValid(t *testing.T) {
 	// Build set of valid permission IDs from the registry.
 	validPermissions := make(map[string]bool)
@@ -467,7 +498,7 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 		// RouteAuthenticated: no identity → 401
 		{
 			name:           "authenticated route denies unauthenticated",
-			route:          "/api/v1/auth/logout",
+			route:          "/api/v1/auth/me",
 			classification: RouteAuthenticated,
 			identity:       nil,
 			wantStatus:     http.StatusUnauthorized,

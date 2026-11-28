@@ -168,11 +168,10 @@ for (const theme of ['light', 'dark'] as const) {
           (await c.locator('.hint').getAttribute('id'))!
         );
       }
-      const yes = c.locator('sl-button[data-choice="yes"]');
-      await expect(yes).toHaveAttribute('variant', 'primary');
-      await expect(yes).toHaveAttribute('outline', '');
+      const yes = c.locator('button[data-choice="yes"]');
+      await expect(yes).toHaveAttribute('data-look', 'outline');
       await expect(yes).toHaveAttribute('title', 'Yes (recommended)');
-      await expect(c.locator('sl-button[data-choice="no"]')).toHaveAttribute('variant', 'default');
+      await expect(c.locator('button[data-choice="no"]')).toHaveAttribute('data-look', 'default');
       await expect(c.locator('.row-foot')).toContainText('Awaiting your answer');
       await expect(message(page, 'prompt-1')).toContainText('One call before I tag it.');
       await expect(message(page, 'prompt-1')).not.toContainText('(fallback)');
@@ -240,14 +239,10 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(c.locator('.row-foot')).toContainText('Answered by you');
       await expect(c.locator('.row-foot time')).toHaveText('15:42');
       expect(body).toMatchObject({ choice_id: 'yes' });
-      const yes = c.locator('sl-button[data-choice="yes"]');
-      await expect(yes).toHaveAttribute('variant', 'primary');
-      await expect(yes).not.toHaveAttribute('outline', '');
+      const yes = c.locator('button[data-choice="yes"]');
+      await expect(yes).toHaveAttribute('data-look', 'filled');
       await expect(yes.locator('sl-icon[name="check-circle-fill"]')).toHaveCount(1);
-      await expect(c.locator('sl-button[data-choice="no"]')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      );
+      await expect(c.locator('button[data-choice="no"]')).toHaveAttribute('aria-disabled', 'true');
       await expect(c.locator('.hint')).toHaveCount(0);
       await shot(page, testInfo, theme, '02-single-answered', ['prompt-1']);
     });
@@ -517,15 +512,12 @@ for (const theme of ['light', 'dark'] as const) {
         'content',
         'Only Bob can confirm or change this answer'
       );
-      const chosen = c.locator('sl-button[data-choice="no"]');
-      await expect(chosen).toHaveAttribute('variant', 'primary');
+      const chosen = c.locator('button[data-choice="no"]');
+      await expect(chosen).toHaveAttribute('data-look', 'filled');
       await expect(chosen).toHaveAttribute('aria-disabled', 'true');
       await expect(chosen.locator('sl-icon[name="robot"]')).toHaveCount(1);
-      await expect(c.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      );
-      await expect(c.locator('sl-button[data-choice="wait"]')).toHaveAttribute(
+      await expect(c.locator('button[data-choice="yes"]')).toHaveAttribute('aria-disabled', 'true');
+      await expect(c.locator('button[data-choice="wait"]')).toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -635,12 +627,12 @@ for (const theme of ['light', 'dark'] as const) {
       const c1 = card(page, 'prompt-p21');
       await expect(c1.locator('.card-head .badge.interp')).toContainText('interpreted');
       await expect(c1.locator('.card-head .badge.interp sl-icon[name="robot"]')).toHaveCount(1);
-      const yes1 = c1.locator('sl-button[data-choice="yes"]');
-      await expect(yes1).toHaveAttribute('variant', 'primary');
+      const yes1 = c1.locator('button[data-choice="yes"]');
+      await expect(yes1).toHaveAttribute('data-look', 'filled');
       await expect(yes1).not.toHaveAttribute('aria-disabled', 'true');
       await expect(yes1.locator('sl-icon[name="robot"]')).toHaveCount(1);
-      await expect(yes1.locator('[part="base"]')).toHaveCSS('color', filledFg);
-      await expect(c1.locator('sl-button[data-choice="no"]')).not.toHaveAttribute(
+      await expect(yes1).toHaveCSS('color', filledFg);
+      await expect(c1.locator('button[data-choice="no"]')).not.toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -666,18 +658,19 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(c1.locator('.confirm-row')).toBeVisible();
 
       // Clicking another choice opens the inline change bar (Mock P2-6).
-      await c1.locator('sl-button[data-choice="no"]').click();
+      await c1.locator('button[data-choice="no"]').click();
       expect(posted).toHaveLength(0);
       const bar = c1.locator('.confirmbar');
       await expect(bar).toContainText(
         `Change your answer from Yes to No? ${ASKER_NAME} will be told.`
       );
-      const no1 = c1.locator('sl-button[data-choice="no"]');
-      await expect(no1).toHaveAttribute('variant', 'primary');
+      const no1 = c1.locator('button[data-choice="no"]');
+      await expect(no1).toHaveAttribute('data-look', 'filled');
       await expect(no1).toHaveAttribute('aria-pressed', 'true');
+      await expect(c1.getByRole('button', { name: /No/, pressed: true })).toBeVisible();
       await expect(no1.locator('sl-icon[name="check-lg"]')).toHaveCount(1);
-      await expect(no1.locator('[part="base"]')).toHaveCSS('color', filledFg);
-      await expect(yes1).toHaveAttribute('outline', '');
+      await expect(no1).toHaveCSS('color', filledFg);
+      await expect(yes1).toHaveAttribute('data-look', 'subtle');
       await expect(yes1.locator('sl-icon[name="robot"]')).toHaveCount(1);
       await shot(page, testInfo, theme, 'p2-6-single-change-bar', ['prompt-p21']);
 
@@ -701,7 +694,7 @@ for (const theme of ['light', 'dark'] as const) {
 
       // Override on c2 settles to Mock P2-3 changed.
       const c2 = card(page, 'prompt-p26');
-      await c2.locator('sl-button[data-choice="no"]').click();
+      await c2.locator('button[data-choice="no"]').click();
       await c2.locator('.confirmbar sl-button[data-action="confirm-change"]').click();
       await expect(c2.locator('.card-head .badge.over')).toContainText('changed');
       await expect(c2.locator('.row-foot')).toContainText('Answered by you');
@@ -709,9 +702,9 @@ for (const theme of ['light', 'dark'] as const) {
         'changed from the interpreted answer Yes'
       );
       await expect(
-        c2.locator('sl-button[data-choice="no"] sl-icon[name="check-circle-fill"]')
+        c2.locator('button[data-choice="no"] sl-icon[name="check-circle-fill"]')
       ).toHaveCount(1);
-      await expect(c2.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
+      await expect(c2.locator('button[data-choice="yes"]')).toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -961,7 +954,7 @@ for (const theme of ['light', 'dark'] as const) {
       );
       await expect(note).toHaveAttribute('role', 'note');
       await expect(c.locator('.card')).not.toHaveAttribute('aria-disabled', 'true');
-      await expect(c.locator('sl-button[data-choice="no"]')).not.toHaveAttribute(
+      await expect(c.locator('button[data-choice="no"]')).not.toHaveAttribute(
         'aria-disabled',
         'true'
       );
@@ -1173,8 +1166,8 @@ for (const theme of ['light', 'dark'] as const) {
         await expect(openSheet).toHaveCount(0);
         await expect(canaryOpt).toHaveClass(/chosen/);
 
-        // Plain sl-button tap also selects without opening the mobile context sheet.
-        const yesBtn = card(page, 'prompt-plain').locator('sl-button[data-choice="yes"]');
+        // Plain button tap also selects without opening the mobile context sheet.
+        const yesBtn = card(page, 'prompt-plain').locator('button[data-choice="yes"]');
         await yesBtn.tap();
         await expect(openSheet).toHaveCount(0);
         await expect(card(page, 'prompt-plain').locator('.row-foot')).toContainText(

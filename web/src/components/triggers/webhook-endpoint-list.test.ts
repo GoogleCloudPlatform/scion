@@ -16,8 +16,15 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import './webhook-endpoint-list.js';
-import { buildScionV1CurlExample, type ScionWebhookEndpointList } from './webhook-endpoint-list.js';
+import {
+  buildScionV1CurlExample,
+  buildWebhookCurlExample,
+  SUPPORTED_SIGNATURE_MODES,
+  type ScionWebhookEndpointList,
+} from './webhook-endpoint-list.js';
 import type { TriggerDefinition, WebhookEndpoint } from './types.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -99,8 +106,11 @@ describe('scion-webhook-endpoint-list', () => {
     expect(revealed?.textContent).toBe('whsec_ONCE_ONLY_SECRET_12345');
     const curlExample = el.shadowRoot?.querySelector('[data-curl-example]')?.textContent ?? '';
     expect(curlExample).toContain("printf 'v1\\n%s\\n%s\\n%s\\n%s\\n%s'");
+    expect(curlExample).toContain(`openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}'`);
+    expect(curlExample).not.toContain(`-r | awk '{print $1}'`);
     expect(curlExample).toContain('X-Scion-Signature: t=${TS},v1=${SIG}');
     expect(curlExample).toContain('X-Scion-Delivery: ${DELIVERY}');
+    expect(curlExample).toContain('X-Scion-Event: ${EVENT}');
     expect(curlExample).toContain('X-Scion-Subject: ${SUBJECT}');
     expect(curlExample).toContain('--data-raw "$BODY"');
     expect(curlExample).not.toContain('X-Scion-Timestamp');
@@ -194,10 +204,23 @@ describe('scion-webhook-endpoint-list', () => {
       'https://hub.example/api/v1/hooks/ep-1',
       'test-secret-key'
     );
+    expect(snippet).toContain('EVENT=""');
+    expect(snippet).toContain('SUBJECT=""');
+    expect(snippet).toContain(
+      '# X-Scion-Event: <name> sets event.type=webhook.<name> (default webhook.received rules then stop matching; use --type webhook.<name>)'
+    );
+    expect(snippet).toContain(
+      '# X-Scion-Subject is stored as event.subject=webhook:<endpoint-id>/<subject>'
+    );
     expect(snippet).toContain(
       `printf 'v1\\n%s\\n%s\\n%s\\n%s\\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY"`
     );
+    expect(snippet).toContain(`openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}'`);
+    expect(snippet).not.toContain(`-r | awk '{print $1}'`);
     expect(snippet).toContain('-H "X-Scion-Signature: t=${TS},v1=${SIG}"');
+    expect(snippet).toContain('-H "X-Scion-Delivery: ${DELIVERY}"');
+    expect(snippet).toContain('-H "X-Scion-Event: ${EVENT}"');
+    expect(snippet).toContain('-H "X-Scion-Subject: ${SUBJECT}"');
     expect(snippet).toContain('--data-raw "$BODY"');
     expect(snippet).not.toContain('X-Scion-Timestamp');
 
@@ -258,5 +281,184 @@ describe('scion-webhook-endpoint-list', () => {
       'whsec_BODY_ONLY_123'
     );
     expect(el.shadowRoot?.querySelector('[data-curl-example]')).toBeNull();
+  });
+
+  it('copies the raw scion_v1 snippet byte-for-byte to the clipboard with all dollar signs intact', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const origClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+          if (init?.method === 'POST' && url.endsWith('/webhook-endpoints')) {
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  ...sampleEndpoint,
+                  id: 'ep-copy',
+                  name: 'copy-hook',
+                  url: 'https://hub.example/api/v1/hooks/ep-copy',
+                  secret: 'whsec_COPY_SECRET_ABC',
+                },
+                201
+              )
+            );
+          }
+          return Promise.resolve(jsonResponse({ endpoints: [], totalCount: 0 }));
+        })
+      );
+
+      const el = document.createElement('scion-webhook-endpoint-list') as ScionWebhookEndpointList;
+      el.projectId = 'proj-1';
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      (el.shadowRoot?.querySelector('[data-create-endpoint]') as HTMLElement).click();
+      await el.updateComplete;
+      const nameInput = el.shadowRoot?.querySelector(
+        '[data-endpoint-name-input]'
+      ) as HTMLInputElement;
+      nameInput.value = 'copy-hook';
+      nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+      await el.updateComplete;
+      (el.shadowRoot?.querySelector('[data-submit-endpoint]') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      const copyBtn = el.shadowRoot?.querySelector('[data-copy-curl-example]') as HTMLElement;
+      expect(copyBtn).toBeTruthy();
+      copyBtn.click();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const expected = buildScionV1CurlExample(
+        'https://hub.example/api/v1/hooks/ep-copy',
+        'whsec_COPY_SECRET_ABC'
+      );
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith(expected);
+      expect(writeText.mock.calls[0][0]).toContain('-H "X-Scion-Signature: t=${TS},v1=${SIG}"');
+      expect(writeText.mock.calls[0][0]).toContain('-H "X-Scion-Event: ${EVENT}"');
+      expect(writeText.mock.calls[0][0]).toContain('-H "X-Scion-Subject: ${SUBJECT}"');
+      expect(writeText.mock.calls[0][0]).toContain(`awk '{print $NF}'`);
+    } finally {
+      if (origClipboard) {
+        Object.defineProperty(navigator, 'clipboard', origClipboard);
+      } else {
+        delete (navigator as unknown as Record<string, unknown>).clipboard;
+      }
+    }
+  });
+
+  it('offers exactly the hub-supported signature modes in the form dropdown (no body_only)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ endpoints: [], totalCount: 0 }))
+    );
+
+    const el = document.createElement('scion-webhook-endpoint-list') as ScionWebhookEndpointList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-create-endpoint]') as HTMLElement).click();
+    await el.updateComplete;
+
+    const select = el.shadowRoot?.querySelector('[data-signature-mode-select]');
+    expect(select).toBeTruthy();
+    const values = Array.from(select?.querySelectorAll('sl-option') ?? []).map((o) =>
+      o.getAttribute('value')
+    );
+    expect(values).toEqual([...SUPPORTED_SIGNATURE_MODES]);
+    expect(values).toEqual(['scion_v1', 'github_v1', 'stripe_v1']);
+    expect(values).not.toContain('body_only');
+  });
+
+  it('shows the matching portable curl snippet for github_v1 and stripe_v1 endpoints', async () => {
+    for (const mode of ['github_v1', 'stripe_v1'] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+          if (init?.method === 'POST' && url.endsWith('/webhook-endpoints')) {
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  ...sampleEndpoint,
+                  id: `ep-${mode}`,
+                  name: `${mode}-hook`,
+                  url: `https://hub.example/api/v1/hooks/ep-${mode}`,
+                  signatureMode: mode,
+                  secret: `whsec_${mode}_SECRET`,
+                },
+                201
+              )
+            );
+          }
+          return Promise.resolve(jsonResponse({ endpoints: [], totalCount: 0 }));
+        })
+      );
+
+      const el = document.createElement('scion-webhook-endpoint-list') as ScionWebhookEndpointList;
+      el.projectId = 'proj-1';
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      (el.shadowRoot?.querySelector('[data-create-endpoint]') as HTMLElement).click();
+      await el.updateComplete;
+      const nameInput = el.shadowRoot?.querySelector(
+        '[data-endpoint-name-input]'
+      ) as HTMLInputElement;
+      nameInput.value = `${mode}-hook`;
+      nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+      await el.updateComplete;
+      (el.shadowRoot?.querySelector('[data-submit-endpoint]') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      const example = el.shadowRoot?.querySelector('[data-curl-example]')?.textContent ?? '';
+      expect(example).toBe(
+        buildWebhookCurlExample(
+          mode,
+          `https://hub.example/api/v1/hooks/ep-${mode}`,
+          `whsec_${mode}_SECRET`
+        )
+      );
+      expect(example).toContain(`openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}'`);
+      expect(example).not.toContain(`-r | awk '{print $1}'`);
+      if (mode === 'github_v1') {
+        expect(example).toContain('X-Hub-Signature-256: sha256=${SIG}');
+      } else {
+        expect(example).toContain('Stripe-Signature: t=${TS},v1=${SIG}');
+      }
+
+      document.body.innerHTML = '';
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('matches the shared golden sender snippets fixture byte-for-byte for every supported mode (R1)', () => {
+    const fixturePath = resolve(
+      __dirname,
+      '../../../../pkg/hub/trigger/testdata/webhook-sender-snippets.json'
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      url: string;
+      secret: string;
+      snippets: Record<string, string[]>;
+    };
+
+    expect(Object.keys(fixture.snippets)).toEqual([...SUPPORTED_SIGNATURE_MODES]);
+
+    for (const mode of SUPPORTED_SIGNATURE_MODES) {
+      const expected = fixture.snippets[mode].join('\n');
+      const actual = buildWebhookCurlExample(mode, fixture.url, fixture.secret);
+      expect(actual, `mode=${mode} drifted from shared golden fixture`).toBe(expected);
+    }
   });
 });

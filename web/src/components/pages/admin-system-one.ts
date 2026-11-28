@@ -38,29 +38,14 @@ import {
 import { formatInstantWithZone } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { srOnlyStyles } from '../shared/styles.js';
+import defaultProbeSpec from './admin-system-one-default-probe-spec.json';
 import './not-found.js';
 
 const ADAPTERS_PATH = '/api/v1/admin/system-one/adapters';
 const INSTANCES_PATH = '/api/v1/admin/system-one/instances';
 const PROJECTS_PATH = '/api/v1/projects';
 
-const DEFAULT_PROBE_SPEC = JSON.stringify(
-  {
-    version: 1,
-    questions: [
-      {
-        id: 'q1',
-        type: 'binary',
-        question: 'Is this synthetic message a routine connectivity check?',
-      },
-    ],
-    output: {
-      question: 'q1',
-    },
-  },
-  null,
-  2
-);
+const DEFAULT_PROBE_SPEC = JSON.stringify(defaultProbeSpec, null, 2);
 
 const DEFAULT_PROBE_TEXT = 'Synthetic connectivity check from Scion System One admin UI.';
 
@@ -72,6 +57,12 @@ export interface SystemOneAdapterAuthMode {
   scopesRequired?: boolean;
 }
 
+export interface SystemOneKnownModel {
+  id: string;
+  displayName?: string;
+  source: string;
+}
+
 export interface SystemOneAdapterCapability {
   id: string;
   version?: string;
@@ -80,6 +71,7 @@ export interface SystemOneAdapterCapability {
   defaultEndpoint?: string;
   modelRequired: boolean;
   supportsModelListing: boolean;
+  knownModels?: SystemOneKnownModel[];
   authModes: SystemOneAdapterAuthMode[];
   allowedSecretNames?: string[];
   defaultSecretName?: string;
@@ -265,6 +257,155 @@ export function instanceNeedsProjectSelectorForTest(inst: SystemOneInstance | nu
   return scope === 'project' || scope === 'project_or_hub';
 }
 
+/** Sentinel dropdown value that reveals the custom write-in model ID input. */
+export const OTHER_MODEL_OPTION = '__other__';
+
+/** Help text displayed beneath the adapter known-models selector. */
+export const KNOWN_MODELS_HELP_TEXT =
+  "Models advertised by the adapter. Selecting one doesn't verify your account has access to it.";
+
+/** State for the Configured Model dropdown + Other write-in control. */
+export interface ModelFieldState {
+  /** Selected dropdown value: a catalog model ID, OTHER_MODEL_OPTION, or '' (unset / write-in only). */
+  selection: string;
+  /** Write-in model ID text (used when selection === OTHER_MODEL_OPTION or catalog is empty). */
+  customValue: string;
+  /** True when the current value came from user write-in rather than a catalog pick. */
+  isCustom: boolean;
+  /** Contextual hint shown after switching adapters. */
+  switchHint: string | null;
+}
+
+/** Initialize model-field state for create or edit (preserving any existing model value). */
+export function initModelFieldState(
+  adapter: SystemOneAdapterCapability | undefined,
+  existingModel?: string
+): ModelFieldState {
+  const catalog = adapter?.knownModels ?? [];
+  const trimmed = (existingModel ?? '').trim();
+
+  if (catalog.length === 0) {
+    return {
+      selection: '',
+      customValue: trimmed,
+      isCustom: trimmed.length > 0,
+      switchHint: null,
+    };
+  }
+
+  if (!trimmed) {
+    return {
+      selection: '',
+      customValue: '',
+      isCustom: false,
+      switchHint: null,
+    };
+  }
+
+  if (catalog.some((m) => m.id === trimmed)) {
+    return {
+      selection: trimmed,
+      customValue: '',
+      isCustom: false,
+      switchHint: null,
+    };
+  }
+
+  return {
+    selection: OTHER_MODEL_OPTION,
+    customValue: trimmed,
+    isCustom: true,
+    switchHint: null,
+  };
+}
+
+/** Resolve the submitted model ID from the current model-field state and adapter catalog. */
+export function effectiveModelValue(
+  field: ModelFieldState,
+  adapter: SystemOneAdapterCapability | undefined
+): string {
+  const catalog = adapter?.knownModels ?? [];
+  if (catalog.length === 0 || field.selection === OTHER_MODEL_OPTION) {
+    return field.customValue.trim();
+  }
+  return field.selection.trim();
+}
+
+/** Update model-field state when the user picks an option in the known-models dropdown. */
+export function selectModelOption(prev: ModelFieldState, value: string): ModelFieldState {
+  if (value === OTHER_MODEL_OPTION) {
+    return {
+      selection: OTHER_MODEL_OPTION,
+      customValue: prev.isCustom ? prev.customValue : '',
+      isCustom: true,
+      switchHint: null,
+    };
+  }
+  return {
+    selection: value,
+    customValue: '',
+    isCustom: false,
+    switchHint: null,
+  };
+}
+
+/** Update model-field state when the user types into the write-in model ID input. */
+export function updateCustomModelInput(
+  _prev: ModelFieldState,
+  value: string,
+  hasCatalog: boolean
+): ModelFieldState {
+  return {
+    selection: hasCatalog ? OTHER_MODEL_OPTION : '',
+    customValue: value,
+    isCustom: hasCatalog || value.trim().length > 0,
+    switchHint: null,
+  };
+}
+
+/**
+ * Transition model-field state on adapter switch:
+ * - clears a selection that came from the old adapter's catalog and shows a hint;
+ * - preserves a custom write-in value and shows a hint.
+ */
+export function switchModelFieldAdapter(
+  prev: ModelFieldState,
+  prevAdapter: SystemOneAdapterCapability | undefined,
+  nextAdapter: SystemOneAdapterCapability | undefined
+): ModelFieldState {
+  const prevEffective = effectiveModelValue(prev, prevAdapter);
+  const nextCatalog = nextAdapter?.knownModels ?? [];
+  const nextLabel = nextAdapter?.displayName || nextAdapter?.id || 'the selected adapter';
+
+  if (!prevEffective) {
+    return {
+      selection: '',
+      customValue: '',
+      isCustom: false,
+      switchHint: null,
+    };
+  }
+
+  if (prev.isCustom) {
+    return {
+      selection: nextCatalog.length > 0 ? OTHER_MODEL_OPTION : '',
+      customValue: prevEffective,
+      isCustom: true,
+      switchHint: `Kept custom model "${prevEffective}". Verify that it is supported by ${nextLabel}.`,
+    };
+  }
+
+  return {
+    selection: '',
+    customValue: '',
+    isCustom: false,
+    switchHint:
+      nextCatalog.length > 0
+        ? `Cleared "${prevEffective}" from the previous adapter. Select a model for ${nextLabel}.`
+        : `Cleared "${prevEffective}" from the previous adapter. Enter a model ID for ${nextLabel}.`,
+  };
+}
+
 @customElement('scion-page-admin-system-one')
 export class ScionPageAdminSystemOne extends LitElement {
   readonly _zone = new DisplayZoneController(this);
@@ -292,7 +433,7 @@ export class ScionPageAdminSystemOne extends LitElement {
   @state() private createDialogOpen = false;
   @state() private createName = '';
   @state() private createAdapterId = '';
-  @state() private createModel = '';
+  @state() private createModelState: ModelFieldState = initModelFieldState(undefined);
   @state() private createAuthMode = '';
   @state() private createApiKey = '';
   @state() private createSecretName = '';
@@ -500,8 +641,8 @@ export class ScionPageAdminSystemOne extends LitElement {
         color: var(--scion-text-muted, #64748b);
       }
 
-      .empty-state sl-icon,
-      .error-state sl-icon {
+      .empty-state > sl-icon,
+      .error-state > sl-icon {
         font-size: 2.5rem;
         margin-bottom: 0.75rem;
         opacity: 0.6;
@@ -761,7 +902,6 @@ export class ScionPageAdminSystemOne extends LitElement {
 
   private openCreate(): void {
     this.createName = '';
-    this.createModel = '';
     this.createApiKey = '';
     this.createScopesText = '';
     this.createQuotaProject = '';
@@ -770,8 +910,9 @@ export class ScionPageAdminSystemOne extends LitElement {
     this.createSubmitting = false;
 
     const firstAdapter = this.adapters[0];
+    this.createModelState = initModelFieldState(firstAdapter);
     if (firstAdapter) {
-      this.applyCreateAdapter(firstAdapter.id);
+      this.applyCreateAdapter(firstAdapter.id, true);
     } else {
       this.createAdapterId = '';
       this.createAuthMode = '';
@@ -790,9 +931,15 @@ export class ScionPageAdminSystemOne extends LitElement {
     this.createError = null;
   }
 
-  private applyCreateAdapter(adapterId: string): void {
+  private applyCreateAdapter(adapterId: string, resetModel = false): void {
+    const prevAdapter = this.selectedCreateAdapter;
     this.createAdapterId = adapterId;
     const cap = this.adapters.find((a) => a.id === adapterId);
+    if (resetModel) {
+      this.createModelState = initModelFieldState(cap);
+    } else if (prevAdapter?.id !== cap?.id) {
+      this.createModelState = switchModelFieldAdapter(this.createModelState, prevAdapter, cap);
+    }
     if (!cap) {
       this.createAuthMode = '';
       this.createEndpoint = '';
@@ -839,7 +986,7 @@ export class ScionPageAdminSystemOne extends LitElement {
       return;
     }
 
-    const model = this.createModel.trim();
+    const model = effectiveModelValue(this.createModelState, cap);
     if (cap.modelRequired && !model) {
       this.createError = `Model is required for adapter "${cap.id}".`;
       return;
@@ -1518,20 +1665,7 @@ export class ScionPageAdminSystemOne extends LitElement {
                 <strong>Provider retention:</strong> ${cap.providerRetention}
               </p>`
             : nothing}
-
-          <sl-input
-            label=${cap?.modelRequired ? 'Configured Model (Required)' : 'Configured Model'}
-            name="model"
-            ?required=${Boolean(cap?.modelRequired)}
-            placeholder=${cap?.id === 'gemini_decisions'
-              ? 'e.g. gemini-decision-1'
-              : 'e.g. jev-1.14.0'}
-            .value=${this.createModel}
-            @sl-input=${(e: Event) => {
-              this.createModel = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
-
+          ${this.renderCreateModelField(cap)}
           ${cap && cap.authModes.length > 0
             ? html`
                 <sl-radio-group
@@ -1618,6 +1752,84 @@ export class ScionPageAdminSystemOne extends LitElement {
           </sl-button>
         </div>
       </sl-dialog>
+    `;
+  }
+
+  private renderCreateModelField(cap: SystemOneAdapterCapability | undefined): TemplateResult {
+    const knownModels = cap?.knownModels ?? [];
+    const hasCatalog = knownModels.length > 0;
+    const isOther = hasCatalog && this.createModelState.selection === OTHER_MODEL_OPTION;
+    const modelLabel = cap?.modelRequired ? 'Configured Model (Required)' : 'Configured Model';
+
+    return html`
+      <div class="form-fields" style="gap: 0.5rem;">
+        ${hasCatalog
+          ? html`
+              <sl-select
+                label=${modelLabel}
+                name="modelSelect"
+                hoist
+                ?required=${Boolean(cap?.modelRequired)}
+                placeholder="Select a model"
+                help-text=${KNOWN_MODELS_HELP_TEXT}
+                .value=${this.createModelState.selection}
+                @sl-change=${(e: Event) => {
+                  this.createModelState = selectModelOption(
+                    this.createModelState,
+                    (e.target as HTMLSelectElement).value
+                  );
+                }}
+              >
+                ${knownModels.map(
+                  (m) => html`
+                    <sl-option value=${m.id}>
+                      ${m.displayName ? `${m.displayName} (${m.id})` : m.id}
+                    </sl-option>
+                  `
+                )}
+                <sl-option value=${OTHER_MODEL_OPTION}>Other (enter model ID)</sl-option>
+              </sl-select>
+              ${isOther
+                ? html`
+                    <sl-input
+                      label=${cap?.modelRequired ? 'Custom Model ID (Required)' : 'Custom Model ID'}
+                      name="model"
+                      ?required=${Boolean(cap?.modelRequired)}
+                      placeholder="Enter model ID"
+                      .value=${this.createModelState.customValue}
+                      @sl-input=${(e: Event) => {
+                        this.createModelState = updateCustomModelInput(
+                          this.createModelState,
+                          (e.target as HTMLInputElement).value,
+                          true
+                        );
+                      }}
+                    ></sl-input>
+                  `
+                : nothing}
+            `
+          : html`
+              <sl-input
+                label=${modelLabel}
+                name="model"
+                ?required=${Boolean(cap?.modelRequired)}
+                placeholder="Enter model ID"
+                .value=${this.createModelState.customValue}
+                @sl-input=${(e: Event) => {
+                  this.createModelState = updateCustomModelInput(
+                    this.createModelState,
+                    (e.target as HTMLInputElement).value,
+                    false
+                  );
+                }}
+              ></sl-input>
+            `}
+        ${this.createModelState.switchHint
+          ? html`<p class="field-note" data-testid="model-switch-hint" role="status">
+              ${this.createModelState.switchHint}
+            </p>`
+          : nothing}
+      </div>
     `;
   }
 

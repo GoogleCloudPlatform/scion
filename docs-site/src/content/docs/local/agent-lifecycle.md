@@ -202,8 +202,11 @@ In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --bro
 
 With the **server-layer, alpha, default-off** [`hub.reincarnate_harness_switch`
 experiment](/scion/reference/experiments/) enabled, use `--harness <harness-config>`
-to select a named harness-config from the project's catalog, falling back to the
-global catalog. This rebuilds the agent home, even when you name its current
+to select a named harness-config from the Hub's catalog: on a hosted Hub the global
+catalog first, then the project's; on a workstation Hub the project's first, then the
+global one. If that first match is archived or pending, the reincarnation fails with
+`400` (see [Inactive Hub harness configs](/scion/reference/harness-settings/#inactive-hub-harness-configs)).
+This rebuilds the agent home, even when you name its current
 harness-config. It keeps the same agent identity and workspace.
 
 Write a handoff that captures the agent's active work, then **run `--dry-run`
@@ -638,10 +641,10 @@ create or `PATCH` requests that set `suspendPolicy` with `400 experiment_disable
 
 - **Web UI:** while `lifecycle.never_suspend` is enabled, the **Create Agent**
   form offers a **Never suspend** checkbox, agent lists and detail pages show a
-  **Never suspend** badge, the hub-wide **Agents** page adds a **Policy** filter
-  (`suspendPolicy:never` / `suspendPolicy:auto`) and surfaces non-default
-  lifecycle and messaging settings in the **Traits** column, and clicking
-  **Suspend** on a flagged agent opens a confirmation dialog that sends
+  **Never suspend** badge, the hub-wide **Agents** page supports filtering by
+  `suspendPolicy:never` / `suspendPolicy:auto` in the filter box and surfaces
+  non-default lifecycle and messaging settings in the **Traits** column, and
+  clicking **Suspend** on a flagged agent opens a confirmation dialog that sends
   `force: true`.
 
 ### Current Limits (v1)

@@ -22,13 +22,16 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,24 +86,10 @@ func TestResolveTemplateReimportSource(t *testing.T) {
 				return
 			}
 			require.Nil(t, err)
-			require.NotNil(t, src)
+			assert.NotEmpty(t, src.Owner)
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-func TestParseTemplateGitHubSource_ArchiveURL(t *testing.T) {
-	src, err := parseTemplateGitHubSource("https://github.com/acme/repo/tree/dev/templates/my-template")
-	require.NoError(t, err)
-	assert.Equal(t, "templates/my-template", src.Path)
-	assert.Equal(t, "https://github.com/acme/repo/archive/refs/heads/dev.tar.gz", src.archiveURL())
-	assert.Equal(t, "https://api.github.com/repos/acme/repo/tarball/refs/heads/dev", src.apiTarballURL())
-
-	src, err = parseTemplateGitHubSource("https://github.com/acme/repo")
-	require.NoError(t, err)
-	assert.Equal(t, "", src.Path)
-	assert.Equal(t, "https://github.com/acme/repo/archive/refs/heads/main.tar.gz", src.archiveURL())
-	assert.Equal(t, "https://api.github.com/repos/acme/repo/tarball/refs/heads/main", src.apiTarballURL())
 }
 
 type tarEntry struct {
@@ -155,35 +144,12 @@ func buildTarGz(t *testing.T, entries []tarEntry) []byte {
 // templates/: my-template and other-template.
 func twoTemplateArchive(t *testing.T, readme string) []byte {
 	return buildTarGz(t, []tarEntry{
-		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader},
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: defaultFakeReimportSHA},
 		{name: "repo-main/", typeflag: tar.TypeDir},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 		{name: "repo-main/templates/my-template/README.md", body: readme},
 		{name: "repo-main/templates/other-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 	})
-}
-
-// fakeTemplateSourceFetcher serves a fixed body (or error) and records the
-// URLs it was asked for, with the Authorization value of each request in
-// auths ("" for FetchBytes).
-type fakeTemplateSourceFetcher struct {
-	body  []byte
-	err   error
-	urls  []string
-	auths []string
-}
-
-func (f *fakeTemplateSourceFetcher) FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error) {
-	return f.FetchBytesAuthorized(ctx, rawURL, "")
-}
-
-func (f *fakeTemplateSourceFetcher) FetchBytesAuthorized(_ context.Context, rawURL, authorization string) (*remotefetch.Result, error) {
-	f.urls = append(f.urls, rawURL)
-	f.auths = append(f.auths, authorization)
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &remotefetch.Result{Body: f.body}, nil
 }
 
 func newReimportAdmin(t *testing.T, s store.Store) *store.User {
@@ -224,8 +190,8 @@ func TestTemplateReimport_RefreshesOnlyTargetTemplate(t *testing.T) {
 	admin := newReimportAdmin(t, s)
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-ok", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
 
-	fetcher := &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
-	srv.templateSourceFetcher = fetcher
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -234,7 +200,11 @@ func TestTemplateReimport_RefreshesOnlyTargetTemplate(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, []string{"my-template"}, resp.Templates)
 	assert.Equal(t, 1, resp.Count)
-	assert.Equal(t, []string{"https://github.com/acme/repo/archive/refs/heads/main.tar.gz"}, fetcher.urls)
+	assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+	assert.NotEmpty(t, fetcher.recordedRawURLs())
+	for _, u := range fetcher.recordedRawURLs() {
+		assert.True(t, strings.HasPrefix(u, "https://raw.githubusercontent.com/acme/repo/"+defaultFakeReimportSHA+"/templates/"), "raw URL = %q", u)
+	}
 
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
@@ -253,14 +223,18 @@ func TestTemplateReimport_OverrideURLIsStored(t *testing.T) {
 	admin := newReimportAdmin(t, s)
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-override", "my-template", store.TemplateScopeGlobal, "", "https://github.com/acme/old/tree/main/templates/my-template")
 
-	fetcher := &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
-	srv.templateSourceFetcher = fetcher
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 
 	override := "https://github.com/acme/repo/tree/main/templates"
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport",
 		ReimportTemplateRequest{SourceURL: override})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"https://github.com/acme/repo/archive/refs/heads/main.tar.gz"}, fetcher.urls)
+	assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+	assert.NotEmpty(t, fetcher.recordedRawURLs())
+	for _, u := range fetcher.recordedRawURLs() {
+		assert.True(t, strings.HasPrefix(u, "https://raw.githubusercontent.com/acme/repo/"+defaultFakeReimportSHA+"/templates/"), "raw URL = %q", u)
+	}
 
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
@@ -273,8 +247,8 @@ func TestTemplateReimport_RefusesUnsupportedSources(t *testing.T) {
 	admin := newReimportAdmin(t, s)
 
 	// Refused sources must not be fetched at all.
-	fetcher := &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
-	srv.templateSourceFetcher = fetcher
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 
 	tests := []struct {
 		name     string
@@ -309,7 +283,7 @@ func TestTemplateReimport_RefusesUnsupportedSources(t *testing.T) {
 			assert.Equal(t, tt.stored, got.SourceURL, "stored source must be unchanged")
 		})
 	}
-	assert.Empty(t, fetcher.urls, "refused sources must not be fetched")
+	assert.Empty(t, fetcher.recordedURLs(), "refused sources must not be fetched")
 }
 
 func TestTemplateReimport_DownloadFailuresAreReported(t *testing.T) {
@@ -318,21 +292,30 @@ func TestTemplateReimport_DownloadFailuresAreReported(t *testing.T) {
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-fail", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
 
 	for name, tc := range map[string]struct {
-		err  error
-		want string
+		err        error
+		wantStatus int
+		wantCode   string
+		wantSub    string
 	}{
-		"oversize download":  {&remotefetch.Error{Reason: remotefetch.ReasonTooLarge, Detail: "body over 1 bytes"}, "size limit"},
-		"too many redirects": {&remotefetch.Error{Reason: remotefetch.ReasonRedirects, Detail: "more than 3 redirects"}, "could not download"},
-		"internal address":   {&remotefetch.Error{Reason: remotefetch.ReasonDeniedAddress, Detail: "codeload.github.com resolves to denied address 10.0.0.5"}, "could not download"},
-		"host off the list":  {&remotefetch.Error{Reason: remotefetch.ReasonHostNotAllowed, Detail: `host "other.test" is not allowed`}, "could not download"},
-		"not found":          {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}, "repository credential (if any) cannot read it"},
+		"oversize download":  {&remotefetch.Error{Reason: remotefetch.ReasonTooLarge, Detail: "body over 1 bytes"}, http.StatusBadRequest, "reimport_failed", "size or file count limit"},
+		"too many redirects": {&remotefetch.Error{Reason: remotefetch.ReasonRedirects, Detail: "more than 3 redirects"}, http.StatusBadRequest, "reimport_failed", "could not download"},
+		"internal address":   {&remotefetch.Error{Reason: remotefetch.ReasonDeniedAddress, Detail: "codeload.github.com resolves to denied address 10.0.0.5"}, http.StatusBadRequest, "reimport_failed", "could not download"},
+		"host off the list":  {&remotefetch.Error{Reason: remotefetch.ReasonHostNotAllowed, Detail: `host "other.test" is not allowed`}, http.StatusBadRequest, "reimport_failed", "could not download"},
+		"not found":          {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusNotFound, Detail: "status 404"}, http.StatusBadRequest, "reimport_failed", "not found"},
+		"auth rejected":      {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusUnauthorized, Detail: "status 401"}, http.StatusBadRequest, "reimport_failed", "rejected"},
+		"forbidden SSO":      {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusForbidden, Header: http.Header{"X-Github-Sso": {"required"}}, Detail: "status 403"}, http.StatusBadRequest, "reimport_failed", "SAML SSO"},
+		"rate limited 429":   {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"45"}}, Detail: "status 429"}, http.StatusTooManyRequests, "rate_limited", "rate limit"},
+		"upstream 502":       {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusBadGateway, Detail: "status 502"}, http.StatusBadRequest, "reimport_failed", "invalid or inconsistent response"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{err: tc.err}
+			srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{err: tc.err})
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
-			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-			assert.Contains(t, rec.Body.String(), "reimport_failed")
-			assert.Contains(t, rec.Body.String(), tc.want)
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.wantCode)
+			assert.Contains(t, rec.Body.String(), tc.wantSub)
+			if tc.wantStatus == http.StatusTooManyRequests {
+				assert.Equal(t, "45", rec.Header().Get("Retry-After"))
+			}
 			// Fetch details (hosts, addresses) stay in the server log.
 			assert.NotContains(t, rec.Body.String(), "10.0.0.5")
 			assert.NotContains(t, rec.Body.String(), "other.test")
@@ -346,28 +329,32 @@ func TestTemplateReimport_OversizeExtractRefused(t *testing.T) {
 	admin := newReimportAdmin(t, s)
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-bigextract", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
 
-	big := strings.Repeat("x", int(defaultTemplateSourceLimits.MaxExtract)+1)
-	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+	big := strings.Repeat("x", int(githubfetch.ImportHostedLimits().MaxFileBytes)+1)
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: buildTarGz(t, []tarEntry{
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "harness: claude\n"},
 		{name: "repo-main/templates/my-template/big.bin", body: big},
-	})}
+	})})
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "size limit")
+	assert.Contains(t, rec.Body.String(), "size or file count limit")
 
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.Files, "a refused source must not change the template")
 }
 
-// TestTemplateSourceFetcher_DefaultIsGuarded checks the fetcher reimport uses
-// when none is injected: it refuses http, hosts off the GitHub allow-list
-// (including internal and metadata addresses given as IP literals) and URLs
-// with credentials, before making any connection.
-func TestTemplateSourceFetcher_DefaultIsGuarded(t *testing.T) {
-	srv := &Server{}
-	f := srv.getTemplateSourceFetcher()
-	require.IsType(t, &remotefetch.Fetcher{}, f)
+// TestTemplateGitHubClient_DefaultIsGuarded checks the server's network-mode
+// wiring (hosted -> NetworkVetted, workstation -> NetworkSystem) and that the
+// hosted Doer refuses http, non-allowlisted hosts, userinfo, and denylisted
+// loopback addresses before making any connection.
+func TestTemplateGitHubClient_DefaultIsGuarded(t *testing.T) {
+	hostedSrv := &Server{workstation: false}
+	workstationSrv := &Server{workstation: true}
+	assert.Equal(t, remotefetch.NetworkVetted, hostedSrv.templateReimportNetworkMode(), "hosted Hub must select NetworkVetted")
+	assert.Equal(t, remotefetch.NetworkSystem, workstationSrv.templateReimportNetworkMode(), "workstation Hub must select NetworkSystem")
+
+	doer := hostedSrv.newTemplateGitHubDoer(githubfetch.DefaultEndpoint(), githubfetch.ImportHostedLimits())
+	_ = hostedSrv.getTemplateGitHubClient(githubfetch.ImportHostedLimits())
 
 	for name, tc := range map[string]struct {
 		url  string
@@ -384,152 +371,41 @@ func TestTemplateSourceFetcher_DefaultIsGuarded(t *testing.T) {
 		"userinfo":         {"https://u:p@github.com/acme/repo/archive/refs/heads/main.tar.gz", remotefetch.ReasonUserinfo},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// Each URL is refused by the per-hop URL checks, before any
-			// name resolution or connection.
-			_, err := f.FetchBytes(context.Background(), tc.url)
+			_, err := doer.Open(context.Background(), githubfetch.Request{URL: tc.url})
 			var fe *remotefetch.Error
 			require.ErrorAs(t, err, &fe)
 			assert.Equal(t, tc.want, fe.Reason)
 		})
 	}
-}
 
-func TestExtractTemplateSource(t *testing.T) {
-	lim := templateSourceLimits{MaxUnpacked: 1 << 20, MaxExtract: 64, MaxFiles: 3}
-	readFile := func(t *testing.T, p string) string {
-		t.Helper()
-		b, err := os.ReadFile(p)
-		require.NoError(t, err)
-		return string(b)
-	}
-
-	t.Run("extracts only the requested folder", func(t *testing.T) {
-		dest := t.TempDir()
-		const wantCommit = "0123456789abcdef0123456789abcdef01234567"
-		archive := buildTarGz(t, []tarEntry{
-			{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: wantCommit},
-			{name: "repo-main/README.md", body: "root"},
-			{name: "repo-main/templates/a/scion-agent.yaml", body: "a"},
-			{name: "repo-main/templatesX/b", body: "b"},
-		})
-		commit, err := extractTemplateSource(archive, "templates", dest, lim)
-		require.NoError(t, err)
-		assert.Equal(t, wantCommit, commit)
-		assert.Equal(t, "a", readFile(t, filepath.Join(dest, "a", "scion-agent.yaml")))
-		assert.NoFileExists(t, filepath.Join(dest, "README.md"))
-		assert.NoFileExists(t, filepath.Join(dest, "b"))
-	})
-
-	t.Run("PAX commit header absent or malformed returns empty", func(t *testing.T) {
-		for _, tc := range []struct {
-			name    string
-			entries []tarEntry
-		}{
-			{
-				name: "absent",
-				entries: []tarEntry{
-					{name: "repo-main/t/a", body: "a"},
-				},
-			},
-			{
-				name: "short hex",
-				entries: []tarEntry{
-					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: "abc123"},
-					{name: "repo-main/t/a", body: "a"},
-				},
-			},
-			{
-				name: "uppercase hex",
-				entries: []tarEntry{
-					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: "0123456789ABCDEF0123456789ABCDEF01234567"},
-					{name: "repo-main/t/a", body: "a"},
-				},
-			},
-			{
-				name: "non-hex",
-				entries: []tarEntry{
-					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: strings.Repeat("z", 40)},
-					{name: "repo-main/t/a", body: "a"},
-				},
-			},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				commit, err := extractTemplateSource(buildTarGz(t, tc.entries), "t", t.TempDir(), lim)
-				require.NoError(t, err)
-				assert.Empty(t, commit)
-			})
+	t.Run("network mode wiring refuses loopback only on hosted", func(t *testing.T) {
+		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+			t.Setenv(k, "")
 		}
-	})
+		loopbackEp := githubfetch.Endpoint{
+			APIBase:  "https://127.0.0.1",
+			RawBase:  "https://127.0.0.1",
+			WebHost:  "127.0.0.1",
+			Codeload: "127.0.0.1",
+		}
+		lim := githubfetch.ImportHostedLimits()
+		lim.RequestTimeout = 2 * time.Second
 
-	t.Run("skips links and names that leave the folder", func(t *testing.T) {
-		dest := filepath.Join(t.TempDir(), "out")
-		require.NoError(t, os.MkdirAll(dest, 0o755))
-		archive := buildTarGz(t, []tarEntry{
-			{name: "repo-main/t/ok", body: "ok"},
-			{name: "repo-main/t/link", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
-			{name: "repo-main/t/hard", typeflag: tar.TypeLink, linkname: "repo-main/t/ok"},
-			{name: "repo-main/t/../../../outside", body: "x"},
-			{name: "../../outside2", body: "x"},
-		})
-		_, err := extractTemplateSource(archive, "t", dest, lim)
-		require.NoError(t, err)
-		assert.FileExists(t, filepath.Join(dest, "ok"))
-		assert.NoFileExists(t, filepath.Join(dest, "link"))
-		assert.NoFileExists(t, filepath.Join(dest, "hard"))
-		assert.NoFileExists(t, filepath.Join(filepath.Dir(dest), "outside"))
-		assert.NoFileExists(t, filepath.Join(filepath.Dir(dest), "outside2"))
-	})
+		hostedDoer := hostedSrv.newTemplateGitHubDoer(loopbackEp, lim)
+		_, err := hostedDoer.Open(context.Background(), githubfetch.Request{URL: "https://127.0.0.1/repos/acme/repo"})
+		var fe *remotefetch.Error
+		require.ErrorAs(t, err, &fe)
+		assert.Equal(t, remotefetch.ReasonDeniedAddress, fe.Reason, "hosted Doer must run in NetworkVetted and refuse loopback with ReasonDeniedAddress")
 
-	t.Run("refuses oversize extract", func(t *testing.T) {
-		archive := buildTarGz(t, []tarEntry{
-			{name: "repo-main/t/a", body: strings.Repeat("a", 40)},
-			{name: "repo-main/t/b", body: strings.Repeat("b", 40)},
-		})
-		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
-		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
-	})
-
-	t.Run("directories count toward the entry limit", func(t *testing.T) {
-		archive := buildTarGz(t, []tarEntry{
-			{name: "repo-main/t/d1/", typeflag: tar.TypeDir},
-			{name: "repo-main/t/d2/", typeflag: tar.TypeDir},
-			{name: "repo-main/t/d3/", typeflag: tar.TypeDir},
-			{name: "repo-main/t/d4/", typeflag: tar.TypeDir},
-		})
-		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
-		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
-	})
-
-	t.Run("refuses too many files", func(t *testing.T) {
-		archive := buildTarGz(t, []tarEntry{
-			{name: "repo-main/t/1", body: "1"},
-			{name: "repo-main/t/2", body: "2"},
-			{name: "repo-main/t/3", body: "3"},
-			{name: "repo-main/t/4", body: "4"},
-		})
-		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
-		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
-	})
-
-	t.Run("refuses oversize unpacked archive outside the folder", func(t *testing.T) {
-		archive := buildTarGz(t, []tarEntry{
-			{name: "repo-main/huge", body: strings.Repeat("z", 2<<20)},
-			{name: "repo-main/t/a", body: "a"},
-		})
-		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
-		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
-	})
-
-	t.Run("missing folder", func(t *testing.T) {
-		archive := buildTarGz(t, []tarEntry{{name: "repo-main/other/a", body: "a"}})
-		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not found")
-	})
-
-	t.Run("not an archive", func(t *testing.T) {
-		_, err := extractTemplateSource([]byte("<html>"), "t", t.TempDir(), lim)
-		require.Error(t, err)
+		workstationDoer := workstationSrv.newTemplateGitHubDoer(loopbackEp, lim)
+		resp, err := workstationDoer.Open(context.Background(), githubfetch.Request{URL: "https://127.0.0.1/repos/acme/repo"})
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		var wfe *remotefetch.Error
+		if errors.As(err, &wfe) {
+			assert.NotEqual(t, remotefetch.ReasonDeniedAddress, wfe.Reason, "workstation Doer must run in NetworkSystem and not refuse loopback with ReasonDeniedAddress")
+		}
 	})
 }
 
@@ -554,11 +430,11 @@ func TestTemplateReimport_GlobalRequiresCreatePermission(t *testing.T) {
 
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-global-authz", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
 
-	fetcher := &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
-	srv.templateSourceFetcher = fetcher
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Empty(t, fetcher.urls)
+	assert.Empty(t, fetcher.recordedURLs())
 }
 
 func TestTemplateReimport_ProjectUsesTemplateCreateAuthorization(t *testing.T) {
@@ -577,7 +453,7 @@ func TestTemplateReimport_ProjectUsesTemplateCreateAuthorization(t *testing.T) {
 	tmpl := createReimportTemplate(t, s, "tmpl-reimport-project-authz", "my-template", store.TemplateScopeProject, project.ID, reimportTestSource)
 	path := "/api/v1/templates/" + tmpl.ID + "/reimport"
 
-	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")})
 
 	// No read access: the template reads as not found.
 	rec := doRequestAsUser(t, srv, user, http.MethodPost, path, nil)
@@ -626,7 +502,7 @@ func TestTemplateReimport_NameDiffersFromSlug(t *testing.T) {
 			}
 			before := countTemplates(t, s, store.TemplateScopeGlobal, "")
 
-			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+			srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")})
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -659,7 +535,7 @@ func TestTemplateReimport_FolderMatchedBySlug(t *testing.T) {
 	target := createReimportTemplateWithSlug(t, s, "tmpl-slug-folder", "My Template", "my-template",
 		store.TemplateScopeGlobal, "", reimportTestSource)
 
-	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")})
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -677,7 +553,7 @@ func TestTemplateReimport_NoMatchingFolder(t *testing.T) {
 	admin := newReimportAdmin(t, s)
 	target := createReimportTemplate(t, s, "tmpl-no-folder", "absent-template", store.TemplateScopeGlobal, "", reimportTestSource)
 
-	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")})
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "does not contain this template")
@@ -724,8 +600,8 @@ func TestTemplateReimport_UserScopeAuthorization(t *testing.T) {
 	require.NoError(t, s.UpdateTemplate(ctx, tmpl))
 	path := "/api/v1/templates/" + tmpl.ID + "/reimport"
 
-	fetcher := &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
-	srv.templateSourceFetcher = fetcher
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 
 	// Another user cannot read the template: it reads as not found.
 	rec := doRequestAsUser(t, srv, other, http.MethodPost, path, nil)
@@ -734,43 +610,16 @@ func TestTemplateReimport_UserScopeAuthorization(t *testing.T) {
 	// A caller who can read it but is not the owner is refused.
 	rec = doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Empty(t, fetcher.urls, "refused callers must not trigger a fetch")
+	assert.Empty(t, fetcher.recordedURLs(), "refused callers must not trigger a fetch")
 
 	// The owner may refresh it.
 	rec = doRequestAsUser(t, srv, owner, http.MethodPost, path, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Len(t, fetcher.urls, 1)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.NotEmpty(t, fetcher.recordedRawURLs())
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Len(t, got.Files, 2)
-}
-
-func TestExtractTarget(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "out")
-	for name, tc := range map[string]struct {
-		rel string
-		ok  bool
-	}{
-		"plain file":          {"a/b.txt", true},
-		"nested dot segments": {"a/./b/../c.txt", true},
-		"empty":               {"", false},
-		"dot":                 {".", false},
-		"parent":              {"..", false},
-		"leaves dest":         {"../x", false},
-		"leaves dest deeper":  {"a/../../x", false},
-		"absolute":            {"/etc/passwd", false},
-		"nul byte":            {"a\x00b", false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			target, ok := extractTarget(dest, tc.rel)
-			assert.Equal(t, tc.ok, ok)
-			if ok {
-				r, err := filepath.Rel(dest, target)
-				require.NoError(t, err)
-				assert.False(t, strings.HasPrefix(r, ".."), "target %q is outside dest", target)
-			}
-		})
-	}
 }
 
 func TestSelectTemplateSourceDir(t *testing.T) {
@@ -807,10 +656,10 @@ func TestTemplateReimport_SeveralMatchingFolders(t *testing.T) {
 	target := createReimportTemplateWithSlug(t, s, "tmpl-several", "My Template", "my-template",
 		store.TemplateScopeGlobal, "", reimportTestSource)
 
-	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: buildTarGz(t, []tarEntry{
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "harness: claude\n"},
 		{name: "repo-main/templates/My Template/scion-agent.yaml", body: "harness: claude\n"},
-	})}
+	})})
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "more than one folder matching this template")
@@ -865,11 +714,11 @@ func TestTemplateReimport_LeavesHarnessConfigsUnchanged(t *testing.T) {
 			}
 			before := countHC()
 
-			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+			srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{body: buildTarGz(t, []tarEntry{
 				{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 				{name: "repo-main/templates/my-template/harness-configs/probe-hc/config.yaml", body: "harness: claude\nimage: example/probe:latest\n"},
 				{name: "repo-main/templates/my-template/harness-configs/new-hc/config.yaml", body: "harness: claude\nimage: example/new:latest\n"},
-			})}
+			})})
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -926,8 +775,8 @@ func TestTemplateReimport_OverrideNotStoredOnFailure(t *testing.T) {
 	const stored = "https://github.com/acme/old/tree/main/templates/my-template"
 	const override = "https://github.com/acme/repo/tree/main/templates"
 
-	for name, fetcher := range map[string]*fakeTemplateSourceFetcher{
-		"download fails": {err: &remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}},
+	for name, fetcher := range map[string]*fakeReimportGitHub{
+		"download fails": {err: &remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusNotFound, Detail: "status 404"}},
 		"no matching folder": {body: buildTarGz(t, []tarEntry{
 			{name: "repo-main/templates/unrelated/scion-agent.yaml", body: "harness: claude\n"},
 		})},
@@ -941,12 +790,12 @@ func TestTemplateReimport_OverrideNotStoredOnFailure(t *testing.T) {
 			tmpl.ContentHash = "sha256:oldhash"
 			require.NoError(t, setTemplateContentForTest(ctx, s, tmpl))
 
-			srv.templateSourceFetcher = fetcher
+			srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport",
 				ReimportTemplateRequest{SourceURL: override})
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "reimport_failed")
-			assert.Len(t, fetcher.urls, 1, "the override passed validation and was fetched")
+			assert.NotEmpty(t, fetcher.recordedURLs(), "the override passed validation and was fetched")
 
 			got, err := s.GetTemplate(ctx, tmpl.ID)
 			require.NoError(t, err)
@@ -958,47 +807,21 @@ func TestTemplateReimport_OverrideNotStoredOnFailure(t *testing.T) {
 	}
 }
 
-func TestExtractTemplateSource_FileModes(t *testing.T) {
-	dest := t.TempDir()
-	archive := buildTarGz(t, []tarEntry{
-		{name: "repo-main/t/plain.txt", body: "a"},
-		{name: "repo-main/t/hook.sh", body: "#!/bin/sh\n", mode: 0o755},
-		{name: "repo-main/t/owner-exec.sh", body: "x", mode: 0o700},
-		{name: "repo-main/t/wide.sh", body: "x", mode: 0o777},
-		{name: "repo-main/t/setuid.sh", body: "x", mode: 0o4755},
-		{name: "repo-main/t/group-write.txt", body: "x", mode: 0o664},
-	})
-	lim := templateSourceLimits{MaxUnpacked: 1 << 20, MaxExtract: 1 << 20, MaxFiles: 100}
-	_, err := extractTemplateSource(archive, "t", dest, lim)
-	require.NoError(t, err)
-
-	for name, want := range map[string]os.FileMode{
-		"plain.txt":       0o644,
-		"hook.sh":         0o755,
-		"owner-exec.sh":   0o755,
-		"wide.sh":         0o755,
-		"setuid.sh":       0o755,
-		"group-write.txt": 0o644,
-	} {
-		info, err := os.Stat(filepath.Join(dest, name))
-		require.NoError(t, err, name)
-		assert.Equal(t, want, info.Mode(), name)
-	}
-}
-
 // TestTemplateReimport_UnchangedSourceKeepsHash: refreshing twice from the same
 // source, which includes an executable file, stores the executable mode and
-// leaves the content hash unchanged on the second refresh.
+// leaves the content hash unchanged on the second refresh without redownloading
+// the tarball or rewriting storage.
 func TestTemplateReimport_UnchangedSourceKeepsHash(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 	admin := newReimportAdmin(t, s)
 	tmpl := createReimportTemplate(t, s, "tmpl-modes", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
 
-	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+	fetcher := &fakeReimportGitHub{body: buildTarGz(t, []tarEntry{
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 		{name: "repo-main/templates/my-template/hooks/start.sh", body: "#!/bin/sh\necho hi\n", mode: 0o755},
 	})}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 	path := "/api/v1/templates/" + tmpl.ID + "/reimport"
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
@@ -1011,29 +834,35 @@ func TestTemplateReimport_UnchangedSourceKeepsHash(t *testing.T) {
 	}
 	assert.Equal(t, "0755", modes["hooks/start.sh"])
 	assert.Equal(t, "0644", modes["scion-agent.yaml"])
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
 
+	// Second reimport at the same commit/tree SHA must be a no-op (no second download).
 	rec = doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	second, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, first.ContentHash, second.ContentHash, "an unchanged source must keep the content hash")
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2, "unchanged tree SHA must skip download and storage write")
 }
 
 func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 	admin := newReimportAdmin(t, s)
-	tmpl := createReimportTemplate(t, s, "tmpl-commit", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
+	tmpl := createReimportTemplate(t, s, "tmpl-commit", "my-template", store.TemplateScopeGlobal, "", reimportTestSource+"/my-template")
 
 	const commit1 = "1111111111111111111111111111111111111111"
 	const commit2 = "2222222222222222222222222222222222222222"
 
-	fetcher := &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+	fetcher := &fakeReimportGitHub{}
+	fetcher.setCommitBody(commit1, buildTarGz(t, []tarEntry{
 		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit1},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 		{name: "repo-main/templates/my-template/README.md", body: "v1"},
-	})}
-	srv.templateSourceFetcher = fetcher
+	}))
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
 	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
@@ -1042,17 +871,224 @@ func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, commit1, got.SourceCommit)
 	firstHash := got.ContentHash
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
 
-	// Refresh again with identical files at a newer commit: hash stays, commit advances.
-	fetcher.body = buildTarGz(t, []tarEntry{
+	// Refresh again with identical files (same tree SHA) at a newer commit:
+	// download and storage write are skipped, hash stays, commit advances.
+	fetcher.setCommitBody(commit2, buildTarGz(t, []tarEntry{
 		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
 		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
 		{name: "repo-main/templates/my-template/README.md", body: "v1"},
-	})
+	}))
 	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	got, err = s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, firstHash, got.ContentHash)
 	assert.Equal(t, commit2, got.SourceCommit)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2, "unchanged tree SHA must skip download and storage write")
+}
+
+func TestTemplateReimport_ChangedTreeAtNewCommitReimports(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-commit-changed", "my-template", store.TemplateScopeGlobal, "", reimportTestSource+"/my-template")
+
+	const commit1 = "1111111111111111111111111111111111111111"
+	const commit2 = "2222222222222222222222222222222222222222"
+
+	fetcher := &fakeReimportGitHub{}
+	fetcher.setCommitBody(commit1, buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit1},
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/README.md", body: "v1"},
+	}))
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	first, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit1, first.SourceCommit)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
+
+	// Advance to commit2 with a modified file (different tree SHA):
+	// new commit files MUST be downloaded, ContentHash must change, and SourceCommit must advance.
+	fetcher.setCommitBody(commit2, buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/README.md", body: "v2-updated-content"},
+	}))
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	second, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit2, second.SourceCommit)
+	assert.NotEqual(t, first.ContentHash, second.ContentHash, "changed tree must rewrite storage and update ContentHash")
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 4, "changed tree SHA must download the new commit files")
+}
+
+func TestTemplateReimport_TagsSHAsAndSlashedBranches(t *testing.T) {
+	const sha = "abcdef0123456789abcdef0123456789abcdef01"
+	cases := []struct {
+		name      string
+		sourceURL string
+		branches  []string
+		tags      []string
+	}{
+		{
+			name:      "tag ref",
+			sourceURL: "https://github.com/acme/repo/tree/v1.2.3/templates/my-template",
+			branches:  []string{"main"},
+			tags:      []string{"v1.2.3"},
+		},
+		{
+			name:      "40-hex commit SHA",
+			sourceURL: "https://github.com/acme/repo/tree/" + sha + "/templates/my-template",
+		},
+		{
+			name:      "slashed branch feat/x/y",
+			sourceURL: "https://github.com/acme/repo/tree/feat/x/y/templates/my-template",
+			branches:  []string{"feat/x", "feat/x/y"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _ := testTemplateBootstrapServer(t)
+			ctx := context.Background()
+			admin := newReimportAdmin(t, s)
+			tmpl := createReimportTemplate(t, s, "tmpl-ref-"+tc.name, "my-template", store.TemplateScopeGlobal, "", tc.sourceURL)
+
+			fetcher := &fakeReimportGitHub{
+				commitSHA: sha,
+				branches:  tc.branches,
+				tags:      tc.tags,
+				body: buildTarGz(t, []tarEntry{
+					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: sha},
+					{name: "repo-sha/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+				}),
+			}
+			srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := s.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.sourceURL, got.SourceURL, "original ref must round-trip in sourceURL")
+			assert.Equal(t, sha, got.SourceCommit, "source_commit must record the resolved SHA")
+		})
+	}
+}
+
+func TestTemplateReimport_BarePathSourceURL(t *testing.T) {
+	const sha = "fedcba9876543210fedcba9876543210fedcba98"
+	const bareURL = "https://github.com/acme/repo/templates/my-template"
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-bare-path", "my-template", store.TemplateScopeGlobal, "", bareURL)
+
+	fetcher := &fakeReimportGitHub{
+		commitSHA: sha,
+		body: buildTarGz(t, []tarEntry{
+			{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: sha},
+			{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+			{name: "repo-main/templates/my-template/README.md", body: "bare-path-ok"},
+		}),
+	}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, bareURL, got.SourceURL)
+	assert.Equal(t, sha, got.SourceCommit)
+	assert.Len(t, got.Files, 2)
+}
+
+func TestTemplateReimport_OverrideFolderAtSameCommitDownloads(t *testing.T) {
+	const (
+		commitC = "3333333333333333333333333333333333333333"
+		folderA = "https://github.com/acme/repo/tree/main/templates-a/my-template"
+		folderB = "https://github.com/acme/repo/tree/main/templates-b/my-template"
+	)
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-same-commit-folder-override", "my-template", store.TemplateScopeGlobal, "", folderA)
+
+	fetcher := &fakeReimportGitHub{}
+	fetcher.setCommitBody(commitC, buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commitC},
+		{name: "repo-main/templates-a/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates-a/my-template/README.md", body: "folder-a-content"},
+		{name: "repo-main/templates-b/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates-b/my-template/README.md", body: "folder-b-content"},
+	}))
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	// First import from folder A at commit C.
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	first, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, folderA, first.SourceURL)
+	assert.Equal(t, commitC, first.SourceCommit)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 2)
+
+	// Reimport with sourceUrl override pointing to folder B in the same repo at the same commit C:
+	// must NOT take the no-op shortcut; must download folder B's files and store its content and URL.
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, ReimportTemplateRequest{SourceURL: folderB})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	second, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Empty(t, fetcher.recordedTarballURLs())
+	assert.Len(t, fetcher.recordedRawURLs(), 4, "override to a different folder at the same commit must download folder B")
+	assert.Equal(t, folderB, second.SourceURL, "folder B's URL must be stored")
+	assert.Equal(t, commitC, second.SourceCommit)
+	assert.NotEqual(t, first.ContentHash, second.ContentHash, "folder B's content must replace folder A's content")
+}
+
+// TestTemplateReimport_ForcedTarballStrategySucceeds exercises the tarball
+// branch end-to-end through template reimport (PAX commit SHA + tree blob
+// verification) when the raw strategy is disabled.
+func TestTemplateReimport_ForcedTarballStrategySucceeds(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-reimport-tarball", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	fetcher := &fakeReimportGitHub{body: twoTemplateArchive(t, "v2")}
+	srv.templateGitHubClient = githubfetch.New(githubfetch.Options{
+		Endpoint:    githubfetch.DefaultEndpoint(),
+		Doer:        fetcher,
+		Cooldown:    githubfetch.NewCooldown(nil),
+		MaxRetries:  0,
+		RawMaxFiles: -1, // force tarball strategy
+	})
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Empty(t, fetcher.recordedRawURLs(), "forced tarball strategy must not make raw requests")
+	assert.Equal(t, []string{"https://github.com/acme/repo/archive/" + defaultFakeReimportSHA + ".tar.gz"}, fetcher.recordedTarballURLs())
+
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, defaultFakeReimportSHA, got.SourceCommit)
+	assert.Len(t, got.Files, 2)
 }

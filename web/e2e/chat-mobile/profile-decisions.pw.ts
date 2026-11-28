@@ -643,7 +643,7 @@ for (const theme of ['light', 'dark'] as const) {
 
       // Answer ship-now inline -> records surface=decisions_page and decrements both Waiting badge and Profile nav badge (4 -> 3)
       const shipCard = pageEl.locator('[data-prompt-card="m-ship"]');
-      const yesBtn = shipCard.locator('sl-button[data-choice="yes"]');
+      const yesBtn = shipCard.locator('button[data-choice="yes"]');
       await yesBtn.scrollIntoViewIfNeeded();
       await yesBtn.click();
 

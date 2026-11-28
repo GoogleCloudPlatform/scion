@@ -2,8 +2,6 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 474
-
 ## Table of Contents
 
 - [agent.lifecycle.create](#agentlifecyclecreate) — Create an agent in a project
@@ -44,6 +42,9 @@
 - [agent.trajectory.segments.prepare](#agenttrajectorysegmentsprepare) — Prepare a Track 2 raw trajectory segment upload and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
 - [agent.trajectory.segments.commit](#agenttrajectorysegmentscommit) — Verify and commit a prepared Track 2 raw trajectory segment and write its Hub-authored manifest for the calling agent (behind tokenomics.trajectory_capture)
 - [agent.trajectory.segments.content](#agenttrajectorysegmentscontent) — Upload raw trajectory segment bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
+- [project.trajectory.segments.list](#projecttrajectorysegmentslist) — List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
+- [project.trajectory.segments.download](#projecttrajectorysegmentsdownload) — Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
+- [agent.trajectory.segments.content.read](#agenttrajectorysegmentscontentread) — Download committed Track 2 raw trajectory segment or manifest bytes via a Hub-issued short-lived HMAC capability URL issued by the audit-logged download endpoint (behind tokenomics.trajectory_capture)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
 - [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
@@ -114,7 +115,7 @@
 - [artifact.review.draft.read](#artifactreviewdraftread) — Read the caller's own saved draft review of an artifact (200 with draft null when none exists, plus currentSeq; ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); the row is always keyed by the caller's own principal with no administrator, steward, owner or publisher override
 - [artifact.review.draft.write](#artifactreviewdraftwrite) — Create, replace or delete the caller's own saved draft review of an artifact with optimistic rev concurrency (ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); rate limited per principal (LimitDraftWrite) after authorization and before reading the request body; the row is always keyed by the caller's own principal with no override; a DELETE that deletes the caller's draft row writes a review_draft_deleted decision-log entry without content, while a DELETE when no draft exists writes none (both answer 204); draft saves never trigger review notifications
 - [artifact.review.request.list](#artifactreviewrequestlist) — List review requests on an artifact (ptone/scion#9296, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off or when the caller cannot read the artifact; publishers receive every open request and up to 50 most recent closed ones (with reviewerCanReview and inDraft for open requests when drafts are enabled); other readable callers receive only requests addressed to themselves
-- [artifact.review.request.create](#artifactreviewrequestcreate) — Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and an interactive user session (403 interactive_session_required for non-interactive credentials before charging the limiter); reviewers who already can review get access=existing, and user requesters who may administer the artifact raise the reviewer's grant to review in the same transaction (access=raised); rate limited per requester (LimitReviewRequest)
+- [artifact.review.request.create](#artifactreviewrequestcreate) — Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306, ptone/scion#9307, ptone/scion#5548); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and either an interactive user session (403 interactive_session_required for non-interactive user credentials before charging the limiter) or an owning agent in its own home project (403 for non-owning agents or after a move); reviewers who already can review get access=existing, user requesters who may administer raise the reviewer's grant to review (access=raised), and owning agents write a role-gated bounded review grant for reviewers reading via a home-project role (access=bounded, at most 10 bounded grants per artifact); rate limited per requester (30/h users via LimitReviewRequest, 10/h agents via LimitReviewRequestAgent)
 - [artifact.review.request.withdraw](#artifactreviewrequestwithdraw) — Withdraw an open review request on an artifact (ptone/scion#9296, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off, when the caller cannot read the artifact, or when the request does not exist; allowed for the request's requester when their credential permits artifact.request_review in the artifact's home scope (agents may withdraw only requests they made, subject to the same check), or for the artifact owner, admin grantee, or steward via adminAuthorityWith (which requires artifact.manage in the home scope); 409 request_closed if the request is no longer open; raised grants are left in place
 - [artifact.review.request.dismiss](#artifactreviewrequestdismiss) — Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off, when the caller's credential does not permit artifact.read in the artifact's home scope, or when no open request exists for the caller; session callers who lost read access via role or grant removal can still dismiss and receive only the request row; rate limited per user (LimitReviewRequestDismiss)
 - [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
@@ -143,6 +144,7 @@
 - [project.messagingpolicy.update](#projectmessagingpolicyupdate) — Set a project's cross-project inbound messaging policy. The caller also must be an active direct project owner or a local unscoped hub admin
 - [project.systemoneinstances.read](#projectsystemoneinstancesread) — Read a project's System One hub instance allowlist (ptone/scion#8045 D1; 404 while hub.system_one is off)
 - [project.systemoneinstances.manage](#projectsystemoneinstancesmanage) — Set, add, or remove entries in a project's System One hub instance allowlist. Caller must hold project.manage_system_one_instances and be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8045 D1; 404 while hub.system_one is off)
+- [project.systemoneinstances.available](#projectsystemoneinstancesavailable) — Read-only discovery summary of Hub System One provider instances (name, adapter, model, enabled, question types, distribution completeness, native metrics, abstains; no secrets or endpoints) for callers who already pass project System One binding authorization (404 unless both hub.system_one and hub.message_policies are on)
 - [project.messagepolicy.read](#projectmessagepolicyread) — List or read a project's configured message policies and surface coverage declaration (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.messagepolicy.create](#projectmessagepolicycreate) — Create a message policy on covered outbound surfaces in a project. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.messagepolicy.update](#projectmessagepolicyupdate) — Update a project message policy, bump its revision, and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
@@ -154,7 +156,7 @@
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
 - [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
 - [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
-- [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.read](#projectgithubread) — Read a project's GitHub integration overview, status, permissions and git identity
 - [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
@@ -249,6 +251,7 @@
 - [chat.decisionprompt.answer](#chatdecisionpromptanswer) — Answer every actionable decision of a decision prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows) with optional surface (native, decisions_page or inbox). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one decision-response message in one transaction, delivers it to the asking agent and publishes decision.updated per row. 404 while web.decisions is off
 - [chat.secretrequest.read](#chatsecretrequestread) — Read a secret-request card (metadata and per-key status, never secret values) plus canRespond and reason. Requires a signed-in user session, recipient membership on the prompt's conversation, and agent.read on the requesting agent. 404 while hub.agent_secrets is off
 - [chat.usersecretrequests.list](#chatusersecretrequestslist) — List open or resolved secret-request cards across the caller's member projects and DMs, with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors and UATs get 403); each row requires recipient membership and agent.read on the requesting agent; answerable counts additionally require answering recipient membership and agent.attach. Unsupported methods get 405; 404 while hub.agent_secrets is off
+- [chat.usercommandrequests.list](#chatusercommandrequestslist) — List open or resolved command-request cards where the caller is the named approver (excluding self-run markdown_block rows), with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors, federated callers and UATs get 403); each row requires command-request recipient eligibility matching GET /api/v1/command-requests/{id}. Unsupported methods get 405; 404 while hub.command_requests is off
 - [chat.commandrequest.read](#chatcommandrequestread) — Read a command-request row and its run view (never output), plus the approver's resolved execution container state for the named approver only. Requires an interactive human session and card recipient membership. 404 while hub.command_requests is off
 - [chat.commandrequest.approve](#chatcommandrequestapprove) — Approve a pending command request matching command_sha256, atomically transitioning pending -> approved and inserting a single queued command_runs row for the approver's execution container. Requires an interactive human session, same-origin CSRF check on cookie sessions, recipient membership, named approver match, and an eligible non-stopped execution container. 404 while hub.command_requests is off
 - [chat.commandrequest.output](#chatcommandrequestoutput) — Read the captured output tail of an approved command run. Requires an interactive human session, caller == run.approver_user_id, and live agent.attach on exec_agent_id (fails closed if deleted). Sets Cache-Control: no-store and bypasses response compression. 404 while hub.command_requests is off
@@ -263,6 +266,11 @@
 - [chat.userdecisions.suggestions](#chatuserdecisionssuggestions) — Search uncapped decision filter value suggestions (agent, conversation, or by) across every project the caller is a member of and can read (capped at 200 readable member projects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty values), then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
 - [chat.conversation.decisions.topic](#chatconversationdecisionstopic) — List open decision prompts in one chat thread with per-viewer prompt counts (oldest first, capped at 100). Needs project:read on the thread's project (a caller without it gets the missing-thread 404); a token also needs inbox:read for the project. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
 - [chat.conversation.decisions.dm](#chatconversationdecisionsdm) — List open decision prompts in one of the caller's DMs with per-viewer prompt counts (oldest first, capped at 100; user-to-user DMs return an empty list). Needs DM participation; a token also needs inbox:read and agent:read on the peer agent under the DM rule. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
+- [chat.scheduled.list](#chatscheduledlist) — List the caller's own pending, sending and failed scheduled messages in a chat topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), plus read access to the topic or DM participation
+- [chat.scheduled.create](#chatscheduledcreate) — Schedule a chat message to be sent later as the caller in a topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), the same conversation send access as a live send (authorizeChatSend), and counts against the sender's chat send allowance and active scheduled-message cap
+- [chat.scheduled.cancel](#chatscheduledcancel) — Cancel one of the caller's own pending scheduled chat messages in a conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own pending row can be cancelled (409 if already claimed or sent)
+- [chat.scheduled.sendnow](#chatscheduledsendnow) — Requeue one of the caller's own missed, interrupted or wake-failed scheduled chat messages for immediate delivery. Requires an interactive, unscoped user session (scheduledSendCaller), conversation send access (authorizeChatSend), and the sender's chat send allowance
+- [chat.scheduled.dismiss](#chatscheduleddismiss) — Dismiss one of the caller's own failed scheduled chat messages from the conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own row can be dismissed
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -287,6 +295,7 @@
 - [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [group.read](#groupread) — Read group details
+- [quota.group.budgets.read](#quotagroupbudgetsread) — Read pooled raw-token budgets for a user group (behind tokenomics.usage_ledger and tokenomics.token_budgets). Hub admins (quota.read) and group owners/admins see per-member breakdown; regular effective members see pool totals only
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
 - [group.update](#groupupdate) — Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist
@@ -1862,6 +1871,98 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT and a Hub-issued HMAC capability URL for its own trajectory segment upload; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## project.trajectory.segments.list
+
+**Domain:** project
+
+**Description:** List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/trajectory/segments` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.trajectory.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.trajectory.segments.download
+
+**Domain:** project
+
+**Description:** Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/trajectory/segments/{segmentId}/download` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.trajectory.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.trajectory.segments.content.read
+
+**Domain:** agent
+
+**Description:** Download committed Track 2 raw trajectory segment or manifest bytes via a Hub-issued short-lived HMAC capability URL issued by the audit-logged download endpoint (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/trajectory/segments/{segmentId}/content` |
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+### Tests
+
+- `pkg/hub:TestTrajectoryRead_LocalHMACDownloadEndToEnd`
+
+### Exemptions
+
+- **public_endpoint:** Capability URL: the short-lived HMAC signature issued by the audit-logged trajectory segment download endpoint authorizes reading one segment or manifest object, with no principal (scope: signed trajectory segment content download) — waives: `principals`, `credentials`, `base_permission`, `denial_codes`
 
 ---
 
@@ -4089,6 +4190,7 @@
 |------|--------|---------|
 | scheduler_job | — | `triggerDrainer:message` |
 | scheduler_job | — | `triggerRetryDrainer:message` |
+| scheduler_job | — | `sendAgentFireNotification:message` |
 | scheduler_job | — | `triggerDrainer:dispatch_agent` |
 | scheduler_job | — | `triggerDrainer:exec` |
 | scheduler_job | — | `triggerDrainer:github.comment` |
@@ -4872,7 +4974,7 @@
 
 **Domain:** artifact
 
-**Description:** Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and an interactive user session (403 interactive_session_required for non-interactive credentials before charging the limiter); reviewers who already can review get access=existing, and user requesters who may administer the artifact raise the reviewer's grant to review in the same transaction (access=raised); rate limited per requester (LimitReviewRequest)
+**Description:** Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306, ptone/scion#9307, ptone/scion#5548); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and either an interactive user session (403 interactive_session_required for non-interactive user credentials before charging the limiter) or an owning agent in its own home project (403 for non-owning agents or after a move); reviewers who already can review get access=existing, user requesters who may administer raise the reviewer's grant to review (access=raised), and owning agents write a role-gated bounded review grant for reviewers reading via a home-project role (access=bounded, at most 10 bounded grants per artifact); rate limited per requester (30/h users via LimitReviewRequest, 10/h agents via LimitReviewRequestAgent)
 
 ### Entry Points
 
@@ -4880,9 +4982,9 @@
 |------|--------|---------|
 | http_route | POST | `/api/v1/artifacts/{id}/review-requests` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `agent_jwt`
 
 **Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
 
@@ -5294,6 +5396,7 @@
 | http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/archive` |
 | http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/files` |
 | http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
+| http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
@@ -5330,6 +5433,10 @@
 | http_route | PUT | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}` |
+| http_route | POST | `/api/v1/projects/{id}/shared-dirs/{name}/uploads` |
+| http_route | PUT | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}` |
+| http_route | POST | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}/complete` |
+| http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
@@ -5865,6 +5972,38 @@
 
 ---
 
+## project.systemoneinstances.available
+
+**Domain:** project
+
+**Description:** Read-only discovery summary of Hub System One provider instances (name, adapter, model, enabled, question types, distribution completeness, native metrics, abstains; no secrets or endpoints) for callers who already pass project System One binding authorization (404 unless both hub.system_one and hub.message_policies are on)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/system-one/available-instances` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage`)
+
+**Base Permission:** `project.manage_system_one_instances`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage`
+
+---
+
 ## project.messagepolicy.read
 
 **Domain:** project
@@ -6179,6 +6318,7 @@
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files/{path}` |
+| http_route | GET | `/api/v1/projects/{id}/workspace/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
@@ -6214,6 +6354,10 @@
 | http_route | PUT | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/pull` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/uploads` |
+| http_route | PUT | `/api/v1/projects/{id}/workspace/uploads/{sid}` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/uploads/{sid}/complete` |
+| http_route | DELETE | `/api/v1/projects/{id}/workspace/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
@@ -6246,12 +6390,13 @@
 
 **Domain:** project
 
-**Description:** Read a project's GitHub status, GitHub permissions and git identity
+**Description:** Read a project's GitHub integration overview, status, permissions and git identity
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/github` |
 | http_route | GET | `/api/v1/projects/{id}/github-status` |
 | http_route | GET | `/api/v1/projects/{id}/github-permissions` |
 | http_route | GET | `/api/v1/projects/{id}/git-identity` |
@@ -9489,6 +9634,40 @@
 
 ---
 
+## chat.usercommandrequests.list
+
+**Domain:** chat
+
+**Description:** List open or resolved command-request cards where the caller is the named approver (excluding self-run markdown_block rows), with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors, federated callers and UATs get 403); each row requires command-request recipient eligibility matching GET /api/v1/command-requests/{id}. Unsupported methods get 405; 404 while hub.command_requests is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/command-requests` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestUserMeCommandRequests_AuthorizationAndScope`
+
+### Exemptions
+
+- **authentication_only:** The path lists only command requests where approver_user_id equals the authenticated session caller and passes recipient eligibility (matching GET /api/v1/command-requests/{id}); no agent.read permission applies (scope: caller's own approver-scoped command requests) — waives: `base_permission`
+
+---
+
 ## chat.commandrequest.read
 
 **Domain:** chat
@@ -10041,6 +10220,180 @@
 ### Tests
 
 - `pkg/hub:TestConversationDecisions_Authz`
+
+---
+
+## chat.scheduled.list
+
+**Domain:** chat
+
+**Description:** List the caller's own pending, sending and failed scheduled messages in a chat topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), plus read access to the topic or DM participation
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/scheduled` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_PendingVisibleOnlyToSender`
+- `pkg/hub:TestScheduledSend_OutsiderRefused`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.create
+
+**Domain:** chat
+
+**Description:** Schedule a chat message to be sent later as the caller in a topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), the same conversation send access as a live send (authorizeChatSend), and counts against the sender's chat send allowance and active scheduled-message cap
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/scheduled` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_OutsiderRefused`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.cancel
+
+**Domain:** chat
+
+**Description:** Cancel one of the caller's own pending scheduled chat messages in a conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own pending row can be cancelled (409 if already claimed or sent)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/chat/conversations/{id}/scheduled/{scheduledId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `chat.scheduled.cancel`
+- **Context Fields:** principal_id, scheduled_message_id, conversation_key, status
+- **Before Fields:** scheduled_message_id, status
+- **Atomic:** No
+- **Non-Atomic Justification:** CancelScheduledMessage commits the status transition before auditScheduledMessage emits the structured audit event
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_CancelBeforeFire_NeverSent`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.sendnow
+
+**Domain:** chat
+
+**Description:** Requeue one of the caller's own missed, interrupted or wake-failed scheduled chat messages for immediate delivery. Requires an interactive, unscoped user session (scheduledSendCaller), conversation send access (authorizeChatSend), and the sender's chat send allowance
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/send-now` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_SendNowChecks`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.dismiss
+
+**Domain:** chat
+
+**Description:** Dismiss one of the caller's own failed scheduled chat messages from the conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own row can be dismissed
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/dismiss` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_Dismiss`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
 
 ---
 
@@ -11103,6 +11456,39 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## quota.group.budgets.read
+
+**Domain:** quota
+
+**Description:** Read pooled raw-token budgets for a user group (behind tokenomics.usage_ledger and tokenomics.token_budgets). Hub admins (quota.read) and group owners/admins see per-member breakdown; regular effective members see pool totals only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/groups/{id}/usage/budgets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
+
+**Base Permission:** `quota.read`
+
+**Resource Resolver:** group-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupUsageBudgets_ReadAndAuthz`
 
 ---
 
@@ -12240,6 +12626,7 @@
 | http_route | POST | `/api/v1/telegram/link/verify` |
 | http_route | POST | `/api/v1/discord/link/verify` |
 | http_route | POST | `/api/v1/teams/link/verify` |
+| http_route | POST | `/api/v1/slack/link/verify` |
 
 **Principals:** `user`
 
@@ -14097,6 +14484,7 @@
 | http_route | GET | `/api/v1/admin/system-one/adapters` |
 | http_route | GET | `/api/v1/admin/system-one/instances` |
 | http_route | GET | `/api/v1/admin/system-one/instances/{name}` |
+| http_route | GET | `/api/v1/admin/system-one/instances/{name}/projects` |
 
 **Principals:** `user`
 

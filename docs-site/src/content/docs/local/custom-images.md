@@ -29,6 +29,14 @@ The `core-base` layer changes infrequently, but needs to be built at least once 
 
 Besides the language runtimes, `core-base` installs the command-line tools agents commonly use, through `image-build/lib/install-core-toolchain.sh`: `gh`, `gcloud`, `gcsfuse`, `kubectl`, `golangci-lint`, Chromium, and `helm`, plus the npm tools `chrome-devtools-mcp` and `@playwright/cli`. `core-base` and `thick-prep` also install the distro `ffmpeg` and a read-only copy of it for Playwright. On every start, `sciontool init` links that copy into Playwright's browser registry in the agent home (`~/.cache/ms-playwright`), so Playwright uses it instead of downloading its own `ffmpeg`. Browsers you install with `npx playwright install` are kept in the same directory across restarts and suspend/resume; if a newer Playwright needs an `ffmpeg` revision the image does not include, Playwright downloads it there. `helm` is pinned to an exact version, v3.17.3, the version used by the chart's CI, so agents that work on the `deploy/helm/scion-hub` chart render the same output as CI without downloading `helm` at run time. To change the version, set the `HELM_VERSION`, `HELM_SHA256_AMD64`, and `HELM_SHA256_ARM64` build args together; the build fails if the downloaded archive does not match the checksum for the build architecture. The `thick-prep` layer installs the same pinned `helm`.
 
+### Optional Build Arguments
+
+Downstream builders can pin base images, core tools, and harness CLIs via `--build-arg` without forking the Dockerfiles. Leaving these unset preserves the default build behavior:
+
+- **`core-base` base images:** `NODE_IMAGE` (default `node:24-trixie-slim`), `BUN_IMAGE` (default `oven/bun:latest`), and `GIT_IMAGE` (default `chainguard/git:latest`).
+- **`core-base` optional tool pins:** `KUBECTL_VERSION` + `KUBECTL_SHA256_AMD64` / `KUBECTL_SHA256_ARM64`, and `GOLANGCI_LINT_VERSION` + `GOLANGCI_LINT_SHA256_AMD64` / `GOLANGCI_LINT_SHA256_ARM64`. Setting any variable in a group enables fail-closed pin mode: both a concrete `X.Y.Z` version and the 64-hex SHA-256 for the target architecture are required and verified before installation.
+- **Harness CLI versions:** `CLAUDE_CLI_VERSION` (`harnesses/claude/Dockerfile`, default `latest`) and `OPENCODE_VERSION` (`harnesses/opencode/Dockerfile`, default `latest`), alongside existing harness ARGs (`CODEX_CLI_VERSION`, `COPILOT_CLI_VERSION`, `GEMINI_CLI_VERSION`, `GROK_VERSION`, `HERMES_VERSION`, `PI_VERSION`).
+
 ### Non-Root Requirement
 
 For security and compatibility across runtimes (especially Kubernetes), Scion agents are required to run as a non-root user.

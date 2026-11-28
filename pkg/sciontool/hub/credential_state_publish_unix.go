@@ -302,6 +302,13 @@ func ReadCredentialState() (st CredentialState, status, reason string) {
 // no usable value. An oversized file is warned about, as ReadTokenFile
 // does.
 func ReadTokenFileWithModTime() (token string, modTime time.Time, ok bool) {
+	mode, _, memTok := snapshotTokenStore()
+	if mode == TokenStoreMemory {
+		if memTok == "" {
+			return "", time.Time{}, false
+		}
+		return memTok, time.Time{}, true
+	}
 	path := TokenFilePath()
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {

@@ -321,6 +321,25 @@ export const ADMITTED_TRIGGER_DIALECTS: readonly TriggerDialectOption[] = [
   { value: 'cel', label: 'CEL' },
 ];
 
+/**
+ * Returns true if `dialect` is in the admitted dialect list for the web editor.
+ */
+export function isAdmittedTriggerDialect(
+  dialect: string,
+  admitted: readonly TriggerDialectOption[] = ADMITTED_TRIGGER_DIALECTS
+): boolean {
+  return admitted.some((d) => d.value === dialect);
+}
+
+/**
+ * Returns true if any match rule has a non-empty dialect other than `'cel'`.
+ * Form-authoring panes only represent CEL rules (mixed-rule-arrays §11.3).
+ */
+export function hasNonCelTriggerRules(rules: readonly TriggerMatchRuleSpec[] | undefined): boolean {
+  if (!rules || rules.length === 0) return false;
+  return rules.some((r) => Boolean(r.dialect) && r.dialect !== 'cel');
+}
+
 export interface TriggerRuleRowError {
   category?: string;
   message: string;
@@ -411,6 +430,19 @@ export function formatRedactedExecSummary(action: TriggerActionSpec): string {
     return `exec (${argc} arg${argc === 1 ? '' : 's'}, sha256:${sha}…, redacted)`;
   }
   return `exec (${argc} arg${argc === 1 ? '' : 's'}, redacted)`;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Splits a free-text agent reference into `{ agentId, agentName }`:
+ * UUID-shaped values map to `agentId` (resolved via GetAgent); any other
+ * non-empty string maps to `agentName` (resolved by slug/name on the Hub).
+ */
+export function splitAgentRef(raw: string): { agentId: string; agentName: string } {
+  const val = raw.trim();
+  if (!val) return { agentId: '', agentName: '' };
+  return UUID_RE.test(val) ? { agentId: val, agentName: '' } : { agentId: '', agentName: val };
 }
 
 /**

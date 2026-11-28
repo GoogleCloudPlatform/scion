@@ -220,6 +220,13 @@ export class ScionReviewNoteDialog extends LitElement {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       this.finish(this.value);
+    } else if (e.key === 'Escape' && !e.isComposing) {
+      // Handle Escape directly rather than relying solely on sl-dialog's
+      // CloseWatcher, which WebKit mobile emulation does not fire on Escape
+      // from a focused textarea.
+      e.preventDefault();
+      e.stopPropagation();
+      this.finish(null);
     }
   }
 

@@ -86,16 +86,21 @@ func TestGeminiCLIDefaultModel_ResolvesThroughAliases(t *testing.T) {
 	assert.NotEqual(t, "medium", resolved)
 }
 
-// TestAntigravityDefaultModelAlias_ResolvesToConcreteModel guards ptone/scion#9153:
-// harnesses/antigravity/provision.py falls back to model_aliases["medium"] when
-// no explicit model or AGY_MODEL override is set, so the embedded config.yaml
-// must define a concrete, non-empty "medium" alias.
+// TestAntigravityDefaultModelAlias_ResolvesToConcreteModel guards ptone/scion#9153
+// and ptone/scion#9679: the embedded antigravity config.yaml must declare the
+// "medium" default tier so the broker passes --model <concrete> on argv (agy
+// 1.5.18's settings.json "model" field only matches display labels, whereas
+// --model accepts model IDs), and that tier must resolve through model_aliases
+// to a concrete, non-empty model.
 func TestAntigravityDefaultModelAlias_ResolvesToConcreteModel(t *testing.T) {
 	data, err := fs.ReadFile(HarnessesFS(), "antigravity/config.yaml")
 	require.NoError(t, err)
 	entry, err := config.ParseHarnessConfigYAML(data)
 	require.NoError(t, err)
+	assert.Equal(t, "medium", entry.Model)
+	resolved := config.ResolveModelAlias(entry.Model, entry.ModelAliases)
 	medium := entry.ModelAliases["medium"]
+	assert.Equal(t, medium, resolved)
 	assert.NotEmpty(t, medium)
 	assert.NotEqual(t, "medium", medium)
 	assert.NotContains(t, entry.ModelAliases, medium,

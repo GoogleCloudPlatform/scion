@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -165,34 +164,5 @@ func (s *Server) notifyFireBlocked(ctx context.Context, req hubfire.FireRequest,
 // user row. It returns "" when there is none. CreatedBy is only used to
 // address the notification, never for authority.
 func (s *Server) scheduleNotificationRecipient(ctx context.Context, createdBy string) string {
-	if createdBy == "" {
-		return ""
-	}
-	if _, err := s.store.GetUser(ctx, createdBy); err == nil {
-		return createdBy
-	} else if !errors.Is(err, store.ErrNotFound) {
-		// A store failure, not a missing user: say so, then skip as for
-		// no owning user.
-		slog.Warn("Scheduler: looking up the schedule creator as a user failed; skipping notification",
-			"subsystem", "scheduler", "createdBy", createdBy, "error", err)
-		return ""
-	}
-	agent, err := s.store.GetAgent(ctx, createdBy)
-	if err != nil {
-		return ""
-	}
-	candidates := []string{}
-	if len(agent.Ancestry) > 0 {
-		candidates = append(candidates, agent.Ancestry[0])
-	}
-	candidates = append(candidates, agent.OwnerID)
-	for _, id := range candidates {
-		if id == "" || id == agent.ID {
-			continue
-		}
-		if _, err := s.store.GetUser(ctx, id); err == nil {
-			return id
-		}
-	}
-	return ""
+	return s.fireNotificationRecipient(ctx, createdBy, "schedule")
 }

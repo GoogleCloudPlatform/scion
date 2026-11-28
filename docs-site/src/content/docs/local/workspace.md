@@ -462,7 +462,11 @@ either way; git cannot persist the upstream (the private `.git/config` is read-o
 `error:`, but the push still succeeds.
 That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
 commands do not try to write lock files in the read-only root. Personal git preferences inside the
-agent go in the agent's own global git config, which is writable, not in the repository config. On the
+agent go in the agent's own global git config, which is writable, not in the repository config. On
+startup, `sciontool init` adds scoped `safe.directory` entries (`<root>` and `<root>/*`) to the
+agent's global `~/.gitconfig` for its mounted workspace root (`/workspace`, `SCION_WORKSPACE_PATH`,
+or `/repo-root` when mounted) — never `*` and never in repository `.git/config` — so git commands
+work in project-storage trees and worktrees owned by another UID. On the
 Apple runtime agents read the repository's git config directly (the runtime cannot bind a single
 private file), so the private-copy settings above (credential stripping, the push pre-seed, the
 housekeeping defaults) do not apply there; keep credentials out of repository git config (use a

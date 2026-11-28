@@ -2225,3 +2225,62 @@ func TestWebLogin_UpdateUserFailure_SkipsGrantSync(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthLogout_Handler(t *testing.T) {
+	srv, _ := testServer(t)
+
+	accessToken, _, _, err := srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:      "logout-user-1",
+		Email:       "logout@example.com",
+		DisplayName: "Logout User",
+		Role:        store.UserRoleMember,
+		ClientType:  ClientTypeCLI,
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		authHeader string
+		body       string
+	}{
+		{
+			name:       "authenticated session",
+			authHeader: "Bearer " + accessToken,
+		},
+		{
+			name: "unauthenticated",
+		},
+		{
+			name:       "invalid bearer token succeeds idempotently",
+			authHeader: "Bearer not-a-valid-token",
+		},
+		{
+			name: "with refresh token body",
+			body: `{"refreshToken":"some-refresh-token"}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodyReader *strings.Reader
+			if tc.body != "" {
+				bodyReader = strings.NewReader(tc.body)
+			} else {
+				bodyReader = strings.NewReader("")
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bodyReader)
+			req.Header.Set("Content-Type", "application/json")
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			rec := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			var resp AuthLogoutResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.True(t, resp.Success)
+		})
+	}
+}

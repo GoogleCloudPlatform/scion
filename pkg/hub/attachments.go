@@ -50,12 +50,6 @@ type AttachmentRef struct {
 	// artifact by newArtifactAttachmentRef, for delivery into an agent's
 	// home. Never serialized.
 	sha256 string
-	// projectedPath and projectedMount are the container path and shared
-	// dir of an artifact attachment's projection into the project's
-	// scratchpad (ptone/scion#5827), set by stageChatAttachments on
-	// the send path and carried into AttachmentDelivery. Never serialized.
-	projectedPath  string
-	projectedMount string
 }
 
 // AttachmentStore abstracts file storage for chat attachments.

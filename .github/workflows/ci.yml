@@ -213,6 +213,39 @@ jobs:
           ./hack/check-fork-ci-gate.sh --selftest
           ./hack/check-fork-ci-gate.sh
 
+  # DowngradeFloor vs the nightly cut (scripts/release/check-downgrade-floor-cut.sh,
+  # ptone/scion#9831). When a commit on main changes pkg/version.DowngradeFloor,
+  # the floor must name the first nightly that contains the commit; otherwise
+  # that nightly refuses to tag (later floor) or a nightly without the migration
+  # stays a downgrade target (earlier floor). Push-only: it cannot block the
+  # merge, but it turns red minutes after it, usually hours before the 03:00
+  # UTC cut. The base is the push's previous main (github.event.before), so a
+  # multi-commit push is checked as a whole; HEAD^1 when that is unavailable.
+  # Stays on ubuntu-latest: a sub-minute shell check.
+  downgrade-floor-cut-check:
+    name: DowngradeFloor cut check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'push') }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 50
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Check DowngradeFloor against the nightly cut
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base=HEAD^1
+          if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && [[ "$BEFORE" != 0000000000000000000000000000000000000000 ]] \
+              && git merge-base --is-ancestor "$BEFORE" HEAD 2>/dev/null; then
+            base="$BEFORE"
+          fi
+          ./scripts/release/check-downgrade-floor-cut.sh --landed --base "$base"
+
   build-and-test:
     name: Build & Test
     # Stays on ubuntu-latest for now. Routed, it would add 15-20 runner-minutes
@@ -1063,7 +1096,7 @@ jobs:
   windows-cross-build:
     name: Windows cross-build (guard)
     if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Checkout code
@@ -1176,7 +1209,7 @@ jobs:
   # hack/hubshard (hub-shard-plan), so the shard count lives in one place.
   hub-shard-plan:
     name: pkg/hub shard plan
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
@@ -1232,7 +1265,7 @@ jobs:
 
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     needs: hub-shard-plan
     # The runner label comes from hub-shard-plan (outputs.runner), the
     # single place to change it for every pkg/hub shard job.
@@ -1353,7 +1386,7 @@ jobs:
   # one, so this job always has at least one shard.
   hub-shard-postgres-integration:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }} Postgres (integration)
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     needs: hub-shard-plan
     runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 45
@@ -1416,7 +1449,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
-    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && ((always()) && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))) }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -1450,7 +1483,7 @@ jobs:
   # be 1..N in order (the run step checks part == job-index + 1).
   launch-store-postgres-entadapter:
     name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ strategy.job-total }})
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: ubuntu-latest
     # 90m: the whole entadapter suite took ~29-39m of the old single job on
     # main, but ~57m on a runner 2-3x slower than usual
@@ -1536,7 +1569,7 @@ jobs:
   # The T1 Postgres packages other than pkg/store/entadapter.
   launch-store-postgres-others:
     name: T1 Launch Store PostgreSQL Tests (other packages)
-    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: ubuntu-latest
     # The old single job took ~20m, of which ~7m was this job's part; 45m
     # leaves room for a runner 2-3x slower than usual.
@@ -1624,7 +1657,7 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     needs: [launch-store-postgres-entadapter, launch-store-postgres-others]
-    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && ((always()) && (github.event_name != 'pull_request' || vars.SCION_HEAVY_CI_GATE != 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))) }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -1831,8 +1864,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The cr-ci runner image has no sudo and ships Ubuntu 24.04's shellcheck,
-      # the version apt installs here; install only when it is missing.
+      # The cr-ci runner image has no sudo and ships a pinned shellcheck matching
+      # ubuntu-latest; install via apt only when it is missing.
       - name: Install shellcheck
         run: |
           if ! command -v shellcheck >/dev/null; then

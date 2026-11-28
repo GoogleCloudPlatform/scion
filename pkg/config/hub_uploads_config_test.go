@@ -37,11 +37,13 @@ func TestHubUploadsConfig_Defaults(t *testing.T) {
 }
 
 // TestHubUploadsConfig_Validate refuses negative values and per-file limits
-// above MaxUploadFileSize.
+// above their ceilings (MaxUploadFileSize for attachments,
+// MaxLargeUploadFileSize for workspace files).
 func TestHubUploadsConfig_Validate(t *testing.T) {
 	for _, ok := range []HubUploadsConfig{
 		{MaxAttachmentSize: 1},
 		{MaxWorkspaceFileSize: MaxUploadFileSize},
+		{MaxWorkspaceFileSize: MaxLargeUploadFileSize},
 		{MaxAttachmentSize: MaxUploadFileSize},
 	} {
 		assert.NoError(t, ok.Validate(), "%+v", ok)
@@ -50,7 +52,7 @@ func TestHubUploadsConfig_Validate(t *testing.T) {
 		{MaxAttachmentSize: -1},
 		{MaxWorkspaceFileSize: -1},
 		{MaxAttachmentSize: MaxUploadFileSize + 1},
-		{MaxWorkspaceFileSize: MaxUploadFileSize + 1},
+		{MaxWorkspaceFileSize: MaxLargeUploadFileSize + 1},
 	} {
 		assert.Error(t, bad.Validate(), "%+v", bad)
 	}

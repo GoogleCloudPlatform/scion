@@ -1051,6 +1051,12 @@ func (f *fakeUsageRetentionStore) SweepMeterHealthBatch(ctx context.Context, cut
 func (f *fakeUsageRetentionStore) SweepRunAttributionBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
 	return f.onSweep("run_attribution", cutoff, nil, batchSize)
 }
+func (f *fakeUsageRetentionStore) SweepUsageBudgetStateBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	return f.onSweep("usage_budget_state", cutoff, nil, batchSize)
+}
+func (f *fakeUsageRetentionStore) SweepUsageGroupRollupsDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	return f.onSweep("usage_group_rollups_daily", cutoff, nil, batchSize)
+}
 
 type contendedAdvisoryLocker struct {
 	mu   sync.Mutex

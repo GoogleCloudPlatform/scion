@@ -104,6 +104,27 @@ func (_u *TrajectorySegmentUpdate) AddCompressedSize(v int64) *TrajectorySegment
 	return _u
 }
 
+// SetChargedBytes sets the "charged_bytes" field.
+func (_u *TrajectorySegmentUpdate) SetChargedBytes(v int64) *TrajectorySegmentUpdate {
+	_u.mutation.ResetChargedBytes()
+	_u.mutation.SetChargedBytes(v)
+	return _u
+}
+
+// SetNillableChargedBytes sets the "charged_bytes" field if the given value is not nil.
+func (_u *TrajectorySegmentUpdate) SetNillableChargedBytes(v *int64) *TrajectorySegmentUpdate {
+	if v != nil {
+		_u.SetChargedBytes(*v)
+	}
+	return _u
+}
+
+// AddChargedBytes adds value to the "charged_bytes" field.
+func (_u *TrajectorySegmentUpdate) AddChargedBytes(v int64) *TrajectorySegmentUpdate {
+	_u.mutation.AddChargedBytes(v)
+	return _u
+}
+
 // SetCompressedSha256 sets the "compressed_sha256" field.
 func (_u *TrajectorySegmentUpdate) SetCompressedSha256(v string) *TrajectorySegmentUpdate {
 	_u.mutation.SetCompressedSha256(v)
@@ -283,6 +304,11 @@ func (_u *TrajectorySegmentUpdate) check() error {
 			return &ValidationError{Name: "compressed_size", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_size": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ChargedBytes(); ok {
+		if err := trajectorysegment.ChargedBytesValidator(v); err != nil {
+			return &ValidationError{Name: "charged_bytes", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.charged_bytes": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.CompressedSha256(); ok {
 		if err := trajectorysegment.CompressedSha256Validator(v); err != nil {
 			return &ValidationError{Name: "compressed_sha256", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_sha256": %w`, err)}
@@ -333,6 +359,12 @@ func (_u *TrajectorySegmentUpdate) sqlSave(ctx context.Context) (_node int, err 
 	}
 	if value, ok := _u.mutation.AddedCompressedSize(); ok {
 		_spec.AddField(trajectorysegment.FieldCompressedSize, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.ChargedBytes(); ok {
+		_spec.SetField(trajectorysegment.FieldChargedBytes, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedChargedBytes(); ok {
+		_spec.AddField(trajectorysegment.FieldChargedBytes, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.CompressedSha256(); ok {
 		_spec.SetField(trajectorysegment.FieldCompressedSha256, field.TypeString, value)
@@ -460,6 +492,27 @@ func (_u *TrajectorySegmentUpdateOne) SetNillableCompressedSize(v *int64) *Traje
 // AddCompressedSize adds value to the "compressed_size" field.
 func (_u *TrajectorySegmentUpdateOne) AddCompressedSize(v int64) *TrajectorySegmentUpdateOne {
 	_u.mutation.AddCompressedSize(v)
+	return _u
+}
+
+// SetChargedBytes sets the "charged_bytes" field.
+func (_u *TrajectorySegmentUpdateOne) SetChargedBytes(v int64) *TrajectorySegmentUpdateOne {
+	_u.mutation.ResetChargedBytes()
+	_u.mutation.SetChargedBytes(v)
+	return _u
+}
+
+// SetNillableChargedBytes sets the "charged_bytes" field if the given value is not nil.
+func (_u *TrajectorySegmentUpdateOne) SetNillableChargedBytes(v *int64) *TrajectorySegmentUpdateOne {
+	if v != nil {
+		_u.SetChargedBytes(*v)
+	}
+	return _u
+}
+
+// AddChargedBytes adds value to the "charged_bytes" field.
+func (_u *TrajectorySegmentUpdateOne) AddChargedBytes(v int64) *TrajectorySegmentUpdateOne {
+	_u.mutation.AddChargedBytes(v)
 	return _u
 }
 
@@ -655,6 +708,11 @@ func (_u *TrajectorySegmentUpdateOne) check() error {
 			return &ValidationError{Name: "compressed_size", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_size": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ChargedBytes(); ok {
+		if err := trajectorysegment.ChargedBytesValidator(v); err != nil {
+			return &ValidationError{Name: "charged_bytes", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.charged_bytes": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.CompressedSha256(); ok {
 		if err := trajectorysegment.CompressedSha256Validator(v); err != nil {
 			return &ValidationError{Name: "compressed_sha256", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_sha256": %w`, err)}
@@ -722,6 +780,12 @@ func (_u *TrajectorySegmentUpdateOne) sqlSave(ctx context.Context) (_node *Traje
 	}
 	if value, ok := _u.mutation.AddedCompressedSize(); ok {
 		_spec.AddField(trajectorysegment.FieldCompressedSize, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.ChargedBytes(); ok {
+		_spec.SetField(trajectorysegment.FieldChargedBytes, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedChargedBytes(); ok {
+		_spec.AddField(trajectorysegment.FieldChargedBytes, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.CompressedSha256(); ok {
 		_spec.SetField(trajectorysegment.FieldCompressedSha256, field.TypeString, value)

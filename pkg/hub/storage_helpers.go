@@ -165,9 +165,29 @@ func (e *invalidFilePathError) Error() string {
 	return e.field + " is not a canonical relative path"
 }
 
-// validateUploadFilePaths requires every requested upload path to be
-// canonical. It stops at the first invalid path.
+// tooManyFilesError reports that an upload or manifest request listed more
+// files than the allowed maximum (importMaxTreeFiles).
+type tooManyFilesError struct {
+	field string
+	count int
+	limit int
+}
+
+func (e *tooManyFilesError) Error() string {
+	return fmt.Sprintf("%s has too many files (%d; max %d)", e.field, e.count, e.limit)
+}
+
+func (e *tooManyFilesError) HTTPStatus() (int, string, string) {
+	return http.StatusBadRequest, ErrCodeValidationError, e.Error()
+}
+
+// validateUploadFilePaths requires the file count to stay within
+// importMaxTreeFiles and every requested upload path to be canonical. It stops
+// at the first invalid path.
 func validateUploadFilePaths(files []FileUploadRequest) error {
+	if len(files) > importMaxTreeFiles {
+		return &tooManyFilesError{field: "files", count: len(files), limit: importMaxTreeFiles}
+	}
 	for _, f := range files {
 		if !isCanonicalResourceFilePath(f.Path) {
 			return &invalidFilePathError{field: uploadFilePathField}
@@ -176,9 +196,13 @@ func validateUploadFilePaths(files []FileUploadRequest) error {
 	return nil
 }
 
-// validateManifestFilePaths requires every manifest path to be canonical and
-// listed once. It stops at the first invalid path.
+// validateManifestFilePaths requires the file count to stay within
+// importMaxTreeFiles and every manifest path to be canonical and listed once.
+// It stops at the first invalid path.
 func validateManifestFilePaths(files []store.TemplateFile) error {
+	if len(files) > importMaxTreeFiles {
+		return &tooManyFilesError{field: "manifest.files", count: len(files), limit: importMaxTreeFiles}
+	}
 	seen := make(map[string]struct{}, len(files))
 	for _, f := range files {
 		if !isCanonicalResourceFilePath(f.Path) {
@@ -193,9 +217,17 @@ func validateManifestFilePaths(files []store.TemplateFile) error {
 }
 
 // writeInvalidFilePathError writes a 400 validation_error response and
-// returns true if err is an *invalidFilePathError; otherwise it writes
-// nothing and returns false.
+// returns true if err is an *invalidFilePathError or *tooManyFilesError;
+// otherwise it writes nothing and returns false.
 func writeInvalidFilePathError(w http.ResponseWriter, err error) bool {
+	var tooManyErr *tooManyFilesError
+	if errors.As(err, &tooManyErr) {
+		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
+			"field": tooManyErr.field,
+			"max":   tooManyErr.limit,
+		})
+		return true
+	}
 	var pathErr *invalidFilePathError
 	if !errors.As(err, &pathErr) {
 		return false

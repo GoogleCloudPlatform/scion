@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -201,7 +202,10 @@ func (s *Server) handleProjectImportResources(
 		if writeImportContentRefusal(w, err) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
+		if writeImportRateLimitError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, "import_failed", importFetchErrorMessage(err), nil)
 		return
 	}
 
@@ -406,7 +410,10 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		if writeImportContentRefusal(w, err) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
+		if writeImportRateLimitError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, "import_failed", importFetchErrorMessage(err), nil)
 		return
 	}
 
@@ -505,6 +512,14 @@ func importErrorEvent(err error) ResourceImportEvent {
 	var invalidCfg *invalidAgentConfigError
 	if errors.As(err, &invalidCfg) {
 		return ResourceImportEvent{Type: ImportEventError, Code: ErrCodeInvalidAgentConfig, Reason: invalidCfg.PublicMessage()}
+	}
+	var ife *importFetchError
+	if errors.As(err, &ife) {
+		code := ""
+		if ife.Kind == githubfetch.KindRateLimited {
+			code = "rate_limited"
+		}
+		return ResourceImportEvent{Type: ImportEventError, Code: code, Reason: ife.Message}
 	}
 	return ResourceImportEvent{Type: ImportEventError, Reason: err.Error()}
 }
@@ -678,7 +693,10 @@ func (s *Server) handleProjectDiscoverResources(
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
+		if writeImportRateLimitError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, importFetchErrorMessage(err), nil)
 		return
 	}
 
@@ -812,7 +830,10 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
+		if writeImportRateLimitError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, importFetchErrorMessage(err), nil)
 		return
 	}
 

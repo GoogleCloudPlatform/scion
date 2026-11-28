@@ -592,12 +592,12 @@ func TestReconcileGuardViewResetAfterKill(t *testing.T) {
 		h.queued(r*10, r)
 	}
 	// Guard order: 11 swap on cr-job-100, 12 fork job on cr-job-200 (hijack),
-	// 13 swap on cr-job-300.
-	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	// 13 swap on cr-job-300. All three are in_progress (P1), so discovery visits
+	// them in ID order (11, 12, 13).
+	h.gh.AddRun(fakes.GitHubRun{ID: 11, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "in_progress",
+		Jobs: []fakes.GitHubJob{{ID: 110, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}})
 	h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
 		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-200"}}})
-	// Run 13 is in_progress like the fork run, so the in_progress pass of
-	// discovery visits it after run 12 (run 11 comes in the queued pass).
 	h.gh.AddRun(fakes.GitHubRun{ID: 13, Repo: testRepo, HeadRepo: testRepo, Event: "push", Status: "in_progress",
 		Jobs: []fakes.GitHubJob{{ID: 130, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-300"}}})
 	before := h.cr.ListCalls
@@ -834,5 +834,264 @@ func TestReconcileSkipsForgottenRunner(t *testing.T) {
 	h.srv.dispatchMu.Unlock()
 	if still {
 		t.Error("forgotten entry not pruned after cancelledTTL")
+	}
+}
+
+func (h *harness) unverifiedHas(name string) bool {
+	h.srv.dispatchMu.Lock()
+	defer h.srv.dispatchMu.Unlock()
+	_, ok := h.srv.unverified[name]
+	return ok
+}
+
+func TestGuard_TransientLookupDefers(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.queued(100, 10)
+
+	// Trigger a 403 rate limit on the next GitHub call (GetRun for run 11).
+	h.gh.RateLimitMode = fakes.Primary403
+	h.gh.RateLimitAfter = 1 // countedCalls is already >= 1 from queued()
+
+	code, _ := h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("in_progress during rate limit: status = %d, want 503", code)
+	}
+	if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+		t.Errorf("transient lookup killed runner: cancels=%v deleted=%v", h.cr.CancelCalls, h.gh.Deleted)
+	}
+	if h.countEvent(logging.EventKillHijacked) != 0 {
+		t.Errorf("unexpected %s logged during transient failure", logging.EventKillHijacked)
+	}
+	h.wantLog(logging.EventRunnerCheckDeferred)
+	if !h.unverifiedHas("cr-job-100") {
+		t.Error("cr-job-100 not recorded in unverified")
+	}
+}
+
+func TestGuard_DeferralResolvedByReconcile(t *testing.T) {
+	t.Run("fork run", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.queued(100, 10)
+		// Fork run 12 is not yet in runMeta cache; rate-limit GetRun during webhook.
+		h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "completed"})
+		h.gh.RateLimitMode = fakes.Secondary429
+		h.gh.RateLimitRetryAfter = 30 * time.Second
+		h.gh.RateLimitAfter = 1
+
+		if code, _ := h.webhook(inProgress(120, 12, testRepo, "cr-job-100")); code != http.StatusServiceUnavailable {
+			t.Fatalf("in_progress: status = %d, want 503", code)
+		}
+		if !h.unverifiedHas("cr-job-100") || len(h.cr.CancelCalls) != 0 {
+			t.Fatalf("expected deferral without kill: unverified=%v cancels=%v", h.unverifiedHas("cr-job-100"), h.cr.CancelCalls)
+		}
+
+		// Rate limit lifts and breaker window elapses; reconcile resolves via unverified sweep.
+		h.gh.ResetRateLimit()
+		h.clock.Add(time.Minute)
+		res := h.reconcile()
+		if res.HijacksKilled != 1 {
+			t.Fatalf("reconcile HijacksKilled = %d, want 1 (res=%+v)", res.HijacksKilled, res)
+		}
+		if len(h.cr.CancelCalls) != 1 {
+			t.Errorf("CancelCalls = %v, want 1", h.cr.CancelCalls)
+		}
+		if !strings.Contains(h.logs.String(), `"reason":"head_repository_differs"`) {
+			t.Errorf("expected reason=head_repository_differs in logs:\n%s", h.logs.String())
+		}
+		if h.unverifiedHas("cr-job-100") {
+			t.Error("unverified entry not cleared after reconcile kill")
+		}
+	})
+
+	t.Run("same-repo run", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.queued(100, 10)
+		// Same-repo run 11 (completed so discovery doesn't list it; sweep resolves via GetRun).
+		h.gh.AddRun(fakes.GitHubRun{ID: 11, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "completed"})
+		h.gh.RateLimitMode = fakes.Secondary429
+		h.gh.RateLimitRetryAfter = 30 * time.Second
+		h.gh.RateLimitAfter = 1
+
+		if code, _ := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusServiceUnavailable {
+			t.Fatalf("in_progress: status = %d, want 503", code)
+		}
+		if !h.unverifiedHas("cr-job-100") {
+			t.Fatal("expected unverified entry after deferral")
+		}
+
+		h.gh.ResetRateLimit()
+		h.clock.Add(time.Minute)
+		res := h.reconcile()
+		if res.HijacksKilled != 0 {
+			t.Fatalf("reconcile HijacksKilled = %d, want 0 (res=%+v)", res.HijacksKilled, res)
+		}
+		if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+			t.Errorf("same-repo swap killed runner: cancels=%v deleted=%v", h.cr.CancelCalls, h.gh.Deleted)
+		}
+		h.wantLog(logging.EventRunnerSwap)
+		if h.unverifiedHas("cr-job-100") {
+			t.Error("unverified entry not cleared after reconcile swap")
+		}
+	})
+}
+
+func TestGuard_DeferralExpiresFailClosed(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.queued(100, 10)
+
+	// Sustained transient 503 on GetRun for run 11.
+	h.gh.FailGetRun = map[int64]int{11: http.StatusServiceUnavailable}
+
+	if code, _ := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusServiceUnavailable {
+		t.Fatalf("initial in_progress: status = %d, want 503", code)
+	}
+	if len(h.cr.CancelCalls) != 0 {
+		t.Fatalf("killed before unverifiedMax")
+	}
+
+	// Still transient past unverifiedMax (15m) -> fail closed and kill.
+	h.clock.Add(unverifiedMax + time.Minute)
+	code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
+	if code != http.StatusOK || !strings.Contains(out, "killed") {
+		t.Fatalf("expired deferral: %d %q, want 200 killed", code, out)
+	}
+	if len(h.cr.CancelCalls) != 1 {
+		t.Errorf("CancelCalls = %v, want 1", h.cr.CancelCalls)
+	}
+	h.wantLog(logging.EventKillHijacked)
+	if !strings.Contains(h.logs.String(), `"reason":"run_lookup_failed"`) {
+		t.Errorf("expected reason=run_lookup_failed in logs:\n%s", h.logs.String())
+	}
+	if h.unverifiedHas("cr-job-100") {
+		t.Error("unverified entry not cleared after fail-closed kill")
+	}
+}
+
+func TestGuard_NonTransientLookupStillKills(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	// Run 999 does not exist -> GitHub returns 404 (non-transient) -> kill immediately.
+	code, out := h.webhook(inProgress(9990, 999, testRepo, "cr-job-100"))
+	if code != http.StatusOK || !strings.Contains(out, "killed") {
+		t.Fatalf("404 lookup: %d %q, want 200 killed", code, out)
+	}
+	if len(h.cr.CancelCalls) != 1 {
+		t.Errorf("CancelCalls = %v, want 1", h.cr.CancelCalls)
+	}
+	h.wantLog(logging.EventKillHijacked)
+	if !strings.Contains(h.logs.String(), `"reason":"run_lookup_failed"`) {
+		t.Errorf("expected reason=run_lookup_failed in logs:\n%s", h.logs.String())
+	}
+	if h.unverifiedHas("cr-job-100") {
+		t.Error("non-transient 404 should not populate unverified")
+	}
+}
+
+func TestGuard_CachedRunAvoidsLookup(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.queued(100, 10)
+
+	// Reconcile discovers run 11 and caches its immutable metadata.
+	h.reconcile()
+
+	getsBefore := h.gh.RunGets
+	code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
+	if code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("swap with cached run: %d %q, want 200 swap", code, out)
+	}
+	if h.gh.RunGets != getsBefore {
+		t.Errorf("GetRun called %d times on cached run, want 0", h.gh.RunGets-getsBefore)
+	}
+}
+
+func TestGuard_CompletedClearsUnverified(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	h.gh.AddRun(fakes.GitHubRun{ID: 11, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "completed"})
+
+	h.gh.RateLimitMode = fakes.Secondary429
+	h.gh.RateLimitRetryAfter = 30 * time.Second
+	h.gh.RateLimitAfter = 1
+
+	if code, _ := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusServiceUnavailable {
+		t.Fatalf("in_progress: status = %d, want 503", code)
+	}
+	if !h.unverifiedHas("cr-job-100") {
+		t.Fatal("expected cr-job-100 in unverified")
+	}
+
+	// Completed webhook arrives for the runner; unverified entry is cleared.
+	h.webhook(onRunner(jobEvent("completed", 101, 11, testRepo, "success", "cr-job-100"), h.registeredID("cr-job-100")))
+	if h.unverifiedHas("cr-job-100") {
+		t.Fatal("completed webhook did not clear unverified entry")
+	}
+
+	// Lift rate limit and reconcile: should not re-check the forgotten runner.
+	h.gh.ResetRateLimit()
+	h.clock.Add(time.Minute)
+	getsBefore := h.gh.RunGets
+	res := h.reconcile()
+	if res.ChecksDeferred != 0 || res.HijacksKilled != 0 {
+		t.Errorf("reconcile after completed = %+v, want 0 deferred and 0 killed", res)
+	}
+	if h.gh.RunGets != getsBefore {
+		t.Errorf("reconcile called GetRun %d times for cleared runner, want 0", h.gh.RunGets-getsBefore)
+	}
+}
+
+func TestHijackKill_ReachesDeleteRunnerWhileBreakerOpen(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		name := "with runner record"
+		if restart {
+			name = "after restart (no runner record)"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{})
+			h.addSameRepoRun(10)
+			h.queued(100, 10)
+			// Cache fork run 12 via reconcile discovery so the hijack verdict does not need GetRun.
+			h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"})
+			h.reconcile()
+
+			if restart {
+				h = newHarness(t, harnessOpts{reuseFrom: h})
+				// Populate runMeta cache for run 12 on the restarted server.
+				h.reconcile()
+			}
+
+			// Trip the local rate-limit breaker via a 429 on an unrelated queued webhook,
+			// then lift the fake's rate limit so only the client-side breaker is open.
+			h.gh.AddRun(fakes.GitHubRun{ID: 99, Repo: testRepo, HeadRepo: testRepo, Event: "push", Status: "queued"})
+			h.gh.RateLimitMode = fakes.Secondary429
+			h.gh.RateLimitRetryAfter = 5 * time.Minute
+			h.gh.RateLimitAfter = 1
+			if code, _ := h.queued(990, 99); code != http.StatusServiceUnavailable {
+				t.Fatalf("breaker-trip webhook: status = %d, want 503", code)
+			}
+			h.gh.ResetRateLimit()
+
+			// While the breaker is open, a hijack kill must still reach DeleteRunner and Terminate.
+			code, out := h.webhook(inProgress(120, 12, testRepo, "cr-job-100"))
+			if code != http.StatusOK || !strings.Contains(out, "killed") {
+				t.Fatalf("hijack kill with open breaker: %d %q, want 200 killed", code, out)
+			}
+			if len(h.gh.Deleted) != 1 {
+				t.Errorf("Deleted = %v, want 1 (DeleteRunner must bypass open breaker)", h.gh.Deleted)
+			}
+			if len(h.cr.CancelCalls) != 1 {
+				t.Errorf("CancelCalls = %v, want 1", h.cr.CancelCalls)
+			}
+			h.wantLog(logging.EventKillHijacked)
+		})
 	}
 }

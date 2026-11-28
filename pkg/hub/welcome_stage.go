@@ -15,9 +15,7 @@
 package hub
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -44,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
@@ -579,7 +578,8 @@ func (s *Server) welcomeFetchAndExtract(ctx context.Context, owner, repo, sha st
 }
 
 // extractWelcomeArchive extracts a GitHub archive (a gzip tarball with one
-// top-level directory) into root, strictly:
+// top-level directory) into root using the shared githubfetch tarball
+// extractor in strict refuse-on-symlink selector mode:
 //
 //   - the first entry must be the pax global header whose comment (the
 //     commit id git-archive writes) equals sha, or nothing is written;
@@ -601,139 +601,48 @@ func (s *Server) welcomeFetchAndExtract(ctx context.Context, owner, repo, sha st
 // O_EXCL through root, so nothing is overwritten and no link is followed.
 // roots are the archive-relative selection roots (no trailing slash).
 func extractWelcomeArchive(body []byte, sha string, root *os.Root, sel func(string) []string, roots []string, budget *welcomeBudget) error {
-	gzr, err := gzip.NewReader(bytes.NewReader(body))
+	lim := githubfetch.Limits{
+		MaxFiles:     budget.lim.MaxFiles,
+		MaxFileBytes: budget.lim.MaxFile,
+		MaxTotal:     budget.lim.MaxTotal,
+		MaxUnpacked:  budget.lim.MaxUnpacked,
+		OnSymlink:    githubfetch.PolicyReject,
+	}
+	extBudget := githubfetch.ExtractBudget{
+		Files: budget.files,
+		Bytes: budget.total,
+	}
+	res, err := githubfetch.ExtractTarGz(bytes.NewReader(body), root, githubfetch.TarExtractOptions{
+		ExpectedSHA:       sha,
+		Limits:            lim,
+		RequireLeadingPAX: true,
+		Select:            sel,
+		Roots:             roots,
+		SkipEmptyDirs:     true,
+		DirMode:           0o700,
+		Budget:            &extBudget,
+	})
+	budget.files = extBudget.Files
+	budget.total = extBudget.Bytes
+	budget.skipped += res.Skipped.Symlinks + res.Skipped.Hardlinks + res.Skipped.Other
 	if err != nil {
-		return fmt.Errorf("%w: not a gzip archive", errWelcomeRefused)
+		return mapWelcomeExtractError(err)
 	}
-	defer func() { _ = gzr.Close() }()
-	tr := tar.NewReader(&cappedReader{r: gzr, remaining: budget.lim.MaxUnpacked})
+	return nil
+}
 
-	next := func() (*tar.Header, error) {
-		hdr, err := tr.Next()
-		if err != nil && err != io.EOF {
-			if errors.Is(err, errTemplateSourceTooLarge) {
-				return nil, errWelcomeTooLarge
-			}
-			return nil, fmt.Errorf("%w: invalid tar stream", errWelcomeRefused)
-		}
-		return hdr, err
-	}
-
-	first, err := next()
-	if err == io.EOF {
+func mapWelcomeExtractError(err error) error {
+	if errors.Is(err, githubfetch.ErrPAXMissing) {
 		return errWelcomePaxMissing
 	}
-	if err != nil {
-		return err
-	}
-	if first.Typeflag != tar.TypeXGlobalHeader {
-		return errWelcomePaxMissing
-	}
-	comment, ok := first.PAXRecords["comment"]
-	if !ok || strings.TrimSpace(comment) == "" {
-		return errWelcomePaxMissing
-	}
-	if !strings.EqualFold(strings.TrimSpace(comment), sha) {
+	if errors.Is(err, githubfetch.ErrPAXMismatch) {
 		return errWelcomePaxMismatch
 	}
-
-	top := ""
-	for {
-		hdr, err := next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if hdr.Typeflag == tar.TypeXGlobalHeader {
-			return fmt.Errorf("%w: second global header", errWelcomeRefused)
-		}
-		name := hdr.Name
-		if name == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, "\x00\\") {
-			return fmt.Errorf("%w: unsafe name", errWelcomeRefused)
-		}
-		trimmed := strings.TrimSuffix(name, "/")
-		for _, c := range strings.Split(trimmed, "/") {
-			if c == ".." || c == "." {
-				return fmt.Errorf("%w: unsafe name", errWelcomeRefused)
-			}
-		}
-		head, rel, _ := strings.Cut(trimmed, "/")
-		if top == "" {
-			top = head
-		} else if head != top {
-			return fmt.Errorf("%w: more than one top-level directory", errWelcomeRefused)
-		}
-		if rel == "" {
-			if hdr.Typeflag != tar.TypeDir {
-				return fmt.Errorf("%w: top-level entry is not a directory", errWelcomeRefused)
-			}
-			continue
-		}
-		dests := sel(rel)
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			continue
-		case tar.TypeReg, tar.TypeRegA: //nolint:staticcheck // TypeRegA is read as a regular file
-		default:
-			if len(dests) > 0 || welcomeSelectsBelow(sel, rel) || welcomeOnRootPath(roots, rel) {
-				return fmt.Errorf("%w: link or special file", errWelcomeRefused)
-			}
-			// Outside the selected subtrees: skipped, never extracted
-			// (release-manager 21d9afa0), and counted without its name.
-			budget.skipped++
-			continue
-		}
-		if len(dests) == 0 {
-			continue
-		}
-		if hdr.Size < 0 || hdr.Size > budget.lim.MaxFile {
-			return fmt.Errorf("%w: file over the per-file limit", errWelcomeTooLarge)
-		}
-		budget.files += len(dests)
-		if budget.files > budget.lim.MaxFiles {
-			return fmt.Errorf("%w: too many files", errWelcomeTooLarge)
-		}
-		budget.total += hdr.Size * int64(len(dests))
-		if budget.total > budget.lim.MaxTotal {
-			return fmt.Errorf("%w: total size over the limit", errWelcomeTooLarge)
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, budget.lim.MaxFile+1))
-		if err != nil {
-			if errors.Is(err, errTemplateSourceTooLarge) {
-				return errWelcomeTooLarge
-			}
-			return fmt.Errorf("%w: invalid tar stream", errWelcomeRefused)
-		}
-		if int64(len(data)) > budget.lim.MaxFile {
-			return fmt.Errorf("%w: file over the per-file limit", errWelcomeTooLarge)
-		}
-		mode := extractFileMode(hdr.Mode)
-		for _, dest := range dests {
-			if err := welcomeWriteFile(root, dest, data, mode); err != nil {
-				return err
-			}
-		}
+	var ghe *githubfetch.Error
+	if errors.As(err, &ghe) && ghe.Kind == githubfetch.KindTooLarge {
+		return fmt.Errorf("%w: %s", errWelcomeTooLarge, ghe.Hint)
 	}
-}
-
-// welcomeSelectsBelow reports whether sel takes anything at or below rel
-// treated as a directory, so a link or special entry standing in for a
-// selected directory is refused too.
-func welcomeSelectsBelow(sel func(string) []string, rel string) bool {
-	return len(sel(rel+"/x")) > 0
-}
-
-// welcomeOnRootPath reports whether rel is a selection root or an ancestor
-// directory of one, the directories every selected entry is reached through.
-func welcomeOnRootPath(roots []string, rel string) bool {
-	for _, r := range roots {
-		if rel == r || strings.HasPrefix(r, rel+"/") {
-			return true
-		}
-	}
-	return false
+	return fmt.Errorf("%w: %v", errWelcomeRefused, err)
 }
 
 // welcomeWriteFile writes data to the root-relative slash path dest,

@@ -579,8 +579,6 @@ func TestBrokerInbound_AttachmentIDsDelivered(t *testing.T) {
 	assert.Equal(t, messages.AttachmentDeliverable, entry.State)
 	assert.Equal(t, ids[0], entry.Delivery.ArtifactID)
 	assert.True(t, strings.HasPrefix(entry.InboxPath, attachmentInboxDir), entry.InboxPath)
-	assert.Empty(t, entry.ProjectedPath, "no scratchpad projection for a plugin conversation")
-	assert.Empty(t, entry.ProjectedMount)
 
 	// The id is now bound to the stored message, which was persisted.
 	_, state, err := f.srv.attachmentService().UsableAttachment(context.Background(), ids[0], artifacts.PrincipalKindUser, f.ua.ID)
@@ -676,7 +674,6 @@ func TestBrokerInbound_AttachmentsNotReadableByOtherUsersAgent(t *testing.T) {
 	calls := f.disp.getCalls()
 	require.Len(t, calls, 1)
 	del := calls[0].StructuredMessage.AttachmentPlan[0].Delivery
-	assert.Empty(t, del.ProjectedPath)
 	project := f.projA.ID
 	assert.False(t, svc.MayReadAttachments(attachmentDecisionForRecipient(bAgent), del.MessageID, &project))
 	plan := f.srv.attachmentDelivery().Plan(ctx, bAgent, []messages.AttachmentDelivery{del})

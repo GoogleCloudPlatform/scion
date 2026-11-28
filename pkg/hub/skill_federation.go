@@ -170,6 +170,8 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	}
 
 	resolved := &resolveResp.Resolved[0]
+	// External federated registries must not supply a GitHub download token.
+	resolved.DownloadToken = ""
 
 	// Content hash checks and trust enforcement (ptone/scion#5935).
 	if resolveErr := s.checkFederatedSkillHashes(ctx, registry, registryName, skillRef, resolved); resolveErr != nil {

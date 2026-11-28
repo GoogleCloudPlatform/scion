@@ -42,6 +42,7 @@ func mergeTestStoredSettings() map[string]string {
 		DefaultModel:           "model-a",
 		DefaultThinkingLevel:   &thinking,
 		TelemetryEnabled:       &yes,
+		TrajectoryCapture:      "metadata_only",
 		AutoExposePortsEnabled: &yes,
 		DefaultMaxTurns:        api.IntPtr(10),
 		DefaultMaxModelCalls:   api.IntPtr(20),
@@ -55,8 +56,9 @@ func mergeTestStoredSettings() map[string]string {
 		DefaultGCPIdentityServiceAccountID:          "sa-a",
 		DefaultGCPIdentityServiceAccountIDByProfile: map[string]string{"p1": "sa-p1"},
 		DefaultGCPIdentityServiceAccountIDByBroker:  map[string]string{"b1": "sa-b1"},
-		MaxAgentRole:     "full",
-		DefaultAgentRole: "baseline",
+		MaxAgentRole:          "full",
+		DefaultAgentRole:      "baseline",
+		UsageUnmeasuredPolicy: UsageUnmeasuredPolicyAllow,
 	})
 	return project.Annotations
 }
@@ -109,6 +111,10 @@ var putMergeFields = []putMergeField{
 		zeroJSON: `false`, zeroWant: map[string]string{projectSettingTelemetryEnabled: "false"},
 	},
 	{
+		name: projectSettingsFieldTrajectoryCapture, setJSON: `"off"`, setWant: map[string]string{projectSettingTrajectoryCapture: "off"},
+		clearJSON: `""`, keys: []string{projectSettingTrajectoryCapture},
+	},
+	{
 		name: projectSettingsFieldAutoExposePortsEnabled, setJSON: `false`, setWant: map[string]string{projectSettingAutoExposePortsEnabled: "false"},
 		clearJSON: `null`, keys: []string{projectSettingAutoExposePortsEnabled}, nullClears: true,
 		zeroJSON: `false`, zeroWant: map[string]string{projectSettingAutoExposePortsEnabled: "false"},
@@ -144,6 +150,7 @@ var putMergeFields = []putMergeField{
 	{name: projectSettingsFieldGCPIdentitySAIDByBroker, setJSON: `{"b2":"sa-b2"}`, setWant: map[string]string{projectSettingDefaultGCPIdentitySAIDByBroker: `{"b2":"sa-b2"}`}, clearJSON: `{}`, keys: []string{projectSettingDefaultGCPIdentitySAIDByBroker}},
 	{name: projectSettingsFieldMaxAgentRole, setJSON: `"readonly"`, setWant: map[string]string{projectSettingMaxAgentRole: "readonly"}, clearJSON: `""`, keys: []string{projectSettingMaxAgentRole}},
 	{name: projectSettingsFieldDefaultAgentRole, setJSON: `"readonly"`, setWant: map[string]string{projectSettingDefaultAgentRole: "readonly"}, clearJSON: `""`, keys: []string{projectSettingDefaultAgentRole}},
+	{name: projectSettingsFieldUsageUnmeasuredPolicy, setJSON: `"deny"`, setWant: map[string]string{projectSettingUsageUnmeasuredPolicy: "deny"}, clearJSON: `""`, keys: []string{projectSettingUsageUnmeasuredPolicy}},
 }
 
 // runPutMerge applies body to a fully populated project the way the PUT

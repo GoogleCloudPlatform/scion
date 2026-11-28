@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -228,7 +229,7 @@ func (s *Server) healthSummaryTriggers(r *http.Request) (*HealthSummaryTriggers,
 			ProjectID:   tr.ProjectID,
 			ProjectSlug: slugs[tr.ProjectID],
 			SourceKind:  tr.SourceKind,
-			ActionType:  tr.ActionType,
+			ActionType:  healthTriggerActionType(tr),
 			Reason:      healthTriggerReasonCode(tr.StatusReason),
 		}
 		if !tr.UpdatedAt.IsZero() {
@@ -244,7 +245,7 @@ func (s *Server) healthSummaryTriggers(r *http.Request) (*HealthSummaryTriggers,
 			ProjectID:      tr.ProjectID,
 			ProjectSlug:    slugs[tr.ProjectID],
 			SourceKind:     tr.SourceKind,
-			ActionType:     tr.ActionType,
+			ActionType:     healthTriggerActionType(tr),
 			LastFireStatus: tr.LastFireStatus,
 			FireCount:      tr.FireCount,
 			ErrorCount:     tr.ErrorCount,
@@ -257,6 +258,21 @@ func (s *Server) healthSummaryTriggers(r *http.Request) (*HealthSummaryTriggers,
 		out.Failing = append(out.Failing, row)
 	}
 	return out, nil
+}
+
+func healthTriggerActionType(tr store.Trigger) string {
+	actions, err := triggerActions(tr)
+	if err != nil || len(actions) == 0 {
+		return tr.ActionType
+	}
+	if len(actions) == 1 {
+		return actions[0].Type
+	}
+	types := make([]string, len(actions))
+	for i, a := range actions {
+		types[i] = a.Type
+	}
+	return strings.Join(types, ",")
 }
 
 func (s *Server) healthSummaryScanTriggers(

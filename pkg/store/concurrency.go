@@ -351,6 +351,21 @@ const (
 	// counters, meter_health, and run_attribution at a time.
 	LockUsageRetention AdvisoryLockKey = 0x5C100037
 
+	// LockUploadQuota serializes CreateUploadSession quota checks and inserts
+	// (ptone/scion#8654 §3.8) via a transaction-scoped pg_advisory_xact_lock
+	// on PostgreSQL, not taken through AdvisoryLocker.
+	LockUploadQuota AdvisoryLockKey = 0x5C100038
+
+	// LockUploadSessionSweep guards the periodic upload-session expiry and
+	// staging-cleanup sweeper ("upload-session-sweep", ptone/scion#8654 §3.7),
+	// so at most one replica sweeps expired/terminal upload sessions per tick.
+	LockUploadSessionSweep AdvisoryLockKey = 0x5C100039
+
+	// LockUsageGroupSeedReconcile guards the nightly pooled-group budget seed
+	// reconciliation job ("usage-group-seed-reconcile", ptone/scion#9243),
+	// ensuring at most one replica scans for missing/incomplete seeds at a time.
+	LockUsageGroupSeedReconcile AdvisoryLockKey = 0x5C10003A
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
@@ -411,6 +426,15 @@ const (
 	// PostgreSQL under READ COMMITTED. In the per-object range; not taken through
 	// AdvisoryLocker.
 	LockCommandRequestQuota AdvisoryLockKey = 0x5C10100B
+
+	// LockUsageGroupEpisode is the CLASS ID for per-group pooled-budget
+	// charging-episode serialization (Tokenomics P3.3, ptone/scion#9243, D6a):
+	// a transaction-scoped pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(groupID), taken by OpenUsageGroupChargingEpisode,
+	// CloseUsageGroupChargingEpisodeIfInactive, and
+	// ExecuteUsageGroupEpisodeSeedPass. In the per-object range; not taken
+	// through AdvisoryLocker.
+	LockUsageGroupEpisode AdvisoryLockKey = 0x5C10100C
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

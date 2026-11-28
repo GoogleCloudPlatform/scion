@@ -121,7 +121,7 @@ func TestInjectPromptFiles_PlaceholderSystemPrompt(t *testing.T) {
 			if tc.inline {
 				inline = &api.ScionConfig{SystemPrompt: tc.systemPrompt}
 			}
-			rendered, err := injectPromptFiles(newPlaceholderTestHarness(t), agentHome, tc.chain(t), cfg, inline)
+			rendered, err := injectPromptFiles(newPlaceholderTestHarness(t), agentHome, tc.chain(t), cfg, inline, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -17,10 +17,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DEFAULT_UPLOAD_LIMITS,
+  MAX_LEGACY_WORKSPACE_FILE_SIZE,
   MAX_WORKSPACE_REQUEST_BODY,
   fileTooLargeMessage,
   formatUploadSize,
   getUploadLimits,
+  legacyWorkspaceMaxFileSize,
   validateWorkspaceUploadFiles,
 } from './upload-limits.js';
 import { invalidatePublicSettings } from './server-feature-flags.js';
@@ -96,5 +98,10 @@ describe('upload-limits', () => {
         50 << 20
       )
     ).toBeNull();
+  });
+
+  it('clamps legacy single-request workspace limit to 100 MiB', () => {
+    expect(legacyWorkspaceMaxFileSize(1 << 30)).toBe(MAX_LEGACY_WORKSPACE_FILE_SIZE);
+    expect(legacyWorkspaceMaxFileSize(80 << 20)).toBe(80 << 20);
   });
 });

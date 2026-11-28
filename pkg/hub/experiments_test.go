@@ -60,6 +60,81 @@ func TestExperimentRegistry_ZeroValueServerFallsBackToDefault(t *testing.T) {
 	}
 }
 
+// TestConduitDeploymentDefault_PrecedenceAndAdminResponse verifies that
+// SetConduitDeploymentDefault overrides the compiled default of hub.conduit
+// for both resolution and the admin experiments response, while stored
+// overrides and malformed documents keep precedence, and that the early-resolve
+// guard panics if hub.conduit is resolved before the setter runs.
+func TestConduitDeploymentDefault_PrecedenceAndAdminResponse(t *testing.T) {
+	srv := &Server{}
+	exp, ok := srv.experimentRegistry().Lookup(conduitExperiment)
+	if !ok {
+		t.Fatalf("%q not registered", conduitExperiment)
+	}
+	if !exp.Default {
+		t.Fatalf("compiled default for %q = false, want true", conduitExperiment)
+	}
+
+	// Early-resolve guard panics before SetConduitDeploymentDefault.
+	srv.SetConduitEarlyResolveGuardForTest(true)
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic when hub.conduit is resolved before SetConduitDeploymentDefault")
+			}
+		}()
+		_ = srv.experimentEnabled(conduitExperiment)
+	}()
+
+	// Before setter (disarmed): compiled default true applies.
+	srv.SetConduitEarlyResolveGuardForTest(false)
+	if !srv.experimentEnabled(conduitExperiment) || !srv.experimentDefault(exp) {
+		t.Fatal("before SetConduitDeploymentDefault, hub.conduit must resolve to compiled default true")
+	}
+
+	// Set deployment default off (hosted HA stage 1).
+	srv.SetConduitEarlyResolveGuardForTest(true)
+	srv.SetConduitDeploymentDefault(false, "hosted_ha_staged")
+	if srv.ConduitDeploymentDefaultReason() != "hosted_ha_staged" {
+		t.Fatalf("reason = %q, want hosted_ha_staged", srv.ConduitDeploymentDefaultReason())
+	}
+	if srv.experimentEnabled(conduitExperiment) {
+		t.Fatal("after SetConduitDeploymentDefault(false), hub.conduit must resolve off")
+	}
+	if srv.experimentDefault(exp) {
+		t.Fatal("experimentDefault must reflect deployment default false")
+	}
+
+	findConduit := func(resp adminExperimentsResponse) adminExperimentEntry {
+		for _, e := range resp.Experiments {
+			if e.Name == conduitExperiment {
+				return e
+			}
+		}
+		t.Fatalf("%q missing from admin experiments response", conduitExperiment)
+		return adminExperimentEntry{}
+	}
+
+	// Admin API response with no override shows default=false, override=nil, enabled=false.
+	entry := findConduit(srv.buildAdminExperimentsResponse(map[string]bool{}, 0, false, false, time.Time{}, ""))
+	if entry.Default || entry.Override != nil || entry.Enabled {
+		t.Fatalf("admin entry (deployment default off, no override) = %+v, want default=false override=nil enabled=false", entry)
+	}
+
+	// Stored override true beats deployment default false.
+	entry = findConduit(srv.buildAdminExperimentsResponse(map[string]bool{conduitExperiment: true}, 1, false, true, testUpdatedAt, "admin@example.com"))
+	if entry.Default || entry.Override == nil || !*entry.Override || !entry.Enabled {
+		t.Fatalf("admin entry (override true) = %+v, want default=false override=true enabled=true", entry)
+	}
+
+	// Malformed document forces hub.conduit off even when deployment default is true.
+	srvOn := &Server{}
+	srvOn.SetConduitDeploymentDefault(true, "")
+	if srvOn.experimentEnabledIn(ExperimentsSnapshot{Malformed: true, Overrides: map[string]bool{}}, conduitExperiment) {
+		t.Fatal("malformed document must force hub.conduit off even with deployment default true")
+	}
+}
+
 func TestExperimentEnabledIn_Resolution(t *testing.T) {
 	srv := &Server{experiments: testRegistry(t)}
 	tests := []struct {
@@ -135,6 +210,30 @@ func TestResolvedExperiments_IncludesProjectVisitors(t *testing.T) {
 	on.SetOperationalSettings(ops)
 	if v, ok := on.resolvedExperiments()[experiments.FederationProjectVisitors]; !ok || !v {
 		t.Errorf("with the override on: resolvedExperiments()[%q] = %v (present=%v), want true", experiments.FederationProjectVisitors, v, ok)
+	}
+}
+
+// TestResolvedExperiments_IncludesMessagePolicies: the browser reads
+// GET /api/v1/experiments to gate the project Message Policies UI, so
+// hub.message_policies must appear in the resolved web-layer map with its
+// effective value (off by default, true when overridden on).
+func TestResolvedExperiments_IncludesMessagePolicies(t *testing.T) {
+	srv := &Server{}
+	got := srv.resolvedExperiments()
+	if v, ok := got[experiments.MessagePolicies]; !ok || v {
+		t.Errorf("resolvedExperiments()[%q] = %v (present=%v), want false and present", experiments.MessagePolicies, v, ok)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.message_policies":true}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	on := &Server{}
+	on.SetOperationalSettings(ops)
+	if v, ok := on.resolvedExperiments()[experiments.MessagePolicies]; !ok || !v {
+		t.Errorf("with the override on: resolvedExperiments()[%q] = %v (present=%v), want true", experiments.MessagePolicies, v, ok)
 	}
 }
 

@@ -108,6 +108,13 @@ const (
 	// reserved permission (artifact.update is Reserved: nothing checks it).
 	// Minted for the baseline and full agent roles (ScopesForRole).
 	ScopeProjectArtifactWrite AgentTokenScope = "project:artifact:write"
+	// ScopeProjectArtifactRequestReview allows the agent to request reviews on
+	// artifacts it owns in its own project (artifact.request_review,
+	// ptone/scion#5548). Ceiling-optional (ceilingOptionalRoleScopes) so legacy
+	// delegation chains and UAT ceilings that predate it still fit baseline and
+	// full without a ceiling violation; minted alongside ScopeProjectArtifactWrite
+	// when the source ceiling allows artifact.request_review.
+	ScopeProjectArtifactRequestReview AgentTokenScope = "project:artifact:request_review"
 	// ScopeAgentSetMessageMode allows the agent to change message mode
 	// for agents within the same project.
 	ScopeAgentSetMessageMode AgentTokenScope = "project:agent:set_message_mode"

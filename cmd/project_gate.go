@@ -100,6 +100,11 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 		if isTopLevel(cmd) {
 			return false
 		}
+	case "login":
+		// Top-level 'login' (alias of 'hub auth login') acts on user credentials and hub list.
+		if isTopLevel(cmd) {
+			return false
+		}
 	}
 	// Hub login and connection commands (ptone/scion#3317).
 	if parentName == "auth" && commandInSubtree(cmd, "hub") {

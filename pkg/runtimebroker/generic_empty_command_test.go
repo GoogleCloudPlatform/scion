@@ -206,12 +206,67 @@ func TestGenericHarnessEmptyCommand_BrokerRefusesWith400(t *testing.T) {
 	})
 
 	t.Run("async classifyStartError", func(t *testing.T) {
-		code, _, msg := classifyStartError(context.Background(), harness.ErrEmptyGenericCommand, "", "", store.LaunchKindStart)
-		if code != ErrCodeHarnessConfigUnusable {
-			t.Errorf("code = %q, want %q", code, ErrCodeHarnessConfigUnusable)
+		cases := []struct {
+			name string
+			err  error
+			want string
+		}{
+			{"empty generic command", harness.ErrEmptyGenericCommand, wantMsg},
+			{"shell-form resume unsupported", harness.ErrGenericShellResumeUnsupported, harness.ErrGenericShellResumeUnsupported.Error()},
+			{"shell-form missing script", harness.ErrGenericShellCommandMissingScript, harness.ErrGenericShellCommandMissingScript.Error()},
 		}
-		if msg != wantMsg {
-			t.Errorf("msg = %q, want %q", msg, wantMsg)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				code, _, msg := classifyStartError(context.Background(), tc.err, "", "", store.LaunchKindStart)
+				if code != ErrCodeHarnessConfigUnusable {
+					t.Errorf("code = %q, want %q", code, ErrCodeHarnessConfigUnusable)
+				}
+				if msg != tc.want {
+					t.Errorf("msg = %q, want %q", msg, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("shell-form generic create without task fails with 400", func(t *testing.T) {
+		var runs int
+		srv, projectScion := newEnv(t, &runs)
+		hcDir := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "generic-sh")
+		if err := os.MkdirAll(hcDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		const cfgYAML = "harness: generic\nuser: scion\nimage: test-image:latest\ncommand:\n  base: [\"sh\", \"-c\"]\n"
+		if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(cfgYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"id":          "id-g4",
+			"name":        "g4",
+			"slug":        "g4",
+			"projectId":   "proj-1",
+			"projectPath": projectScion,
+			"config": map[string]any{
+				"harnessConfig": "generic-sh",
+				"image":         "test-image:latest",
+			},
+		})
+		code, body := postJSON(t, srv, "/api/v1/agents", string(payload))
+		if code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", code, body)
+		}
+		var resp ErrorResponse
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
+			t.Fatalf("unmarshal ErrorResponse: %v: %s", err, body)
+		}
+		if resp.Error.Code != ErrCodeValidationError {
+			t.Errorf("code = %q, want %q", resp.Error.Code, ErrCodeValidationError)
+		}
+		want := "Failed to create agent: " + harness.ErrGenericShellCommandMissingScript.Error()
+		if resp.Error.Message != want {
+			t.Errorf("message = %q, want %q", resp.Error.Message, want)
+		}
+		if runs != 0 {
+			t.Errorf("runs = %d, want 0", runs)
 		}
 	})
 }

@@ -247,6 +247,17 @@ type PrincipalChecker interface {
 	PrincipalsExist(ctx context.Context, refs []string) (map[string]bool, error)
 }
 
+// OwnerSuccessorResolver is an optional extension of PrincipalChecker
+// (ptone/scion#9846). When the owner liveness reconciler sees a gone agent
+// owner with unmarked artifacts, it asks for a live, eligible ancestor agent
+// to inherit the artifacts before marking any remaining rows orphaned.
+// ok=false means no successor qualifies (mark orphaned as before).
+// A non-nil error leaves the owner unchanged for this pass so the next pass
+// retries.
+type OwnerSuccessorResolver interface {
+	ResolveOwnerSuccessor(ctx context.Context, agentID string) (Succession, bool, error)
+}
+
 // ScopeAdministrator is an optional extension of Host (ptone/scion#4529).
 // The delete route asks it whether the caller administers an artifact's
 // home project, the first custodian clause: the project owners and admins

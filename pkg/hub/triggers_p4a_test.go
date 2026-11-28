@@ -1111,7 +1111,7 @@ func TestTriggerLimits_TwoReplicaConcurrencyAndProjectCap(t *testing.T) {
 						FireID:         api.NewUUID(),
 					},
 					ActionType: store.TriggerActionDispatchAgent,
-					Payload:    tr.ActionPayload,
+					Payload:    firstTriggerAction(*tr).Payload,
 					Event: &hubfire.FireEvent{
 						ID:         api.NewUUID(),
 						ProjectID:  f.sched.proj.ID,
@@ -1499,7 +1499,7 @@ func TestTriggerFire_O1VerificationModeUsesRecordedEventAttr(t *testing.T) {
 	reuseRendered, reuseRefusal, reuseErr := f.sched.srv.renderDispatchReuseMessage(ctx, hubfire.FireRequest{
 		ProjectID:  f.sched.proj.ID,
 		ActionType: store.TriggerActionDispatchAgent,
-		Payload:    storedTr.ActionPayload,
+		Payload:    firstTriggerAction(*storedTr).Payload,
 		Authority:  hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger, DefinitionID: storedTr.ID},
 		Event: &hubfire.FireEvent{
 			ID:         storedEv.ID,

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -917,4 +918,46 @@ func TestHandleBrokerInboundRouted_StripsClientSuppliedConversation(t *testing.T
 	require.NotNil(t, calls[0].StructuredMessage)
 	assert.Nil(t, calls[0].StructuredMessage.Conversation,
 		"client-supplied Conversation must be stripped on /api/v1/broker/inbound/routed")
+}
+
+func TestHandleBrokerInboundRouted_LegacyRefReusesPreP4Row(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+	ctx := context.Background()
+
+	legacyKey, err := messaging.ThreadConversationExternalRef(env.project.ID, "1700000000.000777")
+	require.NoError(t, err)
+	seeded, err := messaging.ResolveOrCreateConversationByKey(
+		ctx, env.store, slog.Default(), legacyKey, "group", &env.project.ID,
+		messaging.WithSurface("slack"),
+	)
+	require.NoError(t, err)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Surface:      "slack",
+		ExternalRef:  "C0123ABC:1700000000.000777",
+		ParentRef:    "C0123ABC",
+		LegacyRef:    "1700000000.000777",
+		Message: &messages.StructuredMessage{
+			Version:  messages.Version,
+			Channel:  "slack",
+			ThreadID: "",
+			Sender:   "user:" + env.user.Email,
+			Msg:      "routed follow-up via legacy_ref",
+			Type:     messages.TypeInstruction,
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.agent1.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, seeded.ConversationID, msgs.Items[0].ConversationID,
+		"routed inbound legacy_ref must reuse pre-P4 conversation row")
+
+	allConvs, err := env.store.ListConversations(ctx, store.ConversationFilter{Surface: "slack"}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, allConvs.Items, 1, "must not create a duplicate conversation row")
 }

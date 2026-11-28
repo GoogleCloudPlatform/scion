@@ -28,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
 	corev1 "k8s.io/api/core/v1"

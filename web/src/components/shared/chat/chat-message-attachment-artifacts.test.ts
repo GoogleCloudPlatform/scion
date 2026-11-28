@@ -169,6 +169,30 @@ describe('scion-chat-message attachment chip menu (#4598, #4599)', () => {
       expect(copyMock).toHaveBeenCalledWith(`scion://attachment/${FILE.id}`);
     });
   });
+
+  it('triggers a forced-attachment download when Download is chosen from the menu', async () => {
+    setFeatureFlag(ATTACHMENT_ARTIFACTS_FLAG, true);
+    const el = await mountMessage();
+    let clickedHref: string | null = null;
+    let clickedDownload: string | null = null;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      clickedHref = this.getAttribute('href');
+      clickedDownload = this.getAttribute('download');
+    });
+    try {
+      const slMenu = el.shadowRoot?.querySelector('.attachment-menu sl-menu');
+      slMenu?.dispatchEvent(
+        new CustomEvent('sl-select', { detail: { item: { value: 'download' } } })
+      );
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(clickedHref).toBe(`/api/v1/chat/attachments/${FILE.id}?download=1`);
+      expect(clickedDownload).toBe(FILE.name);
+    } finally {
+      clickSpy.mockRestore();
+    }
+  });
 });
 
 describe('scion-chat-file-preview attachment actions (#4598, #4599)', () => {

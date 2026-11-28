@@ -256,6 +256,22 @@ export function agentStatusTooltip(
 }
 
 /**
+ * Resolve the status badge key for a lightweight agent member record
+ * (phase + activity), mirroring `getAgentDisplayStatus` (`shared/types.ts`).
+ * Returns `''` when neither phase nor a known running activity is present.
+ */
+export function agentMemberBadgeStatus(
+  member: { phase?: string; activity?: string } | undefined
+): string {
+  if (!member) return '';
+  const activity = (member.activity || '').toLowerCase();
+  if (member.phase === 'running' && Object.hasOwn(ACTIVITY_DISPLAY, activity)) {
+    return activity;
+  }
+  return member.phase || '';
+}
+
+/**
  * An agent status badge. Use it for every agent status badge: it shows a
  * provision-only agent as "created (not started)" with a start hint, a
  * suspended agent as "suspended · <activity> (<reason>)" (see

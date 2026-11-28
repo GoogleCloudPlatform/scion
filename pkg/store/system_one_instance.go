@@ -182,6 +182,13 @@ type SystemOneInstanceFilter struct {
 	Enabled *bool
 }
 
+// SystemOneInstanceProjectRef is the minimal project identity returned when
+// listing projects that allowlist a System One provider instance.
+type SystemOneInstanceProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // SystemOneInstanceStore defines persistence operations for Hub-scoped System
 // One provider instances.
 type SystemOneInstanceStore interface {
@@ -227,4 +234,10 @@ type SystemOneInstanceStore interface {
 	// unique slug Name in a single transaction. Returns ErrNotFound if no row
 	// with that Name exists.
 	DeleteSystemOneInstanceByName(ctx context.Context, name string) error
+
+	// ListSystemOneInstanceProjects returns the minimal references (ID, Name) of
+	// all projects whose System One allowlist contains instanceName, ordered by
+	// Name ascending then ID ascending. Returns an empty slice when no project
+	// allowlists the instance.
+	ListSystemOneInstanceProjects(ctx context.Context, instanceName string) ([]SystemOneInstanceProjectRef, error)
 }

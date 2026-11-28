@@ -380,29 +380,49 @@ type TriggerSubjectPatchSpec struct {
 	CoalesceWindow *string `json:"coalesce_window,omitempty"`
 }
 
+// TriggerNotifySpec configures failure notifications on a trigger definition
+// (Stage 2 §10).
+type TriggerNotifySpec struct {
+	OnOutcomes []string `json:"onOutcomes,omitempty"`
+	UserNotice *bool    `json:"userNotice,omitempty"`
+	AgentID    string   `json:"agentId,omitempty"`
+	AgentName  string   `json:"agentName,omitempty"`
+}
+
+// TriggerNotifyPatchSpec holds partial updates to a trigger's notify block.
+type TriggerNotifyPatchSpec struct {
+	OnOutcomes *[]string `json:"onOutcomes,omitempty"`
+	UserNotice *bool     `json:"userNotice,omitempty"`
+	AgentID    *string   `json:"agentId,omitempty"`
+	AgentName  *string   `json:"agentName,omitempty"`
+}
+
 // Trigger represents a trigger definition returned by the Hub API.
 type Trigger struct {
-	ID                      string             `json:"id"`
-	ProjectID               string             `json:"projectId"`
-	Name                    string             `json:"name"`
-	Description             string             `json:"description,omitempty"`
-	Source                  TriggerSourceSpec  `json:"source"`
-	Match                   TriggerMatchSpec   `json:"match"`
-	Action                  TriggerActionSpec  `json:"action"`
-	Subject                 TriggerSubjectSpec `json:"subject"`
-	MaxFiresPerMinute       int                `json:"maxFiresPerMinute,omitempty"`
-	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches,omitempty"`
-	Status                  string             `json:"status"`
-	StatusReason            string             `json:"statusReason,omitempty"`
-	AuthorizationRevision   int                `json:"authorizationRevision"`
-	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
-	LastFireError           string             `json:"lastFireError,omitempty"`
-	FireCount               int                `json:"fireCount"`
-	ErrorCount              int                `json:"errorCount"`
-	CreatedBy               string             `json:"createdBy,omitempty"`
-	CreatedAt               time.Time          `json:"createdAt"`
-	UpdatedAt               time.Time          `json:"updatedAt"`
+	ID                      string              `json:"id"`
+	ProjectID               string              `json:"projectId"`
+	Name                    string              `json:"name"`
+	Description             string              `json:"description,omitempty"`
+	Source                  TriggerSourceSpec   `json:"source"`
+	Match                   TriggerMatchSpec    `json:"match"`
+	Action                  TriggerActionSpec   `json:"action"`
+	Actions                 []TriggerActionSpec `json:"actions"`
+	ActionsBroken           bool                `json:"actionsBroken,omitempty"`
+	Subject                 TriggerSubjectSpec  `json:"subject"`
+	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec  `json:"notify,omitempty"`
+	Status                  string              `json:"status"`
+	StatusReason            string              `json:"statusReason,omitempty"`
+	AuthorizationRevision   int                 `json:"authorizationRevision"`
+	LastFireAt              *time.Time          `json:"lastFireAt,omitempty"`
+	LastFireStatus          string              `json:"lastFireStatus,omitempty"`
+	LastFireError           string              `json:"lastFireError,omitempty"`
+	FireCount               int                 `json:"fireCount"`
+	ErrorCount              int                 `json:"errorCount"`
+	CreatedBy               string              `json:"createdBy,omitempty"`
+	CreatedAt               time.Time           `json:"createdAt"`
+	UpdatedAt               time.Time           `json:"updatedAt"`
 }
 
 // CreateTriggerRequest is the client-side request for creating a trigger.
@@ -411,10 +431,12 @@ type CreateTriggerRequest struct {
 	Description             string              `json:"description,omitempty"`
 	Source                  TriggerSourceSpec   `json:"source"`
 	Match                   *TriggerMatchSpec   `json:"match,omitempty"`
-	Action                  TriggerActionSpec   `json:"action"`
+	Action                  TriggerActionSpec   `json:"action,omitzero"`
+	Actions                 []TriggerActionSpec `json:"actions,omitempty"`
 	Subject                 *TriggerSubjectSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec  `json:"notify,omitempty"`
 }
 
 // UpdateTriggerRequest is the client-side request for updating a trigger.
@@ -424,9 +446,11 @@ type UpdateTriggerRequest struct {
 	Source                  *TriggerSourceSpec       `json:"source,omitempty"`
 	Match                   *TriggerMatchPatchSpec   `json:"match,omitempty"`
 	Action                  *TriggerActionSpec       `json:"action,omitempty"`
+	Actions                 *[]TriggerActionSpec     `json:"actions,omitempty"`
 	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifyPatchSpec  `json:"notify,omitempty"`
 	ExpectedRevision        *int                     `json:"expectedRevision,omitempty"`
 	IfMatch                 string                   `json:"-"`
 }
@@ -474,6 +498,8 @@ type TriggerFire struct {
 	TriggerID      string            `json:"triggerId"`
 	EventID        string            `json:"eventId"`
 	ProjectID      string            `json:"projectId"`
+	ActionIndex    int               `json:"actionIndex"`
+	ActionType     string            `json:"actionType,omitempty"`
 	Subject        string            `json:"subject,omitempty"`
 	Status         string            `json:"status"`
 	ResultRef      string            `json:"resultRef,omitempty"`

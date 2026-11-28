@@ -72,10 +72,10 @@ func callTo(t *testing.T, disp *recordingDispatcher, a *store.Agent) dispatchCal
 }
 
 // TestAttachmentAudience_LocalDefaults_DMAndTopic: with the defaults on a
-// local-storage hub (no object storage) a direct-conversation attachment to
-// an agent is delivered to its inbox and never copied into the scratchpad;
-// a project topic thread's attachment is delivered to the inbox and also
-// projected. Both download from history.
+// local-storage hub (no object storage) both direct-conversation and project
+// topic thread artifact attachments are delivered to the recipient's inbox
+// only, with no copy in the scratchpad and no attachment_mounts. Both download
+// from history.
 func TestAttachmentAudience_LocalDefaults_DMAndTopic(t *testing.T) {
 	f := newRefFixture(t)
 	stagingDir, disp := localStorageHub(t, f)
@@ -91,8 +91,8 @@ func TestAttachmentAudience_LocalDefaults_DMAndTopic(t *testing.T) {
 	require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
 	del := call.StructuredMessage.AttachmentDeliveries[0]
 	assert.Equal(t, resp.ID, del.MessageID)
-	assert.Empty(t, del.ProjectedPath, "no projection for a DM")
 	assert.Empty(t, call.StructuredMessage.Attachments, "no scratchpad path is listed")
+	assert.Empty(t, call.StructuredMessage.AttachmentMounts, "no attachment_mounts for artifact attachment")
 	plan := f.srv.attachmentDelivery().Plan(context.Background(), f.aa, call.StructuredMessage.AttachmentDeliveries)
 	require.Len(t, plan, 1)
 	assert.Equal(t, attachmentInboxPath(resp.ID, "dm.txt"), plan[0].InboxPath)
@@ -100,15 +100,18 @@ func TestAttachmentAudience_LocalDefaults_DMAndTopic(t *testing.T) {
 	require.Equal(t, http.StatusOK, got.status, got.body)
 	assert.Equal(t, "dm bytes", got.body)
 
-	// Project topic thread: inbox plus projection.
+	// Project topic thread: inbox only (no scratchpad copy, ptone/scion#9694).
 	inTopic := f.uploadAs(t, f.ua, f.projA.ID, "topic.txt", "topic bytes")
 	resp = f.sendWith(t, f.ua, f.topicA, inTopic)
-	assert.FileExists(t, filepath.Join(stagingDir, inTopic, "topic.txt"), "a project topic thread is projected")
+	assert.NoDirExists(t, filepath.Join(stagingDir, inTopic), "no scratchpad copy of a project topic artifact attachment")
 	call = callTo(t, disp, f.aa)
 	require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
 	assert.Equal(t, resp.ID, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
-	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+inTopic+"/topic.txt",
-		call.StructuredMessage.AttachmentDeliveries[0].ProjectedPath)
+	assert.Empty(t, call.StructuredMessage.Attachments, "no scratchpad path is listed")
+	assert.Empty(t, call.StructuredMessage.AttachmentMounts, "no attachment_mounts for artifact attachment")
+	plan = f.srv.attachmentDelivery().Plan(context.Background(), f.aa, call.StructuredMessage.AttachmentDeliveries)
+	require.Len(t, plan, 1)
+	assert.Equal(t, attachmentInboxPath(resp.ID, "topic.txt"), plan[0].InboxPath)
 	got = f.download(t, f.ua, inTopic)
 	require.Equal(t, http.StatusOK, got.status, got.body)
 	assert.Equal(t, "topic bytes", got.body)

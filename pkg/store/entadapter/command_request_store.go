@@ -429,6 +429,156 @@ func (c *CompositeStore) ListAgentCommandRequests(ctx context.Context, opts *sto
 	}, nil
 }
 
+// commandRequestNotMarkdownBlock excludes self-run markdown_block rows while
+// keeping rows whose surface is NULL (e.g. pending, withdrawn, expired).
+func commandRequestNotMarkdownBlock() predicate.CommandRequest {
+	return commandrequest.Or(
+		commandrequest.SurfaceIsNil(),
+		commandrequest.SurfaceNEQ(commandrequest.SurfaceMarkdownBlock),
+	)
+}
+
+// ListOpenCommandRequests implements store.CommandRequestStore.
+func (c *CompositeStore) ListOpenCommandRequests(ctx context.Context, viewerID string, now time.Time, limit int) ([]*store.CommandRequest, error) {
+	viewerID = strings.TrimSpace(viewerID)
+	if viewerID == "" {
+		return []*store.CommandRequest{}, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC().Truncate(time.Microsecond)
+
+	q := c.client.CommandRequest.Query().
+		Where(
+			commandrequest.ApproverUserIDEQ(viewerID),
+			commandrequest.StatusEQ(commandrequest.StatusPending),
+			commandrequest.ExpiresAtGT(now),
+			commandRequestNotMarkdownBlock(),
+			commandrequest.MessageIDNotNil(),
+		).
+		Order(
+			ent.Desc(commandrequest.FieldCreatedAt),
+			ent.Desc(commandrequest.FieldID),
+		)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	items := make([]*store.CommandRequest, len(rows))
+	for i, r := range rows {
+		items[i] = entCommandRequestToStore(r)
+	}
+	return items, nil
+}
+
+// ListResolvedCommandRequests implements store.CommandRequestStore.
+func (c *CompositeStore) ListResolvedCommandRequests(ctx context.Context, opts store.CommandRequestHistoryQuery) ([]*store.CommandRequest, error) {
+	viewerID := strings.TrimSpace(opts.ViewerID)
+	if viewerID == "" {
+		return []*store.CommandRequest{}, nil
+	}
+
+	q := c.client.CommandRequest.Query().
+		Where(
+			commandrequest.ApproverUserIDEQ(viewerID),
+			commandrequest.StatusIn(
+				commandrequest.StatusApproved,
+				commandrequest.StatusDismissed,
+				commandrequest.StatusWithdrawn,
+				commandrequest.StatusExpired,
+			),
+			commandrequest.ResolvedAtNotNil(),
+			commandRequestNotMarkdownBlock(),
+			commandrequest.MessageIDNotNil(),
+		)
+
+	if pid := strings.TrimSpace(opts.FilterProjectID); pid != "" {
+		pUID, perr := parseUUID(pid)
+		if perr != nil {
+			return []*store.CommandRequest{}, nil
+		}
+		q = q.Where(commandrequest.ProjectIDEQ(pUID))
+	}
+	if aid := strings.TrimSpace(opts.FilterAgentID); aid != "" {
+		aUID, aerr := parseUUID(aid)
+		if aerr != nil {
+			return []*store.CommandRequest{}, nil
+		}
+		q = q.Where(commandrequest.AgentIDEQ(aUID))
+	}
+	if opts.CursorTime != nil && opts.CursorID != "" {
+		curUID, uerr := parseUUID(opts.CursorID)
+		if uerr != nil {
+			return nil, fmt.Errorf("%w: invalid cursor id", store.ErrInvalidInput)
+		}
+		curTime := opts.CursorTime.UTC()
+		q = q.Where(
+			commandrequest.Or(
+				commandrequest.ResolvedAtLT(curTime),
+				commandrequest.And(
+					commandrequest.ResolvedAtEQ(curTime),
+					commandrequest.IDLT(curUID),
+				),
+			),
+		)
+	}
+
+	q = q.Order(
+		ent.Desc(commandrequest.FieldResolvedAt),
+		ent.Desc(commandrequest.FieldID),
+	)
+	if opts.Limit > 0 {
+		q = q.Limit(opts.Limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	items := make([]*store.CommandRequest, len(rows))
+	for i, r := range rows {
+		items[i] = entCommandRequestToStore(r)
+	}
+	return items, nil
+}
+
+// GetCommandRequestsByIDs implements store.CommandRequestStore.
+func (c *CompositeStore) GetCommandRequestsByIDs(ctx context.Context, ids []string) (map[string]*store.CommandRequest, error) {
+	out := make(map[string]*store.CommandRequest, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	uids := make([]uuid.UUID, 0, len(ids))
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		u, err := uuid.Parse(strings.TrimSpace(id))
+		if err != nil {
+			continue
+		}
+		if _, dup := seen[u]; dup {
+			continue
+		}
+		seen[u] = struct{}{}
+		uids = append(uids, u)
+	}
+	if len(uids) == 0 {
+		return out, nil
+	}
+	rows, err := c.client.CommandRequest.Query().
+		Where(commandrequest.IDIn(uids...)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, r := range rows {
+		out[r.ID.String()] = entCommandRequestToStore(r)
+	}
+	return out, nil
+}
+
 // ApproveCommandRequest implements store.CommandRequestStore.
 func (c *CompositeStore) ApproveCommandRequest(ctx context.Context, in *store.ApproveCommandRequestInput) (*store.ApproveCommandRequestResult, error) {
 	if in == nil || in.RequestID == "" || in.UserID == "" || in.CommandSHA256 == "" || in.ExecAgentID == "" || in.ExecProjectID == "" {
@@ -1669,6 +1819,43 @@ func (c *CompositeStore) HasActionRunOutput(ctx context.Context, runID string) (
 		return false, mapError(err)
 	}
 	return exists, nil
+}
+
+// HasActionRunOutputs implements store.CommandRequestStore.
+func (c *CompositeStore) HasActionRunOutputs(ctx context.Context, runIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(runIDs))
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	uids := make([]uuid.UUID, 0, len(runIDs))
+	seen := make(map[uuid.UUID]struct{}, len(runIDs))
+	for _, id := range runIDs {
+		u, err := uuid.Parse(strings.TrimSpace(id))
+		if err != nil {
+			continue
+		}
+		if _, dup := seen[u]; dup {
+			continue
+		}
+		seen[u] = struct{}{}
+		uids = append(uids, u)
+	}
+	if len(uids) == 0 {
+		return out, nil
+	}
+	present, err := c.client.ExecRunOutput.Query().
+		Where(
+			execrunoutput.IDIn(uids...),
+			execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindActionRun),
+		).
+		IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, u := range present {
+		out[u.String()] = true
+	}
+	return out, nil
 }
 
 // PurgeOldActionRunOutputs implements store.CommandRequestStore.

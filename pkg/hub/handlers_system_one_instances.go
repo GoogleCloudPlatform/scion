@@ -188,6 +188,20 @@ type ListSystemOneInstancesResponse struct {
 	TotalCount int                         `json:"totalCount"`
 }
 
+// SystemOneInstanceProjectRefDTO is the minimal project identity returned by
+// GET /api/v1/admin/system-one/instances/{name}/projects.
+type SystemOneInstanceProjectRefDTO struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ListSystemOneInstanceProjectsResponse is the response body for
+// GET /api/v1/admin/system-one/instances/{name}/projects.
+type ListSystemOneInstanceProjectsResponse struct {
+	Instance string                           `json:"instance"`
+	Projects []SystemOneInstanceProjectRefDTO `json:"projects"`
+}
+
 // SystemOneAdapterAuthModeDTO describes one authentication mode supported by a
 // registered System One adapter. It carries capability metadata only.
 type SystemOneAdapterAuthModeDTO struct {
@@ -196,6 +210,14 @@ type SystemOneAdapterAuthModeDTO struct {
 	TransportScheme       string `json:"transportScheme,omitempty"`
 	CustomEndpointAllowed bool   `json:"customEndpointAllowed"`
 	ScopesRequired        bool   `json:"scopesRequired,omitempty"`
+}
+
+// SystemOneKnownModelDTO describes one static, adapter-documented model
+// advertised on GET /api/v1/admin/system-one/adapters.
+type SystemOneKnownModelDTO struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+	Source      string `json:"source"`
 }
 
 // SystemOneAdapterCapabilityDTO is the non-secret capability metadata for a
@@ -209,6 +231,7 @@ type SystemOneAdapterCapabilityDTO struct {
 	DefaultEndpoint      string                        `json:"defaultEndpoint,omitempty"`
 	ModelRequired        bool                          `json:"modelRequired"`
 	SupportsModelListing bool                          `json:"supportsModelListing"`
+	KnownModels          []SystemOneKnownModelDTO      `json:"knownModels,omitempty"`
 	AuthModes            []SystemOneAdapterAuthModeDTO `json:"authModes"`
 	AllowedSecretNames   []string                      `json:"allowedSecretNames,omitempty"`
 	DefaultSecretName    string                        `json:"defaultSecretName,omitempty"`
@@ -455,6 +478,16 @@ func (s *Server) handleAdminSystemOneAdapters(w http.ResponseWriter, r *http.Req
 			SupportsModelListing: supportsModelListing,
 			AuthModes:            authModes,
 		}
+		if knownModels := systemoneprovider.KnownModelsFor(adapter); len(knownModels) > 0 {
+			dto.KnownModels = make([]SystemOneKnownModelDTO, 0, len(knownModels))
+			for _, m := range knownModels {
+				dto.KnownModels = append(dto.KnownModels, SystemOneKnownModelDTO{
+					ID:          m.ID,
+					DisplayName: m.DisplayName,
+					Source:      m.Source,
+				})
+			}
+		}
 		if len(allowedSecretNames) > 0 {
 			dto.AllowedSecretNames = slices.Clone(allowedSecretNames)
 			dto.AllowedSecretScopes = systemoneprovider.SecretRefScopes()
@@ -568,6 +601,12 @@ func (s *Server) handleAdminSystemOneInstanceByName(w http.ResponseWriter, r *ht
 			return
 		}
 		s.probeSystemOneInstance(w, r, name, user)
+	case "projects":
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.listSystemOneInstanceProjects(w, r, name)
 	default:
 		NotFound(w, "route")
 	}
@@ -1240,6 +1279,39 @@ func (s *Server) getSystemOneInstance(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 	writeJSON(w, http.StatusOK, s.toSystemOneInstanceResponse(r.Context(), inst))
+}
+
+func (s *Server) listSystemOneInstanceProjects(w http.ResponseWriter, r *http.Request, name string) {
+	if !store.IsValidSystemOneInstanceName(name) {
+		NotFound(w, "system_one_instance")
+		return
+	}
+	ctx := r.Context()
+	inst, err := s.store.GetSystemOneInstanceByName(ctx, name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "system_one_instance")
+			return
+		}
+		InternalError(w)
+		return
+	}
+	refs, err := s.store.ListSystemOneInstanceProjects(ctx, inst.Name)
+	if err != nil {
+		InternalError(w)
+		return
+	}
+	projects := make([]SystemOneInstanceProjectRefDTO, 0, len(refs))
+	for _, ref := range refs {
+		projects = append(projects, SystemOneInstanceProjectRefDTO{
+			ID:   ref.ID,
+			Name: ref.Name,
+		})
+	}
+	writeJSON(w, http.StatusOK, ListSystemOneInstanceProjectsResponse{
+		Instance: inst.Name,
+		Projects: projects,
+	})
 }
 
 func (s *Server) deleteSystemOneInstance(w http.ResponseWriter, r *http.Request, name string, user UserIdentity) {

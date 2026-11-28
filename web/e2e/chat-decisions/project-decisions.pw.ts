@@ -460,7 +460,7 @@ test.describe('Project Decisions page on real hub (web.decisions)', () => {
           /\/api\/v1\/decisions\/[^/]+\/answer$/.test(res.url())
       );
 
-      await dmCardTab1Purged.locator('sl-button[data-choice="rotate"]').click();
+      await dmCardTab1Purged.locator('button[data-choice="rotate"]').click();
 
       const [answerReq, answerRes] = await Promise.all([answerReqPromise, answerResPromise]);
       expect(answerRes.status()).toBe(200);

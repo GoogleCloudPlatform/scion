@@ -467,22 +467,28 @@ export class ReviewController {
   }
 
   /**
-   * Opens md; false when it cannot be shown in this editor. Every mark of
-   * the opened text is earlier (design E6): a mark is the reviewer's own
-   * only if it is made in this editor after this load. A composition still
-   * pending from the previous text is dropped.
+   * Opens md; false when it cannot be shown in this editor. When base is
+   * provided (the unmodified base version text), marks absent from base are
+   * restored as this reviewer's own (editable); when omitted, every mark of
+   * the opened text is earlier (read-only). A composition still pending from
+   * the previous text is dropped.
    */
-  load(md: string): boolean {
+  load(md: string, base?: string): boolean {
     if (this.endedTimer) clearTimeout(this.endedTimer);
     this.endedTimer = null;
     this.composing = null;
     this.ended = null;
     this.loading = true;
     try {
-      return this.session.load(md);
+      return this.session.load(md, base);
     } finally {
       this.loading = false;
     }
+  }
+
+  /** Whether the last load(md, base) failed closed due to unmarked edits against a marked base. */
+  get baseFailClosed(): boolean {
+    return this.session.baseFailClosed;
   }
 
   /**

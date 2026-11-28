@@ -627,6 +627,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 							"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
 					}
 				}
+				s.InvalidatePooledGroupCacheForUser(user.ID)
 				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
 		}
@@ -771,6 +772,10 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxAuthLogoutBodyBytes bounds POST /api/v1/auth/logout, a public route
+// (RoutePublic) that accepts at most an optional refreshToken JSON object.
+const maxAuthLogoutBodyBytes int64 = 4 << 10
+
 // handleAuthLogout handles POST /api/v1/auth/logout.
 // In proxy mode, this is a no-op (the proxy owns the session).
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
@@ -781,7 +786,14 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req AuthLogoutRequest
-	_ = json.NewDecoder(r.Body).Decode(&req) // Empty body is fine for logout.
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAuthLogoutBodyBytes)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body exceeds maximum size", nil)
+			return
+		}
+		// Empty or non-JSON body is fine for logout.
+	}
 
 	// TODO: In production, add the refresh token to a blacklist
 	// For now, just acknowledge the logout
@@ -1804,7 +1816,11 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		ensureSuperAdminBinding: s.ensureSuperAdminBinding,
 		deleteSuperAdminBinding: s.deleteSuperAdminBinding,
 		syncGrants: func(ctx context.Context, userID, role string) error {
-			return syncHubRoleGrants(ctx, s.store, userID, role, store.SystemReconcileCreatedBy)
+			err := syncHubRoleGrants(ctx, s.store, userID, role, store.SystemReconcileCreatedBy)
+			if err == nil {
+				s.InvalidatePooledGroupCacheForUser(userID)
+			}
+			return err
 		},
 		applyDefaultGrants: func(ctx context.Context, userID, role string) error {
 			return applyDefaultUserRoleGrants(ctx, s.store, userID, role, s.DefaultUserRole(), s.CustomDefaultRoleEnabled())

@@ -58,8 +58,16 @@ func (TriggerFire) Fields() []ent.Field {
 		field.String("action_type").
 			NotEmpty().
 			Immutable(),
+		field.Int("action_index").
+			Default(0).
+			Immutable(),
 		field.String("status").
 			Default("firing"),
+		field.String("rate_decision").
+			Default("").
+			MaxLen(16),
+		field.Bool("counter_flushed").
+			Default(false),
 		field.String("error").
 			Optional(),
 		field.String("result_ref").
@@ -116,9 +124,9 @@ func (TriggerFire) Edges() []ent.Edge {
 func (TriggerFire) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("trigger_id", "created"),
-		index.Fields("event_id", "trigger_id").
+		index.Fields("event_id", "trigger_id", "action_index").
 			Unique(),
-		index.Fields("trigger_id", "subject", "status"),
+		index.Fields("trigger_id", "action_index", "subject", "status"),
 		index.Fields("status", "lease_until"),
 		index.Fields("target_agent_id", "status"),
 		index.Fields("project_id", "status"),

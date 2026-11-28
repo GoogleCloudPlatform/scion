@@ -1633,6 +1633,7 @@ type V1ServerConfig struct {
 	Env      string               `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Hub      *V1ServerHubConfig   `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
 	Relay    *V1ServerRelayConfig `json:"relay,omitempty" yaml:"relay,omitempty" koanf:"relay"`
+	MCP      *V1ServerMCPConfig   `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Broker   *V1BrokerConfig      `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
 	Database *V1DatabaseConfig    `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
 	Auth     *V1AuthConfig        `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
@@ -2306,6 +2307,20 @@ type V1ServerRelayConfig struct {
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
 	// Singleton asserts a non-HA singleton relay (required on Cloud Run).
 	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
+}
+
+// V1ServerMCPConfig holds the MCP server listener settings in settings.yaml
+// format (server.mcp; ptone/scion#8137).
+type V1ServerMCPConfig struct {
+	Enabled                bool     `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Host                   string   `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	Port                   int      `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Path                   string   `json:"path,omitempty" yaml:"path,omitempty" koanf:"path"`
+	PublicURL              string   `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	HubEndpoint            string   `json:"hub_endpoint,omitempty" yaml:"hub_endpoint,omitempty" koanf:"hub_endpoint"`
+	AllowedOrigins         []string `json:"allowed_origins,omitempty" yaml:"allowed_origins,omitempty" koanf:"allowed_origins"`
+	MaxStreamsPerPrincipal int      `json:"max_streams_per_principal,omitempty" yaml:"max_streams_per_principal,omitempty" koanf:"max_streams_per_principal"`
+	StreamWait             string   `json:"stream_wait,omitempty" yaml:"stream_wait,omitempty" koanf:"stream_wait"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -3121,8 +3136,8 @@ type V1ServerHubChatSearchConfig struct {
 	MaxConcurrent *int `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty" koanf:"max_concurrent"`
 }
 
-// V1ServerHubUploadsConfig holds web upload limits (server.hub.uploads), in
-// bytes. Zero or unset means the default. Read at startup.
+// V1ServerHubUploadsConfig holds web upload limits and resumable chunked-upload
+// settings (server.hub.uploads). Zero or unset means the compiled default.
 type V1ServerHubUploadsConfig struct {
 	// MaxAttachmentSize is the per-file limit of a chat attachment stored by
 	// the hub's attachment store (default 10 MiB).
@@ -3130,6 +3145,18 @@ type V1ServerHubUploadsConfig struct {
 	// MaxWorkspaceFileSize is the per-file limit of a project workspace or
 	// shared directory upload (default 50 MiB).
 	MaxWorkspaceFileSize int64 `json:"max_workspace_file_size,omitempty" yaml:"max_workspace_file_size,omitempty" koanf:"max_workspace_file_size"`
+	// ChunkBytes is the maximum size of a single resumable upload chunk (1–16 MiB, default 8 MiB).
+	ChunkBytes *int64 `json:"chunk_bytes,omitempty" yaml:"chunk_bytes,omitempty" koanf:"chunk_bytes"`
+	// SessionIdleTTL is the idle expiration duration for upload sessions (5m–24h, default 1h).
+	SessionIdleTTL string `json:"session_idle_ttl,omitempty" yaml:"session_idle_ttl,omitempty" koanf:"session_idle_ttl"`
+	// SessionMaxLifetime is the hard lifetime cap for upload sessions (>= session_idle_ttl, <= 7d, default 24h).
+	SessionMaxLifetime string `json:"session_max_lifetime,omitempty" yaml:"session_max_lifetime,omitempty" koanf:"session_max_lifetime"`
+	// MaxSessionsPerUser caps concurrent active upload sessions per user (1–64, default 4).
+	MaxSessionsPerUser *int `json:"max_sessions_per_user,omitempty" yaml:"max_sessions_per_user,omitempty" koanf:"max_sessions_per_user"`
+	// MaxPendingBytesPerUser caps total declared bytes across a user's active sessions (default 2 GiB).
+	MaxPendingBytesPerUser *int64 `json:"max_pending_bytes_per_user,omitempty" yaml:"max_pending_bytes_per_user,omitempty" koanf:"max_pending_bytes_per_user"`
+	// MaxPendingBytesHub caps total declared bytes across all sessions holding staging on the hub (default 16 GiB).
+	MaxPendingBytesHub *int64 `json:"max_pending_bytes_hub,omitempty" yaml:"max_pending_bytes_hub,omitempty" koanf:"max_pending_bytes_hub"`
 }
 
 // V1CORSConfig holds CORS settings for server endpoints.
@@ -3195,6 +3222,8 @@ type V1TelemetryRetentionConfig struct {
 	HourlyRollupsDays *int   `json:"hourly_rollups_days,omitempty" yaml:"hourly_rollups_days,omitempty" koanf:"hourly_rollups_days"`
 	DailyRollupsDays  *int   `json:"daily_rollups_days,omitempty" yaml:"daily_rollups_days,omitempty" koanf:"daily_rollups_days"`
 	ScopeCountersDays *int   `json:"scope_counters_days,omitempty" yaml:"scope_counters_days,omitempty" koanf:"scope_counters_days"`
+	GroupRollupsDays  *int   `json:"group_rollups_days,omitempty" yaml:"group_rollups_days,omitempty" koanf:"group_rollups_days"`
+	BudgetStateDays   *int   `json:"budget_state_days,omitempty" yaml:"budget_state_days,omitempty" koanf:"budget_state_days"`
 	MeterHealthDays   *int   `json:"meter_health_days,omitempty" yaml:"meter_health_days,omitempty" koanf:"meter_health_days"`
 	SweepInterval     string `json:"sweep_interval,omitempty" yaml:"sweep_interval,omitempty" koanf:"sweep_interval"`
 	BatchSize         *int   `json:"batch_size,omitempty" yaml:"batch_size,omitempty" koanf:"batch_size"`
@@ -3330,37 +3359,46 @@ type V1SubstrateConfig struct {
 	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
 	// "api.ate-system.svc:443".
 	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
-	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
-	// to reach an actor's control server, e.g.
-	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
-	// required), not a bare host:port. This hop is plain HTTP: CAFile and
-	// ClusterTrustBundle below apply only to the ateapi Control gRPC dial
-	// (APIEndpoint), not to this one, and there is no separate TLS setting
-	// for it (see substrate-runtime.md §10).
+	// RouterEndpoint is the atenet-router HTTPS endpoint the broker uses to
+	// reach an actor's port 80 (the control server), e.g.
+	// "https://atenet-router.ate-system.svc" (Service port 443). Used as a
+	// base URL (scheme required), not a bare host:port. Substrate v1's
+	// router serves only mTLS: see RouterCAFile, RouterClientCertFile and
+	// RouterServerName. Other actor ports go through RouterConnectEndpoint.
 	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
 	// TokenAudience is the audience requested for the in-cluster
 	// ServiceAccount TokenRequest used to authenticate to the ateapi
 	// Control API. Defaults to "api.ate-system.svc" when empty.
 	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
 	// CAFile is a path to a PEM CA bundle used to verify the ateapi Control
-	// gRPC server certificate.
+	// gRPC server certificate (re-read when its content changes), and
+	// atenet-router when RouterCAFile is unset. When both this and
+	// ClusterTrustBundle are empty, the dialer pools live
+	// servicedns.podcert.ate.dev/identity ClusterTrustBundles.
 	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
 	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
-	// holding the CA used to verify the ateapi Control gRPC server
-	// certificate. When both this and CAFile are set, the dialer prefers
-	// ClusterTrustBundle.
+	// (certificates.k8s.io/v1, falling back to v1beta1, refreshed
+	// periodically) holding the CA used to verify ateapi (and atenet-router
+	// when RouterCAFile is unset). When both this and CAFile are set, the
+	// dialer prefers ClusterTrustBundle.
 	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
-	// SandboxClass selects the actor sandbox isolation technology
-	// ("gvisor" or "microvm"). Defaults to "gvisor" when empty.
+	// SandboxClass is deprecated and rejected by validation: Substrate v1
+	// takes the sandbox class from the WorkerPool's spec.sandboxClasses,
+	// selected through WorkerSelector. Kept so an old settings file fails
+	// with a message naming the replacement instead of a schema error.
 	SandboxClass string `json:"sandbox_class,omitempty" yaml:"sandbox_class,omitempty" koanf:"sandbox_class"`
-	// SandboxConfigName names the Substrate SandboxConfig CRD instance used
-	// by actor templates.
+	// SandboxConfigName is deprecated and rejected by validation: Substrate
+	// v1 takes the SandboxConfig from the WorkerPool's
+	// spec.sandboxClasses[].configRef, selected through WorkerSelector.
 	SandboxConfigName string `json:"sandbox_config_name,omitempty" yaml:"sandbox_config_name,omitempty" koanf:"sandbox_config_name"`
 	// WorkerSelector is copied into the ActorTemplate's workerSelector, to
 	// pin actors to a labeled WorkerPool.
 	WorkerSelector map[string]string `json:"worker_selector,omitempty" yaml:"worker_selector,omitempty" koanf:"worker_selector"`
-	// SnapshotStorage is the configured bucket/prefix used for the
-	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
+	// SnapshotStorage is the bucket/prefix sent as the ActorTemplate's
+	// snapshot_config.storage_location, e.g. "gs://bucket/prefix/".
+	// Substrate v1 accepts it only with its PerTemplateSnapshotLocation
+	// preview gate on; leave it empty to use the ate-api server's
+	// --snapshot-location.
 	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
 	// EgressAllow lists additional hostnames allowed through the per-actor
 	// EgressPolicy, beyond the hub/git/model/telemetry hosts the runtime
@@ -3396,8 +3434,8 @@ type V1SubstrateConfig struct {
 	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
 	// EgressTrustBundle names a Substrate trust bundle to project into every
 	// actor as a system-info volume, so the actor can validate the egress
-	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
-	// Substrate d277088b).
+	// gateway's own TLS certificate (docs/guides/egress-trust-bundle.md in
+	// agent-substrate/substrate).
 	//
 	// Required iff the cluster runs the sdsmint egress gateway
 	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
@@ -3412,16 +3450,38 @@ type V1SubstrateConfig struct {
 	// Empty (the default) is off, and off is byte-identical to today: no
 	// system-info volume, no mount, no env. Validated by
 	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
-	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
-	// supports. Kept as a string validated against a one-name allowlist,
-	// not a bool, deliberately: it mirrors Substrate's own
-	// trustBundle.name, and a future additional name needs only an
-	// allowlist entry here, not a schema change.
+	// "egress-mitm.ate.dev", the only egress-MITM trust bundle name
+	// scion/Substrate supports. Kept as a string validated against a one-name
+	// allowlist, not a bool, deliberately: it mirrors Substrate's own
+	// trustBundle.names, and a future additional name needs only an allowlist
+	// entry here, not a schema change.
 	EgressTrustBundle string `json:"egress_trust_bundle,omitempty" yaml:"egress_trust_bundle,omitempty" koanf:"egress_trust_bundle"`
 	// TemplateReadyTimeout bounds how long Run waits for a newly created
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
 	// Defaults to 10 minutes when empty.
 	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+	// RouterCAFile is a PEM CA bundle verifying the atenet-router serving
+	// certificate. Empty uses the ateapi trust source (cluster_trust_bundle,
+	// ca_file, or the servicedns ClusterTrustBundles).
+	RouterCAFile string `json:"router_ca_file,omitempty" yaml:"router_ca_file,omitempty" koanf:"router_ca_file"`
+	// RouterClientCertFile is the PEM credential bundle (certificate chain
+	// and private key) presented to atenet-router for mTLS. Re-read on every
+	// handshake. Defaults to
+	// "/run/podidentity.podcert.ate.dev/credential-bundle.pem".
+	RouterClientCertFile string `json:"router_client_cert_file,omitempty" yaml:"router_client_cert_file,omitempty" koanf:"router_client_cert_file"`
+	// RouterServerName is the TLS server name verified on atenet-router.
+	// Defaults to router_endpoint's host.
+	RouterServerName string `json:"router_server_name,omitempty" yaml:"router_server_name,omitempty" koanf:"router_server_name"`
+	// RouterConnectEndpoint is the atenet-router CONNECT-over-TLS
+	// "host:port" used for actor ports other than 80. Defaults to
+	// router_endpoint's host on port 8444.
+	RouterConnectEndpoint string `json:"router_connect_endpoint,omitempty" yaml:"router_connect_endpoint,omitempty" koanf:"router_connect_endpoint"`
+	// APIClientCertFile is an optional PEM credential bundle presented to
+	// ateapi for mTLS. When ateapi accepts the client certificate, it
+	// authenticates the broker by its SPIFFE pod identity instead of the
+	// bearer token; TokenRequest RBAC remains required because substrate.Dial
+	// still attaches per-RPC ServiceAccount token credentials alongside mTLS.
+	APIClientCertFile string `json:"api_client_cert_file,omitempty" yaml:"api_client_cert_file,omitempty" koanf:"api_client_cert_file"`
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
@@ -4897,10 +4957,25 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		if u := v1.Hub.Uploads; u != nil {
-			gc.Hub.Uploads = HubUploadsConfig{
+			up := HubUploadsConfig{
 				MaxAttachmentSize:    u.MaxAttachmentSize,
 				MaxWorkspaceFileSize: u.MaxWorkspaceFileSize,
+				SessionIdleTTL:       u.SessionIdleTTL,
+				SessionMaxLifetime:   u.SessionMaxLifetime,
 			}
+			if u.ChunkBytes != nil {
+				up.ChunkBytes = *u.ChunkBytes
+			}
+			if u.MaxSessionsPerUser != nil {
+				up.MaxSessionsPerUser = *u.MaxSessionsPerUser
+			}
+			if u.MaxPendingBytesPerUser != nil {
+				up.MaxPendingBytesPerUser = *u.MaxPendingBytesPerUser
+			}
+			if u.MaxPendingBytesHub != nil {
+				up.MaxPendingBytesHub = *u.MaxPendingBytesHub
+			}
+			gc.Hub.Uploads = up
 		}
 		if v1.Hub.GCPIAMCheckMode != "" {
 			gc.Hub.GCPIAMCheckMode = v1.Hub.GCPIAMCheckMode
@@ -5043,6 +5118,36 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 
 	if r := v1.Relay; r != nil {
 		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
+	}
+
+	if m := v1.MCP; m != nil {
+		gc.MCP.Enabled = m.Enabled
+		if m.Host != "" {
+			gc.MCP.Host = m.Host
+		}
+		if m.Port != 0 {
+			gc.MCP.Port = m.Port
+		}
+		if m.Path != "" {
+			gc.MCP.Path = m.Path
+		}
+		if m.PublicURL != "" {
+			gc.MCP.PublicURL = m.PublicURL
+		}
+		if m.HubEndpoint != "" {
+			gc.MCP.HubEndpoint = m.HubEndpoint
+		}
+		if len(m.AllowedOrigins) > 0 {
+			gc.MCP.AllowedOrigins = append([]string(nil), m.AllowedOrigins...)
+		}
+		if m.MaxStreamsPerPrincipal > 0 {
+			gc.MCP.MaxStreamsPerPrincipal = m.MaxStreamsPerPrincipal
+		}
+		if m.StreamWait != "" {
+			if d, err := time.ParseDuration(m.StreamWait); err == nil {
+				gc.MCP.StreamWait = d
+			}
+		}
 	}
 
 	// Broker config
@@ -5457,10 +5562,29 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1Hub.Chat = &V1ServerHubChatConfig{Search: cs}
 	}
 	if u := gc.Hub.Uploads; !u.IsZero() {
-		v1Hub.Uploads = &V1ServerHubUploadsConfig{
+		v1Up := &V1ServerHubUploadsConfig{
 			MaxAttachmentSize:    u.MaxAttachmentSize,
 			MaxWorkspaceFileSize: u.MaxWorkspaceFileSize,
+			SessionIdleTTL:       u.SessionIdleTTL,
+			SessionMaxLifetime:   u.SessionMaxLifetime,
 		}
+		if u.ChunkBytes > 0 {
+			v := u.ChunkBytes
+			v1Up.ChunkBytes = &v
+		}
+		if u.MaxSessionsPerUser > 0 {
+			v := u.MaxSessionsPerUser
+			v1Up.MaxSessionsPerUser = &v
+		}
+		if u.MaxPendingBytesPerUser > 0 {
+			v := u.MaxPendingBytesPerUser
+			v1Up.MaxPendingBytesPerUser = &v
+		}
+		if u.MaxPendingBytesHub > 0 {
+			v := u.MaxPendingBytesHub
+			v1Up.MaxPendingBytesHub = &v
+		}
+		v1Hub.Uploads = v1Up
 	}
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
@@ -5599,6 +5723,22 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	v1.Hub = v1Hub
 	if r := gc.Relay; !r.IsZero() {
 		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
+	}
+	if m := gc.MCP; !m.IsZero() {
+		v1MCP := &V1ServerMCPConfig{
+			Enabled:                m.Enabled,
+			Host:                   m.Host,
+			Port:                   m.Port,
+			Path:                   m.Path,
+			PublicURL:              m.PublicURL,
+			HubEndpoint:            m.HubEndpoint,
+			AllowedOrigins:         append([]string(nil), m.AllowedOrigins...),
+			MaxStreamsPerPrincipal: m.MaxStreamsPerPrincipal,
+		}
+		if m.StreamWait > 0 {
+			v1MCP.StreamWait = m.StreamWait.String()
+		}
+		v1.MCP = v1MCP
 	}
 
 	// Broker config

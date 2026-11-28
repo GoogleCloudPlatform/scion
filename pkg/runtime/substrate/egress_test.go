@@ -881,3 +881,81 @@ func TestEgressAllowCovers(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_DeprecatedSandboxFields(t *testing.T) {
+	for _, sc := range []*config.V1SubstrateConfig{
+		{SandboxClass: "gvisor"},
+		{SandboxConfigName: "gvisor-config"},
+	} {
+		err := Validate(sc)
+		if err == nil {
+			t.Fatalf("Validate(%+v) = nil, want a deprecation error", sc)
+		}
+		for _, want := range []string{"spec.sandboxClasses[].configRef", "worker_selector", "WorkerPool"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Validate(%+v) error = %q, want it to name %q", sc, err, want)
+			}
+		}
+	}
+}
+
+func TestValidate_RouterEndpointRequiresHTTPS(t *testing.T) {
+	for _, okURL := range []string{
+		"",
+		"https://atenet-router.ate-system.svc",
+		"https://atenet-router.ate-system.svc:443",
+		"HTTPS://atenet-router.ate-system.svc",
+	} {
+		if err := Validate(&config.V1SubstrateConfig{RouterEndpoint: okURL}); err != nil {
+			t.Errorf("Validate(RouterEndpoint=%q) = %v, want nil", okURL, err)
+		}
+	}
+	for _, badURL := range []string{
+		"http://atenet-router.ate-system.svc:80",
+		"http://atenet-router.ate-system.svc",
+		"atenet-router.ate-system.svc:443",
+		"https://",
+		"ftp://atenet-router.ate-system.svc",
+	} {
+		err := Validate(&config.V1SubstrateConfig{RouterEndpoint: badURL})
+		if err == nil || !strings.Contains(err.Error(), "router_endpoint") || !strings.Contains(err.Error(), "https://") {
+			t.Errorf("Validate(RouterEndpoint=%q) = %v, want error naming router_endpoint and https://", badURL, err)
+		}
+	}
+}
+
+func TestValidate_RouterConnectEndpoint(t *testing.T) {
+	for _, okAddr := range []string{
+		"",
+		"   ",
+		"atenet-router.ate-system.svc:8444",
+		"  atenet-router.ate-system.svc:8444  ",
+		"[fd00::1]:8444",
+		"127.0.0.1:1",
+		"atenet-router.ate-system.svc:65535",
+	} {
+		if err := Validate(&config.V1SubstrateConfig{RouterConnectEndpoint: okAddr}); err != nil {
+			t.Errorf("Validate(RouterConnectEndpoint=%q) = %v, want nil", okAddr, err)
+		}
+	}
+	for _, badAddr := range []string{
+		"https://atenet-router.ate-system.svc:8444",
+		"http://atenet-router.ate-system.svc:8444",
+		"https://atenet-router.ate-system.svc",
+		"atenet-router.ate-system.svc",
+		":8444",
+		"[]:8444",
+		"atenet-router.ate-system.svc:",
+		"atenet-router.ate-system.svc:0",
+		"atenet-router.ate-system.svc:65536",
+		"atenet-router.ate-system.svc:-1",
+		"atenet-router.ate-system.svc:+8444",
+		"atenet-router.ate-system.svc:abc",
+		"atenet-router.ate-system.svc/path:8444",
+	} {
+		err := Validate(&config.V1SubstrateConfig{RouterConnectEndpoint: badAddr})
+		if err == nil || !strings.Contains(err.Error(), "router_connect_endpoint") {
+			t.Errorf("Validate(RouterConnectEndpoint=%q) = %v, want error naming router_connect_endpoint", badAddr, err)
+		}
+	}
+}

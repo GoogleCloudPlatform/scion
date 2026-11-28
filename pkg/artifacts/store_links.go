@@ -109,10 +109,11 @@ func (s *sqlStore) ResolveLink(ctx context.Context, tokenHash string, now time.T
 		g.id, g.subject_ref, g.permission, g.expires_at, g.created_by_ref, g.created_at
 		FROM artifact_grant g JOIN artifact a ON a.id = g.artifact_id
 		WHERE g.subject_kind = ? AND g.subject_ref = ? AND g.permission = ?
+		AND (g.created_by_ref IS NULL OR g.created_by_ref NOT IN (?, ?))
 		AND g.expires_at > ?
 		AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)
 		AND a.current_seq IS NOT NULL AND `+notAttachmentScope("a.scope_kind")),
-		SubjectLink, tokenHash, GrantRead, at, at).Scan(
+		SubjectLink, tokenHash, GrantRead, SponsorReviewCreator, BoundedReviewCreator, at, at).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
 		&expires, &created, &updated,
 		&g.ID, &g.SubjectRef, &g.Permission, &gExpires, &by, &gCreated)
@@ -140,8 +141,9 @@ func (s *sqlStore) LinkActive(ctx context.Context, artifactID, linkID string, no
 	var n int
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant
 		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND permission = ?
+		AND (created_by_ref IS NULL OR created_by_ref NOT IN (?, ?))
 		AND expires_at > ?`),
-		linkID, artifactID, SubjectLink, GrantRead, s.timeArg(now)).Scan(&n)
+		linkID, artifactID, SubjectLink, GrantRead, SponsorReviewCreator, BoundedReviewCreator, s.timeArg(now)).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("artifacts: check link: %w", err)
 	}

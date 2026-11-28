@@ -86,12 +86,19 @@ func ResolveRunAttributionHarness(ac *AgentAppliedConfig, ec *AgentEffectiveConf
 	return ""
 }
 
-// Usage ledger scope kinds for usage_scope_counters_daily.
+// Usage ledger scope kinds for usage_scope_counters_daily and usage_budget_state.
 const (
 	UsageScopeKindProject     = "project"
 	UsageScopeKindUser        = "user"
 	UsageScopeKindUserProject = "user_project"
+	UsageScopeKindGroup       = "group"
 	UsageScopeKindGlobal      = "global"
+)
+
+// Usage group rollup origins for usage_group_rollups_daily (§4.2 item 5, §4.3).
+const (
+	UsageGroupRollupOriginIngest = "ingest"
+	UsageGroupRollupOriginSeed   = "seed"
 )
 
 // UsageRollupHourlyCoverageSection is the system hub_settings section that
@@ -338,6 +345,13 @@ func (m *MeterHealth) RejectedRangesCoalesced() bool {
 	return span > m.RejectedCount
 }
 
+// TrajectoryCaptureStateFunc reports whether Track 2 trajectory capture is
+// currently enabled and whether projects are allowed to opt out below "full".
+// Called inside run_attribution creation transactions (must read in-memory Hub
+// state only — never issue DB queries — to avoid nested pool deadlocks on
+// single-writer SQLite).
+type TrajectoryCaptureStateFunc func() (enabled bool, allowProjectOptOut bool)
+
 // RunAttributionConfig configures atomic run_attribution writes on the store
 // (installed by the Hub when tokenomics.usage_ledger is enabled, cleared when
 // disabled).
@@ -523,7 +537,6 @@ type UsageCoverageFilter struct {
 // (deriveMeasurementStatus) without per-agent queries.
 type UsageCoverageBucket struct {
 	HarnessConfig       string
-	Harness             string
 	CapabilityProjectID string
 	IsRunning           bool
 	HasMeterHealth      bool
@@ -704,6 +717,7 @@ type UsageLedgerStore interface {
 	CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error)
 
 	UsageRetentionStore
+	UsageBudgetStore
 }
 
 // UsageExportCursor is the analytics export watermark for usage_events (P8).
@@ -777,4 +791,13 @@ type UsageRetentionStore interface {
 	// live (non-deleted) agent, and with no remaining usage_events or
 	// meter_health rows referencing the run (D8a rule).
 	SweepRunAttributionBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageBudgetStateBatch deletes up to batchSize closed
+	// usage_budget_state rows with window_end_utc < cutoff (never touching
+	// active windows).
+	SweepUsageBudgetStateBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageGroupRollupsDailyBatch deletes up to batchSize
+	// usage_group_rollups_daily rows with day_utc < cutoff.
+	SweepUsageGroupRollupsDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 }

@@ -420,6 +420,13 @@ func countsAcrossSubjects(limitName string) bool {
 	return limitName == store.LimitMaxAgentsPerProject
 }
 
+// pooledGroupLimit reports whether limitName is a pooled user-group token
+// budget limit (Tokenomics P3.3, §4.4).
+func pooledGroupLimit(limitName string) bool {
+	return limitName == store.LimitLLMTokensPerGroupDay ||
+		limitName == store.LimitLLMTokensPerGroupMonth
+}
+
 // countActive is Reserve's count of active reservations: the scope-wide
 // total for a limit counted across subjects, through the grouped per-scope
 // count, else the subject's own count in the scope.
@@ -724,6 +731,280 @@ func (qs *QuotaService) resolveEffectiveLimitWithSource(ctx context.Context, lim
 	}
 
 	return maxValue, true, nil
+}
+
+// ResolveEffectiveTokenLimit resolves the effective raw-token cap and breach
+// action for (limitDefID, subjectID, scopeType, scopeID) using the same
+// most-generous binding merge rule as ResolveEffectiveLimit:
+//   - If subjectID is non-empty, user bindings and direct group bindings are
+//     collected alongside system_default bindings; if subjectID is empty (e.g.
+//     project-pooled llm_tokens_per_project_* limits), only system_default
+//     bindings are collected.
+//   - If no matching binding exists, falls back to LimitDefinition.DefaultValue
+//     with action = pause_new (0 or negative means unlimited).
+//   - If ANY matching binding has Value <= 0, the effective limit is unlimited
+//     (0, pause_new).
+//   - Otherwise the maximum positive Value wins. A unique winning binding's
+//     token_action wins (NULL = pause_new). When multiple bindings tie for the
+//     same maximum positive Value, the most permissive token_action wins:
+//     notify_only > pause_new > suspend_and_pause.
+func (qs *QuotaService) ResolveEffectiveTokenLimit(ctx context.Context, limitDefID, subjectID, scopeType, scopeID string) (cap int64, action string, err error) {
+	cache := newTokenLimitEvalCache(qs)
+	return cache.resolveByID(ctx, limitDefID, subjectID, scopeType, scopeID)
+}
+
+// tokenLimitEvalCache caches system_default bindings and per-subject
+// user+group bindings within a single EvaluateIngestedEvents or
+// IsScopeExhaustedForAction call so evaluating all 6 raw-token limits for a
+// user/project does not repeat identical store queries.
+type tokenLimitEvalCache struct {
+	qs *QuotaService
+
+	defsLoaded bool
+	defsByName map[string]*store.LimitDefinition
+
+	sysLoaded   bool
+	sysBindings []*store.EntitlementBinding
+
+	subjectLoaded   map[string]bool
+	subjectBindings map[string][]*store.EntitlementBinding
+
+	groupLoaded   map[string]bool
+	groupBindings map[string][]*store.EntitlementBinding
+}
+
+func newTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
+	return &tokenLimitEvalCache{
+		qs:              qs,
+		subjectLoaded:   make(map[string]bool),
+		subjectBindings: make(map[string][]*store.EntitlementBinding),
+		groupLoaded:     make(map[string]bool),
+		groupBindings:   make(map[string][]*store.EntitlementBinding),
+	}
+}
+
+func (c *tokenLimitEvalCache) lookupLimitDef(ctx context.Context, name string) (*store.LimitDefinition, error) {
+	if !c.defsLoaded {
+		defs, err := c.qs.store.ListLimitDefinitions(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list limit definitions: %w", err)
+		}
+		c.defsByName = make(map[string]*store.LimitDefinition, len(defs))
+		for _, d := range defs {
+			c.defsByName[d.Name] = d
+		}
+		c.defsLoaded = true
+	}
+	return c.defsByName[name], nil
+}
+
+func (c *tokenLimitEvalCache) loadSystemBindings(ctx context.Context) []*store.EntitlementBinding {
+	if c.sysLoaded {
+		return c.sysBindings
+	}
+	sysBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectSystemDefault, "")
+	if err != nil {
+		if c.qs.logger != nil {
+			c.qs.logger.Debug("failed to list system default bindings for token budget resolution", "error", err)
+		}
+	} else {
+		c.sysBindings = sysBindings
+	}
+	c.sysLoaded = true
+	return c.sysBindings
+}
+
+func (c *tokenLimitEvalCache) loadSubjectBindings(ctx context.Context, subjectID string) ([]*store.EntitlementBinding, error) {
+	if subjectID == "" {
+		return nil, nil
+	}
+	if c.subjectLoaded[subjectID] {
+		return c.subjectBindings[subjectID], nil
+	}
+
+	userBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectUser, subjectID)
+	if err != nil {
+		return nil, fmt.Errorf("list user bindings: %w", err)
+	}
+	combined := make([]*store.EntitlementBinding, 0, len(userBindings))
+	combined = append(combined, userBindings...)
+
+	groupMemberships, err := c.qs.store.GetUserGroups(ctx, subjectID)
+	if err != nil {
+		if c.qs.logger != nil {
+			c.qs.logger.Debug("failed to get user groups for token budget resolution",
+				"subject_id", subjectID, "error", err)
+		}
+	} else {
+		for _, gm := range groupMemberships {
+			groupBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, gm.GroupID)
+			if err != nil {
+				if c.qs.logger != nil {
+					c.qs.logger.Debug("failed to list group bindings for token budget resolution",
+						"group_id", gm.GroupID, "error", err)
+				}
+				continue
+			}
+			combined = append(combined, groupBindings...)
+		}
+	}
+
+	c.subjectBindings[subjectID] = combined
+	c.subjectLoaded[subjectID] = true
+	return combined, nil
+}
+
+func (c *tokenLimitEvalCache) resolveByID(ctx context.Context, limitDefID, subjectID, scopeType, scopeID string) (int64, string, error) {
+	return c.resolve(ctx, limitDefID, nil, subjectID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) resolveForDef(ctx context.Context, def *store.LimitDefinition, subjectID, scopeType, scopeID string) (int64, string, error) {
+	return c.resolve(ctx, def.ID, def, subjectID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) resolve(ctx context.Context, limitDefID string, def *store.LimitDefinition, subjectID, scopeType, scopeID string) (int64, string, error) {
+	var matchingBindings []*store.EntitlementBinding
+
+	if subjectID != "" {
+		subjBindings, err := c.loadSubjectBindings(ctx, subjectID)
+		if err != nil {
+			return 0, store.TokenActionPauseNew, err
+		}
+		for _, b := range subjBindings {
+			if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
+				matchingBindings = append(matchingBindings, b)
+			}
+		}
+	}
+
+	for _, b := range c.loadSystemBindings(ctx) {
+		if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
+			matchingBindings = append(matchingBindings, b)
+		}
+	}
+
+	if len(matchingBindings) == 0 {
+		if def == nil {
+			var err error
+			def, err = c.qs.store.GetLimitDefinition(ctx, limitDefID)
+			if err != nil {
+				return 0, store.TokenActionPauseNew, fmt.Errorf("get limit definition: %w", err)
+			}
+		}
+		if def.DefaultValue <= 0 {
+			return 0, store.TokenActionPauseNew, nil
+		}
+		return def.DefaultValue, store.TokenActionPauseNew, nil
+	}
+
+	var maxValue int64
+	bestAction := ""
+	for _, b := range matchingBindings {
+		if b.Value <= 0 {
+			return 0, store.TokenActionPauseNew, nil
+		}
+		act := store.EffectiveTokenAction(b.TokenAction)
+		if b.Value > maxValue {
+			maxValue = b.Value
+			bestAction = act
+		} else if b.Value == maxValue {
+			if tokenActionPermissivenessRank(act) > tokenActionPermissivenessRank(bestAction) {
+				bestAction = act
+			}
+		}
+	}
+	if bestAction == "" {
+		bestAction = store.TokenActionPauseNew
+	}
+	return maxValue, bestAction, nil
+}
+
+// ResolveEffectiveGroupTokenLimit resolves the effective pooled raw-token cap
+// and breach action for (limitDefID, groupID) at exact scope (scopeType,
+// scopeID). Unlike per-user resolution, system-scoped ("system", "") and
+// project-scoped ("project", projectID) pools are evaluated independently and
+// do not fall back to system_default or LimitDefinition.DefaultValue; a group
+// with no matching binding is unlimited (0, pause_new).
+func (qs *QuotaService) ResolveEffectiveGroupTokenLimit(ctx context.Context, limitDefID, groupID, scopeType, scopeID string) (cap int64, action string, err error) {
+	cache := newTokenLimitEvalCache(qs)
+	return cache.resolveGroupByID(ctx, limitDefID, groupID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) loadGroupBindings(ctx context.Context, groupID string) ([]*store.EntitlementBinding, error) {
+	if groupID == "" {
+		return nil, nil
+	}
+	if c.groupLoaded[groupID] {
+		return c.groupBindings[groupID], nil
+	}
+	groupBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("list group bindings: %w", err)
+	}
+	c.groupBindings[groupID] = groupBindings
+	c.groupLoaded[groupID] = true
+	return groupBindings, nil
+}
+
+func (c *tokenLimitEvalCache) resolveGroupForDef(ctx context.Context, def *store.LimitDefinition, groupID, scopeType, scopeID string) (int64, string, error) {
+	return c.resolveGroupByID(ctx, def.ID, groupID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) resolveGroupByID(ctx context.Context, limitDefID, groupID, scopeType, scopeID string) (int64, string, error) {
+	if groupID == "" {
+		return 0, store.TokenActionPauseNew, nil
+	}
+	groupBindings, err := c.loadGroupBindings(ctx, groupID)
+	if err != nil {
+		return 0, store.TokenActionPauseNew, err
+	}
+
+	var matching []*store.EntitlementBinding
+	for _, b := range groupBindings {
+		if b.LimitDefinitionID == limitDefID && b.ScopeType == scopeType && b.ScopeID == scopeID {
+			matching = append(matching, b)
+		}
+	}
+	if len(matching) == 0 {
+		return 0, store.TokenActionPauseNew, nil
+	}
+
+	var maxValue int64
+	bestAction := ""
+	for _, b := range matching {
+		if b.Value <= 0 {
+			return 0, store.TokenActionPauseNew, nil
+		}
+		act := store.EffectiveTokenAction(b.TokenAction)
+		if b.Value > maxValue {
+			maxValue = b.Value
+			bestAction = act
+		} else if b.Value == maxValue {
+			if tokenActionPermissivenessRank(act) > tokenActionPermissivenessRank(bestAction) {
+				bestAction = act
+			}
+		}
+	}
+	if bestAction == "" {
+		bestAction = store.TokenActionPauseNew
+	}
+	return maxValue, bestAction, nil
+}
+
+// tokenActionPermissivenessRank orders breach actions from strictest (0) to
+// most permissive (2) for deterministic tie-breaking when multiple bindings
+// tie for the maximum positive cap: notify_only > pause_new > suspend_and_pause.
+func tokenActionPermissivenessRank(action string) int {
+	switch action {
+	case store.TokenActionNotifyOnly:
+		return 2
+	case store.TokenActionPauseNew:
+		return 1
+	case store.TokenActionSuspendAndPause:
+		return 0
+	default:
+		return 1
+	}
 }
 
 // Release marks resourceID's active reservation for limitName as released

@@ -48,6 +48,7 @@ type inboundMessageRequest struct {
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
+	LegacyRef   string `json:"legacy_ref,omitempty"`
 
 	// AttachmentIDs names attachments stored as artifacts that the sender
 	// uploaded (POST /api/v1/broker/inbound/attachments). Each must be an
@@ -97,8 +98,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req inboundMessageRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &req) {
 		return
 	}
 
@@ -341,7 +341,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		convResult, convErr := s.resolveBrokerInboundConversation(
 			r.Context(), log, agent.ProjectID,
 			req.Surface, req.ExternalRef, req.ParentRef, req.DisplayName, agent.ID,
-			req.Message.Channel, req.Message.ThreadID,
+			req.Message.Channel, req.LegacyRef, req.Message.ThreadID,
 		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {

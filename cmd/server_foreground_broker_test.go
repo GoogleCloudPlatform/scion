@@ -253,7 +253,7 @@ func TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart(t *test
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "attacker.net:443",
-					"router_endpoint": "http://attacker.net:80"
+					"router_endpoint": "https://attacker.net"
 				}
 			}
 		},
@@ -335,7 +335,7 @@ func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(
 func operatorSubstrateSettings(extraSubstrateFields string) string {
 	return operatorSubstrateSettingsWithBlock(`
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"` + extraSubstrateFields)
+					"router_endpoint": "https://atenet-router.ate-system.svc"` + extraSubstrateFields)
 }
 
 // operatorSubstrateSettingsWithBlock returns operator settings whose default
@@ -374,7 +374,7 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 		{
 			name: "missing api_endpoint",
 			settings: operatorSubstrateSettingsWithBlock(`
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"`),
+					"router_endpoint": "https://atenet-router.ate-system.svc"`),
 			wantInErrMsg: "api_endpoint is required",
 		},
 		{
@@ -382,6 +382,13 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 			settings: operatorSubstrateSettingsWithBlock(`
 					"api_endpoint": "api.ate-system.svc:443"`),
 			wantInErrMsg: "router_endpoint is required",
+		},
+		{
+			name: "plaintext router_endpoint rejected",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"`),
+			wantInErrMsg: "https://",
 		},
 		{
 			name: "substrate.Validate rejects egress_trust_bundle",

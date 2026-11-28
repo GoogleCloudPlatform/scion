@@ -36,9 +36,10 @@ import { criticToSentinels, renderCriticSentinels } from './critic.js';
 export interface MarkdownRenderOptions {
   /**
    * Keep only images the page's own origin serves (relative and
-   * same-origin URLs, and data: images). Images from any other host are
-   * replaced by their alt text, so showing the content makes the viewer's
-   * browser fetch nothing from elsewhere.
+   * same-origin URLs, and data: images). Off-origin http(s) images are
+   * replaced by links the viewer can open (or plain text if already inside
+   * a link or using another scheme), so showing the content makes the
+   * viewer's browser fetch nothing from elsewhere.
    */
   sameOriginImagesOnly?: boolean;
   /**
@@ -81,14 +82,56 @@ export function isSameOriginImageSrc(src: string, origin: string): boolean {
 }
 
 /**
- * Replaces every image in root not served by origin with its alt text.
+ * Resolves a raw image URL against origin and returns its canonical href
+ * when it uses http: or https:; returns null for any other scheme or
+ * invalid URL.
+ */
+function toHttpImageUrl(raw: string, origin: string): string | null {
+  const value = raw.trim();
+  if (value === '') return null;
+  try {
+    const parsed = new URL(value, origin + '/');
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.href;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Extracts the first URL token from an HTML srcset attribute value. */
+function firstSrcsetUrl(srcset: string): string {
+  const firstCandidate = (srcset.split(',')[0] ?? '').trim();
+  return firstCandidate.split(/\s+/)[0] ?? '';
+}
+
+/**
+ * Replaces every image in root not served by origin with an openable link
+ * (for http(s) URLs not already inside an anchor) or plain text (for other
+ * schemes or images nested inside an anchor).
  * Call it before the nodes join the page's document (see toInertFragment).
  */
 function dropOffOriginImages(root: DocumentFragment, origin: string): void {
+  const doc = root.ownerDocument;
   for (const img of Array.from(root.querySelectorAll('img'))) {
-    const src = img.getAttribute('src') ?? '';
+    const src = (img.getAttribute('src') ?? '').trim();
     if (img.hasAttribute('srcset') || !isSameOriginImageSrc(src, origin)) {
-      img.replaceWith(root.ownerDocument.createTextNode(img.getAttribute('alt') ?? ''));
+      const alt = img.getAttribute('alt') ?? '';
+      const candidate = src !== '' ? src : firstSrcsetUrl(img.getAttribute('srcset') ?? '');
+      const href = toHttpImageUrl(candidate, origin);
+      const label = alt.trim() !== '' ? alt : (href ?? alt);
+
+      if (href !== null && img.closest('a') === null) {
+        const link = doc.createElement('a');
+        link.setAttribute('href', href);
+        link.setAttribute('target', '_blank');
+        link.setAttribute('rel', 'noopener noreferrer');
+        link.textContent = label;
+        img.replaceWith(link);
+      } else {
+        img.replaceWith(doc.createTextNode(label));
+      }
     }
   }
 }

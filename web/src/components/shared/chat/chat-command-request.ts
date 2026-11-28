@@ -63,7 +63,6 @@ import {
 import {
   commandConfirmDialogStyles,
   execContainerAllowsRun,
-  renderCommandConfirmDialog,
   renderCommandScriptBlock,
   renderCommandWorkdirWarning,
   renderEscapedInlineValue,
@@ -192,10 +191,6 @@ export class ScionChatCommandRequest extends LitElement {
   @state()
   private liveDetail: CommandRequestDetailResponse | null = null;
 
-  /** Whether the confirm dialog (§4.7) is open. */
-  @state()
-  private confirmDialogOpen = false;
-
   /** Approver's current share-output selection (defaults to `request.shareOutputRequested`). */
   @state()
   private shareOutputChecked = false;
@@ -215,6 +210,10 @@ export class ScionChatCommandRequest extends LitElement {
   /** Lazy-loaded output state (feature-detected; active once P4 lands). */
   @state()
   private outputOpen = false;
+
+  /** Whether a >10-line script block is currently expanded. */
+  @state()
+  private scriptExpanded = false;
 
   @state()
   private outputLoading = false;
@@ -311,240 +310,12 @@ export class ScionChatCommandRequest extends LitElement {
       opacity: 0.72;
     }
 
-    .banner {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-      padding: 0.55rem 0.75rem;
-      border-radius: var(--scion-radius);
-      font-size: var(--chat-fs-sm, 0.875rem);
-      line-height: 1.4;
-    }
-
-    .banner sl-icon {
-      flex-shrink: 0;
-      margin-top: 0.15rem;
-      font-size: 1rem;
-    }
-
-    .banner.warning {
-      background: var(--scion-warning-bg);
-      border: 1px solid var(--scion-warning-border);
-      color: var(--scion-warning-text);
-    }
-
-    .banner.error {
-      background: var(--scion-error-bg);
-      border: 1px solid var(--scion-border);
-      color: var(--scion-error-text);
-    }
-
-    .banner.info {
-      background: var(--scion-bg-subtle);
-      border: 1px solid var(--scion-border);
-      color: var(--scion-text-secondary);
-    }
-
     .description {
       margin: 0;
       color: var(--scion-text);
       font-size: var(--chat-fs-base, 0.9375rem);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-    }
-
-    .script-wrap {
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
-      background: var(--scion-bg);
-      overflow: hidden;
-    }
-
-    .script-nonascii-note {
-      display: flex;
-      align-items: center;
-      gap: 0.45rem;
-      padding: 0.4rem 0.65rem;
-      background: var(--scion-warning-bg);
-      border-bottom: 1px solid var(--scion-warning-border);
-      color: var(--scion-warning-text);
-      font-size: 0.8125rem;
-    }
-
-    .script-nonascii-note sl-icon {
-      flex-shrink: 0;
-    }
-
-    .script-scroll {
-      overflow-x: hidden;
-      padding: 0.5rem 0;
-      font-family: var(--scion-font-mono);
-      font-size: 0.8125rem;
-      line-height: 1.5;
-      color: var(--scion-text);
-    }
-
-    .script-line {
-      display: flex;
-      align-items: baseline;
-      padding: 0 0.65rem 0 0;
-    }
-
-    .script-lineno {
-      user-select: none;
-      min-width: 2.5rem;
-      padding: 0 0.6rem 0 0.5rem;
-      text-align: right;
-      color: var(--scion-text-muted);
-      font-variant-numeric: tabular-nums;
-      flex-shrink: 0;
-    }
-
-    .script-code {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      min-width: 0;
-    }
-
-    .ws-token {
-      display: inline-block;
-      padding: 0 0.2rem;
-      margin: 0 0.05rem;
-      border-radius: var(--scion-radius-sm);
-      background: var(--scion-badge-neutral-bg);
-      color: var(--scion-text-muted);
-      font-size: 0.75rem;
-    }
-
-    .escape-token {
-      display: inline-block;
-      padding: 0 0.25rem;
-      margin: 0 0.05rem;
-      border-radius: var(--scion-radius-sm);
-      background: var(--scion-warning-bg);
-      border: 1px solid var(--scion-warning-border);
-      color: var(--scion-warning-text);
-      font-weight: 600;
-      font-size: 0.75rem;
-    }
-
-    .script-foot {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.5rem;
-      padding: 0.3rem 0.65rem;
-      border-top: 1px solid var(--scion-border);
-      background: var(--scion-bg-subtle);
-      color: var(--scion-text-muted);
-      font-size: 0.75rem;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .meta-grid {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.45rem 0.9rem;
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-secondary);
-    }
-
-    .meta-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      min-width: 0;
-    }
-
-    .meta-item sl-icon {
-      flex-shrink: 0;
-      font-size: 0.9rem;
-      color: var(--scion-text-muted);
-    }
-
-    .workdir-badge {
-      font: 500 0.8125rem/1.2 var(--scion-font-mono);
-      background: var(--scion-bg-subtle);
-      border: 1px solid var(--scion-border);
-      color: var(--scion-text);
-      padding: 0.1rem 0.4rem;
-      border-radius: var(--scion-radius-sm);
-      overflow-wrap: anywhere;
-    }
-
-    .workdir-badge.warn {
-      background: var(--scion-warning-bg);
-      border-color: var(--scion-warning-border);
-      color: var(--scion-warning-text);
-    }
-
-    .exec-container-line {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.4rem 0.6rem;
-      padding: 0.5rem 0.7rem;
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
-      background: var(--scion-bg);
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-secondary);
-    }
-
-    .exec-container-line sl-icon {
-      flex-shrink: 0;
-      color: var(--scion-text-muted);
-    }
-
-    .exec-container-name {
-      font-weight: 600;
-      color: var(--scion-text);
-    }
-
-    .exec-state-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.1rem 0.45rem;
-      border-radius: var(--scion-radius-sm);
-      font-size: 0.75rem;
-      font-weight: 600;
-      background: var(--scion-badge-neutral-bg);
-      color: var(--scion-badge-neutral-text);
-    }
-
-    .exec-state-chip.ready {
-      color: var(--scion-status-success);
-    }
-
-    .exec-state-chip.stopped,
-    .exec-state-chip.unavailable {
-      background: var(--scion-warning-bg);
-      color: var(--scion-warning-text);
-    }
-
-    .exec-container-note {
-      color: var(--scion-text-muted);
-      font-size: 0.8125rem;
-    }
-
-    .exec-container-link {
-      color: var(--scion-primary);
-      font-weight: 600;
-      text-decoration: none;
-    }
-
-    .exec-container-link:hover {
-      text-decoration: underline;
-    }
-
-    .share-output-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-secondary);
     }
 
     .run-section {
@@ -663,38 +434,6 @@ export class ScionChatCommandRequest extends LitElement {
       border-top: 1px solid var(--scion-border);
       background: var(--scion-bg);
     }
-
-    sl-dialog.confirm-dialog {
-      --sl-panel-background-color: var(--scion-surface);
-      --sl-panel-border-color: var(--scion-border);
-      --sl-color-neutral-700: var(--scion-text);
-    }
-
-    sl-dialog.confirm-dialog::part(panel) {
-      width: min(42rem, calc(100vw - 1.5rem));
-    }
-
-    .confirm-dialog-body {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-      font-size: var(--chat-fs-base, 0.9375rem);
-      color: var(--scion-text);
-    }
-
-    .confirm-sha {
-      font-family: var(--scion-font-mono);
-      font-size: 0.75rem;
-      color: var(--scion-text-muted);
-      overflow-wrap: anywhere;
-    }
-
-    .confirm-dialog-footer {
-      display: flex;
-      justify-content: flex-end;
-      gap: 0.5rem;
-      width: 100%;
-    }
   `;
 
   override connectedCallback(): void {
@@ -723,11 +462,11 @@ export class ScionChatCommandRequest extends LitElement {
         this.detailRefreshAbort = null;
         this.errorMessage = '';
         this.deniedReason = '';
-        this.confirmDialogOpen = false;
         this.approving = false;
         this.pendingApproveIdempotencyKey = '';
         this.pendingDismissIdempotencyKey = '';
         this.outputOpen = false;
+        this.scriptExpanded = false;
         this.outputLoading = false;
         this.outputText = '';
         this.outputError = '';
@@ -807,7 +546,6 @@ export class ScionChatCommandRequest extends LitElement {
     if (chosen === current) return false;
     this.localRequest = chosen;
     if (chosen.status !== 'pending') {
-      this.confirmDialogOpen = false;
       this.actionState.reconcileOpenDismissDialog();
     }
     return true;
@@ -856,17 +594,6 @@ export class ScionChatCommandRequest extends LitElement {
     this.applyRequestUpdate(freshReq);
   }
 
-  private openConfirmDialog(): void {
-    if (!this.canApproveNow || !this.execContainerAllowsApprove || this.approving) return;
-    this.errorMessage = '';
-    this.confirmDialogOpen = true;
-  }
-
-  private closeConfirmDialog(): void {
-    if (this.approving) return;
-    this.confirmDialogOpen = false;
-  }
-
   private onShareOutputChange(e: Event): void {
     this.shareOutputChecked = Boolean(
       (e.currentTarget as HTMLElement & { checked?: boolean })?.checked
@@ -911,7 +638,6 @@ export class ScionChatCommandRequest extends LitElement {
 
     if (result.ok) {
       this.pendingApproveIdempotencyKey = '';
-      this.confirmDialogOpen = false;
       const merged: CommandRequestView = { ...result.request, run: result.run };
       this.applyRequestUpdate(merged);
       this.dispatchEvent(
@@ -935,7 +661,6 @@ export class ScionChatCommandRequest extends LitElement {
         result.details,
         result.message
       );
-      this.confirmDialogOpen = false;
       return;
     }
 
@@ -1042,8 +767,17 @@ export class ScionChatCommandRequest extends LitElement {
     return renderEscapedInlineValue(value);
   }
 
+  private renderDescription(description: string): TemplateResult {
+    return html`<p class="description" data-testid="command-description">${description}</p>`;
+  }
+
   private renderScriptBlock(formatted: FormattedCommandScript): TemplateResult {
-    return renderCommandScriptBlock(formatted);
+    return renderCommandScriptBlock(formatted, {
+      expanded: this.scriptExpanded,
+      onToggle: (): void => {
+        this.scriptExpanded = !this.scriptExpanded;
+      },
+    });
   }
 
   private renderWorkdirWarning(
@@ -1174,30 +908,6 @@ ${this.outputText || '(no output)'}</pre
     }
   }
 
-  private renderConfirmDialog(
-    req: CommandRequestView,
-    formatted: FormattedCommandScript
-  ): TemplateResult {
-    return renderCommandConfirmDialog({
-      open: this.confirmDialogOpen,
-      label: 'Approve & run command',
-      confirmLabel: 'Approve & run',
-      formatted,
-      workdir: req.workdir ?? '',
-      workdirKind: resolveCommandWorkdirKind(req),
-      timeoutS: req.timeoutS,
-      sha256: req.commandSha256,
-      execContainer: this.execContainer,
-      execContainerAllowed: this.execContainerAllowsApprove,
-      shareOutputChecked: this.shareOutputChecked,
-      submitting: this.approving,
-      errorMessage: this.errorMessage,
-      onClose: () => this.closeConfirmDialog(),
-      onShareOutputChange: (e) => this.onShareOutputChange(e),
-      onConfirm: () => void this.handleConfirmApprove(),
-    });
-  }
-
   private renderDismissDialog(req: CommandRequestView): TemplateResult | typeof nothing {
     if (!this.detail?.canDismiss) return nothing;
     const reasonLen = [...this.actionState.dismissReasonDraft].length;
@@ -1298,35 +1008,39 @@ ${this.outputText || '(no output)'}</pre
                 </div>
               `
             : nothing}
-          ${req.description
-            ? html`<p class="description" data-testid="command-description">${req.description}</p>`
-            : nothing}
-          ${this.renderScriptBlock(formatted)}
+          <section class="command-section" data-testid="section-what-runs">
+            <div class="command-section-label">What Runs</div>
+            ${req.description ? this.renderDescription(req.description) : nothing}
+            ${this.renderScriptBlock(formatted)}
+          </section>
 
-          <div class="meta-grid">
-            <span class="meta-item">
-              <sl-icon name="folder" aria-hidden="true"></sl-icon>
-              <span>Workdir:</span>
-              <span
-                class="workdir-badge${workdirKind === 'workspace' || workdirKind === 'shared_dir'
-                  ? ' warn'
-                  : ''}"
-                data-testid="command-workdir"
-                >${this.renderEscapedInline(workdirLabel)}</span
-              >
-            </span>
-            <span class="meta-item" data-testid="command-timeout">
-              <sl-icon name="clock" aria-hidden="true"></sl-icon>
-              <span>Timeout: ${formatCommandTimeout(req.timeoutS)}</span>
-            </span>
-            <span class="meta-item" data-testid="command-approver">
-              <sl-icon name="person" aria-hidden="true"></sl-icon>
-              <span>Approver: ${approverLabel}</span>
-            </span>
-          </div>
+          <section class="command-section" data-testid="section-exec-env">
+            <div class="command-section-label">Execution Environment</div>
+            ${ec ? this.renderExecContainerLine(ec) : nothing}
+            <div class="meta-grid">
+              <span class="meta-item">
+                <sl-icon name="folder" aria-hidden="true"></sl-icon>
+                <span>Workdir:</span>
+                <span
+                  class="workdir-badge${workdirKind === 'workspace' || workdirKind === 'shared_dir'
+                    ? ' warn'
+                    : ''}"
+                  data-testid="command-workdir"
+                  >${this.renderEscapedInline(workdirLabel)}</span
+                >
+              </span>
+              <span class="meta-item" data-testid="command-timeout">
+                <sl-icon name="clock" aria-hidden="true"></sl-icon>
+                <span>Timeout: ${formatCommandTimeout(req.timeoutS)}</span>
+              </span>
+              <span class="meta-item" data-testid="command-approver">
+                <sl-icon name="person" aria-hidden="true"></sl-icon>
+                <span>Approver: ${approverLabel}</span>
+              </span>
+            </div>
+            ${this.renderWorkdirWarning(req, formatted)}
+          </section>
 
-          ${this.renderWorkdirWarning(req, formatted)}
-          ${ec ? this.renderExecContainerLine(ec) : nothing}
           ${req.status === 'pending' && this.canApproveNow
             ? html`
                 <div class="share-output-row">
@@ -1354,7 +1068,7 @@ ${this.outputText || '(no output)'}</pre
                 </div>
               `
             : nothing}
-          ${this.errorMessage && !this.confirmDialogOpen
+          ${this.errorMessage
             ? html`
                 <div class="banner error" role="alert" data-testid="command-error-banner">
                   <sl-icon name="exclamation-circle" aria-hidden="true"></sl-icon>
@@ -1390,20 +1104,21 @@ ${this.outputText || '(no output)'}</pre
                   class="approve-btn"
                   data-testid="approve-btn"
                   title=${this.approveDisabledHint}
+                  ?loading=${this.approving}
                   ?disabled=${!this.execContainerAllowsApprove ||
                   this.approving ||
                   this.actionState.dismissSubmitting}
-                  @click=${(): void => this.openConfirmDialog()}
+                  @click=${(): void => void this.handleConfirmApprove()}
                 >
                   <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                  Approve &amp; run…
+                  Approve &amp; run
                 </sl-button>
               </div>
             `
           : nothing}
       </div>
 
-      ${this.renderConfirmDialog(req, formatted)} ${this.renderDismissDialog(req)}
+      ${this.renderDismissDialog(req)}
     `;
   }
 }

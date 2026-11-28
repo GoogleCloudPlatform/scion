@@ -213,8 +213,10 @@ func (a *messageAction) Authorize(
 	// gate, so a refused or migrating fire resumes nothing. A target the hub
 	// suspended (ptone/scion#7826) wakes without the payload's wake flag and
 	// without the wake permission: the send authorization above suffices.
-	autoWake := s.autoWakeModeOf(agent) != autoWakeNone
-	wake := payload.Wake || autoWake
+	// When req.NoWake is set (e.g. failure notifications, Stage 2 §10), all
+	// wake paths are suppressed.
+	autoWake := !req.NoWake && s.autoWakeModeOf(agent) != autoWakeNone
+	wake := !req.NoWake && (payload.Wake || autoWake)
 	if wake && !autoWake {
 		if wakeErr := s.authorizeScheduledWake(ctx, auth, identity, agent); wakeErr != nil {
 			slog.Warn("Scheduler: scheduled message wake refused at fire time",
@@ -418,8 +420,11 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	// Render message-slot template for event fires before waking or queueing so
 	// template errors refuse the fire immediately without waking an offline
 	// target or parking a doomed fire (Stage 2 §5.7).
+	// Hub-authored failure notifications (ExecutorKindTriggerNotify) carry
+	// verbatim hub text (not a user-authored template) and must not be parsed
+	// as templates (ptone/scion#9804).
 	var templatedVars []string
-	if isEventFire && req.Event != nil {
+	if isEventFire && req.Event != nil && req.Executor.Kind != ExecutorKindTriggerNotify {
 		rendered, vars, refusal := renderDispatchedMessageTemplate(ctx, s, req, payload)
 		if refusal != nil {
 			refusal.TargetAgentID = agent.ID
@@ -466,6 +471,13 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 			if out, ok := s.offlineQueueOutcomeForAgent(ctx, agent, false); ok {
 				return out, nil
 			}
+		}
+		if req.NoWake {
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusSkipped,
+				Error:         "target not running",
+				TargetAgentID: agent.ID,
+			}, nil
 		}
 		slog.Warn("Scheduler: scheduled message target is not running",
 			"eventID", fireID,

@@ -123,17 +123,18 @@ func TestDispatchAgentAckComment_AuthoringValidation(t *testing.T) {
 		})
 	require.Equal(t, http.StatusBadRequest, recEmpty.Code, recEmpty.Body.String())
 
-	// 3. Un-opted-in untrusted variable in ackComment.body -> 400 untrusted_var_not_allowed.
+	// 3. Explicit narrower/empty untrustedVars missing ackComment.body var -> 400 untrusted_var_not_allowed.
 	recUntrusted := f.doJSON(t, creatorCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
-		CreateTriggerRequest{
-			Name:   "gh-ack-untrusted",
-			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
-			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
-			Action: TriggerActionSpec{
-				Type:       store.TriggerActionDispatchAgent,
-				Task:       "run",
-				AckComment: &DispatchAgentAckComment{Body: "Requested by @${event.attributes.sender}"},
+		map[string]any{
+			"name":   "gh-ack-untrusted",
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			"match":  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			"action": map[string]any{
+				"type":          store.TriggerActionDispatchAgent,
+				"task":          "run",
+				"ackComment":    map[string]any{"body": "Requested by @${event.attributes.sender}"},
+				"untrustedVars": []string{},
 			},
 		})
 	require.Equal(t, http.StatusBadRequest, recUntrusted.Code, recUntrusted.Body.String())
@@ -1051,7 +1052,7 @@ func TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire(t *testing.T) {
 	require.NoError(t, f.sched.store.CreateAgent(ctx, inFlightAgent))
 
 	const subject = "github:acme/widgets#77"
-	seedClaim, existing, err := claims.Claim(ctx, trigResp.ID, subject, uuid.NewString(), uuid.NewString())
+	seedClaim, existing, err := claims.Claim(ctx, trigResp.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NoError(t, claims.Bind(ctx, seedClaim, inFlightAgent.ID))
@@ -1112,7 +1113,7 @@ func TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire(t *testing.T) {
 	f.sched.srv.checkProjectsForRemovedRepos(ctx, 8301, map[string]bool{"acme/widgets": true})
 
 	// Claim must be released (GetActiveTriggerSubjectClaim returns ErrNotFound).
-	activeClaim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subject)
+	activeClaim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subject)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	assert.Nil(t, activeClaim, "bound claim must be released on repo removal")
 
@@ -1249,7 +1250,7 @@ func TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce(t *testing.T) {
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, liveAgent))
 	const liveSubject = "github:acme/widgets#101"
-	liveClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, liveSubject, uuid.NewString(), uuid.NewString())
+	liveClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, 0, liveSubject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, ex)
 	require.NoError(t, claims.Bind(ctx, liveClaim, liveAgent.ID))
@@ -1267,7 +1268,7 @@ func TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce(t *testing.T) {
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, deferAgent))
 	const deferSubject = "github:acme/widgets#102"
-	deferClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, deferSubject, uuid.NewString(), uuid.NewString())
+	deferClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, 0, deferSubject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, ex)
 	require.NoError(t, claims.Bind(ctx, deferClaim, deferAgent.ID))

@@ -655,6 +655,77 @@ func TestConversationWatch_StartBeginning(t *testing.T) {
 	assert.Equal(t, []string{"msg:" + m3.ID, "msg:" + m4.ID}, []string{afterM2.Events[0].EventID, afterM2.Events[1].EventID})
 }
 
+func TestConversationWatch_StartTail(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	agent := &store.Agent{ID: uuid.NewString(), Slug: "a1", Name: "Agent 1", ProjectID: projID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	group := watchTestGroupConv(t, s, projID)
+
+	createMsg := func(sender, senderID, body string) *store.Message {
+		m := &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      projID,
+			ConversationID: group.ID,
+			Sender:         sender,
+			SenderID:       senderID,
+			Recipient:      "group:g",
+			RecipientID:    group.ID,
+			Msg:            body,
+			Type:           "chat",
+			DispatchState:  store.MessageDispatchDispatched,
+		}
+		require.NoError(t, s.CreateMessage(ctx, m))
+		return m
+	}
+
+	m1 := createMsg("agent:"+agent.Slug, agent.ID, "one")
+	m2 := createMsg("agent:"+agent.Slug, agent.ID, "two")
+	m3 := createMsg("user:"+user.Email, user.ID, "three-self")
+	m4 := createMsg("agent:"+agent.Slug, agent.ID, "four")
+	m5 := createMsg("agent:"+agent.Slug, agent.ID, "five")
+
+	watchJSON := func(query string) conversationWatchResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/conversations/"+group.ID+"/watch?"+query, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body conversationWatchResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+
+	// head > limit with filter=all returns the last 2 messages in ascending order.
+	tail2 := watchJSON("start=tail&filter=all&limit=2&wait=0")
+	require.Len(t, tail2.Events, 2)
+	assert.Equal(t, []string{"msg:" + m4.ID, "msg:" + m5.ID}, []string{tail2.Events[0].EventID, tail2.Events[1].EventID})
+	assert.False(t, tail2.HasMore)
+	assert.False(t, tail2.TimedOut)
+	assert.Equal(t, eventfeed.EncodeCursor(group.ID, 5), tail2.NextCursor)
+
+	// head > limit with default filter=others excludes caller's own m3 from the last 3 seqs.
+	tailOthers := watchJSON("start=tail&limit=3&wait=0")
+	require.Len(t, tailOthers.Events, 2)
+	assert.Equal(t, []string{"msg:" + m4.ID, "msg:" + m5.ID}, []string{tailOthers.Events[0].EventID, tailOthers.Events[1].EventID})
+	assert.Equal(t, eventfeed.EncodeCursor(group.ID, 5), tailOthers.NextCursor)
+
+	// head < limit returns all retained messages.
+	tailAll := watchJSON("start=tail&filter=all&limit=10&wait=0")
+	require.Len(t, tailAll.Events, 5)
+	assert.Equal(t, "msg:"+m1.ID, tailAll.Events[0].EventID)
+	assert.Equal(t, "msg:"+m2.ID, tailAll.Events[1].EventID)
+	assert.Equal(t, "msg:"+m5.ID, tailAll.Events[4].EventID)
+
+	// Explicit cursor takes precedence over start=tail.
+	afterM2 := watchJSON("start=tail&filter=all&limit=2&cursor=" + string(eventfeed.EncodeCursor(group.ID, 2)) + "&wait=0")
+	require.Len(t, afterM2.Events, 2)
+	assert.True(t, afterM2.HasMore)
+	assert.Equal(t, []string{"msg:" + m3.ID, "msg:" + m4.ID}, []string{afterM2.Events[0].EventID, afterM2.Events[1].EventID})
+}
+
 // Phase 3 item 3: Membership revocation ends an in-flight watch poll early with
 // 200 OK (empty events, current cursor), and the next poll gets 403 Forbidden
 // (design §3.5 "Revalidation").

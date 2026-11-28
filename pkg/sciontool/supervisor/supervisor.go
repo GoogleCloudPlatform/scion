@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -107,6 +108,13 @@ type Config struct {
 	// itself (see chownRecursive's doc comment) is unconditional — it is
 	// behaviour-preserving and has no legitimate dependent case.
 	RequirePrivilegeDrop bool
+	// WorkloadIsolation strips all SCION_* control environment variables from
+	// the child environment as the last step of childEnv (after HOME/USER,
+	// SCION_EXTRA_PATH, AuthEnv, EnvOverlay, and SecretOverrides), keeping
+	// only keys in workloadScionAllowlist (initially empty). Enabled for
+	// shell execution containers so tmux shells, Conduit SSH sessions, and
+	// approved commands run in a clean workstation environment.
+	WorkloadIsolation bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -519,7 +527,32 @@ func childEnv(cfg Config, base []string, applySecrets, logSteps bool) ([]string,
 	if cfg.NativeTelemetryPolicy != "" {
 		env = removeEnvVar(env, hooks.NativeTelemetryPolicyKey)
 	}
+	if cfg.WorkloadIsolation {
+		env = StripScionControlEnv(env)
+	}
 	return env, nil
+}
+
+// workloadScionAllowlist holds SCION_* variable names explicitly permitted to
+// cross the PID 1 -> workload boundary when Config.WorkloadIsolation is set.
+// Intentionally empty: all SCION_* control variables are stripped by prefix.
+var workloadScionAllowlist = map[string]bool{}
+
+// StripScionControlEnv removes every KEY=VALUE entry whose key starts with
+// "SCION_" unless the key is in workloadScionAllowlist.
+func StripScionControlEnv(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		key := e
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			key = e[:i]
+		}
+		if strings.HasPrefix(key, "SCION_") && !workloadScionAllowlist[key] {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
 }
 
 // setEnvVar sets or replaces an environment variable in a list of KEY=VALUE strings.

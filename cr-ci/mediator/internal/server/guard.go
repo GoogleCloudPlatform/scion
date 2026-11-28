@@ -2,11 +2,16 @@ package server
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/githubapp"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
 )
+
+// errDeferred is returned by checkRunnerJobLocked when a transient GetRun
+// failure defers the hijack verdict within unverifiedMax.
+var errDeferred = errors.New("runner check deferred")
 
 // checkRunnerJob is the hijack guard. It runs when GitHub reports job jobID
 // in progress (or completed) on the cr-ci runner runnerName, from a webhook
@@ -39,12 +44,13 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		return "ok", nil
 	}
 	rec := s.runners[runnerName]
-	if rec == nil && source == "reconcile" {
+	if rec == nil && (source == "reconcile" || source == "reconcile_unverified") {
 		// Reconcile discovers in_progress jobs without the lock. If the job's completed
 		// webhook has forgotten this runner since then, the entry is stale: the job is
 		// over and the runner gone. Re-checking it would log the swap again, recreate a
 		// record for a finished runner and dispatch for nothing.
 		if _, gone := s.forgotten[runnerName]; gone {
+			delete(s.unverified, runnerName)
 			return "ok", nil
 		}
 	}
@@ -53,6 +59,7 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		served = rec.serve
 	}
 	if jobID == served {
+		delete(s.unverified, runnerName)
 		return "ok", nil // that job passed the fork guard at dispatch
 	}
 	attrs := []any{"source", source, "repo", repoFull, "job_id", jobID, "run_id", runID, "runner", runnerName, "served_job_id", served}
@@ -69,17 +76,50 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 	case !targeted:
 		reason = "repo_not_allowed"
 	case run == nil:
-		r, err := s.o.GitHub.GetRun(ctx, repo, runID)
-		if err != nil {
-			s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
-			reason = "run_lookup_failed"
-		} else {
-			run = r
+		if cached, ok := s.cachedRun(runID); ok {
+			run = cached
 			reason = forkReason(run, repo)
+		} else {
+			r, err := s.o.GitHub.GetRun(ctx, repo, runID)
+			if err != nil {
+				if githubapp.IsTransient(err) {
+					now := s.o.Now()
+					prev, ok := s.unverified[runnerName]
+					if ok && now.Sub(prev.since) > unverifiedMax {
+						s.log().Error("fetching workflow run failed after deferral budget exhausted",
+							append(attrs, "event", logging.EventError, "error", err.Error(), "deferred_for", now.Sub(prev.since).String())...)
+						reason = "run_lookup_failed"
+					} else {
+						if !ok {
+							prev = unverifiedRec{
+								repo:     repoFull,
+								jobID:    jobID,
+								runID:    runID,
+								runnerID: runnerID,
+								since:    now,
+							}
+							s.unverified[runnerName] = prev
+						}
+						s.log().Warn("deferring runner hijack check after transient run lookup failure",
+							append(attrs, "event", logging.EventRunnerCheckDeferred, "reason", "run_lookup_transient",
+								"error", err.Error(), "deferred_for", now.Sub(prev.since).String())...)
+						return "deferred", errDeferred
+					}
+				} else {
+					s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
+					reason = "run_lookup_failed"
+				}
+			} else {
+				s.rememberRun(*r)
+				run = r
+				reason = forkReason(run, repo)
+			}
 		}
 	default:
 		reason = forkReason(run, repo)
 	}
+	// A definitive verdict was reached (swap or kill); clear any prior deferral.
+	delete(s.unverified, runnerName)
 
 	serveRepo := s.runnerRepo(repoFull)
 	if rec != nil {

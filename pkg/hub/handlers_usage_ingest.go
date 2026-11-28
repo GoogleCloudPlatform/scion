@@ -499,6 +499,43 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 
+	// Populate usage_events.charged_group_ids from the Hub-frozen
+	// run_attribution.BillingUserID (never from the request payload) when
+	// tokenomics.token_budgets is enabled (Tokenomics P3.3, §4.4). Batched:
+	// one cache lookup per distinct billing user, active pooled bindings
+	// loaded once per call.
+	if len(validEvents) > 0 && s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+		distinctUsers := make([]string, 0, len(validEvents))
+		seenUsers := make(map[string]struct{}, len(validEvents))
+		for _, ev := range validEvents {
+			if ev.BillingUserID != nil && *ev.BillingUserID != "" {
+				uid := *ev.BillingUserID
+				if _, ok := seenUsers[uid]; !ok {
+					seenUsers[uid] = struct{}{}
+					distinctUsers = append(distinctUsers, uid)
+				}
+			}
+		}
+		if len(distinctUsers) > 0 {
+			if resolver := s.PooledGroupResolver(); resolver != nil {
+				groupsByUser, resolveErr := resolver.ResolveForUsers(ctx, distinctUsers)
+				if resolveErr != nil {
+					resolver.RecordResolveError(ctx)
+					slog.Warn("usage ingest: failed to resolve pooled budget groups",
+						"agent_id", agentID, "error", resolveErr)
+				} else {
+					for _, ev := range validEvents {
+						if ev.BillingUserID != nil && *ev.BillingUserID != "" {
+							if gids := groupsByUser[*ev.BillingUserID]; len(gids) > 0 {
+								ev.ChargedGroupIDs = append([]string(nil), gids...)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	res, err := s.store.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID:     agentID,
 		Events:      validEvents,
@@ -516,6 +553,47 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 	// residual batches). Emission never fails or slows the ingest response.
 	if req.DirectOTelSuppressed && len(res.InsertedEvents) > 0 {
 		s.UsageOTelMetrics().RecordCommittedEvents(ctx, res.InsertedEvents, attrCache)
+	}
+
+	// Post-commit raw-token budget evaluation (Tokenomics P3.1/P3.2 B1, D4):
+	// runs strictly after IngestUsageBatch commits when tokenomics.token_budgets
+	// is enabled. For batches with newly inserted rows, the notice is derived
+	// directly from the evaluator pass (zero extra queries); otherwise (empty
+	// heartbeats / all-duplicate batches) fall back to active budget state.
+	// Evaluation errors are logged and never fail or change the HTTP status.
+	var budgetNotice *telemetrycontract.UsageBudgetNotice
+	if s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+		if eval := s.TokenBudgetEvaluator(); eval != nil {
+			var noticeStatus *BudgetNoticeStatus
+			if len(res.InsertedEvents) > 0 {
+				noticeStatus = eval.EvaluateIngestedEventsWithNotice(ctx, res.InsertedEvents)
+			} else if agent != nil && agent.ProjectID != "" {
+				var billingUserID string
+				for _, attr := range attrCache {
+					if attr != nil && attr.BillingUserID != nil && *attr.BillingUserID != "" {
+						billingUserID = *attr.BillingUserID
+						break
+					}
+				}
+				if billingUserID == "" && len(attrCache) == 0 {
+					if uid, rerr := s.resolveAdmissionBillingUserID(ctx, agent); rerr == nil {
+						billingUserID = uid
+					}
+				}
+				noticeStatus = eval.HighestActiveBudgetNotice(ctx, agent.ProjectID, billingUserID)
+			}
+			if noticeStatus != nil {
+				budgetNotice = &telemetrycontract.UsageBudgetNotice{
+					State:       noticeStatus.State,
+					Limit:       noticeStatus.LimitName,
+					ScopeKind:   noticeStatus.ScopeKind,
+					Consumed:    noticeStatus.Consumed,
+					Max:         noticeStatus.Cap,
+					WindowEnd:   noticeStatus.WindowEnd.UTC().Format(time.RFC3339),
+					TokenAction: noticeStatus.TokenAction,
+				}
+			}
+		}
 	}
 
 	if len(res.Rejected) > 0 {
@@ -540,6 +618,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 			Action: telemetrycontract.UsageEnforcementActionNone,
 		},
 		SuppressDirectOTel: s.UsageOTelMetrics().HasConfiguredSink(),
+		BudgetNotice:       budgetNotice,
 	})
 }
 

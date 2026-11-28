@@ -625,6 +625,8 @@ func (s *Server) handleProjectGitHubRoutes(w http.ResponseWriter, r *http.Reques
 	}
 
 	switch subPath {
+	case "github":
+		s.handleProjectGitHub(w, r, project)
 	case "github-installation":
 		s.handleProjectGitHubInstallation(w, r, project)
 	case "github-status":

@@ -435,6 +435,11 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		// Bypasses seq.
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetPhase(string(state.PhaseRunning)).
+			// Entering running from a pre-running phase anchors
+			// LastActivityEvent at now so a stall sweep landing before the
+			// container's first activity report does not inherit a stale
+			// pre-suspension timestamp (ptone/scion#8304).
+			SetLastActivityEvent(now).
 			// The first running write: the exit fields describe the
 			// previous run, as in UpdateAgentStatus (ptone/scion#5384).
 			ClearExitCode().

@@ -122,14 +122,8 @@ for (const theme of ['light', 'dark'] as const) {
 
       const c = card(page, 'prompt-w1');
       await expect(c.locator('.row.withdrawn')).toBeVisible();
-      await expect(c.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      );
-      await expect(c.locator('sl-button[data-choice="no"]')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      );
+      await expect(c.locator('button[data-choice="yes"]')).toHaveAttribute('aria-disabled', 'true');
+      await expect(c.locator('button[data-choice="no"]')).toHaveAttribute('aria-disabled', 'true');
       await expect(c.locator('.hint')).toHaveCount(0);
       await expect(c.locator('.wd sl-icon[name="slash-circle"]')).toHaveCount(1);
       await expect(c.locator('.wd')).toContainText(`No longer needed · withdrawn by ${ASKER_NAME}`);
@@ -375,7 +369,7 @@ for (const theme of ['light', 'dark'] as const) {
       );
 
       const c1 = card(page, 'prompt-v1');
-      await c1.locator('sl-button[data-choice="yes"]').click();
+      await c1.locator('button[data-choice="yes"]').click();
 
       await expect(page.locator('sl-alert[open]')).toContainText(
         `No longer needed: ${ASKER_NAME} withdrew this decision`

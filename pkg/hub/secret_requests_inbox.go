@@ -30,10 +30,11 @@ type secretRequestActionInboxKind struct {
 	srv *Server
 }
 
-func (k *secretRequestActionInboxKind) Kind() string       { return msgaction.KindSecretRequest }
-func (k *secretRequestActionInboxKind) Experiment() string { return experiments.AgentSecrets }
-func (k *secretRequestActionInboxKind) Category() string   { return InboxCategoryAgentSecrets }
-func (k *secretRequestActionInboxKind) Href() string       { return agentSecretsInboxHref }
+func (k *secretRequestActionInboxKind) Kind() string                { return msgaction.KindSecretRequest }
+func (k *secretRequestActionInboxKind) Experiment() string          { return experiments.AgentSecrets }
+func (k *secretRequestActionInboxKind) Category() string            { return InboxCategoryAgentSecrets }
+func (k *secretRequestActionInboxKind) Href() string                { return agentSecretsInboxHref }
+func (k *secretRequestActionInboxKind) Scope() actionInboxScopeMode { return scopeMemberProjects }
 
 func secretRequestToActionInboxRow(r *store.SecretRequest) actionInboxRow {
 	cls, _ := msgaction.SecretRequestKindSpec.Classify(r.Status)
@@ -100,6 +101,14 @@ func (k *secretRequestActionInboxKind) ListResolved(ctx context.Context, q actio
 	return out, nil
 }
 
+func (k *secretRequestActionInboxKind) Recipient(ctx context.Context, sc *actionInboxScope, row actionInboxRow, answering bool) bool {
+	return sc.isRecipient(ctx, row.ChatKey, row.MessageID, answering)
+}
+
+func (k *secretRequestActionInboxKind) CanRead(ctx context.Context, sc *actionInboxScope, row actionInboxRow) bool {
+	return sc.checkAgentPerm(ctx, row.AgentID, row.ProjectID, ActionRead)
+}
+
 func (k *secretRequestActionInboxKind) CanRespond(ctx context.Context, sc *actionInboxScope, row actionInboxRow) bool {
 	return sc.checkAgentPerm(ctx, row.AgentID, row.ProjectID, ActionAttach)
 }
@@ -138,6 +147,14 @@ func (k *secretRequestActionInboxKind) CardsFor(ctx context.Context, sc *actionI
 
 	sc.preloadProjectNames(ctx, projIDs)
 
+	msgIDs := make([]string, 0, len(order))
+	for _, b := range order {
+		if b.msgID != "" {
+			msgIDs = append(msgIDs, b.msgID)
+		}
+	}
+	sc.preloadPromptMessages(ctx, msgIDs)
+
 	// Batch-load any ReplacedBy rows across all cards in one store call.
 	var replIDs []string
 	seenRepl := make(map[string]struct{})
@@ -167,12 +184,9 @@ func (k *secretRequestActionInboxKind) CardsFor(ctx context.Context, sc *actionI
 		})
 		first := b.rawRows[0]
 		chatKey := first.ChatKey
-		var promptMsg *store.Message
-		if chatKey == "" || first.IntroLength > 0 {
-			promptMsg = sc.getPromptMessage(ctx, b.msgID)
-			if chatKey == "" && promptMsg != nil {
-				chatKey = promptMsg.ThreadID
-			}
+		promptMsg := sc.getPromptMessage(ctx, b.msgID)
+		if chatKey == "" && promptMsg != nil {
+			chatKey = promptMsg.ThreadID
 		}
 		intro := ""
 		if promptMsg != nil && first.IntroLength > 0 && first.IntroLength <= len(promptMsg.Msg) {
@@ -209,17 +223,18 @@ func (k *secretRequestActionInboxKind) CardsFor(ctx context.Context, sc *actionI
 		}
 
 		cards = append(cards, SecretRequestCardResponse{
-			MessageID:      b.msgID,
-			ProjectID:      first.ProjectID,
-			ProjectName:    sc.projectName(ctx, first.ProjectID),
-			AgentID:        first.AgentID,
-			AgentName:      first.AgentName,
-			ConversationID: first.ConversationID,
-			ThreadID:       chatKey,
-			Intro:          intro,
-			Rows:           views,
-			CanRespond:     canRespond,
-			Reason:         reason,
+			MessageID:       b.msgID,
+			ProjectID:       first.ProjectID,
+			ProjectName:     sc.projectName(ctx, first.ProjectID),
+			AgentID:         first.AgentID,
+			AgentName:       first.AgentName,
+			ConversationID:  first.ConversationID,
+			ThreadID:        chatKey,
+			Intro:           intro,
+			Rows:            views,
+			CanRespond:      canRespond,
+			PromptAvailable: promptMsg != nil,
+			Reason:          reason,
 		})
 	}
 	return cards, nil

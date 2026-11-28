@@ -181,6 +181,9 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		}
 		return nil
 	})
+	if err == nil {
+		s.InvalidatePooledGroupCacheForUser(existingUser.ID)
+	}
 	if err != nil {
 		var lastOwnerErr *lastProjectOwnerDeleteError
 		var blockedErr *userDeleteBlockedError

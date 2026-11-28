@@ -250,6 +250,13 @@ const Artifacts = "hub.artifacts"
 // deploymentExperimentDefault).
 const AttachmentArtifacts = "hub.attachment_artifacts"
 
+// LargeUploads gates resumable chunked web uploads (ptone/scion#8654) for chat
+// attachments and project workspace / shared-dir files: the .../uploads routes
+// answer 404 experiment_disabled while off, and the web UI keeps single-request
+// uploads. Sessions in flight when it is turned off stop at their next request
+// and are swept; files already completed are unaffected.
+const LargeUploads = "hub.large_uploads"
+
 // Decisions gates agent decision prompts, cards, routes, pages, CLI listing
 // and coalesced bell notifications (ptone/scion#7514, ptone/scion#8223):
 // agent sends carrying decisions (refused with experiment_disabled while off),
@@ -387,6 +394,11 @@ const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 // touch-primary devices (ptone/scion#9338). It is web-only and
 // presentation-only: the hub is unaffected whether or not it is on.
 const TerminalKeyBar = "web.terminal_key_bar"
+
+// AgentsColumnPicker gates the column visibility picker on the hub-wide and
+// project agents list tables (ptone/scion#9577). It is web-only and
+// presentation-only: the hub is unaffected whether or not it is on.
+const AgentsColumnPicker = "web.agents_column_picker"
 
 // SecretRotation gates opt-in Hub server keyring configuration
 // (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
@@ -609,12 +621,16 @@ const ProjectSelfLeave = "hub.project_self_leave"
 // step in the setup wizard.
 const WelcomeProject = "hub.welcome_project"
 
-// SystemOne gates Hub-scoped System One provider instance administration and
-// probing (ptone/scion#8044): /api/v1/admin/system-one/instances[/{name}[/probe]]
-// and scion admin system-one instance create|list|delete|probe, with runtime
-// probe evaluations bounded by server.hub.system_one.max_eval_time. While it is
-// off, the System One admin routes answer 404 and stored provider instances are
-// kept. The design names it "hub.system-one"; NamePattern allows no hyphen.
+// SystemOne gates Hub-scoped System One provider instance administration,
+// allowlisting-project lookup, and probing (ptone/scion#8044):
+// /api/v1/admin/system-one/instances[/{name}[/probe|/projects]],
+// /api/v1/projects/{id}/system-one/instances[/{name}],
+// GET /api/v1/projects/{id}/system-one/available-instances (also gated on
+// hub.message_policies), and scion admin system-one instance
+// create|list|delete|probe, with runtime probe evaluations bounded by
+// server.hub.system_one.max_eval_time. While it is off, the System One admin
+// and project routes answer 404 and stored provider instances are kept. The
+// design names it "hub.system-one"; NamePattern allows no hyphen.
 const SystemOne = "hub.system_one"
 
 // GitHubTriggers gates routing GitHub App webhook deliveries into the trigger
@@ -633,11 +649,12 @@ const Triggers = "hub.triggers"
 
 // MessagePolicies gates project-scoped message admission policies
 // (ptone/scion#8047): /api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]],
-// scion message-policy create|list|get|delete|test|decisions, and the H2
-// outbound agent message gate (agent->user DMs, agent conversation posts and
-// choice prompts; shadow and enforce modes). While it is off, the message
-// policy routes answer 404, the outbound gate evaluates and records nothing,
-// and stored policies and decision records are kept.
+// scion message-policy create|update|list|get|delete|test|decisions, and the outbound
+// agent message gate (agent_to_user, agent_to_conversation, agent_dm,
+// mention_delivery; shadow and enforce modes). Server layer: while it is off,
+// the message policy routes answer 404, the outbound gate evaluates and records
+// nothing, and stored policies and decision records are kept. Web layer:
+// exposes the flag for UI presentation.
 const MessagePolicies = "hub.message_policies"
 
 // EffectivePermissions gates the admin effective-permissions viewer
@@ -727,10 +744,27 @@ const TokenomicsTrajectoryCapture = "tokenomics.trajectory_capture"
 // off.
 const AccessConstraints = "hub.access_constraints"
 
+// MCPServer gates serving the MCP endpoint (messaging tools and MCP Events
+// push) on the listener configured by server.mcp (ptone/scion#8137). While
+// off, /mcp answers 404 and visitors are not admitted to conversation
+// messages and watch. The listener binds only when server.mcp.enabled is set.
+const MCPServer = "hub.mcp_server"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        MCPServer,
+		Title:       "MCP server",
+		Description: "Serves the MCP endpoint (messaging tools and MCP Events push) on the listener configured by `server.mcp`. While off, `/mcp` answers 404 and visitors are not admitted to conversation messages and watch. The listener binds only when `server.mcp.enabled` is set.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8137",
+		Owner:       "mcp-server",
+		ReviewBy:    "2027-01-08",
+	},
 	{
 		Name:        NeverSuspend,
 		Title:       "Never-suspend agents",
@@ -1056,7 +1090,7 @@ var compiled = []Experiment{
 	{
 		Name:        AttachmentArtifacts,
 		Title:       "Attachments as artifacts",
-		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: the stored file is readable exactly by the readers of that message, and is removed when the message is deleted. It is delivered into each recipient agent's inbox; for a message in a project topic thread a copy is also placed in the project's scratchpad shared directory, where every agent and member with access to that directory can read it (direct and group conversations get inbox delivery only). Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off. Defaults on wherever the artifact service is ready, local blob storage included, and on hubs whose resource storage is an object store (GCS).",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: the stored file is readable exactly by the readers of that message, and is removed when the message is deleted. It is delivered into each recipient agent's inbox (~/.scion/inbox/<message-id>/<name>), with no copy in the project's scratchpad shared directory; sibling agents that may read the message can fetch it with `scion conversation get-message --save-attachments`. Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off. Defaults on wherever the artifact service is ready, local blob storage included, and on hubs whose resource storage is an object store (GCS).",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
@@ -1067,8 +1101,8 @@ var compiled = []Experiment{
 	{
 		Name:        "hub.conduit",
 		Title:       "Conduit connection layer",
-		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
-		Default:     false,
+		Description: "Enables Conduit, the unified agent/broker connection layer: Ed25519 stream grants (GET /api/v1/conduit/grant-keys), the agent and broker Conduit session endpoint (GET /api/v1/conduit), the in-process relay, port proxy, PTY, tunnel and SSH over Conduit, broker dual-dial and broker RPC routing, and the agent control RPCs used together with hub.conduit_deliver, hub.exec_schedules and hub.command_requests. Read at startup: turning it on or off for the relay takes effect after a restart. Defaults on outside hosted HA; in hosted HA it defaults off (with the reason logged at startup), while an explicit override to on keeps the strict HA startup checks.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#2774",
@@ -1195,6 +1229,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9338",
 		Owner:       "web",
 		ReviewBy:    "2027-02-26",
+	},
+	{
+		Name:        AgentsColumnPicker,
+		Title:       "Agents list column picker",
+		Description: "Adds a column visibility picker to the hub-wide and project agents list tables so users can show or hide non-pinned columns, persisted per browser in localStorage. Web only; the hub is unaffected.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9577",
+		Owner:       "web",
+		ReviewBy:    "2027-02-27",
 	},
 	{
 		Name:        ArtifactReviewEditor,
@@ -1399,7 +1444,7 @@ var compiled = []Experiment{
 	{
 		Name:        SystemOne,
 		Title:       "System One message guardrails",
-		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe]], /api/v1/admin/system-one/adapters, admin web UI, and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin routes answer 404, the admin web page is hidden, and stored provider instances are kept.",
+		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe|/projects]], /api/v1/admin/system-one/adapters, /api/v1/projects/{id}/system-one/instances[/{name}], GET /api/v1/projects/{id}/system-one/available-instances when hub.message_policies is also on, admin web UI, and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin and project routes answer 404, the admin web page is hidden, and stored provider instances are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
@@ -1432,9 +1477,9 @@ var compiled = []Experiment{
 	{
 		Name:        MessagePolicies,
 		Title:       "Project message policies",
-		Description: "Enables project-scoped CEL message policies on outbound agent messages to users, conversations and choice prompts (/api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]] and scion message-policy create|list|get|delete|test|decisions), with shadow and enforce modes and content-free decision records. Agent-to-agent DMs, group-set fan-out and mention deliveries are not covered yet and are reported in coverage.uncovered_agent_paths. While off, the routes answer 404, the gate evaluates nothing and stored policies and decisions are kept.",
+		Description: "Enables project-scoped message policies on outbound agent messages to users, conversations, choice prompts, agent-to-agent DMs, and mention deliveries (agent_to_user, agent_to_conversation, agent_dm, mention_delivery) (/api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]] and scion message-policy), with shadow and enforce modes and content-free decision records. Uncovered agent paths (group_post, group_set, mention_fanout, broadcast) are reported in coverage.uncovered_agent_paths. Server layer: while off, the routes answer 404, the gate evaluates nothing and stored policies and decisions are kept. Web layer: exposes the flag for UI presentation.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8047",
 		Owner:       "system-one",
@@ -1516,6 +1561,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9370",
 		Owner:       "@ptone",
 		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        LargeUploads,
+		Title:       "Large file uploads",
+		Description: "Enables HA-safe, resumable chunked web uploads up to 1 GiB for chat attachments and project workspace / shared-directory files. While off, upload-session routes answer 404 experiment_disabled and the web UI keeps single-request uploads.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8654",
+		Owner:       "uploads-owner",
+		ReviewBy:    "2027-02-25",
 	},
 }
 

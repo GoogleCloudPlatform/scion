@@ -47,6 +47,7 @@ const PROFILE_TITLES: Record<string, string> = {
   '/profile/inbox': 'Inbox',
   '/profile/decisions': 'Decisions',
   '/profile/agent-secrets': 'Agent Secrets',
+  '/profile/agent-executions': 'Agent Executions',
   '/profile/env': 'Environment Variables',
   '/profile/secrets': 'Secrets',
   '/profile/settings': 'Settings',

@@ -63,18 +63,22 @@ crci_start
 
 # GITHUB_APP_ID=1 is the documented placeholder for the steps before the App
 # exists; a mediator deployed with it gets 401s from GitHub.
-APP_ID=$(_crci_int "${CFG[GITHUB_APP_ID]}")
+APP_ID=$(_crci_int "$(crci_cfg GITHUB_APP_ID)")
 if [[ $APP_ID == 1 ]]; then
   [[ $CRCI_MODE == apply ]] && crci_die "GITHUB_APP_ID is still the placeholder 1; create the GitHub App and set its ID first"
   crci_note "WARNING: GITHUB_APP_ID is the placeholder 1; --apply refuses to deploy until it is the real App ID"
 fi
 
-P=${CFG[GCP_PROJECT]}
-R=${CFG[REGION]}
-SVC=${CFG[MEDIATOR_SERVICE_NAME]}
-IMAGE=$(crci_image_ref "${CFG[MEDIATOR_IMAGE_NAME]}" "$TAG")
-MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
-SCHEDULER=$(crci_sa_email "${CFG[SCHEDULER_SA_NAME]}")
+P=$(crci_cfg GCP_PROJECT)
+R=$(crci_cfg REGION)
+SVC=$(crci_cfg MEDIATOR_SERVICE_NAME)
+RUNNER_JOB=$(crci_cfg RUNNER_JOB_NAME)
+MEDIATOR_IMAGE=$(crci_cfg MEDIATOR_IMAGE_NAME)
+MEDIATOR_MIN=$(crci_cfg MEDIATOR_MIN_INSTANCES)
+MEDIATOR_URL=$(crci_cfg MEDIATOR_URL)
+IMAGE=$(crci_image_ref "$MEDIATOR_IMAGE" "$TAG")
+MEDIATOR=$(crci_sa_email "$(crci_cfg MEDIATOR_SA_NAME)")
+SCHEDULER=$(crci_sa_email "$(crci_cfg SCHEDULER_SA_NAME)")
 
 # Upgrade order: the mediator first, then the runner job (deploy-job.sh). A newer
 # mediator only adds launch env that an older runner image ignores (GH_REPOS), while
@@ -82,16 +86,17 @@ SCHEDULER=$(crci_sa_email "${CFG[SCHEDULER_SA_NAME]}")
 # 2, "GH_REPOS is not set"; redeploy #2, 2026-10-27). So this only reports whether
 # the job still runs another image than the current runner/ tree: deploy it next.
 crci_note "check: which runner image the job runs (upgrade order: the mediator first, then deploy-job.sh)"
-if crci_exists gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --format='value(metadata.name)'; then
-  crci_read JOB_IMAGE "" gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" \
+if crci_exists gcloud run jobs describe "$RUNNER_JOB" --region="$R" --project="$P" --format='value(metadata.name)'; then
+  JOB_IMAGE=""
+  crci_read JOB_IMAGE "" gcloud run jobs describe "$RUNNER_JOB" --region="$R" --project="$P" \
     --format='value(spec.template.spec.template.spec.containers[0].image)'
   WANT_TAG=$(crci_try_default_tag runner)
   if [[ -n $WANT_TAG && -n $JOB_IMAGE && ${JOB_IMAGE##*:} != "$WANT_TAG" ]]; then
     printf '%s: NOTE: job %s runs %s, not the current runner tag %s; after this deploy, run build-runner-image.sh and deploy-job.sh (the mediator goes first).\n' \
-      "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" "$JOB_IMAGE" "$WANT_TAG" >&2
+      "$CRCI_PROG" "$RUNNER_JOB" "$JOB_IMAGE" "$WANT_TAG" >&2
   fi
 elif [[ $CRCI_MODE == apply ]]; then
-  printf '%s: WARNING: runner job %s not found; run deploy-job.sh before any job is routed.\n' "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" >&2
+  printf '%s: WARNING: runner job %s not found; run deploy-job.sh before any job is routed.\n' "$CRCI_PROG" "$RUNNER_JOB" >&2
 fi
 
 # Diff config.env against the live mediator service before building or
@@ -105,8 +110,9 @@ if crci_exists gcloud run services describe "$SVC" --region="$R" --project="$P" 
     --flatten='spec.template.spec.containers[0].env[]' \
     --format='value[separator="="](spec.template.spec.containers[0].env.name,spec.template.spec.containers[0].env.value)'
 
-  declare -A LIVE_CFG=()
-  declare -a LIVE_EXTRA_KEYS=()
+  LIVE_KEYS=()
+  LIVE_VALS=()
+  LIVE_EXTRA_KEYS=()
   while IFS= read -r line; do
     [[ -n $line ]] || continue
     if [[ $line == *=* ]]; then
@@ -116,31 +122,60 @@ if crci_exists gcloud run services describe "$SVC" --region="$R" --project="$P" 
       lk=$line
       lv=""
     fi
-    LIVE_CFG[$lk]=$lv
-    if [[ ! -v CRCI_DEFAULTS[$lk] ]]; then
+    found=0
+    for ((i = 0; i < ${#LIVE_KEYS[@]}; i++)); do
+      if [[ ${LIVE_KEYS[i]} == "$lk" ]]; then
+        LIVE_VALS[i]=$lv
+        found=1
+        break
+      fi
+    done
+    if ((found == 0)); then
+      LIVE_KEYS+=("$lk")
+      LIVE_VALS+=("$lv")
+    fi
+    if ! crci_is_known_key "$lk"; then
       LIVE_EXTRA_KEYS+=("$lk")
     fi
   done <<<"$LIVE_ENV"
 
+  _live_lookup() {
+    local key=$1 i
+    for ((i = 0; i < ${#LIVE_KEYS[@]}; i++)); do
+      if [[ ${LIVE_KEYS[i]} == "$key" ]]; then
+        LIVE_VAL=${LIVE_VALS[i]}
+        return 0
+      fi
+    done
+    return 1
+  }
+
   changed=0
   unchanged=0
-  declare -a DIFF_LINES=()
+  DIFF_LINES=()
   for k in "${CRCI_KEYS[@]}"; do
-    want=${CFG[$k]}
-    if [[ ! -v LIVE_CFG[$k] ]]; then
+    want=""
+    crci_cfg_into want "$k"
+    LIVE_VAL=""
+    if ! _live_lookup "$k"; then
       DIFF_LINES+=("  + $k=$want (new)")
       changed=$((changed + 1))
-    elif [[ ${LIVE_CFG[$k]} != "$want" ]]; then
-      DIFF_LINES+=("  - $k=${LIVE_CFG[$k]}" "  + $k=$want")
+    elif [[ $LIVE_VAL != "$want" ]]; then
+      DIFF_LINES+=("  - $k=$LIVE_VAL" "  + $k=$want")
       changed=$((changed + 1))
     else
       unchanged=$((unchanged + 1))
     fi
   done
   if ((${#LIVE_EXTRA_KEYS[@]} > 0)); then
-    mapfile -t LIVE_EXTRA_KEYS < <(printf '%s\n' "${LIVE_EXTRA_KEYS[@]}" | LC_ALL=C sort -u)
-    for k in "${LIVE_EXTRA_KEYS[@]}"; do
-      DIFF_LINES+=("  - $k=${LIVE_CFG[$k]} (removed)")
+    SORTED_EXTRA_KEYS=()
+    while IFS= read -r ek; do
+      [[ -n $ek ]] && SORTED_EXTRA_KEYS+=("$ek")
+    done < <(printf '%s\n' "${LIVE_EXTRA_KEYS[@]}" | LC_ALL=C sort -u)
+    for k in "${SORTED_EXTRA_KEYS[@]}"; do
+      LIVE_VAL=""
+      _live_lookup "$k" || true
+      DIFF_LINES+=("  - $k=$LIVE_VAL (removed)")
       changed=$((changed + 1))
     done
   fi
@@ -158,8 +193,8 @@ if crci_exists gcloud run services describe "$SVC" --region="$R" --project="$P" 
       CONFIRM=""
       printf 'Apply these config changes to %s in %s (%s)? [y/N] ' "$SVC" "$R" "$P" >&2
       IFS= read -r CONFIRM || CONFIRM=""
-      case ${CONFIRM,,} in
-        y | yes) ;;
+      case $CONFIRM in
+        [yY] | [yY][eE][sS]) ;;
         *) crci_die "aborted; nothing deployed" ;;
       esac
     fi
@@ -168,8 +203,8 @@ elif [[ $CRCI_MODE == apply ]]; then
   crci_note "service $SVC does not exist yet; skipping live config diff"
 fi
 
-crci_note "mediator image ${CFG[MEDIATOR_IMAGE_NAME]}:$TAG"
-crci_build_image "${CFG[MEDIATOR_IMAGE_NAME]}" mediator/Dockerfile . "$TAG" "$LOCAL"
+crci_note "mediator image $MEDIATOR_IMAGE:$TAG"
+crci_build_image "$MEDIATOR_IMAGE" mediator/Dockerfile . "$TAG" "$LOCAL"
 
 # Env: every key of the config contract, in config.example.env order. Values
 # contain commas (TARGET_REPOS) and spaces (RECONCILE_SCHEDULE), so gcloud's
@@ -179,7 +214,9 @@ first=1
 for k in "${CRCI_KEYS[@]}"; do
   [[ $first == 1 ]] || ENV+=";"
   first=0
-  ENV+="$k=${CFG[$k]}"
+  val=""
+  crci_cfg_into val "$k"
+  ENV+="$k=$val"
 done
 
 if [[ $NO_INVOKER_CHECK == 1 ]]; then
@@ -191,11 +228,12 @@ fi
 crci_note "C12: mediator service $SVC (max-instances=1 is required: claims live in memory)"
 crci_run gcloud run deploy "$SVC" --image="$IMAGE" --region="$R" --project="$P" \
   --service-account="$MEDIATOR" \
-  --min-instances="${CFG[MEDIATOR_MIN_INSTANCES]}" --max-instances=1 --cpu=1 --memory=512Mi --concurrency=80 --timeout=300 \
+  --min-instances="$MEDIATOR_MIN" --max-instances=1 --cpu=1 --memory=512Mi --concurrency=80 --timeout=300 \
   --ingress=all --port=8080 "${ACCESS[@]}" \
   --set-env-vars="$ENV" --labels=managed-by=cr-ci
 
 crci_note "check: max-instances is 1"
+MAXSCALE=""
 crci_read MAXSCALE 1 gcloud run services describe "$SVC" --region="$R" --project="$P" \
   --format='value(spec.template.metadata.annotations."autoscaling.knative.dev/maxScale")'
 [[ $MAXSCALE == 1 ]] || crci_die "service $SVC has max-instances '$MAXSCALE'; it must be 1"
@@ -204,20 +242,22 @@ crci_note "C13: SCHEDULER_SA_NAME may invoke this service only"
 crci_run gcloud run services add-iam-policy-binding "$SVC" --region="$R" --project="$P" \
   --member="serviceAccount:$SCHEDULER" --role=roles/run.invoker --format=none
 
+URL=""
 crci_read URL "<url printed by the command above>" gcloud run services describe "$SVC" \
   --region="$R" --project="$P" --format='value(status.url)'
 crci_note "service URL: $URL"
 # A service answers on several URLs (status.url, which may be the hash form,
 # and the deterministic https://SERVICE-PROJECT_NUMBER.REGION.run.app); any of
 # them is a valid MEDIATOR_URL.
+URLS=""
 crci_read URLS "[]" gcloud run services describe "$SVC" --region="$R" --project="$P" \
   --format='value(metadata.annotations."run.googleapis.com/urls")'
 if [[ $CRCI_MODE == apply ]]; then
-  if [[ -z ${CFG[MEDIATOR_URL]} ]]; then
+  if [[ -z $MEDIATOR_URL ]]; then
     crci_note "MEDIATOR_URL is empty: set MEDIATOR_URL=$URL in $CRCI_CONFIG, re-run deploy-mediator.sh, then run deploy-scheduler.sh"
     crci_note "the GitHub App webhook URL is $URL/webhook"
-  elif [[ ${CFG[MEDIATOR_URL]} != "$URL" && $URLS != *"\"${CFG[MEDIATOR_URL]}\""* ]]; then
-    printf '%s: WARNING: MEDIATOR_URL=%s is not one of the service URLs (%s %s).\n' "$CRCI_PROG" "${CFG[MEDIATOR_URL]}" "$URL" "$URLS" >&2
+  elif [[ $MEDIATOR_URL != "$URL" && $URLS != *"\"$MEDIATOR_URL\""* ]]; then
+    printf '%s: WARNING: MEDIATOR_URL=%s is not one of the service URLs (%s %s).\n' "$CRCI_PROG" "$MEDIATOR_URL" "$URL" "$URLS" >&2
     printf '%s: WARNING: update MEDIATOR_URL in %s and the App webhook URL (%s/webhook), then re-run this script and deploy-scheduler.sh.\n' \
       "$CRCI_PROG" "$CRCI_CONFIG" "$URL" >&2
   else

@@ -427,3 +427,49 @@ func TestCompositeStore_SystemOneInstancesAndWithTx(t *testing.T) {
 	assert.Equal(t, int64(2), got.Revision)
 	assert.Equal(t, "https://updated-in-tx.example.test", got.Endpoint)
 }
+
+func TestSystemOneInstanceStore_ListSystemOneInstanceProjects(t *testing.T) {
+	cs := NewCompositeStore(enttest.NewClient(t))
+	ctx := context.Background()
+
+	require.NoError(t, cs.CreateSystemOneInstance(ctx, sampleSystemOneInstance("inst-a")))
+	require.NoError(t, cs.CreateSystemOneInstance(ctx, sampleSystemOneInstance("inst-b")))
+
+	pZeta := &store.Project{ID: uuid.NewString(), Name: "Zeta Project", Slug: "zeta-proj"}
+	pAlpha := &store.Project{ID: uuid.NewString(), Name: "Alpha Project", Slug: "alpha-proj"}
+	pNone := &store.Project{ID: uuid.NewString(), Name: "Unbound Project", Slug: "unbound-proj"}
+	require.NoError(t, cs.CreateProject(ctx, pZeta))
+	require.NoError(t, cs.CreateProject(ctx, pAlpha))
+	require.NoError(t, cs.CreateProject(ctx, pNone))
+
+	// Initially empty.
+	refs, err := cs.ListSystemOneInstanceProjects(ctx, "inst-a")
+	require.NoError(t, err)
+	assert.NotNil(t, refs)
+	assert.Empty(t, refs)
+
+	// Empty name returns empty slice.
+	refs, err = cs.ListSystemOneInstanceProjects(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, refs)
+
+	// Bind inst-a to Zeta and Alpha; bind inst-b to Zeta only.
+	_, _, err = cs.SetProjectSystemOneInstances(ctx, pZeta.ID, []string{"inst-a", "inst-b"})
+	require.NoError(t, err)
+	_, _, err = cs.AddProjectSystemOneInstance(ctx, pAlpha.ID, "inst-a")
+	require.NoError(t, err)
+
+	// Ordered by Name ASC.
+	refs, err = cs.ListSystemOneInstanceProjects(ctx, "inst-a")
+	require.NoError(t, err)
+	assert.Equal(t, []store.SystemOneInstanceProjectRef{
+		{ID: pAlpha.ID, Name: pAlpha.Name},
+		{ID: pZeta.ID, Name: pZeta.Name},
+	}, refs)
+
+	refs, err = cs.ListSystemOneInstanceProjects(ctx, "inst-b")
+	require.NoError(t, err)
+	assert.Equal(t, []store.SystemOneInstanceProjectRef{
+		{ID: pZeta.ID, Name: pZeta.Name},
+	}, refs)
+}

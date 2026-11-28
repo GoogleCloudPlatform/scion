@@ -562,7 +562,6 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 	for rows.Next() {
 		var (
 			harnessConfig       string
-			harness             string
 			capabilityProjectID string
 			isRunning           int
 			hasMeterHealth      int
@@ -577,7 +576,6 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 		)
 		if err := rows.Scan(
 			&harnessConfig,
-			&harness,
 			&capabilityProjectID,
 			&isRunning,
 			&hasMeterHealth,
@@ -594,7 +592,6 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 		}
 		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
 			HarnessConfig:       harnessConfig,
-			Harness:             harness,
 			CapabilityProjectID: capabilityProjectID,
 			IsRunning:           isRunning != 0,
 			HasMeterHealth:      hasMeterHealth != 0,
@@ -887,7 +884,6 @@ agent_mh AS (
 		sa.run_id,
 		sa.phase,
 		COALESCE(NULLIF(ra_cur.harness_config, ''), sa.agent_harness_config) AS harness_config,
-		COALESCE(ra_cur.harness, '') AS harness,
 		ra_cur.created_at AS run_created_at,
 		MAX(mh.last_receipt_at) AS latest_receipt_at,
 		COALESCE(MAX(CASE
@@ -911,12 +907,11 @@ agent_mh AS (
 		ON ra_cur.run_id = sa.run_id AND sa.run_id <> ''
 	LEFT JOIN meter_health mh
 		ON mh.agent_id = sa.agent_id_text AND mh.run_id = sa.run_id AND sa.run_id <> ''
-	GROUP BY sa.agent_id_text, sa.project_id_text, sa.run_id, sa.phase, ra_cur.harness_config, sa.agent_harness_config, ra_cur.harness, ra_cur.created_at
+	GROUP BY sa.agent_id_text, sa.project_id_text, sa.run_id, sa.phase, ra_cur.harness_config, sa.agent_harness_config, ra_cur.created_at
 ),
 agent_flags AS (
 	SELECT
 		am.harness_config AS harness_config,
-		am.harness AS harness,
 		CASE
 			WHEN am.harness_config <> '' AND EXISTS (
 				SELECT 1 FROM harness_configs hc
@@ -961,7 +956,6 @@ agent_flags AS (
 )
 SELECT
 	harness_config,
-	harness,
 	capability_project_id,
 	is_running,
 	has_meter_health,
@@ -974,7 +968,7 @@ SELECT
 	CAST(COUNT(*) AS BIGINT) AS agent_count,
 	MAX(latest_receipt_at) AS max_last_receipt_at
 FROM agent_flags
-GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_health, latest_final_state, is_receipt_stale, is_past_grace, has_schema_drift, has_usage_data, has_legacy_only`,
+GROUP BY harness_config, capability_project_id, is_running, has_meter_health, latest_final_state, is_receipt_stale, is_past_grace, has_schema_drift, has_usage_data, has_legacy_only`,
 		fmt.Sprintf(scopedAgentsCTE, strings.Join(scopeWhere, " AND ")),
 		isRunningExpr,
 		isStaleExpr,

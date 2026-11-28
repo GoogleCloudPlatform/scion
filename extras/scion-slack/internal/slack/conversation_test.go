@@ -17,6 +17,7 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -26,7 +27,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 type postedSlackMessage struct {
@@ -202,6 +208,8 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 		Recipient: "agent:coder",
 		Msg:       "hello agent",
 		Type:      messages.TypeInstruction,
+		Channel:   "slack",
+		ThreadID:  "1700000000.000100",
 		Metadata: map[string]string{
 			"slack_channel_id": "C0123ABC",
 			"slack_thread_ts":  "1700000000.000100",
@@ -209,7 +217,7 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	}
 
 	// 1. Without hub_inbound_conversation capability flag (older hub):
-	// inbound payloads must omit surface, external_ref, parent_ref, display_name.
+	// inbound payloads must omit surface, external_ref, parent_ref, display_name, legacy_ref.
 	he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
 	require.Nil(t, he)
 	res, he := b.deliverRoutedInbound("p1", "coder", msg)
@@ -218,7 +226,7 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	assert.True(t, res.Delivered)
 
 	mu.Lock()
-	for _, field := range []string{"surface", "external_ref", "parent_ref", "display_name"} {
+	for _, field := range []string{"surface", "external_ref", "parent_ref", "display_name", "legacy_ref"} {
 		_, hasIn := gotInbound[field]
 		assert.False(t, hasIn, "older hub (no flag) must omit %q on /broker/inbound", field)
 		_, hasRt := gotRouted[field]
@@ -228,8 +236,8 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	gotRouted = nil
 	mu.Unlock()
 
-	// 2. With hub_inbound_conversation="1" (P4+ hub):
-	// inbound payloads include surface, external_ref, and parent_ref.
+	// 2. With hub_inbound_conversation="1" (P4+/P5a hub):
+	// inbound payloads include surface, external_ref, parent_ref, and legacy_ref.
 	require.NoError(t, b.Configure(map[string]string{
 		"hub_inbound_conversation": "1",
 	}))
@@ -243,23 +251,83 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	assert.True(t, res.Delivered)
 
 	mu.Lock()
-	defer mu.Unlock()
 	require.NotNil(t, gotInbound)
 	assert.Equal(t, "slack", gotInbound["surface"])
 	assert.Equal(t, "C0123ABC:1700000000.000100", gotInbound["external_ref"])
 	assert.Equal(t, "C0123ABC", gotInbound["parent_ref"])
+	assert.Equal(t, "1700000000.000100", gotInbound["legacy_ref"])
 
 	require.NotNil(t, gotRouted)
 	assert.Equal(t, "slack", gotRouted["surface"])
 	assert.Equal(t, "C0123ABC:1700000000.000100", gotRouted["external_ref"])
 	assert.Equal(t, "C0123ABC", gotRouted["parent_ref"])
+	assert.Equal(t, "1700000000.000100", gotRouted["legacy_ref"])
+	gotInbound = nil
+	mu.Unlock()
+
+	// 3. Even when metadata/ThreadID are absent, surface:"slack" is always sent
+	// when hub_inbound_conversation is enabled.
+	bareMsg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:coder",
+		Msg:       "bare dm",
+		Type:      messages.TypeInstruction,
+		Channel:   "slack",
+	}
+	he = b.deliverInbound("scion.project.p1.agent.coder.messages", bareMsg)
+	require.Nil(t, he)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotNil(t, gotInbound)
+	assert.Equal(t, "slack", gotInbound["surface"])
+	_, hasExt := gotInbound["external_ref"]
+	assert.False(t, hasExt)
+	_, hasLegacy := gotInbound["legacy_ref"]
+	assert.False(t, hasLegacy)
 }
 
+type hubConvStore struct {
+	store.Store
+	convs map[string]*store.Conversation
+}
+
+func (s *hubConvStore) GetConversation(_ context.Context, id string) (*store.Conversation, error) {
+	c, ok := s.convs[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return c, nil
+}
+
+type slackForwardingBus struct {
+	broker *SlackBroker
+}
+
+func (f *slackForwardingBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	// Round-trip through the real gRPC proto conversion so the Slack plugin
+	// receives the exact wire shape emitted by a real hub.
+	wire := grpcbroker.ProtoToStructuredMessage(grpcbroker.StructuredMessageToProto(msg))
+	return f.broker.Publish(ctx, topic, wire)
+}
+
+func (f *slackForwardingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, nil
+}
+
+func (f *slackForwardingBus) Close() error { return nil }
+
 // TestSlackBroker_Publish_HubEnrichedOptionAShapes drives the Slack broker
-// with the exact outbound shapes emitted by MessageBrokerProxy.enrichConversation
-// under Option A: (1) an external thread reply carrying translated surface-native
-// Conversation.ExternalRef alongside legacy Channel/ThreadID, and (2) a DM reply
-// with Conversation omitted (nil) and reply-affinity Channel:"slack".
+// from REAL hub-enriched shapes produced by hub.MessageBrokerProxy (backed by
+// real store.Conversation rows and round-tripped through grpcbroker proto
+// conversion):
+//  1. External Slack thread reply (Kind:"group", Surface:"slack", translated ExternalRef)
+//  2. User DM reply (Kind:"direct", Surface:"native", empty ExternalRef) routed by Recipient,
+//     ignoring any legacy ThreadID when Conversation is present
+//  3. User DM reply for an unmapped user does not broadcast to public project channel links
+//  4. Agent-to-agent observer DM (Kind:"direct", Surface:"native") still delivers to
+//     ShowAgentToAgent channel links
 func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	srv, getPosted := newTestSlackServer(t)
 
@@ -278,48 +346,199 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 		AgentSlug:     "coder",
 		LastChannelID: "D_ALICE_DM",
 	}))
+	require.NoError(t, b.store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:        "C_PUBLIC_OBS",
+		ProjectID:        "p1",
+		Active:           true,
+		ShowAgentToAgent: true,
+	}))
+	require.NoError(t, b.store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:        "C_PUBLIC_NO_OBS",
+		ProjectID:        "p1",
+		Active:           true,
+		ShowAgentToAgent: false,
+	}))
 
-	topic := "scion.project.p1.user.u1.messages"
+	projectID := "p1"
+	threadKey, threadKind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:  "C0123ABC:1700000000.000100",
+		ProjectID: projectID,
+	})
+	require.NoError(t, err)
+	dmKey, dmKind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		SenderKind:    "agent",
+		SenderID:      "11111111-1111-1111-1111-111111111111",
+		RecipientKind: "user",
+		RecipientID:   "22222222-2222-2222-2222-222222222222",
+	})
+	require.NoError(t, err)
+	a2aKey, a2aKind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		SenderKind:    "agent",
+		SenderID:      "11111111-1111-1111-1111-111111111111",
+		RecipientKind: "agent",
+		RecipientID:   "33333333-3333-3333-3333-333333333333",
+	})
+	require.NoError(t, err)
 
-	// 1. Outbound `--channel slack --thread-id C0123ABC:1700000000.000100`
-	// after Option A hub translation (thread:<proj>: stripped).
-	err := b.Publish(ctx, topic, &messages.StructuredMessage{
+	convStore := &hubConvStore{
+		convs: map[string]*store.Conversation{
+			"conv-slack-thread": {
+				ID:          "conv-slack-thread",
+				ProjectID:   &projectID,
+				Kind:        threadKind,
+				Surface:     "slack",
+				ExternalRef: threadKey,
+				ParentRef:   "C0123ABC",
+				DisplayName: "#eng",
+			},
+			"conv-dm-alice": {
+				ID:          "conv-dm-alice",
+				ProjectID:   &projectID,
+				Kind:        dmKind,
+				Surface:     "native",
+				ExternalRef: dmKey,
+				DisplayName: "Direct Message",
+			},
+			"conv-dm-a2a": {
+				ID:          "conv-dm-a2a",
+				ProjectID:   &projectID,
+				Kind:        a2aKind,
+				Surface:     "native",
+				ExternalRef: a2aKey,
+			},
+			"conv-native-group": {
+				ID:          "conv-native-group",
+				ProjectID:   &projectID,
+				Kind:        "group",
+				Surface:     "native",
+				ExternalRef: "thread:p1:native-topic",
+				DisplayName: "Native Topic",
+			},
+		},
+	}
+
+	proxy := hub.NewMessageBrokerProxy(&slackForwardingBus{broker: b}, convStore, nil, nil, slog.Default())
+
+	// 1. Outbound Slack thread reply enriched by MessageBrokerProxy (no legacy ThreadID needed).
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-alice", &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice@example.com",
 		Msg:            "reply on slack thread",
 		Type:           messages.TypeInstruction,
 		Channel:        "slack",
-		ThreadID:       "C0123ABC:1700000000.000100",
 		ConversationID: "conv-slack-thread",
-		Conversation: &messages.Conversation{
-			Surface:     "slack",
-			ExternalRef: "C0123ABC:1700000000.000100",
-			ParentRef:   "C0123ABC",
-		},
-	})
-	require.NoError(t, err)
+	}))
 
-	// 2. Outbound DM reply with affinity Channel:"slack": hub omits
-	// Conversation (nil) while preserving ConversationID and legacy fields.
-	err = b.Publish(ctx, topic, &messages.StructuredMessage{
+	// 2. Outbound DM reply enriched by MessageBrokerProxy: Conversation is
+	// {Surface:"native", Kind:"direct", DisplayName:"Direct Message"} with empty
+	// ExternalRef. Even with a legacy ThreadID present, Slack must NOT read
+	// ThreadID and must route to Alice's DM via Recipient.
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-alice", &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice@example.com",
 		Msg:            "dm reply via slack affinity",
 		Type:           messages.TypeInstruction,
 		Channel:        "slack",
-		ConversationID: "conv-dm-1",
-		Conversation:   nil,
-	})
-	require.NoError(t, err)
+		ThreadID:       "C_WRONG_CHAN:1700000099.000999",
+		ConversationID: "conv-dm-alice",
+	}))
+
+	// 3. Outbound DM reply to an unmapped user must not broadcast to public project links.
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-bob", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:bob@example.com",
+		Msg:            "private dm for unmapped user",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-dm-alice",
+	}))
+
+	// 4. Outbound agent-to-agent observer DM still delivers to ShowAgentToAgent link.
+	require.NoError(t, proxy.PublishMessage(ctx, projectID, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "agent:reviewer",
+		Msg:            "agent-to-agent observer dm",
+		Type:           messages.TypeInstruction,
+		ObserverOnly:   true,
+		ConversationID: "conv-dm-a2a",
+	}))
 
 	posted := getPosted()
-	require.Len(t, posted, 2)
+	require.Len(t, posted, 3)
 	assert.Equal(t, "C0123ABC", posted[0].Channel)
 	assert.Equal(t, "1700000000.000100", posted[0].ThreadTS)
 	assert.Equal(t, "D_ALICE_DM", posted[1].Channel)
 	assert.Equal(t, "", posted[1].ThreadTS)
+	assert.Equal(t, "C_PUBLIC_OBS", posted[2].Channel)
+	assert.Equal(t, "", posted[2].ThreadTS)
+
+	// 5. Hand-built defense-in-depth test pinning the Kind != "direct" guard:
+	// even if a Conversation carries Kind:"direct" alongside a non-empty Slack
+	// ExternalRef, Slack routes the DM via Recipient and ignores ExternalRef.
+	require.NoError(t, b.Publish(ctx, "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "direct with unexpected external_ref",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-direct-guard",
+		Conversation: &messages.Conversation{
+			Surface:     "slack",
+			Kind:        "direct",
+			ExternalRef: "C0123ABC:1700000000.000100",
+			ParentRef:   "C0123ABC",
+		},
+	}))
+	posted = getPosted()
+	require.Len(t, posted, 4)
+	assert.Equal(t, "D_ALICE_DM", posted[3].Channel)
+	assert.Equal(t, "", posted[3].ThreadTS)
+
+	// 6. Version-skew guard (pre-P5a hub with Conversation == nil and dm: ThreadID):
+	// an unmapped user DM must not fall through to project-linked channel broadcast.
+	require.NoError(t, b.Publish(ctx, "scion.project.p1.user.u2.messages", &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:bob@example.com",
+		Msg:       "pre-p5a dm for unmapped user",
+		Type:      messages.TypeInstruction,
+		Channel:   "slack",
+		ThreadID:  dmKey,
+	}))
+	assert.Len(t, getPosted(), 4, "pre-P5a dm: ThreadID for unmapped user must not broadcast")
+
+	// 7. Native-surface user-addressed rule (O1): a native group conversation
+	// addressed to a user: recipient with Channel:"slack" routes to the user's
+	// DM when mapped and drops (never broadcasts to project links) when unmapped.
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-alice", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "native group addressed to mapped user",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-native-group",
+	}))
+	posted = getPosted()
+	require.Len(t, posted, 5)
+	assert.Equal(t, "D_ALICE_DM", posted[4].Channel)
+	assert.Equal(t, "", posted[4].ThreadTS)
+
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-bob", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:bob@example.com",
+		Msg:            "native group addressed to unmapped user",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-native-group",
+	}))
+	assert.Len(t, getPosted(), 5, "native-surface group for unmapped user must not broadcast to project links")
 }
 
 // TestSlackBroker_Publish_PreUpgradeBareTimestampNeverPostsToTS (R-FV1)

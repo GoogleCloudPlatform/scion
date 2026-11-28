@@ -425,7 +425,7 @@ func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 
 // checkSubjectOnlyFeedsCanReview fails unless every use of variable name in fd
 // is its own definition, a comparison against nil, or a direct argument to
-// principalCanReview.
+// principalCanReview or principalReadsHomeByRole.
 func checkSubjectOnlyFeedsCanReview(t *testing.T, fd *ast.FuncDecl, name string) {
 	t.Helper()
 	allowed := map[*ast.Ident]bool{}
@@ -443,7 +443,7 @@ func checkSubjectOnlyFeedsCanReview(t *testing.T, fd *ast.FuncDecl, name string)
 				}
 			}
 		case *ast.CallExpr:
-			if extractCallSymbol(v) == "principalCanReview" {
+			if sym := extractCallSymbol(v); sym == "principalCanReview" || sym == "principalReadsHomeByRole" {
 				for _, arg := range v.Args {
 					if id, ok := arg.(*ast.Ident); ok && id.Name == name {
 						allowed[id] = true
@@ -461,7 +461,7 @@ func checkSubjectOnlyFeedsCanReview(t *testing.T, fd *ast.FuncDecl, name string)
 	})
 	ast.Inspect(fd.Body, func(n ast.Node) bool {
 		if id, ok := n.(*ast.Ident); ok && id.Name == name && !allowed[id] {
-			t.Errorf("classifyReviewer uses ResolveRecipient subject %q outside nil check and principalCanReview", name)
+			t.Errorf("classifyReviewer uses ResolveRecipient subject %q outside nil check, principalCanReview, and principalReadsHomeByRole", name)
 		}
 		return true
 	})

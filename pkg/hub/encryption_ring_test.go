@@ -49,11 +49,11 @@ import (
 
 const encTestHubID = "enc-test-hub"
 
-// encSigningKeys are the seven ensureSigningKey backups New creates.
+// encSigningKeys are the eight ensureSigningKey backups New creates.
 var encSigningKeys = []string{
 	SecretKeyAgentSigningKey, SecretKeyUserSigningKey, SecretKeyDownloadSigningKey,
 	SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey,
-	SecretKeyPortViewKey,
+	SecretKeyPortViewKey, SecretKeyGitHubScopeKey,
 }
 
 // newOIDCHubTestStore creates an in-memory SQLite store for the OIDC key

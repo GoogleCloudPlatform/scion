@@ -80,7 +80,7 @@ func (s *UsageLedgerStore) EnsureRunAttributionForAgent(ctx context.Context, age
 		if err != nil {
 			return mapError(err)
 		}
-		attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, "", hubID, "")
+		attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, "", hubID, "", s.trajectoryCapture.load())
 		if err != nil {
 			return err
 		}
@@ -496,6 +496,9 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 				producerEpoch: ev.ProducerEpoch,
 			}]
 		}); err != nil {
+			return nil, false, err
+		}
+		if err := upsertGroupRollupsDailyTx(ctx, drv, dialectName, insertedEvents); err != nil {
 			return nil, false, err
 		}
 		if err := fillRunAttributionUsageLiveSourcesTx(ctx, client, insertedEvents); err != nil {
@@ -1153,6 +1156,173 @@ DO UPDATE SET
 			agg.tokensSummable,
 			agg.calls,
 			agg.unmeasuredCalls,
+		}
+		if err := drv.Exec(ctx, upsertSQL, args, &res); err != nil {
+			return mapError(err)
+		}
+	}
+	return nil
+}
+
+type groupRollupKey struct {
+	dayUTC         time.Time
+	groupID        string
+	projectScopeID string
+}
+
+type groupRollupAgg struct {
+	key            groupRollupKey
+	tokensSummable int64
+	input          int64
+	output         int64
+	cacheRead      int64
+	cacheWrite     int64
+	calls          int64
+	events         int64
+}
+
+// upsertGroupRollupsDailyTx updates usage_group_rollups_daily (origin='ingest')
+// for newly inserted events that carry non-empty ChargedGroupIDs (§4.3).
+//
+// For every charged group G on an event in project P, both the system-wide
+// bucket (day_utc, G, "", 'ingest') and the project-scoped bucket
+// (day_utc, G, P, 'ingest') are incremented additively in canonical key-sorted
+// order. Writing both buckets maintains the invariant that G in
+// usage_events.charged_group_ids means G's ingest rollups already reflect that
+// event for both system and project scopes, so a mid-month seeder for either
+// scope can safely skip events where G is in charged_group_ids without
+// undercounting or double-counting.
+//
+// Anomalous events (>50M summable tokens) are excluded from token counters
+// identically to usage_scope_counters_daily.
+func upsertGroupRollupsDailyTx(ctx context.Context, drv dialect.Driver, dialectName string, events []*store.UsageEvent) error {
+	aggs := make(map[groupRollupKey]*groupRollupAgg)
+	addBucket := func(dayUTC time.Time, groupID, projectScopeID string, tokens, in, out, cacheRead, cacheWrite, calls int64) {
+		k := groupRollupKey{
+			dayUTC:         dayUTC,
+			groupID:        groupID,
+			projectScopeID: projectScopeID,
+		}
+		agg, ok := aggs[k]
+		if !ok {
+			agg = &groupRollupAgg{key: k}
+			aggs[k] = agg
+		}
+		agg.tokensSummable = saturatingAddInt64(agg.tokensSummable, tokens)
+		agg.input = saturatingAddInt64(agg.input, in)
+		agg.output = saturatingAddInt64(agg.output, out)
+		agg.cacheRead = saturatingAddInt64(agg.cacheRead, cacheRead)
+		agg.cacheWrite = saturatingAddInt64(agg.cacheWrite, cacheWrite)
+		agg.calls = saturatingAddInt64(agg.calls, calls)
+		agg.events = saturatingAddInt64(agg.events, 1)
+	}
+
+	for _, ev := range events {
+		if ev == nil || len(ev.ChargedGroupIDs) == 0 {
+			continue
+		}
+		dayUTC := utcDayStart(ev.EventTS.UTC())
+		var tokens, inTok, outTok, crTok, cwTok int64
+		if !ev.Anomalous {
+			if ev.Input != nil {
+				inTok = *ev.Input
+				tokens = saturatingAddInt64(tokens, inTok)
+			}
+			if ev.Output != nil {
+				outTok = *ev.Output
+				tokens = saturatingAddInt64(tokens, outTok)
+			}
+			if ev.CacheRead != nil {
+				crTok = *ev.CacheRead
+				tokens = saturatingAddInt64(tokens, crTok)
+			}
+			if ev.CacheWrite != nil {
+				cwTok = *ev.CacheWrite
+				tokens = saturatingAddInt64(tokens, cwTok)
+			}
+		}
+
+		seenGroup := make(map[string]struct{}, len(ev.ChargedGroupIDs))
+		for _, gid := range ev.ChargedGroupIDs {
+			if gid == "" {
+				continue
+			}
+			if _, dup := seenGroup[gid]; dup {
+				continue
+			}
+			seenGroup[gid] = struct{}{}
+			addBucket(dayUTC, gid, "", tokens, inTok, outTok, crTok, cwTok, ev.Calls)
+			if ev.ProjectID != "" {
+				addBucket(dayUTC, gid, ev.ProjectID, tokens, inTok, outTok, crTok, cwTok, ev.Calls)
+			}
+		}
+	}
+
+	if len(aggs) == 0 {
+		return nil
+	}
+
+	// Canonical key-sorted order prevents deadlocks across concurrent replicas (§4.3).
+	ordered := make([]*groupRollupAgg, 0, len(aggs))
+	for _, agg := range aggs {
+		ordered = append(ordered, agg)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i].key, ordered[j].key
+		if !a.dayUTC.Equal(b.dayUTC) {
+			return a.dayUTC.Before(b.dayUTC)
+		}
+		if a.groupID != b.groupID {
+			return a.groupID < b.groupID
+		}
+		return a.projectScopeID < b.projectScopeID
+	})
+
+	satAdd := func(col string) string {
+		return fmt.Sprintf(
+			"%s = CASE WHEN EXCLUDED.%s > 9223372036854775807 - usage_group_rollups_daily.%s THEN 9223372036854775807 ELSE usage_group_rollups_daily.%s + EXCLUDED.%s END",
+			col, col, col, col, col,
+		)
+	}
+
+	upsertSQL := usageRebindSQL(dialectName, fmt.Sprintf(`
+INSERT INTO usage_group_rollups_daily (
+	id, day_utc, group_id, project_scope_id, origin,
+	tokens_summable, input, output, cache_read, cache_write, calls, events
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (day_utc, group_id, project_scope_id, origin)
+DO UPDATE SET
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s`,
+		satAdd("tokens_summable"),
+		satAdd("input"),
+		satAdd("output"),
+		satAdd("cache_read"),
+		satAdd("cache_write"),
+		satAdd("calls"),
+		satAdd("events"),
+	))
+
+	for _, agg := range ordered {
+		var res sql.Result
+		args := []any{
+			uuid.New(),
+			agg.key.dayUTC,
+			agg.key.groupID,
+			agg.key.projectScopeID,
+			store.UsageGroupRollupOriginIngest,
+			agg.tokensSummable,
+			agg.input,
+			agg.output,
+			agg.cacheRead,
+			agg.cacheWrite,
+			agg.calls,
+			agg.events,
 		}
 		if err := drv.Exec(ctx, upsertSQL, args, &res); err != nil {
 			return mapError(err)

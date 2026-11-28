@@ -22,12 +22,13 @@ import (
 
 // GitHubRun is a workflow run in the fake.
 type GitHubRun struct {
-	ID       int64
-	Repo     string // owner/name
-	HeadRepo string // owner/name; "" means null head_repository
-	Event    string
-	Status   string
-	Jobs     []GitHubJob
+	ID        int64
+	Repo      string // owner/name
+	HeadRepo  string // owner/name; "" means null head_repository
+	Event     string
+	Status    string
+	CreatedAt time.Time
+	Jobs      []GitHubJob
 }
 
 // GitHubJob is a workflow job in the fake.
@@ -48,6 +49,19 @@ type GitHubRunner struct {
 	Scope  string // "repo:owner/name" or "org:owner"
 	Labels []string
 }
+
+// RateLimitMode selects the response returned once RateLimitAfter counted
+// calls have been made.
+type RateLimitMode int
+
+const (
+	Primary403 RateLimitMode = iota
+	Secondary429
+	// Secondary403NoRetryAfter returns HTTP 403 with a secondary-rate-limit
+	// body, X-RateLimit-Remaining > 0, X-RateLimit-Reset = Now()+55m, and no
+	// Retry-After header.
+	Secondary403NoRetryAfter
+)
 
 // GitHub is a fake GitHub REST API.
 type GitHub struct {
@@ -71,12 +85,27 @@ type GitHub struct {
 	// Failure injection.
 	FailJIT    bool
 	FailDelete bool
-	// FailListRuns / FailListJobs: HTTP status to answer for a repo's runs list
-	// (key "owner/repo") or a run's jobs list (key run ID).
+	// FailListRuns / FailListJobs / FailGetRun: HTTP status to answer for a
+	// repo's runs list (key "owner/repo"), a run's jobs list, or GetRun (key run ID).
 	FailListRuns  map[string]int
 	FailListJobs  map[int64]int
+	FailGetRun    map[int64]int
 	BusyOnDelete  bool          // DELETE answers 422 as if the runner just picked up a job
 	TokenLifetime time.Duration // default 1 h
+	OnListRuns    func()        // optional hook invoked during listRuns (outside mu)
+
+	// Rate-limit simulation (guarded by rlMu).
+	rlMu                      sync.Mutex
+	RateLimitAfter            int           // if > 0, rate-limit after this many counted calls
+	RateLimitMode             RateLimitMode // Primary403 (default) or Secondary429
+	RateLimitLimit            int           // X-RateLimit-Limit (default 5000)
+	RateLimitInitialRemaining int           // optional starting remaining (default RateLimitLimit)
+	RateLimitReset            time.Time     // optional fixed X-RateLimit-Reset (default Now()+1h)
+	RateLimitRetryAfter       time.Duration // Retry-After for Secondary429 (default 60s)
+	countedCalls              int
+	calls                     map[string]int
+	calls200                  map[string]int
+	calls304                  map[string]int
 
 	// Observations.
 	TokenMints   int
@@ -102,6 +131,9 @@ func NewGitHub(appID int64, appKey *rsa.PublicKey) *GitHub {
 		nextRunner:     1000,
 		tokens:         map[string]time.Time{},
 		InstallationID: 77,
+		calls:          map[string]int{},
+		calls200:       map[string]int{},
+		calls304:       map[string]int{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", g.jwtOnly(g.installation))
@@ -234,6 +266,46 @@ func (g *GitHub) Stats() (tokenMints, jitRequests, deletes int) {
 	return g.TokenMints, len(g.JITRequests), len(g.Deleted)
 }
 
+// Calls returns the number of token-authenticated requests whose URL path
+// starts with pathPrefix.
+func (g *GitHub) Calls(pathPrefix string) int {
+	g.rlMu.Lock()
+	defer g.rlMu.Unlock()
+	total := 0
+	for p, n := range g.calls {
+		if strings.HasPrefix(p, pathPrefix) {
+			total += n
+		}
+	}
+	return total
+}
+
+// CallsByStatus returns the number of 200 and 304 responses for token-
+// authenticated requests whose URL path starts with pathPrefix.
+func (g *GitHub) CallsByStatus(pathPrefix string) (ok200, notModified304 int) {
+	g.rlMu.Lock()
+	defer g.rlMu.Unlock()
+	for p, n := range g.calls200 {
+		if strings.HasPrefix(p, pathPrefix) {
+			ok200 += n
+		}
+	}
+	for p, n := range g.calls304 {
+		if strings.HasPrefix(p, pathPrefix) {
+			notModified304 += n
+		}
+	}
+	return ok200, notModified304
+}
+
+// ResetRateLimit clears counted calls and disables RateLimitAfter.
+func (g *GitHub) ResetRateLimit() {
+	g.rlMu.Lock()
+	defer g.rlMu.Unlock()
+	g.RateLimitAfter = 0
+	g.countedCalls = 0
+}
+
 // Secrets returns every credential the fake issued or received.
 func (g *GitHub) Secrets() []string {
 	g.mu.Lock()
@@ -297,6 +369,65 @@ func (g *GitHub) verifyJWT(jwt string) bool {
 	return c.Iss == strconv.FormatInt(g.AppID, 10) && c.Iat <= now && c.Exp > now && c.Exp-c.Iat <= 600
 }
 
+type rlResponseWriter struct {
+	http.ResponseWriter
+	g           *GitHub
+	path        string
+	wroteHeader bool
+}
+
+func (rw *rlResponseWriter) WriteHeader(code int) {
+	if !rw.wroteHeader {
+		rw.wroteHeader = true
+		rw.g.recordResponse(rw.Header(), rw.path, code)
+	}
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *rlResponseWriter) Write(b []byte) (int, error) {
+	if !rw.wroteHeader {
+		rw.WriteHeader(http.StatusOK)
+	}
+	return rw.ResponseWriter.Write(b)
+}
+
+func (g *GitHub) rateLimitMetaLocked() (limit int, reset time.Time) {
+	limit = g.RateLimitLimit
+	if limit <= 0 {
+		limit = 5000
+	}
+	reset = g.RateLimitReset
+	if reset.IsZero() {
+		reset = g.Now().Add(time.Hour)
+	}
+	return limit, reset
+}
+
+func (g *GitHub) recordResponse(h http.Header, path string, code int) {
+	g.rlMu.Lock()
+	defer g.rlMu.Unlock()
+	if code == http.StatusNotModified {
+		g.calls304[path]++
+	} else {
+		g.countedCalls++
+		if code == http.StatusOK {
+			g.calls200[path]++
+		}
+	}
+	limit, reset := g.rateLimitMetaLocked()
+	start := limit
+	if g.RateLimitInitialRemaining > 0 {
+		start = g.RateLimitInitialRemaining
+	}
+	rem := start - g.countedCalls
+	if rem < 0 {
+		rem = 0
+	}
+	h.Set("X-RateLimit-Limit", strconv.Itoa(limit))
+	h.Set("X-RateLimit-Remaining", strconv.Itoa(rem))
+	h.Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+}
+
 func (g *GitHub) tokenOnly(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "token ")
@@ -311,7 +442,41 @@ func (g *GitHub) tokenOnly(h http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
 			return
 		}
-		h(w, r)
+		g.rlMu.Lock()
+		g.calls[r.URL.Path]++
+		limited := g.RateLimitAfter > 0 && g.countedCalls >= g.RateLimitAfter
+		mode := g.RateLimitMode
+		limit, reset := g.rateLimitMetaLocked()
+		retryAfter := g.RateLimitRetryAfter
+		g.rlMu.Unlock()
+		if limited {
+			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limit))
+			if mode == Secondary403NoRetryAfter {
+				rem := limit - 1000
+				if rem <= 0 {
+					rem = 4000
+				}
+				w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(rem))
+				w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(g.Now().Add(55*time.Minute).Unix(), 10))
+				writeJSON(w, http.StatusForbidden, map[string]string{"message": "You have exceeded a secondary rate limit."})
+				return
+			}
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+			if mode == Secondary429 {
+				secs := int(retryAfter.Seconds())
+				if secs <= 0 {
+					secs = 60
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(secs))
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{"message": "You have exceeded a secondary rate limit"})
+				return
+			}
+			writeJSON(w, http.StatusForbidden, map[string]string{"message": "API rate limit exceeded for installation"})
+			return
+		}
+		rw := &rlResponseWriter{ResponseWriter: w, g: g, path: r.URL.Path}
+		h(rw, r)
 	}
 }
 
@@ -351,10 +516,14 @@ func repoRef(full string) any {
 }
 
 func (g *GitHub) runJSON(run *GitHubRun) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id": run.ID, "event": run.Event, "status": run.Status,
 		"repository": repoRef(run.Repo), "head_repository": repoRef(run.HeadRepo),
 	}
+	if !run.CreatedAt.IsZero() {
+		m["created_at"] = run.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	return m
 }
 
 func (g *GitHub) getRun(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +532,10 @@ func (g *GitHub) getRun(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.RunGets++
+	if code := g.FailGetRun[id]; code != 0 {
+		writeJSON(w, code, map[string]string{"message": "injected failure"})
+		return
+	}
 	run, ok := g.runs[id]
 	if !ok || !strings.EqualFold(run.Repo, full) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})
@@ -371,7 +544,28 @@ func (g *GitHub) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, g.runJSON(run))
 }
 
+func writeJSONConditional(w http.ResponseWriter, r *http.Request, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sum := sha256.Sum256(b)
+	etag := fmt.Sprintf("W/\"%x\"", sum[:16])
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
 func (g *GitHub) listRuns(w http.ResponseWriter, r *http.Request) {
+	if fn := g.OnListRuns; fn != nil {
+		fn()
+	}
 	full := r.PathValue("owner") + "/" + r.PathValue("repo")
 	status := r.URL.Query().Get("status")
 	g.mu.Lock()
@@ -391,7 +585,7 @@ func (g *GitHub) listRuns(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		runs = append(runs, g.runJSON(g.runs[id]))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total_count": len(runs), "workflow_runs": runs})
+	writeJSONConditional(w, r, map[string]any{"total_count": len(runs), "workflow_runs": runs})
 }
 
 func (g *GitHub) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -411,7 +605,7 @@ func (g *GitHub) listJobs(w http.ResponseWriter, r *http.Request) {
 	for _, j := range run.Jobs {
 		jobs = append(jobs, jobJSON(run.ID, j))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total_count": len(jobs), "jobs": jobs})
+	writeJSONConditional(w, r, map[string]any{"total_count": len(jobs), "jobs": jobs})
 }
 
 func jobJSON(runID int64, j GitHubJob) map[string]any {

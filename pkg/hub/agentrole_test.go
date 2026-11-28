@@ -47,7 +47,7 @@ func TestScopesForRole_ReadOnly(t *testing.T) {
 
 func TestScopesForRole_Baseline(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
-	require.Len(t, scopes, 7)
+	require.Len(t, scopes, 8)
 
 	// Must include these scopes
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -57,6 +57,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentPortForward)
 	assert.Contains(t, scopes, ScopeProjectArtifactRead)
 	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
+	assert.Contains(t, scopes, ScopeProjectArtifactRequestReview)
 
 	// Must NOT include elevated scopes
 	assert.NotContains(t, scopes, ScopeAgentCreate)
@@ -68,8 +69,9 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 14)
+	require.Len(t, scopes, 15)
 	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
+	assert.Contains(t, scopes, ScopeProjectArtifactRequestReview)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -102,6 +104,20 @@ func TestScopesForRole_EmptyStringDefaultsToNone(t *testing.T) {
 	// Empty string (missing stored role) fails closed to no scopes.
 	scopes := ScopesForRole(AgentRole(""))
 	assert.Nil(t, scopes)
+}
+
+// TestAgentAuthoringFloorScope_MatchesBaselineFloor pins the coupling between
+// agentAuthoringFloorScope and the stock agent roles (Stage 2 §4.3,
+// ptone/scion#8065): readonly and none MUST NOT hold it, baseline and full
+// MUST hold it, and it MUST NOT be ceiling-optional (so every minted
+// baseline/full token carries it).
+func TestAgentAuthoringFloorScope_MatchesBaselineFloor(t *testing.T) {
+	assert.NotContains(t, ScopesForRole(AgentRoleNone), agentAuthoringFloorScope)
+	assert.NotContains(t, ScopesForRole(AgentRoleReadOnly), agentAuthoringFloorScope)
+	assert.Contains(t, ScopesForRole(AgentRoleBaseline), agentAuthoringFloorScope)
+	assert.Contains(t, ScopesForRole(AgentRoleFull), agentAuthoringFloorScope)
+	assert.False(t, ceilingOptionalRoleScopes[agentAuthoringFloorScope],
+		"agentAuthoringFloorScope must remain a non-optional baseline scope")
 }
 
 func TestValidAgentRole(t *testing.T) {
@@ -170,6 +186,7 @@ func TestScopesForRole_RoleReadOnlyHasOnlyReadAndSelfStatus(t *testing.T) {
 		ScopeAgentCreate, ScopeAgentLifecycle, ScopeAgentNotify, ScopeAgentPortForward,
 		ScopeAgentTokenRefresh, ScopeAgentSAAssign, ScopeProjectSecretRead,
 		ScopeProjectTemplateWrite, ScopeProjectSkillWrite, ScopeAgentSetMessageMode, ScopeProjectArtifactWrite,
+		ScopeProjectArtifactRequestReview,
 	} {
 		assert.NotContains(t, scopes, s)
 	}

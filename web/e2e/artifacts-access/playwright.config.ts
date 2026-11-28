@@ -18,6 +18,10 @@ import { chromiumLaunchOptions } from '../../playwright-chromium.js';
 
 const CI = !!process.env.CI;
 
+// Drop the page snapshot from Playwright's failure context (error-context.md
+// is still written with error text and call log). Inherited by workers.
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1';
+
 // Artifact access journey (R1-A), end to end against the real Go hub
 // binary. By default the global setup starts a throwaway member-level test
 // hub (../harness/hub.ts) with no broker; E2E_TARGET_URL points the journey

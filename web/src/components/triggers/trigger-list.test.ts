@@ -286,6 +286,210 @@ describe('scion-trigger-list', () => {
     expect(patchBodies[2]['source']).toBeUndefined();
   });
 
+  it('omits untrustedVars on create and edit so hub derives them (ptone/scion#9776)', async () => {
+    const existing: TriggerDefinition = {
+      id: 'tr-msg-untrusted',
+      projectId: 'proj-1',
+      name: 'ci-alert',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: { types: ['webhook.received'], rules: [] },
+      action: {
+        type: 'message',
+        agentId: 'ag-1',
+        message: 'Old ${event.payload.old}',
+        untrustedVars: ['event.payload.old'],
+      },
+      subject: { mode: 'new' },
+      status: 'active',
+      authorizationRevision: 1,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T05:00:00Z',
+      updatedAt: '2026-11-28T05:00:00Z',
+    };
+
+    const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST' || init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          requests.push({
+            method: init.method,
+            body: JSON.parse(rawBody) as Record<string, unknown>,
+          });
+          return Promise.resolve(jsonResponse(existing, init.method === 'POST' ? 201 : 200));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [existing], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Create multi-action trigger with message (${event.payload.commit}) + dispatch_agent:
+    //    must send actions[] (not scalar action) and omit untrustedVars on every action.
+    el.openCreateDialog('webhook');
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'web-msg-commit';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const srcInput = el.shadowRoot?.querySelector('[data-trigger-source-id]') as HTMLInputElement;
+    srcInput.value = 'ep-1';
+    srcInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const actionEditor = el.shadowRoot?.querySelector('scion-trigger-action-editor');
+    actionEditor?.dispatchEvent(
+      new CustomEvent('actions-changed', {
+        detail: {
+          actions: [
+            {
+              type: 'message',
+              agentId: 'ag-1',
+              message: 'CI at ${event.payload.commit}',
+              offline: 'skip',
+            },
+            {
+              type: 'dispatch_agent',
+              template: 'developer',
+              task: 'Investigate ${event.attributes.repo}',
+            },
+          ],
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[0]?.method).toBe('POST');
+    expect(requests[0]?.body['action']).toBeUndefined();
+    const createdActions = requests[0]?.body['actions'] as Array<Record<string, unknown>>;
+    expect(createdActions).toHaveLength(2);
+    expect(createdActions[0]['message']).toBe('CI at ${event.payload.commit}');
+    expect('untrustedVars' in createdActions[0]).toBe(false);
+    expect(createdActions[1]['task']).toBe('Investigate ${event.attributes.repo}');
+    expect('untrustedVars' in createdActions[1]).toBe(false);
+
+    // 2. Edit legacy single-action message trigger with new placeholder:
+    //    round-trips via actions[] and omits stored untrustedVars so hub re-derives.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-msg-untrusted"]') as HTMLElement).click();
+    await el.updateComplete;
+    const editActionEditor = el.shadowRoot?.querySelector('scion-trigger-action-editor');
+    editActionEditor?.dispatchEvent(
+      new CustomEvent('actions-changed', {
+        detail: {
+          actions: [
+            {
+              type: 'message',
+              agentId: 'ag-1',
+              message: 'CI at ${event.payload.commit}',
+              untrustedVars: ['event.payload.old'],
+            },
+          ],
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[1]?.method).toBe('PATCH');
+    expect(requests[1]?.body['action']).toBeUndefined();
+    const patchedActions = requests[1]?.body['actions'] as Array<Record<string, unknown>>;
+    expect(patchedActions).toHaveLength(1);
+    expect(patchedActions[0]['message']).toBe('CI at ${event.payload.commit}');
+    expect('untrustedVars' in patchedActions[0]).toBe(false);
+  });
+
+  it('locks the action list read-only when actions[] contains a read-only row while allowing non-action edits (R1)', async () => {
+    const mixed: TriggerDefinition = {
+      id: 'tr-mixed',
+      projectId: 'proj-1',
+      name: 'mixed-rule',
+      description: 'orig',
+      source: { kind: 'github', id: '' },
+      match: { types: ['github.issue_comment.created'], rules: [] },
+      actions: [
+        { type: 'message', agentId: 'ag-1', message: 'Notify ${event.attributes.repo}' },
+        { type: 'github.comment', target: 'event', body: 'Acked' },
+      ],
+      subject: { mode: 'new' },
+      status: 'active',
+      authorizationRevision: 3,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T05:00:00Z',
+      updatedAt: '2026-11-28T05:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse({ ...mixed, name: 'mixed-rule-renamed' }));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [mixed], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-mixed"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    // Visible notice explains CLI/API editing requirement.
+    const notice = el.shadowRoot?.querySelector('[data-readonly-actions-notice]');
+    expect(notice).toBeTruthy();
+    expect(notice?.textContent?.replace(/\s+/g, ' ')).toContain(
+      'these actions can only be edited with the CLI or API'
+    );
+
+    // Action editor is locked read-only: no Add/Remove/Move controls and message input is readonly.
+    const editor = el.shadowRoot?.querySelector('scion-trigger-action-editor') as HTMLElement & {
+      readonly: boolean;
+      updateComplete: Promise<boolean>;
+    };
+    expect(editor).toBeTruthy();
+    expect(editor.readonly).toBe(true);
+    await editor.updateComplete;
+    expect(editor.shadowRoot?.querySelector('[data-add-action-row]')).toBeNull();
+    expect(editor.shadowRoot?.querySelector('[data-remove-action="0"]')).toBeNull();
+    expect(editor.shadowRoot?.querySelector('[data-move-action-up="1"]')).toBeNull();
+    const msgTextarea = editor.shadowRoot?.querySelector('[data-action-message="0"]');
+    expect(msgTextarea?.hasAttribute('readonly')).toBe(true);
+
+    // Non-action fields (name) remain editable and save cleanly without sending or dropping actions.
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'mixed-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).toEqual({
+      name: 'mixed-rule-renamed',
+      expectedRevision: 3,
+    });
+    expect(patchBodies[0]['action']).toBeUndefined();
+    expect(patchBodies[0]['actions']).toBeUndefined();
+  });
+
   it('uses canonical deep equality for actions, rules, form, durations, and untrimmed descriptions on rename (O-A, Nit)', async () => {
     const existing: TriggerDefinition = {
       id: 'tr-canon',
@@ -374,5 +578,454 @@ describe('scion-trigger-list', () => {
       name: 'canon-rule-renamed',
       expectedRevision: 7,
     });
+  });
+
+  it('round-trips notify settings on create and PATCH (edit, clear agent, outcomes) and omits notify when unchanged', async () => {
+    const stored: TriggerDefinition = {
+      id: 'tr-notify',
+      projectId: 'proj-1',
+      name: 'deploy-rule',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: { types: ['webhook.received'], rules: [] },
+      actions: [{ type: 'message', agentId: 'ag-1', message: 'hello' }],
+      subject: { mode: 'new' },
+      notify: {
+        onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+        userNotice: false,
+        agentId: 'ag-2',
+        agentName: 'triage-agent',
+      },
+      status: 'active',
+      authorizationRevision: 5,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T05:00:00Z',
+      updatedAt: '2026-11-28T05:00:00Z',
+    };
+
+    const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST' || init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          requests.push({
+            method: init.method,
+            body: JSON.parse(rawBody) as Record<string, unknown>,
+          });
+          return Promise.resolve(jsonResponse(stored, init.method === 'POST' ? 201 : 200));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [stored], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    el.agents = [
+      { id: 'ag-1', name: 'ops-agent' },
+      { id: 'ag-2', name: 'triage-agent' },
+    ];
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Create with custom notify (userNotice false, agent ag-2, skipped enabled).
+    el.openCreateDialog('webhook');
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'deploy-rule';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const srcInput = el.shadowRoot?.querySelector('[data-trigger-source-id]') as HTMLInputElement;
+    srcInput.value = 'ep-1';
+    srcInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+
+    const createNotifyEditor = el.shadowRoot?.querySelector('scion-trigger-notify-editor');
+    createNotifyEditor?.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+            userNotice: false,
+            agentId: 'ag-2',
+            agentName: 'triage-agent',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[0]?.method).toBe('POST');
+    expect(requests[0]?.body['notify']).toEqual({
+      onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+      userNotice: false,
+      agentId: 'ag-2',
+      agentName: 'triage-agent',
+    });
+
+    // 2. Open edit dialog: stored values are hydrated into notify editor.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-notify"]') as HTMLElement).click();
+    await el.updateComplete;
+    const editNotifyEditor = el.shadowRoot?.querySelector(
+      'scion-trigger-notify-editor'
+    ) as HTMLElement & {
+      notify: { onOutcomes?: string[]; userNotice?: boolean; agentId?: string; agentName?: string };
+    };
+    expect(editNotifyEditor.notify).toEqual({
+      onOutcomes: ['failed', 'refused', 'expired', 'skipped'],
+      userNotice: false,
+      agentId: 'ag-2',
+      agentName: 'triage-agent',
+    });
+
+    // 3. Rename only -> PATCH must NOT include notify.
+    const editName = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    editName.value = 'deploy-rule-v2';
+    editName.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[1]?.method).toBe('PATCH');
+    expect(requests[1]?.body).toEqual({
+      name: 'deploy-rule-v2',
+      expectedRevision: 5,
+    });
+
+    // 4. Clear agent, re-enable userNotice, remove skipped -> PATCH sends explicit empty agentId/agentName.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-notify"]') as HTMLElement).click();
+    await el.updateComplete;
+    const patchNotifyEditor = el.shadowRoot?.querySelector('scion-trigger-notify-editor');
+    patchNotifyEditor?.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused'],
+            userNotice: true,
+            agentId: '',
+            agentName: '',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[2]?.method).toBe('PATCH');
+    expect(requests[2]?.body).toEqual({
+      expectedRevision: 5,
+      notify: {
+        onOutcomes: ['failed', 'refused'],
+        userNotice: true,
+        agentId: '',
+        agentName: '',
+      },
+    });
+  });
+
+  it('shows hub notify refusal inline and keeps the dialog open', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: 'forbidden',
+                  message: 'caller is not allowed to message agent restricted-agent',
+                },
+              },
+              403
+            )
+          );
+        }
+        return Promise.resolve(jsonResponse({ triggers: [], totalCount: 0 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    el.agents = [{ id: 'ag-restricted', name: 'restricted-agent' }];
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    el.openCreateDialog('webhook');
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'forbidden-notify-rule';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const srcInput = el.shadowRoot?.querySelector('[data-trigger-source-id]') as HTMLInputElement;
+    srcInput.value = 'ep-1';
+    srcInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+
+    const notifyEditor = el.shadowRoot?.querySelector('scion-trigger-notify-editor');
+    notifyEditor?.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused', 'expired'],
+            userNotice: true,
+            agentId: 'ag-restricted',
+            agentName: 'restricted-agent',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot?.querySelector('[data-trigger-dialog]');
+    expect(dialog?.hasAttribute('open')).toBe(true);
+    const errAlert = el.shadowRoot?.querySelector('[data-trigger-form-error]');
+    expect(errAlert?.textContent).toContain(
+      'caller is not allowed to message agent restricted-agent'
+    );
+  });
+
+  it('allows editing and PATCHing notify on rules with read-only action types without sending actions (R1)', async () => {
+    const execWithNotify: TriggerDefinition = {
+      ...execTrigger,
+      notify: {
+        onOutcomes: ['failed', 'refused'],
+        userNotice: true,
+      },
+    };
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(execWithNotify));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [execWithNotify], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    el.agents = [{ id: 'ag-1', name: 'ops-agent' }];
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-exec"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    // Action editor stays read-only, while notify editor stays enabled.
+    const actionEditor = el.shadowRoot?.querySelector(
+      'scion-trigger-action-editor'
+    ) as HTMLElement & { readonly: boolean };
+    expect(actionEditor.readonly).toBe(true);
+
+    const notifyEditor = el.shadowRoot?.querySelector(
+      'scion-trigger-notify-editor'
+    ) as HTMLElement & { readonly: boolean; updateComplete: Promise<boolean> };
+    expect(notifyEditor).toBeTruthy();
+    expect(notifyEditor.readonly).toBe(false);
+    await notifyEditor.updateComplete;
+    expect(
+      notifyEditor.shadowRoot?.querySelector('[data-notify-user-notice]')?.hasAttribute('disabled')
+    ).toBe(false);
+    expect(
+      notifyEditor.shadowRoot?.querySelector('[data-notify-agent-select]')?.hasAttribute('disabled')
+    ).toBe(false);
+
+    // Edit notify and save -> PATCH sends only expectedRevision + notify; actions untouched.
+    notifyEditor.dispatchEvent(
+      new CustomEvent('notify-changed', {
+        detail: {
+          notify: {
+            onOutcomes: ['failed', 'refused', 'skipped'],
+            userNotice: false,
+            agentId: 'ag-1',
+            agentName: 'ops-agent',
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).toEqual({
+      expectedRevision: 2,
+      notify: {
+        onOutcomes: ['failed', 'refused', 'skipped'],
+        userNotice: false,
+        agentId: 'ag-1',
+        agentName: 'ops-agent',
+      },
+    });
+    expect(patchBodies[0]['action']).toBeUndefined();
+    expect(patchBodies[0]['actions']).toBeUndefined();
+  });
+
+  it('preserves non-admitted match rules byte-identical across edits, reorders, non-match edits, and supports explicit removal (J16c)', async () => {
+    const systemOneRule = {
+      dialect: 'system_one',
+      expr: 'policy("prod-only") &&  severity >= 3\n',
+    };
+    const stored: TriggerDefinition = {
+      id: 'tr-s1',
+      projectId: 'proj-1',
+      name: 'mixed-dialect-rule',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: {
+        types: ['webhook.received'],
+        rules: [
+          { dialect: 'cel', expr: 'event.attributes.env == "prod"' },
+          { ...systemOneRule },
+          { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+        ],
+      },
+      actions: [{ type: 'message', agentId: 'ag-1', message: 'ping' }],
+      subject: { mode: 'new' },
+      maxFiresPerMinute: 10,
+      status: 'active',
+      authorizationRevision: 6,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T10:00:00Z',
+      updatedAt: '2026-11-28T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(stored));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [stored], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Edit A's expression -> PATCH carries S byte-identical in position 2 (index 1).
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const where1 = el.shadowRoot?.querySelector('scion-trigger-where-editor') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await where1.updateComplete;
+    const exprA = where1.shadowRoot?.querySelector('[data-where-expr="0"]') as HTMLTextAreaElement;
+    exprA.value = 'event.attributes.env == "staging"';
+    exprA.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const match1 = patchBodies[0]?.['match'] as {
+      rules: Array<{ dialect: string; expr: string }>;
+    };
+    expect(match1.rules).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.env == "staging"' },
+      systemOneRule,
+      { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+    ]);
+    expect(match1.rules[1]?.dialect).toBe('system_one');
+
+    // 2. Reorder A/B (move A down twice, then move B up to index 0) -> S remains intact.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const where2 = el.shadowRoot?.querySelector('scion-trigger-where-editor') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await where2.updateComplete;
+    // Move A (0) down -> [S, A, B]
+    (where2.shadowRoot?.querySelector('[data-where-down="0"]') as HTMLElement).click();
+    await where2.updateComplete;
+    // Move B (2) up -> [S, B, A]
+    (where2.shadowRoot?.querySelector('[data-where-up="2"]') as HTMLElement).click();
+    await where2.updateComplete;
+    // Move B (1) up -> [B, S, A]
+    (where2.shadowRoot?.querySelector('[data-where-up="1"]') as HTMLElement).click();
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const match2 = patchBodies[1]?.['match'] as {
+      rules: Array<{ dialect: string; expr: string }>;
+    };
+    expect(match2.rules).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+      systemOneRule,
+      { dialect: 'cel', expr: 'event.attributes.env == "prod"' },
+    ]);
+    expect(match2.rules[1]?.dialect).toBe('system_one');
+
+    // 3. Change another field (name + maxFiresPerMinute) -> match is omitted from PATCH.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'mixed-dialect-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const fpmInput = el.shadowRoot?.querySelector('[data-trigger-max-fpm]') as HTMLInputElement;
+    fpmInput.value = '25';
+    fpmInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[2]).toEqual({
+      name: 'mixed-dialect-rule-renamed',
+      maxFiresPerMinute: 25,
+      expectedRevision: 6,
+    });
+    expect(patchBodies[2]['match']).toBeUndefined();
+
+    // 4. Explicitly remove S -> PATCH omits S and keeps [A, B].
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-s1"]') as HTMLElement).click();
+    await el.updateComplete;
+    const where4 = el.shadowRoot?.querySelector('scion-trigger-where-editor') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await where4.updateComplete;
+    (where4.shadowRoot?.querySelector('[data-where-remove="1"]') as HTMLElement).click();
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const match4 = patchBodies[3]?.['match'] as {
+      rules: Array<{ dialect: string; expr: string }>;
+    };
+    expect(match4.rules).toEqual([
+      { dialect: 'cel', expr: 'event.attributes.env == "prod"' },
+      { dialect: 'cel', expr: 'event.attributes.team == "core"' },
+    ]);
+
+    // Sanity check: S's dialect was never coerced to 'cel' in any PATCH payload.
+    for (const body of patchBodies) {
+      const m = body['match'] as { rules?: Array<{ dialect: string; expr: string }> } | undefined;
+      for (const r of m?.rules ?? []) {
+        if (r.expr === systemOneRule.expr) {
+          expect(r.dialect).toBe('system_one');
+        }
+      }
+    }
   });
 });

@@ -122,6 +122,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockCommandRunSweep,
 		LockDecisionRetention,
 		LockUsageRetention,
+		LockUsageGroupSeedReconcile,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -143,6 +144,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockTriggerSubjectOverlap,
 		LockTriggerOfflineQueue,
 		LockCommandRequestQuota,
+		LockUsageGroupEpisode,
 		testLockClassID,
 	}
 	for _, k := range classIDs {
@@ -243,6 +245,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockCommandRunSweep", LockCommandRunSweep},
 		{"LockDecisionRetention", LockDecisionRetention},
 		{"LockUsageRetention", LockUsageRetention},
+		{"LockUsageGroupSeedReconcile", LockUsageGroupSeedReconcile},
 		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
 		{"LockScheduledEventQuota", LockScheduledEventQuota},
 		{"LockScheduledExecOverlap", LockScheduledExecOverlap},
@@ -251,6 +254,9 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockTriggerOfflineQueue", LockTriggerOfflineQueue},
 		{"LockNeverSuspendQuota", LockNeverSuspendQuota},
 		{"LockCommandRequestQuota", LockCommandRequestQuota},
+		{"LockUploadQuota", LockUploadQuota},
+		{"LockUploadSessionSweep", LockUploadSessionSweep},
+		{"LockUsageGroupEpisode", LockUsageGroupEpisode},
 	}
 
 	// --- Check 1: value uniqueness ---

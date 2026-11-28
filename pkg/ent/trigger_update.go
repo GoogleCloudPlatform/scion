@@ -466,6 +466,20 @@ func (_u *TriggerUpdate) SetNillableActionPayload(v *string) *TriggerUpdate {
 	return _u
 }
 
+// SetActions sets the "actions" field.
+func (_u *TriggerUpdate) SetActions(v string) *TriggerUpdate {
+	_u.mutation.SetActions(v)
+	return _u
+}
+
+// SetNillableActions sets the "actions" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableActions(v *string) *TriggerUpdate {
+	if v != nil {
+		_u.SetActions(*v)
+	}
+	return _u
+}
+
 // SetSubjectDialect sets the "subject_dialect" field.
 func (_u *TriggerUpdate) SetSubjectDialect(v string) *TriggerUpdate {
 	_u.mutation.SetSubjectDialect(v)
@@ -568,6 +582,26 @@ func (_u *TriggerUpdate) SetNillableMaxConcurrentDispatches(v *int) *TriggerUpda
 // AddMaxConcurrentDispatches adds value to the "max_concurrent_dispatches" field.
 func (_u *TriggerUpdate) AddMaxConcurrentDispatches(v int) *TriggerUpdate {
 	_u.mutation.AddMaxConcurrentDispatches(v)
+	return _u
+}
+
+// SetNotify sets the "notify" field.
+func (_u *TriggerUpdate) SetNotify(v string) *TriggerUpdate {
+	_u.mutation.SetNotify(v)
+	return _u
+}
+
+// SetNillableNotify sets the "notify" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableNotify(v *string) *TriggerUpdate {
+	if v != nil {
+		_u.SetNotify(*v)
+	}
+	return _u
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (_u *TriggerUpdate) ClearNotify() *TriggerUpdate {
+	_u.mutation.ClearNotify()
 	return _u
 }
 
@@ -791,11 +825,6 @@ func (_u *TriggerUpdate) check() error {
 			return &ValidationError{Name: "match_types", err: fmt.Errorf(`ent: validator failed for field "Trigger.match_types": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.ActionType(); ok {
-		if err := trigger.ActionTypeValidator(v); err != nil {
-			return &ValidationError{Name: "action_type", err: fmt.Errorf(`ent: validator failed for field "Trigger.action_type": %w`, err)}
-		}
-	}
 	return nil
 }
 
@@ -934,6 +963,9 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.ActionPayload(); ok {
 		_spec.SetField(trigger.FieldActionPayload, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.Actions(); ok {
+		_spec.SetField(trigger.FieldActions, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.SubjectDialect(); ok {
 		_spec.SetField(trigger.FieldSubjectDialect, field.TypeString, value)
 	}
@@ -960,6 +992,12 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedMaxConcurrentDispatches(); ok {
 		_spec.AddField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.Notify(); ok {
+		_spec.SetField(trigger.FieldNotify, field.TypeString, value)
+	}
+	if _u.mutation.NotifyCleared() {
+		_spec.ClearField(trigger.FieldNotify, field.TypeString)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1466,6 +1504,20 @@ func (_u *TriggerUpdateOne) SetNillableActionPayload(v *string) *TriggerUpdateOn
 	return _u
 }
 
+// SetActions sets the "actions" field.
+func (_u *TriggerUpdateOne) SetActions(v string) *TriggerUpdateOne {
+	_u.mutation.SetActions(v)
+	return _u
+}
+
+// SetNillableActions sets the "actions" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableActions(v *string) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetActions(*v)
+	}
+	return _u
+}
+
 // SetSubjectDialect sets the "subject_dialect" field.
 func (_u *TriggerUpdateOne) SetSubjectDialect(v string) *TriggerUpdateOne {
 	_u.mutation.SetSubjectDialect(v)
@@ -1568,6 +1620,26 @@ func (_u *TriggerUpdateOne) SetNillableMaxConcurrentDispatches(v *int) *TriggerU
 // AddMaxConcurrentDispatches adds value to the "max_concurrent_dispatches" field.
 func (_u *TriggerUpdateOne) AddMaxConcurrentDispatches(v int) *TriggerUpdateOne {
 	_u.mutation.AddMaxConcurrentDispatches(v)
+	return _u
+}
+
+// SetNotify sets the "notify" field.
+func (_u *TriggerUpdateOne) SetNotify(v string) *TriggerUpdateOne {
+	_u.mutation.SetNotify(v)
+	return _u
+}
+
+// SetNillableNotify sets the "notify" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableNotify(v *string) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetNotify(*v)
+	}
+	return _u
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (_u *TriggerUpdateOne) ClearNotify() *TriggerUpdateOne {
+	_u.mutation.ClearNotify()
 	return _u
 }
 
@@ -1804,11 +1876,6 @@ func (_u *TriggerUpdateOne) check() error {
 			return &ValidationError{Name: "match_types", err: fmt.Errorf(`ent: validator failed for field "Trigger.match_types": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.ActionType(); ok {
-		if err := trigger.ActionTypeValidator(v); err != nil {
-			return &ValidationError{Name: "action_type", err: fmt.Errorf(`ent: validator failed for field "Trigger.action_type": %w`, err)}
-		}
-	}
 	return nil
 }
 
@@ -1964,6 +2031,9 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	if value, ok := _u.mutation.ActionPayload(); ok {
 		_spec.SetField(trigger.FieldActionPayload, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.Actions(); ok {
+		_spec.SetField(trigger.FieldActions, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.SubjectDialect(); ok {
 		_spec.SetField(trigger.FieldSubjectDialect, field.TypeString, value)
 	}
@@ -1990,6 +2060,12 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.AddedMaxConcurrentDispatches(); ok {
 		_spec.AddField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.Notify(); ok {
+		_spec.SetField(trigger.FieldNotify, field.TypeString, value)
+	}
+	if _u.mutation.NotifyCleared() {
+		_spec.ClearField(trigger.FieldNotify, field.TypeString)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)

@@ -663,3 +663,313 @@ func TestUsageCapabilityMemo_HostedGlobalStoreErrorDoesNotConsultProjectScope(t 
 	assert.Nil(t, got, "hosted global store error must yield unknown capability (nil)")
 	assert.False(t, stub.projectQueried, "hosted hub must never consult project scope after non-NotFound global store error")
 }
+
+type scopeWalkQuery struct {
+	slug    string
+	scope   string
+	scopeID string
+}
+
+type harnessConfigScopeWalkStubStore struct {
+	store.Store
+	configs map[string]*store.HarnessConfig
+	errs    map[string]error
+	queries []scopeWalkQuery
+}
+
+func scopeWalkConfigKey(scope, scopeID, slug string) string {
+	return scope + ":" + scopeID + ":" + slug
+}
+
+func scopeWalkErrKey(scope, scopeID string) string {
+	return scope + ":" + scopeID
+}
+
+func (s *harnessConfigScopeWalkStubStore) GetHarnessConfigBySlug(_ context.Context, slug, scope, scopeID string) (*store.HarnessConfig, error) {
+	s.queries = append(s.queries, scopeWalkQuery{slug: slug, scope: scope, scopeID: scopeID})
+	if err, ok := s.errs[scopeWalkErrKey(scope, scopeID)]; ok {
+		return nil, err
+	}
+	if hc, ok := s.configs[scopeWalkConfigKey(scope, scopeID, slug)]; ok {
+		return hc, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func TestResolveHarnessConfigBySlug_DispatchAndUsageMemoParity(t *testing.T) {
+	const (
+		projectID = "proj-1"
+		userID    = "user-1"
+		slug      = "shared-cfg"
+	)
+	globalHC := &store.HarnessConfig{ID: "hc-global", Slug: slug, Scope: store.HarnessConfigScopeGlobal}
+	projectHC := &store.HarnessConfig{ID: "hc-project", Slug: slug, Scope: store.HarnessConfigScopeProject, ScopeID: projectID}
+	userHC := &store.HarnessConfig{ID: "hc-user", Slug: slug, Scope: store.HarnessConfigScopeUser, ScopeID: userID}
+
+	errGlobal := errors.New("global store unavailable")
+	errProject := errors.New("project store unavailable")
+
+	qGlobal := scopeWalkQuery{slug: slug, scope: store.HarnessConfigScopeGlobal, scopeID: ""}
+	qProject := scopeWalkQuery{slug: slug, scope: store.HarnessConfigScopeProject, scopeID: projectID}
+
+	cases := []struct {
+		name        string
+		workstation bool
+		projectID   string
+		slug        string
+		configs     map[string]*store.HarnessConfig
+		errs        map[string]error
+		wantID      string
+		wantErr     error
+		wantQueries []scopeWalkQuery
+	}{
+		{
+			name:        "hosted/project-only",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			wantID:      projectHC.ID,
+			wantQueries: []scopeWalkQuery{qGlobal, qProject},
+		},
+		{
+			name:        "workstation/project-only",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			wantID:      projectHC.ID,
+			wantQueries: []scopeWalkQuery{qProject},
+		},
+		{
+			name:        "hosted/global-only",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug): globalHC,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qGlobal},
+		},
+		{
+			name:        "workstation/global-fallback",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug): globalHC,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qProject, qGlobal},
+		},
+		{
+			name:        "hosted/global-wins-over-project",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug):         globalHC,
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qGlobal},
+		},
+		{
+			name:        "workstation/project-wins-over-global",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug):         globalHC,
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			wantID:      projectHC.ID,
+			wantQueries: []scopeWalkQuery{qProject},
+		},
+		{
+			name:        "hosted/user-scope-ignored",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeUser, userID, slug): userHC,
+			},
+			wantID:      "",
+			wantQueries: []scopeWalkQuery{qGlobal, qProject},
+		},
+		{
+			name:        "workstation/user-scope-ignored",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeUser, userID, slug): userHC,
+			},
+			wantID:      "",
+			wantQueries: []scopeWalkQuery{qProject, qGlobal},
+		},
+		{
+			name:        "hosted/user-ignored-resolves-global",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeUser, userID, slug): userHC,
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug):   globalHC,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qGlobal},
+		},
+		{
+			name:        "workstation/user-ignored-resolves-project",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeUser, userID, slug):       userHC,
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			wantID:      projectHC.ID,
+			wantQueries: []scopeWalkQuery{qProject},
+		},
+		{
+			name:        "hosted/empty-project-id-global-fallback",
+			workstation: false,
+			projectID:   "",
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug):         globalHC,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qGlobal},
+		},
+		{
+			name:        "workstation/empty-project-id-global-fallback",
+			workstation: true,
+			projectID:   "",
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug):         globalHC,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qGlobal},
+		},
+		{
+			name:        "hosted/global-error-fails-closed",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			errs: map[string]error{
+				scopeWalkErrKey(store.HarnessConfigScopeGlobal, ""): errGlobal,
+			},
+			wantErr:     errGlobal,
+			wantQueries: []scopeWalkQuery{qGlobal},
+		},
+		{
+			name:        "workstation/project-error-falls-back-to-global",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug): globalHC,
+			},
+			errs: map[string]error{
+				scopeWalkErrKey(store.HarnessConfigScopeProject, projectID): errProject,
+			},
+			wantID:      globalHC.ID,
+			wantQueries: []scopeWalkQuery{qProject, qGlobal},
+		},
+		{
+			name:        "workstation/project-error-retains-err-on-global-not-found",
+			workstation: true,
+			projectID:   projectID,
+			slug:        slug,
+			errs: map[string]error{
+				scopeWalkErrKey(store.HarnessConfigScopeProject, projectID): errProject,
+			},
+			wantErr:     errProject,
+			wantQueries: []scopeWalkQuery{qProject, qGlobal},
+		},
+		{
+			name:        "hosted/global-not-found-project-error-returns-err",
+			workstation: false,
+			projectID:   projectID,
+			slug:        slug,
+			errs: map[string]error{
+				scopeWalkErrKey(store.HarnessConfigScopeProject, projectID): errProject,
+			},
+			wantErr:     errProject,
+			wantQueries: []scopeWalkQuery{qGlobal, qProject},
+		},
+		{
+			name:        "hosted/empty-slug-no-queries",
+			workstation: false,
+			projectID:   projectID,
+			slug:        "",
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeGlobal, "", slug): globalHC,
+			},
+			wantID:      "",
+			wantQueries: nil,
+		},
+		{
+			name:        "workstation/empty-slug-no-queries",
+			workstation: true,
+			projectID:   projectID,
+			slug:        "",
+			configs: map[string]*store.HarnessConfig{
+				scopeWalkConfigKey(store.HarnessConfigScopeProject, projectID, slug): projectHC,
+			},
+			wantID:      "",
+			wantQueries: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			dispatchStub := &harnessConfigScopeWalkStubStore{configs: tc.configs, errs: tc.errs}
+			dispatchSrv := &Server{store: dispatchStub, workstation: tc.workstation}
+			dispatchHC, dispatchErr := dispatchSrv.resolveHarnessConfigBySlug(ctx, tc.projectID, tc.slug)
+
+			memoStub := &harnessConfigScopeWalkStubStore{configs: tc.configs, errs: tc.errs}
+			memoSrv := &Server{store: memoStub, workstation: tc.workstation}
+			memoHC, memoErr := newUsageCapabilityMemo(ctx, memoSrv).resolveConfigBySlug(tc.projectID, tc.slug)
+
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, dispatchErr, tc.wantErr)
+				assert.ErrorIs(t, memoErr, tc.wantErr)
+			} else {
+				assert.NoError(t, dispatchErr)
+				assert.NoError(t, memoErr)
+			}
+
+			if tc.wantID == "" {
+				assert.Nil(t, dispatchHC)
+				assert.Nil(t, memoHC)
+			} else {
+				if assert.NotNil(t, dispatchHC) {
+					assert.Equal(t, tc.wantID, dispatchHC.ID)
+				}
+				if assert.NotNil(t, memoHC) {
+					assert.Equal(t, tc.wantID, memoHC.ID)
+				}
+			}
+
+			assert.Equal(t, tc.wantQueries, dispatchStub.queries, "dispatch scope walk queries")
+			assert.Equal(t, tc.wantQueries, memoStub.queries, "usageCapabilityMemo scope walk queries")
+			assert.Equal(t, dispatchStub.queries, memoStub.queries, "dispatch and usageCapabilityMemo must walk identical scopes")
+		})
+	}
+}

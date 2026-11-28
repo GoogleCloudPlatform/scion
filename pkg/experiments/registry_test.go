@@ -403,6 +403,44 @@ func TestFlatCloudRunTargetExperimentRegistered(t *testing.T) {
 	}
 }
 
+// TestConduitExperimentRegistered pins the hub.conduit entry: a server-only
+// alpha experiment, compiled default on (hosted HA overrides it off at
+// startup via SetConduitDeploymentDefault), with an accurate description of
+// the paths it changes.
+func TestConduitExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup("hub.conduit")
+	if !ok {
+		t.Fatal("hub.conduit is not registered")
+	}
+	if !e.Default {
+		t.Fatal("hub.conduit compiled default must be on")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must remain alpha, got %q", e.Stage)
+	}
+	if len(e.Layers) != 1 || !e.HasLayer(LayerServer) {
+		t.Fatalf("must be a server-only experiment, got %v", e.Layers)
+	}
+	if strings.Contains(e.Description, "No existing connection path changes") {
+		t.Fatalf("description still carries stale text: %q", e.Description)
+	}
+	for _, want := range []string{
+		"port proxy",
+		"PTY",
+		"tunnel",
+		"SSH",
+		"broker dual-dial",
+		"hub.conduit_deliver",
+		"hub.exec_schedules",
+		"hub.command_requests",
+		"hosted HA",
+	} {
+		if !strings.Contains(e.Description, want) {
+			t.Fatalf("description must mention %q: %q", want, e.Description)
+		}
+	}
+}
+
 // TestConduitDeliverExperimentRegistered pins the hub.conduit_deliver entry:
 // a server-only alpha experiment, off by default, that names its dependency
 // on hub.conduit.
@@ -536,6 +574,28 @@ func TestTerminalKeyBar_RegisteredDefaultOff(t *testing.T) {
 	}
 	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#9338" || entry.Owner != "web" || entry.ReviewBy != "2027-02-26" {
 		t.Errorf("terminal key bar experiment metadata mismatch: %+v", entry)
+	}
+}
+
+// TestAgentsColumnPicker_RegisteredDefaultOff pins web.agents_column_picker
+// (ptone/scion#9577): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestAgentsColumnPicker_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentsColumnPicker)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentsColumnPicker)
+	}
+	if entry.Name != "web.agents_column_picker" {
+		t.Errorf("Name = %q, want web.agents_column_picker", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#9577" || entry.Owner != "web" || entry.ReviewBy != "2027-02-27" {
+		t.Errorf("agents column picker experiment metadata mismatch: %+v", entry)
 	}
 }
 
@@ -909,7 +969,7 @@ func TestTriggersExperimentRegistered(t *testing.T) {
 }
 
 // TestMessagePoliciesExperimentRegistered pins hub.message_policies
-// (ptone/scion#8047): server-layer only and ships off by default.
+// (ptone/scion#8047): server+web layers and ships off by default.
 func TestMessagePoliciesExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(MessagePolicies)
 	if !ok {
@@ -921,8 +981,8 @@ func TestMessagePoliciesExperimentRegistered(t *testing.T) {
 	if e.Default {
 		t.Fatal("hub.message_policies must default to off")
 	}
-	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
-		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#8047" || e.Stage != StageAlpha || e.Owner != "system-one" {
 		t.Fatalf("unexpected registration: %+v", e)

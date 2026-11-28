@@ -284,6 +284,30 @@ describe('terminal — _handleFileDrop size validation', () => {
     expect(calls.some((c) => c.url.includes('/files') && c.method === 'POST')).toBe(false);
   });
 
+  it('clamps legacy terminal-pane drop check to 100 MiB when hub limit is 1 GiB', async () => {
+    const calls: Call[] = [];
+    const el = await createForUploadTest(calls, { uploads: { maxWorkspaceFileSize: 1 << 30 } });
+    el.uploadEnabled = true;
+    el.uploadTargetDir = 'scratchpad';
+    el.uploadBasePath = '/scion-volumes/scratchpad';
+
+    const hugeFile = new File(['x'], 'huge.bin');
+    Object.defineProperty(hugeFile, 'size', { value: 200 * 1024 * 1024 });
+    const fileList = {
+      length: 1,
+      0: hugeFile,
+      [Symbol.iterator]: function* () {
+        yield hugeFile;
+      },
+    } as unknown as FileList;
+
+    await (el as any)._handleFileDrop(fileList);
+
+    expect(el.uploadStatus).toContain('exceeds the maximum size of 100 MiB');
+    expect(el.isUploading).toBe(false);
+    expect(calls.some((c) => c.url.includes('/files') && c.method === 'POST')).toBe(false);
+  });
+
   it('shows error when total exceeds 100 MiB', async () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls);

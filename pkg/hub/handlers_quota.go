@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -51,20 +52,22 @@ type updateLimitDefinitionRequest struct {
 
 // createEntitlementBindingRequest is the payload for POST /api/v1/admin/limits/:id/entitlements.
 type createEntitlementBindingRequest struct {
-	SubjectType string `json:"subjectType"`
-	SubjectID   string `json:"subjectId"`
-	ScopeType   string `json:"scopeType"`
-	ScopeID     string `json:"scopeId"`
-	Value       int64  `json:"value"`
+	SubjectType string  `json:"subjectType"`
+	SubjectID   string  `json:"subjectId"`
+	ScopeType   string  `json:"scopeType"`
+	ScopeID     string  `json:"scopeId"`
+	Value       int64   `json:"value"`
+	TokenAction *string `json:"tokenAction,omitempty"`
 }
 
 // updateEntitlementBindingRequest is the payload for PUT /api/v1/admin/entitlements/:id.
 type updateEntitlementBindingRequest struct {
-	SubjectType string `json:"subjectType"`
-	SubjectID   string `json:"subjectId"`
-	ScopeType   string `json:"scopeType"`
-	ScopeID     string `json:"scopeId"`
-	Value       int64  `json:"value"`
+	SubjectType string  `json:"subjectType"`
+	SubjectID   string  `json:"subjectId"`
+	ScopeType   string  `json:"scopeType"`
+	ScopeID     string  `json:"scopeId"`
+	Value       int64   `json:"value"`
+	TokenAction *string `json:"tokenAction,omitempty"`
 }
 
 // listLimitDefinitionsResponse wraps the list result for the API.
@@ -395,6 +398,16 @@ func (s *Server) listLimitDefinitions(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if !s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+		filtered := make([]*store.LimitDefinition, 0, len(defs))
+		for _, def := range defs {
+			if def.ResourceType == store.LimitResourceTypeLLMTokens {
+				continue
+			}
+			filtered = append(filtered, def)
+		}
+		defs = filtered
+	}
 	if defs == nil {
 		defs = []*store.LimitDefinition{}
 	}
@@ -527,7 +540,7 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		BadRequest(w, "subject_type is required")
 		return
 	}
-	if req.SubjectID == "" {
+	if req.SubjectID == "" && req.SubjectType != store.EntitlementSubjectSystemDefault {
 		BadRequest(w, "subject_id is required")
 		return
 	}
@@ -548,12 +561,32 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		return
 	}
 
+	tokenAction, err := normalizeAndValidateTokenAction(req.TokenAction, limitDef.ResourceType)
+	if err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens &&
+		req.SubjectType == store.EntitlementSubjectSystemDefault &&
+		req.SubjectID != "" {
+		BadRequest(w, "subject_id must be empty when subject_type is system_default")
+		return
+	}
+
 	// ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2: per-broker
 	// max_agents_per_broker caps are set via the broker settings API, not
 	// via a broker-scoped entitlement binding. System-scoped bindings for
 	// this limit are unaffected — they remain the hub-wide override.
 	if limitDef.Name == store.LimitMaxAgentsPerBroker && req.ScopeType == store.QuotaScopeBroker {
 		BadRequest(w, "per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings")
+		return
+	}
+	if err := s.validatePooledGroupBindingShape(r.Context(), limitDef.Name, req.SubjectType, req.SubjectID, req.ScopeType, req.ScopeID); err != nil {
+		if errors.Is(err, store.ErrInvalidInput) {
+			BadRequest(w, err.Error())
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -566,6 +599,7 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		ScopeType:         req.ScopeType,
 		ScopeID:           req.ScopeID,
 		Value:             req.Value,
+		TokenAction:       tokenAction,
 		CreatedBy:         user.Email(),
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -583,6 +617,18 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 
 	slog.Info("entitlement binding created",
 		"binding_id", created.ID, "limit_id", limitID, "actor", user.Email())
+	if pooledGroupLimit(limitDef.Name) {
+		s.InvalidatePooledGroupCacheAll()
+		if created.Value > 0 {
+			_ = s.TokenBudgetEvaluator()
+			if seeder := s.GroupBudgetSeeder(); seeder != nil {
+				if seedErr := seeder.OnGroupBindingActivated(r.Context(), created.SubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to open pooled group charging episode on binding create",
+						"binding_id", created.ID, "group_id", created.SubjectID, "error", seedErr)
+				}
+			}
+		}
+	}
 
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -626,7 +672,7 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		BadRequest(w, "subject_type is required")
 		return
 	}
-	if req.SubjectID == "" {
+	if req.SubjectID == "" && req.SubjectType != store.EntitlementSubjectSystemDefault {
 		BadRequest(w, "subject_id is required")
 		return
 	}
@@ -663,12 +709,36 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		BadRequest(w, "per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings")
 		return
 	}
+	if err := s.validatePooledGroupBindingShape(r.Context(), limitDef.Name, req.SubjectType, req.SubjectID, req.ScopeType, req.ScopeID); err != nil {
+		if errors.Is(err, store.ErrInvalidInput) {
+			BadRequest(w, err.Error())
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+
+	tokenAction, err := normalizeAndValidateTokenAction(req.TokenAction, limitDef.ResourceType)
+	if err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens &&
+		req.SubjectType == store.EntitlementSubjectSystemDefault &&
+		req.SubjectID != "" {
+		BadRequest(w, "subject_id must be empty when subject_type is system_default")
+		return
+	}
+
+	prevValue := existing.Value
+	prevSubjectID := existing.SubjectID
 
 	existing.SubjectType = req.SubjectType
 	existing.SubjectID = req.SubjectID
 	existing.ScopeType = req.ScopeType
 	existing.ScopeID = req.ScopeID
 	existing.Value = req.Value
+	existing.TokenAction = tokenAction
 	existing.UpdatedAt = time.Now()
 
 	updated, err := s.store.UpdateEntitlementBinding(r.Context(), existing)
@@ -683,11 +753,48 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 
 	slog.Info("entitlement binding updated",
 		"binding_id", updated.ID, "actor", user.Email())
+	if pooledGroupLimit(limitDef.Name) {
+		s.InvalidatePooledGroupCacheAll()
+		_ = s.TokenBudgetEvaluator()
+		if seeder := s.GroupBudgetSeeder(); seeder != nil {
+			// D6a: If the binding deactivated for prevSubjectID (value -> 0 or
+			// subject moved), close prevSubjectID's episode if no active pooled
+			// bindings remain.
+			if prevValue > 0 && (updated.Value <= 0 || prevSubjectID != updated.SubjectID) {
+				if seedErr := seeder.OnGroupBindingDeactivated(r.Context(), prevSubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to close pooled group charging episode on binding update",
+						"binding_id", updated.ID, "group_id", prevSubjectID, "error", seedErr)
+				}
+			}
+			// D6a: If the binding is active on updated.SubjectID and just
+			// activated (0 -> >0 or subject moved), open an episode if none is
+			// open. Ordinary cap/action/scope edits inside an open episode are
+			// a no-op.
+			if updated.Value > 0 && (prevValue <= 0 || prevSubjectID != updated.SubjectID) {
+				if seedErr := seeder.OnGroupBindingActivated(r.Context(), updated.SubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to open pooled group charging episode on binding update",
+						"binding_id", updated.ID, "group_id", updated.SubjectID, "error", seedErr)
+				}
+			}
+		}
+	}
 
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
+	// Fetch binding before delete so we can close a pooled group's charging
+	// episode if this was its last active pooled binding (D6a).
+	existing, getErr := s.store.GetEntitlementBinding(r.Context(), id)
+	if getErr != nil {
+		if errors.Is(getErr, store.ErrNotFound) {
+			NotFound(w, "Entitlement Binding")
+			return
+		}
+		writeErrorFromErr(w, getErr, "")
+		return
+	}
+
 	if err := s.store.DeleteEntitlementBinding(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Entitlement Binding")
@@ -699,8 +806,57 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 
 	slog.Info("entitlement binding deleted",
 		"binding_id", id, "actor", user.Email())
+	s.InvalidatePooledGroupCacheAll()
+	if existing != nil && existing.SubjectType == store.EntitlementSubjectGroup && existing.Value > 0 {
+		if limitDef, defErr := s.store.GetLimitDefinition(r.Context(), existing.LimitDefinitionID); defErr == nil && limitDef != nil && pooledGroupLimit(limitDef.Name) {
+			if seeder := s.GroupBudgetSeeder(); seeder != nil {
+				if seedErr := seeder.OnGroupBindingDeactivated(r.Context(), existing.SubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to close pooled group charging episode on binding delete",
+						"binding_id", id, "group_id", existing.SubjectID, "error", seedErr)
+				}
+			}
+		}
+	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validatePooledGroupBindingShape enforces the required binding shape for
+// pooled group token limits (llm_tokens_per_group_day|_month, §4.4):
+//   - subject_type == "group" with a non-empty subject_id referencing an
+//     existing explicit user group (rejecting project_agents groups)
+//   - scope_type in {"system", "project"} with empty scope_id for "system" and
+//     non-empty scope_id for "project"
+func (s *Server) validatePooledGroupBindingShape(ctx context.Context, limitName, subjectType, subjectID, scopeType, scopeID string) error {
+	if !pooledGroupLimit(limitName) {
+		return nil
+	}
+	if subjectType != store.EntitlementSubjectGroup || subjectID == "" {
+		return fmt.Errorf("%w: %s requires subject_type %q and a non-empty group subject_id", store.ErrInvalidInput, limitName, store.EntitlementSubjectGroup)
+	}
+	switch scopeType {
+	case store.QuotaScopeSystem:
+		if scopeID != "" {
+			return fmt.Errorf("%w: %s with scope_type %q requires an empty scope_id", store.ErrInvalidInput, limitName, store.QuotaScopeSystem)
+		}
+	case store.QuotaScopeProject:
+		if scopeID == "" {
+			return fmt.Errorf("%w: %s with scope_type %q requires a non-empty project scope_id", store.ErrInvalidInput, limitName, store.QuotaScopeProject)
+		}
+	default:
+		return fmt.Errorf("%w: %s requires scope_type %q or %q", store.ErrInvalidInput, limitName, store.QuotaScopeSystem, store.QuotaScopeProject)
+	}
+	grp, err := s.store.GetGroup(ctx, subjectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: group %q not found", store.ErrInvalidInput, subjectID)
+		}
+		return fmt.Errorf("failed to verify group %q: %w", subjectID, err)
+	}
+	if grp.GroupType != store.GroupTypeExplicit {
+		return fmt.Errorf("%w: %s applies only to explicit user groups (not %q)", store.ErrInvalidInput, limitName, grp.GroupType)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -716,8 +872,12 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tokenBudgetsOn := s.experimentEnabled(experiments.TokenomicsTokenBudgets)
 	entries := make([]usageSummaryEntry, 0, len(defs))
 	for _, def := range defs {
+		if def.ResourceType == store.LimitResourceTypeLLMTokens && !tokenBudgetsOn {
+			continue
+		}
 		// max_agents_per_broker reservations are stored at
 		// store.QuotaScopeBroker scoped to each individual broker
 		// (broker_quota.go), never at store.QuotaScopeSystem, so the
@@ -1036,7 +1196,7 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 		// admin view), the correct fix here is to omit the row from a user's
 		// own usage entirely rather than reporting a broker-wide count under
 		// "my usage". ptone/scion#2313.
-		if def.Name == store.LimitMaxAgentsPerBroker {
+		if def.Name == store.LimitMaxAgentsPerBroker || def.ResourceType == store.LimitResourceTypeLLMTokens {
 			continue
 		}
 
@@ -1113,4 +1273,27 @@ func (s *Server) requireWritePermissionForQuota(w http.ResponseWriter, r *http.R
 		return nil, false
 	}
 	return user, true
+}
+
+// normalizeAndValidateTokenAction trims and validates an optional token_action
+// field on entitlement binding create/update requests (Tokenomics D4).
+// Empty or nil returns (nil, nil) which defaults to pause_new at evaluation time.
+// Non-empty values are accepted only for resource_type == "llm_tokens" and must
+// be one of pause_new, suspend_and_pause, or notify_only.
+func normalizeAndValidateTokenAction(raw *string, resourceType string) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	v := strings.TrimSpace(*raw)
+	if v == "" {
+		return nil, nil
+	}
+	if resourceType != store.LimitResourceTypeLLMTokens {
+		return nil, fmt.Errorf("token_action is only valid for %s limits", store.LimitResourceTypeLLMTokens)
+	}
+	if !store.ValidTokenAction(v) {
+		return nil, fmt.Errorf("invalid token_action %q: must be %s, %s, or %s",
+			v, store.TokenActionPauseNew, store.TokenActionSuspendAndPause, store.TokenActionNotifyOnly)
+	}
+	return &v, nil
 }

@@ -247,6 +247,61 @@ export interface GitHubTokenPermissions {
   actions?: string;
 }
 
+export interface GitHubInstallation {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  app_id: number;
+  repositories?: string[];
+  status: string;
+}
+
+export interface ProjectGitHubInfo {
+  project_id: string;
+  app: {
+    configured: boolean;
+    slug: string;
+    web_host: string;
+    installation_url?: string;
+  };
+  remote: {
+    owner: string;
+    repo: string;
+    on_app_host: boolean;
+  };
+  association: {
+    installation_id: number | null;
+    account_login: string;
+    basis: 'admin_binding' | 'creator_push' | 'creator_pull' | null;
+    write_allowed: boolean;
+    bound_by?: string;
+    bound_by_name?: string;
+    bound_at?: string;
+    authorized: boolean;
+    verified: boolean;
+    error_code: string;
+    reason: string;
+  };
+  status: GitHubAppProjectStatus | null;
+  permissions: {
+    mode: 'default' | 'custom';
+    app_grant_known: boolean;
+    requested: Record<string, string>;
+    app_granted: Record<string, string> | null;
+    effective: Record<string, string>;
+    capped: string[];
+    cap_reasons: Record<string, string>;
+  };
+  can: {
+    bind: boolean;
+    unbind: boolean;
+    check: boolean;
+    edit_permissions: boolean;
+    edit_extra_repos: boolean;
+    discover: boolean;
+  };
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -1108,6 +1163,10 @@ export interface Agent {
   launch?: AgentLaunch;
   lastSeen?: string;
   lastActivityEvent?: string;
+  /** When the current activity began while running; absent when not running. Set on single-agent GET. */
+  activitySince?: string;
+  /** Hub-computed earliest instant the agent becomes due for idle auto-suspend; absent when ineligible or blocked. Set on single-agent GET. */
+  idleSuspendAt?: string;
   // Backend sends "created"/"updated"; legacy frontend code uses "createdAt"/"updatedAt".
   // Accept both so existing pages and new API responses both work.
   created?: string;
@@ -1168,6 +1227,8 @@ export interface Agent {
   currentModelCalls?: number;
   startedAt?: string;
   connectionState?: string;
+  // Most recent completed reincarnation timestamp (single-agent GET and full-view list responses).
+  lastReincarnatedAt?: string;
 
   // Cloud Logging capability (from hub)
   cloudLogging?: boolean;
@@ -1203,6 +1264,19 @@ export interface Agent {
   pendingConfig?: AgentPendingConfig | null;
   // Optimistic-concurrency version; send it back with a PATCH.
   stateVersion?: number;
+
+  // Effective Track 2 trajectory capture policy for this agent's project.
+  // Present on single-agent GET only when experiment tokenomics.trajectory_capture is on.
+  trajectory_capture?: TrajectoryCapturePolicyStatus;
+}
+
+/** Track 2 trajectory capture policy values (pkg/telemetrycontract). */
+export type TrajectoryCapturePolicy = 'full' | 'metadata_only' | 'off';
+
+/** Effective Track 2 trajectory capture policy status from the Hub. */
+export interface TrajectoryCapturePolicyStatus {
+  policy: TrajectoryCapturePolicy | (string & Record<never, never>);
+  enforced_by_hub: boolean;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
@@ -2752,6 +2826,56 @@ export interface AgentUsageRunSummary {
 export interface AgentUsageWindow {
   since: string;
   until: string;
+}
+
+/**
+ * Track 2 raw trajectory segment metadata returned by
+ * GET /api/v1/agents/{id}/trajectory/segments (behind tokenomics.trajectory_capture).
+ */
+export interface TrajectorySegmentSummary {
+  segment_id: string;
+  run_id: string;
+  harness: string;
+  native_relative_path: string;
+  artifact_kind: string;
+  generation: number;
+  byte_start: number;
+  byte_end: number;
+  raw_size: number;
+  compressed_size: number;
+  raw_sha256: string;
+  compressed_sha256: string;
+  incomplete_tail: boolean;
+  session_id?: string;
+  committed_at?: string;
+}
+
+export interface TrajectorySegmentsListResponse {
+  agent_id: string;
+  project_id: string;
+  segments: TrajectorySegmentSummary[];
+  next_cursor?: string;
+}
+
+export interface TrajectorySegmentDownloadLink {
+  object_path: string;
+  url: string;
+  method: string;
+  expires_at: string;
+  content_type: string;
+}
+
+export interface TrajectorySegmentDownloadResponse {
+  segment_id: string;
+  object_path: string;
+  url: string;
+  method: string;
+  expires_at: string;
+  content_type: string;
+  compressed_size: number;
+  raw_sha256: string;
+  compressed_sha256: string;
+  manifest?: TrajectorySegmentDownloadLink;
 }
 
 /**

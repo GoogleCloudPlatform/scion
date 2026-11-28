@@ -47,11 +47,19 @@ func TestGeneric_GetEnv(t *testing.T) {
 func TestGeneric_GetCommand(t *testing.T) {
 	g := &Generic{}
 
-	cmd := g.GetCommand("test task", false, nil)
-	if !reflect.DeepEqual(cmd, []string{"test task"}) {
-		t.Errorf("Expected command ['test task'], got %v", cmd)
+	// Default exec form: without baseArgs, task is a single argv element (no implicit sh -c).
+	cmd := g.GetCommand("sleep infinity", false, nil)
+	if !reflect.DeepEqual(cmd, []string{"sleep infinity"}) {
+		t.Errorf("Expected exec-form command ['sleep infinity'], got %v", cmd)
 	}
 
+	// Explicit shell-form opt-in via baseArgs ["sh", "-c"].
+	cmdShellOptIn := g.GetCommand("npm test && echo ok", false, []string{"sh", "-c"})
+	if !reflect.DeepEqual(cmdShellOptIn, []string{"sh", "-c", "npm test && echo ok"}) {
+		t.Errorf("Expected shell opt-in command [sh -c 'npm test && echo ok'], got %v", cmdShellOptIn)
+	}
+
+	// Exec form with explicit command baseArgs keeps task as a single argv element.
 	cmdWithArgs := g.GetCommand("test task", false, []string{"--arg1"})
 	if !reflect.DeepEqual(cmdWithArgs, []string{"--arg1", "test task"}) {
 		t.Errorf("Expected command ['--arg1', 'test task'], got %v", cmdWithArgs)
@@ -60,6 +68,130 @@ func TestGeneric_GetCommand(t *testing.T) {
 	cmdEmpty := g.GetCommand("", false, nil)
 	if len(cmdEmpty) != 0 {
 		t.Errorf("Expected empty command, got %v", cmdEmpty)
+	}
+}
+
+func TestDeclarativeGenericHarness_GetCommand(t *testing.T) {
+	cases := []struct {
+		name     string
+		entry    config.HarnessConfigEntry
+		task     string
+		resume   bool
+		baseArgs []string
+		want     []string
+	}{
+		{
+			name:  "nil command uses exec form",
+			entry: config.HarnessConfigEntry{Harness: "generic"},
+			task:  "npm test && echo ok",
+			want:  []string{"npm test && echo ok"},
+		},
+		{
+			name: "explicit sh -c opt-in via command.base",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+			},
+			task: "npm test && echo ok",
+			want: []string{"sh", "-c", "npm test && echo ok"},
+		},
+		{
+			name: "empty command.base uses exec form",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{},
+			},
+			task: "sleep infinity",
+			want: []string{"sleep infinity"},
+		},
+		{
+			name: "empty command.base with task_flag",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{TaskFlag: "--x"},
+			},
+			task: "npm test && echo ok",
+			want: []string{"--x", "npm test && echo ok"},
+		},
+		{
+			name: "empty command.base with baseArgs",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{},
+			},
+			task:     "npm test && echo ok",
+			baseArgs: []string{"python3", "agent.py"},
+			want:     []string{"python3", "agent.py", "npm test && echo ok"},
+		},
+		{
+			name: "empty command.base with resume_flag",
+			entry: config.HarnessConfigEntry{
+				Harness: "generic",
+				Command: &config.HarnessCommandConfig{ResumeFlag: "--resume"},
+			},
+			task:   "npm test && echo ok",
+			resume: true,
+			want:   []string{"--resume", "npm test && echo ok"},
+		},
+		{
+			name: "command.base with task_flag",
+			entry: config.HarnessConfigEntry{
+				Harness: "custom",
+				Command: &config.HarnessCommandConfig{Base: []string{"my-agent"}, TaskFlag: "--task"},
+			},
+			task:     "do work",
+			baseArgs: []string{"--verbose"},
+			want:     []string{"my-agent", "--verbose", "--task", "do work"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewDeclarativeGenericHarness(tc.entry)
+			got := d.GetCommand(tc.task, tc.resume, tc.baseArgs)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("GetCommand() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSupportsModelFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		h    api.Harness
+		want bool
+	}{
+		{"plain Generic", &Generic{}, false},
+		{"Shell", &Shell{}, false},
+		{"declarative generic without command", NewDeclarativeGenericHarness(config.HarnessConfigEntry{Harness: "generic"}), false},
+		{"declarative generic with sh -c", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "generic",
+			Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+		}), false},
+		{"declarative generic with custom base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "generic",
+			Command: &config.HarnessCommandConfig{Base: []string{"python3", "worker.py"}},
+		}), false},
+		{"declarative custom without command.base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "custom-cli",
+		}), false},
+		{"declarative custom with /bin/bash base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "custom-shell",
+			Command: &config.HarnessCommandConfig{Base: []string{"/bin/bash", "-lc"}},
+		}), false},
+		{"declarative custom with non-shell command.base", NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+			Harness: "custom-cli",
+			Command: &config.HarnessCommandConfig{Base: []string{"custom-cli"}},
+		}), true},
+		{"container-script harness", &ContainerScriptHarness{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SupportsModelFlag(tc.h); got != tc.want {
+				t.Errorf("SupportsModelFlag(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -131,6 +263,187 @@ func TestGeneric_ValidateCommand(t *testing.T) {
 	}
 	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, config.HarnessConfigEntry{Harness: "generic"}, "", false, nil); err != nil {
 		t.Errorf("ValidateEntryCommand(broker-local generic empty) = %v, want nil", err)
+	}
+}
+
+func TestGeneric_ValidateCommand_ShellForm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	resolvedBuiltin, err := Resolve(context.Background(), ResolveOptions{Name: "generic"})
+	if err != nil {
+		t.Fatalf("Resolve(generic): %v", err)
+	}
+
+	declShell := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+	})
+	declBashLC := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"/bin/bash", "-lc"}},
+	})
+	declExec := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"python3", "worker.py"}},
+	})
+	declInteractiveShell := NewDeclarativeGenericHarness(config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"bash", "-l"}},
+	})
+
+	cases := []struct {
+		name     string
+		h        api.Harness
+		task     string
+		resume   bool
+		baseArgs []string
+		wantErr  error
+	}{
+		{
+			name:     "built-in generic sh -c resume without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -c fresh start without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   false,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  ErrGenericShellCommandMissingScript,
+		},
+		{
+			name:     "built-in generic sh -c resume with explicit task allowed",
+			h:        resolvedBuiltin.Harness,
+			task:     "echo hi",
+			resume:   true,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic sh -c fresh start with task allowed",
+			h:        resolvedBuiltin.Harness,
+			task:     "echo hi",
+			resume:   false,
+			baseArgs: []string{"sh", "-c"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic /bin/sh -eu -c resume without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"/bin/sh", "-eu", "-c"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -o errexit -c without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"sh", "-o", "errexit", "-c"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -c -- without task refused",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"sh", "-c", "--"},
+			wantErr:  ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:     "built-in generic sh -c -- with task allowed",
+			h:        resolvedBuiltin.Harness,
+			task:     "echo hi",
+			resume:   true,
+			baseArgs: []string{"sh", "-c", "--"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic bash -lc with inline script resume allowed",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"bash", "-lc", "sleep 30"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic exec-form resume without task allowed",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"python3", "agent.py"},
+			wantErr:  nil,
+		},
+		{
+			name:     "built-in generic python3 -c not treated as POSIX shell",
+			h:        resolvedBuiltin.Harness,
+			resume:   true,
+			baseArgs: []string{"python3", "-c"},
+			wantErr:  nil,
+		},
+		{
+			name:    "on-disk declarative generic sh -c resume without task refused",
+			h:       declShell,
+			resume:  true,
+			wantErr: ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:    "on-disk declarative generic sh -c fresh start without task refused",
+			h:       declShell,
+			resume:  false,
+			wantErr: ErrGenericShellCommandMissingScript,
+		},
+		{
+			name:    "on-disk declarative generic sh -c with task allowed",
+			h:       declShell,
+			task:    "npm test && echo ok",
+			resume:  true,
+			wantErr: nil,
+		},
+		{
+			name:    "on-disk declarative generic /bin/bash -lc resume without task refused",
+			h:       declBashLC,
+			resume:  true,
+			wantErr: ErrGenericShellResumeUnsupported,
+		},
+		{
+			name:    "on-disk declarative generic exec-form resume without task allowed",
+			h:       declExec,
+			resume:  true,
+			wantErr: nil,
+		},
+		{
+			name:    "on-disk declarative generic interactive bash -l resume allowed",
+			h:       declInteractiveShell,
+			resume:  true,
+			wantErr: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateCommand(tc.h, tc.task, tc.resume, tc.baseArgs)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("ValidateCommand() = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+
+	// ValidateEntryCommand must match for both built-in and on-disk declarative entries.
+	shEntry := config.HarnessConfigEntry{
+		Harness: "generic",
+		Command: &config.HarnessCommandConfig{Base: []string{"sh", "-c"}},
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, shEntry, "", true, nil); !errors.Is(err, ErrGenericShellResumeUnsupported) {
+		t.Errorf("ValidateEntryCommand(broker-local sh -c resume) = %v, want ErrGenericShellResumeUnsupported", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, shEntry, "", false, nil); !errors.Is(err, ErrGenericShellCommandMissingScript) {
+		t.Errorf("ValidateEntryCommand(broker-local sh -c start) = %v, want ErrGenericShellCommandMissingScript", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, shEntry, "echo ok", true, nil); err != nil {
+		t.Errorf("ValidateEntryCommand(broker-local sh -c with task) = %v, want nil", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBuiltin, config.HarnessConfigEntry{Harness: "generic"}, "", true, []string{"sh", "-c"}); !errors.Is(err, ErrGenericShellResumeUnsupported) {
+		t.Errorf("ValidateEntryCommand(builtin sh -c resume) = %v, want ErrGenericShellResumeUnsupported", err)
 	}
 }
 

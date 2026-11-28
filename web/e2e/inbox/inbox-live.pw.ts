@@ -383,13 +383,20 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       );
       expect(storedFilter).toBe('mentions');
 
-      const unreadBtn = rail.locator('.filter-toggle button', { hasText: 'Unread' });
-      const mentionsChip = rail.locator('[data-mentions-chip]');
-      await expect(unreadBtn).toHaveAttribute('aria-pressed', 'true');
-      await expect(mentionsChip).toBeVisible();
-      await expect(mentionsChip).toHaveAttribute('aria-pressed', 'true');
+      const dropdownTrigger = rail.locator('[data-unread-dropdown-trigger]');
+      const unreadMain = rail.locator('[data-unread-filter-main]');
+      await expect(dropdownTrigger).toBeVisible();
+      await expect(unreadMain).toBeVisible();
+      await expect(unreadMain).toContainText('Mentions');
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'true');
+      await expect(unreadMain.locator('sl-icon')).toHaveAttribute('name', 'at');
+      await expect(dropdownTrigger).toHaveAttribute('aria-haspopup', 'menu');
+      await expect(rail.locator('[data-mentions-chip]')).toHaveCount(0);
+      await expect(rail.locator('.rail-header .sort-btn')).toBeVisible();
+      await expect(rail.locator('.rail-toolbar .sort-btn')).toHaveCount(0);
 
-      // Expand the shown space and confirm only the mentioned thread appears (plain unread thread and Unread DMs hidden).
+      // Expand the shown space and confirm only the mentioned thread appears (plain unread thread and Unread DMs hidden),
+      // matching the Inbox Chat card's "1 with mentions" count.
       const spaceHeader = rail.locator('.space-header').first();
       await expect(spaceHeader).toBeVisible({ timeout: 10_000 });
       await spaceHeader.click();
@@ -399,7 +406,59 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toHaveCount(0);
       await expect(rail.locator('.dm-section')).toHaveCount(0);
 
-      // AC-8 extended: toolbar and individual filter button labels do not overflow or clip across 200-260px rail widths.
+      // Clicking the main part of the split button does NOT open the dropdown.
+      await unreadMain.click();
+      await expect(dropdownTrigger).toHaveAttribute('aria-expanded', 'false');
+
+      // Open the dropdown via the chevron trigger and switch Mentions -> Unread -> Mentions.
+      await dropdownTrigger.click();
+      await expect(dropdownTrigger).toHaveAttribute('aria-expanded', 'true');
+      const unreadMenuItem = rail.locator('[data-unread-filter-menu] sl-menu-item[value="unread"]');
+      const mentionsMenuItem = rail.locator(
+        '[data-unread-filter-menu] sl-menu-item[value="mentions"]'
+      );
+      await expect(mentionsMenuItem).toHaveAttribute('checked', '');
+      await expect(unreadMenuItem).toBeVisible();
+      await unreadMenuItem.click();
+      await expect(unreadMenuItem).toBeHidden();
+      await expect(unreadMain).toContainText('Unread');
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'true');
+      await expect(unreadMain.locator('sl-icon')).toHaveAttribute('name', 'envelope');
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'mentions-' })).toBeVisible(
+        { timeout: 10_000 }
+      );
+      expect(await page.evaluate(() => localStorage.getItem('scion-chat-space-filter'))).toBe(
+        'unread'
+      );
+
+      // Re-selecting the already-active Unread item preserves its checked state cleanly.
+      await dropdownTrigger.click();
+      await expect(unreadMenuItem).toHaveAttribute('checked', '');
+      await unreadMenuItem.click();
+      await expect(unreadMenuItem).toBeHidden();
+      await dropdownTrigger.click();
+      await expect(unreadMenuItem).toHaveAttribute('checked', '');
+
+      // Switch back to Mentions via the dropdown.
+      await expect(mentionsMenuItem).toBeVisible();
+      await mentionsMenuItem.click();
+      await expect(mentionsMenuItem).toBeHidden();
+      await expect(unreadMain).toContainText('Mentions');
+      await expect(unreadMain.locator('sl-icon')).toHaveAttribute('name', 'at');
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toHaveCount(0);
+
+      // Switching to All and clicking the main split button re-selects Mentions without opening the menu.
+      await rail.locator('.filter-toggle button', { hasText: 'All' }).click();
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'false');
+      await unreadMain.click();
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'true');
+      await expect(dropdownTrigger).toHaveAttribute('aria-expanded', 'false');
+
+      // AC-8 extended: toolbar, split button, icons, and labels (including Mentions + chevron)
+      // do not overflow or clip across 200-260px rail widths.
       for (const width of [200, 230, 240, 260]) {
         const probe = await page.evaluate((w) => {
           const chatPage = document.querySelector('scion-page-chat');
@@ -411,12 +470,15 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
           }
           const railEl = chatPage?.shadowRoot?.querySelector('scion-chat-space-rail');
           const toolbar = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-toolbar');
-          const subfilter = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-subfilter');
+          const caret = railEl?.shadowRoot?.querySelector<HTMLElement>('.filter-caret');
+          const mainIcon = railEl?.shadowRoot?.querySelector<HTMLElement>(
+            '[data-unread-filter-main] sl-icon'
+          );
           const buttons = Array.from(
             railEl?.shadowRoot?.querySelectorAll<HTMLElement>('.filter-toggle button') ?? []
           );
           const buttonOverflows = buttons.map((b) => ({
-            label: b.textContent?.trim() ?? '',
+            label: b.textContent?.trim() ?? b.getAttribute('aria-label') ?? '',
             scrollWidth: b.scrollWidth,
             clientWidth: b.clientWidth,
             clipped: b.scrollWidth > b.clientWidth + 1,
@@ -425,21 +487,44 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
             width: w,
             railWidth: railEl?.getBoundingClientRect().width ?? 0,
             toolbarOverflow: toolbar ? toolbar.scrollWidth > toolbar.clientWidth + 1 : true,
-            subfilterOverflow: subfilter ? subfilter.scrollWidth > subfilter.clientWidth + 1 : true,
+            caretVisible: caret ? getComputedStyle(caret).display !== 'none' : false,
+            mainIconVisible: mainIcon ? getComputedStyle(mainIcon).display !== 'none' : false,
             buttonOverflows,
           };
         }, width);
         expect(probe.railWidth, `width=${width}`).toBeLessThanOrEqual(width + 1);
         expect(probe.toolbarOverflow, `width=${width}`).toBe(false);
-        expect(probe.subfilterOverflow, `width=${width}`).toBe(false);
-        expect(probe.buttonOverflows.length, `width=${width}`).toBeGreaterThanOrEqual(3);
+        expect(probe.caretVisible, `width=${width}`).toBe(true);
+        expect(probe.mainIconVisible, `width=${width}`).toBe(true);
+        expect(probe.buttonOverflows.length, `width=${width}`).toBeGreaterThanOrEqual(4);
         expect(
           probe.buttonOverflows.every((b) => !b.clipped),
           `width=${width}: ${JSON.stringify(probe.buttonOverflows)}`
         ).toBe(true);
       }
 
-      // Hydrate ?filter=starred directly -> Starred active, chip hidden, param stripped.
+      // Browser back returns from the opened space thread to /chat, and a second back returns to /profile/inbox.
+      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await expect(chatCard).toBeVisible({ timeout: 15_000 });
+      await chatCard.locator('a[data-card-prose-link="chat-unread"]').click();
+      await expect(rail).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => new URL(page.url()).searchParams.has('filter'), { timeout: 5_000 })
+        .toBe(false);
+      await expect(unreadMain).toContainText('Unread');
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'true');
+      await expect(unreadMain.locator('sl-icon')).toHaveAttribute('name', 'envelope');
+
+      // Single-step browser back/forward works cleanly after ?filter=unread hydration.
+      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await expect(chatCard).toBeVisible({ timeout: 15_000 });
+      await page.goForward({ waitUntil: 'domcontentloaded' });
+      await expect(rail).toBeVisible({ timeout: 15_000 });
+      await expect(unreadMain).toContainText('Unread');
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'true');
+
+      // Hydrate ?filter=starred directly -> Starred active, middle button inactive, param stripped.
       await page.goto('/chat?filter=starred', { waitUntil: 'domcontentloaded' });
       await expect(rail).toBeVisible({ timeout: 15_000 });
       await expect
@@ -449,7 +534,8 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         'aria-pressed',
         'true'
       );
-      await expect(rail.locator('[data-mentions-chip]')).toHaveCount(0);
+      await expect(unreadMain).toContainText('Unread');
+      await expect(unreadMain).toHaveAttribute('aria-pressed', 'false');
 
       expect(pageErrors).toEqual([]);
     } finally {
@@ -657,6 +743,167 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         { timeout: 7_000 }
       );
       await expect(reviewsCard.locator('a[data-card-prose-link="reviews-drafts"]')).toHaveCount(0);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('Agent Executions card, /profile/agent-executions live refresh on thread request, and Open in chat link (ptone/scion#9698 AC-10, AC-12, AC-14, AC-16)', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      baseURL: hub.baseURL,
+      storageState: user.storageStatePath,
+    });
+    const page1 = await context.newPage();
+    const page2 = await context.newPage();
+    const pageErrors: string[] = [];
+    page1.on('pageerror', (err) => pageErrors.push(`page1: ${err.message}`));
+    page2.on('pageerror', (err) => pageErrors.push(`page2: ${err.message}`));
+
+    try {
+      // Page 1: /profile/inbox shows Agent Executions card after Secrets, initially empty.
+      await page1.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
+      const execCard = page1.locator('[data-inbox-card="executions"]');
+      await expect(execCard).toBeVisible({ timeout: 15_000 });
+      await expect(execCard.locator('.card-title')).toHaveText('Agent Executions');
+      await expect(execCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+        timeout: 10_000,
+      });
+
+      const cardOrder = await page1.evaluate(() => {
+        const inbox = document.querySelector('scion-page-profile-inbox');
+        return Array.from(inbox?.shadowRoot?.querySelectorAll('[data-inbox-card]') ?? []).map(
+          (el) => el.getAttribute('data-inbox-card')
+        );
+      });
+      const secretsIdx = cardOrder.indexOf('secrets');
+      const execIdx = cardOrder.indexOf('executions');
+      expect(secretsIdx).toBeGreaterThanOrEqual(0);
+      expect(execIdx).toBe(secretsIdx + 1);
+
+      // Page 2: /profile/agent-executions renders active tab, active sidebar Inbox link, and empty state.
+      await page2.goto('/profile/agent-executions', { waitUntil: 'domcontentloaded' });
+      const actionPage = page2.locator('scion-page-profile-agent-executions');
+      await expect(actionPage).toBeVisible({ timeout: 15_000 });
+      await expect(actionPage.locator('[data-inbox-tab="agent-executions"]')).toHaveAttribute(
+        'aria-current',
+        'page',
+        { timeout: 10_000 }
+      );
+      await expect(
+        page2.locator('scion-profile-nav').first().locator('[data-inbox-nav-link]')
+      ).toHaveClass(/active/);
+      await expect(actionPage.locator('[data-action-empty]')).toContainText('Nothing Waiting', {
+        timeout: 10_000,
+      });
+
+      // Plant sentinels to verify live updates happen without reload.
+      await page1.evaluate(() => {
+        (window as unknown as { __execSentinel?: string }).__execSentinel = 'alive';
+      });
+      await page2.evaluate(() => {
+        (window as unknown as { __execSentinel?: string }).__execSentinel = 'alive';
+      });
+
+      // Create a project thread (as user so user is a participant) and send a structured command request from the agent targeting user.
+      const threadName = `exec-live-${Date.now()}`;
+      const threadRes = await hubApi<{ id: string }>(
+        hub,
+        user.accessToken,
+        'POST',
+        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`,
+        { name: threadName }
+      );
+      expect(threadRes.status, JSON.stringify(threadRes.body)).toBeLessThan(300);
+      const topicId = threadRes.body.id;
+
+      const sendRes = await agent.request<{
+        message_id?: string;
+        command_request?: { rowId?: string };
+      }>(`/api/v1/agents/${encodeURIComponent(agent.id)}/outbound-message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversation_ref: `#${threadName}`,
+          msg: 'Please approve this command request.',
+          command_request: {
+            key: `e2e-exec-${Date.now()}`,
+            description: 'Echo E2E verification',
+            script: 'echo e2e-ok',
+            approver: user.user.email,
+          },
+        }),
+      });
+      expect(sendRes.status, sendRes.text).toBeLessThan(300);
+
+      // Page 1 (/profile/inbox) live-updates without reload: count 1, prose, inline link.
+      await expect(execCard.locator('[data-card-count]')).toHaveText('1', { timeout: 7_000 });
+      await expect(execCard.locator('[data-card-prose]')).toHaveText(
+        '1 execution request from 1 agent in 1 project',
+        { timeout: 7_000 }
+      );
+      const execLink = execCard.locator('a.card-prose-link');
+      await expect(execLink).toHaveCount(1);
+      await expect(execLink).toHaveText('1 execution request');
+      await expect(execLink).toHaveAttribute('href', '/profile/agent-executions');
+
+      // Page 2 (/profile/agent-executions) live-updates via inbox-changed without reload.
+      const cardEl = actionPage.locator('[data-command-request-card]').first();
+      await expect(cardEl).toBeVisible({ timeout: 7_000 });
+      const rowId = (await cardEl.getAttribute('data-command-request-card')) ?? '';
+      expect(rowId).toBeTruthy();
+
+      const openInChat = cardEl.locator('[data-open-in-chat]');
+      await expect(openInChat).toBeVisible();
+      const chatHref = (await openInChat.getAttribute('href')) ?? '';
+      expect(chatHref).toMatch(new RegExp(`^/chat/space/${projectId}/thread/${topicId}#msg-.+`));
+
+      // Dismiss the request from Page 1's session (simulating another tab) -> both pages update live.
+      const dismissStatus = await page1.evaluate(async (id) => {
+        const res = await fetch(`/api/v1/command-requests/${encodeURIComponent(id)}/dismiss`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            surface: 'standalone_page',
+            idempotency_key: `e2e-dismiss-${Date.now()}`,
+          }),
+        });
+        return res.status;
+      }, rowId);
+      expect(dismissStatus).toBe(200);
+
+      // Page 1 returns to "Nothing Waiting" and Page 2 Open tab empties without reload.
+      await expect(execCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+        timeout: 7_000,
+      });
+      await expect(execCard.locator('[data-card-count]')).toHaveCount(0, { timeout: 7_000 });
+      await expect(actionPage.locator('[data-action-empty]')).toContainText('Nothing Waiting', {
+        timeout: 7_000,
+      });
+
+      // Confirm neither tab reloaded.
+      expect(
+        await page1.evaluate(
+          () => (window as unknown as { __execSentinel?: string }).__execSentinel
+        )
+      ).toBe('alive');
+      expect(
+        await page2.evaluate(
+          () => (window as unknown as { __execSentinel?: string }).__execSentinel
+        )
+      ).toBe('alive');
+
+      // Switch to Resolved tab on Page 2, confirm dismissed card appears, and click Open in chat.
+      await actionPage.locator('[data-action-tab="resolved"]').click();
+      const resolvedCard = actionPage.locator(`[data-command-request-card="${rowId}"]`);
+      await expect(resolvedCard).toBeVisible({ timeout: 10_000 });
+      await resolvedCard.locator('[data-open-in-chat]').click();
+      await expect(page2).toHaveURL(new RegExp(`/chat/space/${projectId}/thread/${topicId}`), {
+        timeout: 15_000,
+      });
 
       expect(pageErrors).toEqual([]);
     } finally {

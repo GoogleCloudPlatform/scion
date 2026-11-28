@@ -1096,7 +1096,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "code_hash", Type: field.TypeString, Unique: true},
 		{Name: "user_identifier", Type: field.TypeString},
-		{Name: "provider", Type: field.TypeEnum, Enums: []string{"telegram", "discord", "teams"}},
+		{Name: "provider", Type: field.TypeEnum, Enums: []string{"telegram", "discord", "teams", "slack"}},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "confirmed"}, Default: "pending"},
 		{Name: "user_id", Type: field.TypeString, Nullable: true},
 		{Name: "user_email", Type: field.TypeString, Nullable: true},
@@ -1227,6 +1227,16 @@ var (
 				Name:    "commandrequest_project_id_created_at",
 				Unique:  false,
 				Columns: []*schema.Column{CommandRequestsColumns[1], CommandRequestsColumns[30]},
+			},
+			{
+				Name:    "commandrequest_approver_user_id_resolved_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[13], CommandRequestsColumns[27]},
+			},
+			{
+				Name:    "commandrequest_approver_user_id_status_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[13], CommandRequestsColumns[18], CommandRequestsColumns[31]},
 			},
 		},
 	}
@@ -1866,6 +1876,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "value", Type: field.TypeInt64},
+		{Name: "token_action", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "updated_at", Type: field.TypeTime},
@@ -1879,7 +1890,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "entitlement_bindings_limit_definitions_entitlement_bindings",
-				Columns:    []*schema.Column{EntitlementBindingsColumns[9]},
+				Columns:    []*schema.Column{EntitlementBindingsColumns[10]},
 				RefColumns: []*schema.Column{LimitDefinitionsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -1888,7 +1899,7 @@ var (
 			{
 				Name:    "entitlementbinding_limit_definition_id_subject_type_subject_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{EntitlementBindingsColumns[9], EntitlementBindingsColumns[1], EntitlementBindingsColumns[2], EntitlementBindingsColumns[3], EntitlementBindingsColumns[4]},
+				Columns: []*schema.Column{EntitlementBindingsColumns[10], EntitlementBindingsColumns[1], EntitlementBindingsColumns[2], EntitlementBindingsColumns[3], EntitlementBindingsColumns[4]},
 			},
 		},
 	}
@@ -4374,6 +4385,7 @@ var (
 		{Name: "byte_end", Type: field.TypeInt64},
 		{Name: "raw_sha256", Type: field.TypeString},
 		{Name: "compressed_size", Type: field.TypeInt64},
+		{Name: "charged_bytes", Type: field.TypeInt64, Default: 0},
 		{Name: "compressed_sha256", Type: field.TypeString},
 		{Name: "incomplete_tail", Type: field.TypeBool, Default: false},
 		{Name: "session_id", Type: field.TypeString, Nullable: true, Default: ""},
@@ -4404,7 +4416,7 @@ var (
 			{
 				Name:    "trajectorysegment_agent_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[21]},
+				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[22]},
 			},
 		},
 	}
@@ -4436,14 +4448,16 @@ var (
 		{Name: "match_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "match_rules", Type: field.TypeString, Size: 2147483647, Default: "[]"},
 		{Name: "match_form", Type: field.TypeString, Nullable: true, Size: 2147483647},
-		{Name: "action_type", Type: field.TypeString},
+		{Name: "action_type", Type: field.TypeString, Default: ""},
 		{Name: "action_payload", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "actions", Type: field.TypeString, Size: 2147483647, Default: "[]"},
 		{Name: "subject_dialect", Type: field.TypeString, Default: "cel"},
 		{Name: "subject_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "subject_mode", Type: field.TypeString, Default: "new"},
 		{Name: "coalesce_window_seconds", Type: field.TypeInt, Default: 0},
 		{Name: "max_fires_per_minute", Type: field.TypeInt, Default: 0},
 		{Name: "max_concurrent_dispatches", Type: field.TypeInt, Default: 0},
+		{Name: "notify", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "last_fire_at", Type: field.TypeTime, Nullable: true},
@@ -4479,7 +4493,7 @@ var (
 			{
 				Name:    "trigger_project_id_source_kind_source_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[34]},
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[36]},
 			},
 			{
 				Name:    "trigger_initiator_principal_id",
@@ -4564,7 +4578,10 @@ var (
 		{Name: "event_id", Type: field.TypeUUID},
 		{Name: "subject", Type: field.TypeString, Size: 256},
 		{Name: "action_type", Type: field.TypeString},
+		{Name: "action_index", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "firing"},
+		{Name: "rate_decision", Type: field.TypeString, Size: 16, Default: ""},
+		{Name: "counter_flushed", Type: field.TypeBool, Default: false},
 		{Name: "error", Type: field.TypeString, Nullable: true},
 		{Name: "result_ref", Type: field.TypeString, Nullable: true},
 		{Name: "matched_through", Type: field.TypeString, Nullable: true, Size: 16},
@@ -4591,37 +4608,37 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[29]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[32]},
 			},
 			{
-				Name:    "triggerfire_event_id_trigger_id",
+				Name:    "triggerfire_event_id_trigger_id_action_index",
 				Unique:  true,
-				Columns: []*schema.Column{TriggerFiresColumns[10], TriggerFiresColumns[9]},
+				Columns: []*schema.Column{TriggerFiresColumns[10], TriggerFiresColumns[9], TriggerFiresColumns[13]},
 			},
 			{
-				Name:    "triggerfire_trigger_id_subject_status",
+				Name:    "triggerfire_trigger_id_action_index_subject_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[11], TriggerFiresColumns[13]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[13], TriggerFiresColumns[11], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_status_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[24]},
+				Columns: []*schema.Column{TriggerFiresColumns[14], TriggerFiresColumns[27]},
 			},
 			{
 				Name:    "triggerfire_target_agent_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[19], TriggerFiresColumns[13]},
+				Columns: []*schema.Column{TriggerFiresColumns[22], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_project_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[8], TriggerFiresColumns[13]},
+				Columns: []*schema.Column{TriggerFiresColumns[8], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_result_ref",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[15]},
+				Columns: []*schema.Column{TriggerFiresColumns[18]},
 			},
 		},
 	}
@@ -4629,6 +4646,7 @@ var (
 	TriggerSubjectClaimsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "trigger_id", Type: field.TypeUUID},
+		{Name: "action_index", Type: field.TypeInt, Default: 0},
 		{Name: "subject", Type: field.TypeString, Size: 256},
 		{Name: "state", Type: field.TypeString, Default: "active"},
 		{Name: "agent_id", Type: field.TypeUUID, Nullable: true},
@@ -4646,19 +4664,114 @@ var (
 		PrimaryKey: []*schema.Column{TriggerSubjectClaimsColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "triggersubjectclaim_trigger_id_subject",
+				Name:    "triggersubjectclaim_trigger_id_action_index_subject",
 				Unique:  true,
-				Columns: []*schema.Column{TriggerSubjectClaimsColumns[1], TriggerSubjectClaimsColumns[2]},
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[1], TriggerSubjectClaimsColumns[2], TriggerSubjectClaimsColumns[3]},
 			},
 			{
 				Name:    "triggersubjectclaim_agent_id",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerSubjectClaimsColumns[4]},
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[5]},
 			},
 			{
 				Name:    "triggersubjectclaim_state_released_at",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerSubjectClaimsColumns[3], TriggerSubjectClaimsColumns[9]},
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[4], TriggerSubjectClaimsColumns[10]},
+			},
+		},
+	}
+	// UploadSessionsColumns holds the columns for the "upload_sessions" table.
+	UploadSessionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "owner_kind", Type: field.TypeString},
+		{Name: "owner_id", Type: field.TypeString},
+		{Name: "target_kind", Type: field.TypeEnum, Enums: []string{"chat_attachment", "workspace", "shared_dir"}},
+		{Name: "scope_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "scope_shared_dir", Type: field.TypeString, Nullable: true},
+		{Name: "dest_path", Type: field.TypeString, Nullable: true},
+		{Name: "overwrite", Type: field.TypeBool, Default: false},
+		{Name: "file_name", Type: field.TypeString},
+		{Name: "media_type", Type: field.TypeString, Default: ""},
+		{Name: "declared_size", Type: field.TypeInt64},
+		{Name: "received", Type: field.TypeInt64, Default: 0},
+		{Name: "hash_state", Type: field.TypeBytes, Nullable: true},
+		{Name: "head", Type: field.TypeBytes, Nullable: true},
+		{Name: "parts", Type: field.TypeJSON, Nullable: true},
+		{Name: "staging_ref", Type: field.TypeString},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"uploading", "finalizing", "completed", "failed", "aborted", "expired"}, Default: "uploading"},
+		{Name: "lease_token", Type: field.TypeString, Nullable: true},
+		{Name: "lease_until", Type: field.TypeTime, Nullable: true},
+		{Name: "takeovers", Type: field.TypeInt, Default: 0},
+		{Name: "result", Type: field.TypeJSON, Nullable: true},
+		{Name: "artifact_id", Type: field.TypeString, Nullable: true},
+		{Name: "idle_expires_at", Type: field.TypeTime},
+		{Name: "hard_expires_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// UploadSessionsTable holds the schema information for the "upload_sessions" table.
+	UploadSessionsTable = &schema.Table{
+		Name:       "upload_sessions",
+		Columns:    UploadSessionsColumns,
+		PrimaryKey: []*schema.Column{UploadSessionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "uploadsession_owner_kind_owner_id_state",
+				Unique:  false,
+				Columns: []*schema.Column{UploadSessionsColumns[2], UploadSessionsColumns[3], UploadSessionsColumns[17]},
+			},
+			{
+				Name:    "uploadsession_state_idle_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{UploadSessionsColumns[17], UploadSessionsColumns[23]},
+			},
+			{
+				Name:    "uploadsession_state_hard_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{UploadSessionsColumns[17], UploadSessionsColumns[24]},
+			},
+		},
+	}
+	// UsageBudgetStateColumns holds the columns for the "usage_budget_state" table.
+	UsageBudgetStateColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "limit_definition_id", Type: field.TypeUUID},
+		{Name: "scope_kind", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "project_scope_id", Type: field.TypeString, Default: ""},
+		{Name: "window_start_utc", Type: field.TypeTime},
+		{Name: "window_end_utc", Type: field.TypeTime},
+		{Name: "state", Type: field.TypeString, Default: "ok"},
+		{Name: "consumed_at_eval", Type: field.TypeInt64, Default: 0},
+		{Name: "cap_at_eval", Type: field.TypeInt64, Default: 0},
+		{Name: "thresholds_notified", Type: field.TypeInt64, Default: 0},
+		{Name: "ack_anomalous_through", Type: field.TypeTime, Nullable: true},
+		{Name: "override_until", Type: field.TypeTime, Nullable: true},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// UsageBudgetStateTable holds the schema information for the "usage_budget_state" table.
+	UsageBudgetStateTable = &schema.Table{
+		Name:       "usage_budget_state",
+		Columns:    UsageBudgetStateColumns,
+		PrimaryKey: []*schema.Column{UsageBudgetStateColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_budget_state_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageBudgetStateColumns[1], UsageBudgetStateColumns[2], UsageBudgetStateColumns[3], UsageBudgetStateColumns[4], UsageBudgetStateColumns[5]},
+			},
+			{
+				Name:    "usagebudgetstate_window_end_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageBudgetStateColumns[6]},
+			},
+			{
+				Name:    "usage_budget_state_scope_window",
+				Unique:  false,
+				Columns: []*schema.Column{UsageBudgetStateColumns[2], UsageBudgetStateColumns[3], UsageBudgetStateColumns[4], UsageBudgetStateColumns[5]},
 			},
 		},
 	}
@@ -4749,6 +4862,82 @@ var (
 				Name:    "usageevent_event_ts",
 				Unique:  false,
 				Columns: []*schema.Column{UsageEventsColumns[28]},
+			},
+		},
+	}
+	// UsageGroupBudgetSeedsColumns holds the columns for the "usage_group_budget_seeds" table.
+	UsageGroupBudgetSeedsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "group_id", Type: field.TypeString},
+		{Name: "activated_at", Type: field.TypeTime},
+		{Name: "seed_from_utc", Type: field.TypeTime},
+		{Name: "cutoff_at", Type: field.TypeTime},
+		{Name: "ended_at", Type: field.TypeTime, Nullable: true},
+		{Name: "frozen_member_ids", Type: field.TypeJSON, Nullable: true},
+		{Name: "member_snapshot_set", Type: field.TypeBool, Default: false},
+		{Name: "finalized", Type: field.TypeBool, Default: false},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// UsageGroupBudgetSeedsTable holds the schema information for the "usage_group_budget_seeds" table.
+	UsageGroupBudgetSeedsTable = &schema.Table{
+		Name:       "usage_group_budget_seeds",
+		Columns:    UsageGroupBudgetSeedsColumns,
+		PrimaryKey: []*schema.Column{UsageGroupBudgetSeedsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_group_budget_seeds_group_act_idx",
+				Unique:  true,
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[1], UsageGroupBudgetSeedsColumns[2]},
+			},
+			{
+				Name:    "usage_group_budget_seeds_group_ended_idx",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[1], UsageGroupBudgetSeedsColumns[5]},
+			},
+			{
+				Name:    "usage_group_budget_seeds_incomplete_idx",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupBudgetSeedsColumns[8], UsageGroupBudgetSeedsColumns[4]},
+			},
+		},
+	}
+	// UsageGroupRollupsDailyColumns holds the columns for the "usage_group_rollups_daily" table.
+	UsageGroupRollupsDailyColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "day_utc", Type: field.TypeTime},
+		{Name: "group_id", Type: field.TypeString},
+		{Name: "project_scope_id", Type: field.TypeString, Default: ""},
+		{Name: "origin", Type: field.TypeString},
+		{Name: "tokens_summable", Type: field.TypeInt64, Default: 0},
+		{Name: "input", Type: field.TypeInt64, Default: 0},
+		{Name: "output", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write", Type: field.TypeInt64, Default: 0},
+		{Name: "calls", Type: field.TypeInt64, Default: 0},
+		{Name: "events", Type: field.TypeInt64, Default: 0},
+	}
+	// UsageGroupRollupsDailyTable holds the schema information for the "usage_group_rollups_daily" table.
+	UsageGroupRollupsDailyTable = &schema.Table{
+		Name:       "usage_group_rollups_daily",
+		Columns:    UsageGroupRollupsDailyColumns,
+		PrimaryKey: []*schema.Column{UsageGroupRollupsDailyColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_group_rollups_daily_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageGroupRollupsDailyColumns[1], UsageGroupRollupsDailyColumns[2], UsageGroupRollupsDailyColumns[3], UsageGroupRollupsDailyColumns[4]},
+			},
+			{
+				Name:    "usagegrouprollupdaily_group_id_project_scope_id_day_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupRollupsDailyColumns[2], UsageGroupRollupsDailyColumns[3], UsageGroupRollupsDailyColumns[1]},
+			},
+			{
+				Name:    "usagegrouprollupdaily_day_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageGroupRollupsDailyColumns[1]},
 			},
 		},
 	}
@@ -5353,7 +5542,11 @@ var (
 		TriggerEventsTable,
 		TriggerFiresTable,
 		TriggerSubjectClaimsTable,
+		UploadSessionsTable,
+		UsageBudgetStateTable,
 		UsageEventsTable,
+		UsageGroupBudgetSeedsTable,
+		UsageGroupRollupsDailyTable,
 		UsageReservationsTable,
 		UsageRollupsDailyTable,
 		UsageRollupsHourlyTable,
@@ -5669,9 +5862,21 @@ func init() {
 	TriggerSubjectClaimsTable.Annotation = &entsql.Annotation{
 		Table: "trigger_subject_claims",
 	}
+	UploadSessionsTable.Annotation = &entsql.Annotation{
+		Table: "upload_sessions",
+	}
+	UsageBudgetStateTable.Annotation = &entsql.Annotation{
+		Table: "usage_budget_state",
+	}
 	UsageEventsTable.ForeignKeys[0].RefTable = RunAttributionTable
 	UsageEventsTable.Annotation = &entsql.Annotation{
 		Table: "usage_events",
+	}
+	UsageGroupBudgetSeedsTable.Annotation = &entsql.Annotation{
+		Table: "usage_group_budget_seeds",
+	}
+	UsageGroupRollupsDailyTable.Annotation = &entsql.Annotation{
+		Table: "usage_group_rollups_daily",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsageRollupsDailyTable.Annotation = &entsql.Annotation{

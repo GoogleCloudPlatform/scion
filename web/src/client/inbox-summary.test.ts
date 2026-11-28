@@ -36,7 +36,11 @@ import {
 
 function makeSummary(
   count: number,
-  opts?: { nextExpiresAt?: string; agentSecretsNextExpiresAt?: string }
+  opts?: {
+    nextExpiresAt?: string;
+    agentSecretsNextExpiresAt?: string;
+    agentExecutionsNextExpiresAt?: string;
+  }
 ): InboxSummaryResponse {
   return {
     generatedAt: '2026-11-23T18:00:00Z',
@@ -95,6 +99,19 @@ function makeSummary(
               href: '/profile/agent-secrets',
               previews: [],
               nextExpiresAt: opts.agentSecretsNextExpiresAt,
+            },
+          }
+        : {}),
+      ...(opts?.agentExecutionsNextExpiresAt
+        ? {
+            agent_executions: {
+              state: 'ok' as const,
+              count: 1,
+              capped: false,
+              countsTowardTotal: true,
+              href: '/profile/agent-executions',
+              previews: [],
+              nextExpiresAt: opts.agentExecutionsNextExpiresAt,
             },
           }
         : {}),
@@ -263,6 +280,44 @@ describe('InboxSummaryStore', () => {
     // Past the sooner expiry + buffer: refreshes immediately.
     await vi.advanceTimersByTimeAsync(1_500);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('schedules expiry refresh from agent_executions.nextExpiresAt via generalized scheduleExpiryTimer (AC-13)', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const now = Date.now();
+    // Use 10s (strictly below INBOX_POLL_UNHEALTHY_MS = 30s) so the safety poll cannot mask expiry.
+    const execExpiresIso = new Date(now + 10_000).toISOString();
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify(makeSummary(1, { agentExecutionsNextExpiresAt: execExpiresIso })),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeSummary(0)), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+    store.ensureStarted('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(store.total).toBe(1);
+
+    // Before 10s expiry (+9s): no refresh yet.
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past 10s expiry + 500ms buffer (+11s total, well before 30s safety poll): refreshes and drops total to 0.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(store.total).toBe(0);
   });
 
   it('marks unavailable404 when the hub returns 404', async () => {

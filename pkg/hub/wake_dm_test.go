@@ -767,3 +767,126 @@ func TestWakeAgentForDM_SetsWakeForMessage(t *testing.T) {
 	assert.Equal(t, 1, disp.plainCalls, "synchronous manual StartClaimUser uses plain DispatchAgentStart")
 	disp.optMu.Unlock()
 }
+
+// wakeDisconnectDispatcher cancels callerCancel as soon as the resume dispatch
+// starts, simulating a CLI client timing out and disconnecting mid-wake.
+type wakeDisconnectDispatcher struct {
+	wakeTrackingDispatcher
+	onStart func()
+}
+
+func (d *wakeDisconnectDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	if d.onStart != nil {
+		d.onStart()
+	}
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, task, resume)
+}
+
+// TestExecuteAgentDM_Wake_ClientDisconnectDuringWake_StillDelivers verifies
+// that when a sender disconnects while the target agent is resuming (e.g. a
+// CLI send timing out during a slow wake), ExecuteAgentDM still persists and
+// dispatches the message once the wake completes instead of dropping it
+// (ptone/scion#9757).
+func TestExecuteAgentDM_Wake_ClientDisconnectDuringWake_StillDelivers(t *testing.T) {
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+
+	disp := &wakeDisconnectDispatcher{
+		onStart: func() {
+			// Simulate client disconnect while wake is in flight.
+			cancelReq()
+		},
+	}
+	srv.SetDispatcher(disp)
+
+	// Simulate agent becoming ready after the client disconnected.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: "idle",
+		})
+	}()
+
+	result, dmErr := srv.ExecuteAgentDM(reqCtx, &AgentDMInput{
+		SenderAgent:    sender,
+		SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
+		TargetAgent:    target,
+		Msg:            "do not drop me during slow wake",
+		Type:           "instruction",
+		ProjectID:      sender.ProjectID,
+		Wake:           true,
+	})
+
+	require.Nil(t, dmErr, "ExecuteAgentDM must not fail when client disconnects mid-wake")
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAccepted, result.Outcome)
+	assert.NotEmpty(t, result.MessageID)
+
+	starts := disp.getStartCalls()
+	require.Len(t, starts, 1, "agent should be resumed once")
+	assert.True(t, starts[0].Continue)
+
+	disp.mu2.Lock()
+	msgs := append([]wakeDispatchMsg(nil), disp.messageCalls...)
+	disp.mu2.Unlock()
+	require.Len(t, msgs, 1, "message must be dispatched after wake completes")
+	assert.Equal(t, "do not drop me during slow wake", msgs[0].Message)
+
+	stored, err := s.GetMessage(context.Background(), result.MessageID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, "do not drop me during slow wake", stored.Msg)
+}
+
+// TestHandleAgentMessage_HumanWake_ClientDisconnectDuringWake_StillDelivers
+// verifies that a human POST /api/v1/agents/{id}/message with wake=true still
+// persists and delivers the message if the HTTP client disconnects while the
+// agent is resuming (ptone/scion#9757).
+func TestHandleAgentMessage_HumanWake_ClientDisconnectDuringWake_StillDelivers(t *testing.T) {
+	srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+
+	disp := &wakeDisconnectDispatcher{
+		onStart: func() {
+			cancelReq()
+		},
+	}
+	srv.SetDispatcher(disp)
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: "idle",
+		})
+	}()
+
+	body := map[string]any{
+		"message": "human message during slow wake",
+		"wake":    true,
+	}
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(raw))
+	req = req.WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	starts := disp.getStartCalls()
+	require.Len(t, starts, 1, "agent should be resumed once")
+	assert.True(t, starts[0].Continue)
+
+	disp.mu2.Lock()
+	msgs := append([]wakeDispatchMsg(nil), disp.messageCalls...)
+	disp.mu2.Unlock()
+	require.Len(t, msgs, 1, "human message must still be dispatched after wake completes despite client disconnect")
+	assert.Equal(t, "human message during slow wake", msgs[0].Message)
+}

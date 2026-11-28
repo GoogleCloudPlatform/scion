@@ -67,9 +67,11 @@ func (Trigger) Fields() []ent.Field {
 		field.Text("match_form").
 			Optional(),
 		field.String("action_type").
-			NotEmpty(),
+			Default(""),
 		field.Text("action_payload").
 			Default("{}"),
+		field.Text("actions").
+			Default("[]"),
 		field.String("subject_dialect").
 			Default("cel"),
 		field.Text("subject_rule").
@@ -82,6 +84,8 @@ func (Trigger) Fields() []ent.Field {
 			Default(0),
 		field.Int("max_concurrent_dispatches").
 			Default(0),
+		field.Text("notify").
+			Optional(),
 		field.String("status").
 			Default("active"),
 		field.String("status_reason").

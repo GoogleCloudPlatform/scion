@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,35 +54,6 @@ func TestFetchRemoteTemplateWithOptions_CountsImplicitDirectories(t *testing.T) 
 	_, err = FetchRemoteTemplateWithOptions(context.Background(), "https://artifacts.example.com/t.tar.gz",
 		FetchOptions{Download: download, MaxFiles: 31})
 	require.NoError(t, err, "30 directories and one file fit a limit of 31")
-}
-
-// TestFetchRemoteTemplateWithOptions_NoGitFallbackWhenLimited: a limited
-// fetch whose GitHub tarball fails is not retried with an unbounded git
-// checkout; an unlimited fetch still is.
-func TestFetchRemoteTemplateWithOptions_NoGitFallbackWhenLimited(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	restoreLs := SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
-		return nil, errors.New("no git")
-	})
-	t.Cleanup(restoreLs)
-	calls := 0
-	restore := SetGitSparseCheckoutForTest(func(_ context.Context, _ *GitHubURLParts, dest, _ string) error {
-		calls++
-		return os.WriteFile(filepath.Join(dest, "scion-agent.yaml"), []byte("x"), 0o644)
-	})
-	t.Cleanup(restore)
-	failing := func(context.Context, string, string) ([]byte, error) { return nil, errors.New("download refused") }
-	const uri = "https://github.com/acme/repo/tree/v1.0/templates"
-
-	_, err := FetchRemoteTemplateWithOptions(context.Background(), uri,
-		FetchOptions{Download: failing, MaxFiles: 100, PrivateCacheDir: true})
-	require.Error(t, err)
-	assert.Equal(t, 0, calls, "a limited fetch must not run the git fallback")
-
-	path, err := FetchRemoteTemplateWithOptions(context.Background(), uri, FetchOptions{Download: failing})
-	require.NoError(t, err)
-	assert.Equal(t, 1, calls, "an unlimited fetch keeps the git fallback")
-	assert.FileExists(t, filepath.Join(path, "scion-agent.yaml"))
 }
 
 // TestFetchRemoteTemplateWithOptions_RcloneCapIsPerFetch: the rclone

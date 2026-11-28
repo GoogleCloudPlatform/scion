@@ -104,8 +104,10 @@ import {
   ADMIN_MANAGED_BROKERS_FLAG,
   AGENT_LIMIT_CEILINGS_FLAG,
   TELEMETRY_ENFORCEMENT_FLAG,
+  TOKENOMICS_TRAJECTORY_CAPTURE_FLAG,
   agentLimitCeilingsEnabled,
   telemetryEnforcementEnabled,
+  trajectoryCaptureEnabled,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
@@ -212,6 +214,43 @@ interface V1ServerHubConfig {
   gcp_iam_check_mode?: string;
   gcp_iam_deny_unknown_policy?: string;
   observability?: V1ServerHubObservabilityConfig;
+  uploads?: V1ServerHubUploadsConfig;
+}
+
+/**
+ * Hub upload limits, chunk sizing, and resumable session quotas
+ * (server.hub.uploads, ptone/scion#9619 & #8654). Omitted keys keep their
+ * stored value; null resets a key to its default.
+ */
+interface V1ServerHubUploadsConfig {
+  max_attachment_size?: number | null;
+  max_workspace_file_size?: number | null;
+  chunk_bytes?: number | null;
+  session_idle_ttl?: string | null;
+  session_max_lifetime?: string | null;
+  max_sessions_per_user?: number | null;
+  max_pending_bytes_per_user?: number | null;
+  max_pending_bytes_hub?: number | null;
+}
+
+/**
+ * Hub-level artifact service settings (DB-only Layer-1 section `artifacts`).
+ * Omitted keys use their compiled defaults; null clears a stored key.
+ */
+interface ArtifactsSettings {
+  enabled?: boolean | null;
+  max_file_bytes?: number | null;
+  max_bundle_bytes?: number | null;
+  max_files?: number | null;
+  default_retention_days?: number | null;
+  link_default_ttl_hours?: number | null;
+  link_max_ttl_hours?: number | null;
+  gc_grace_hours?: number | null;
+  remote_images_enabled?: boolean | null;
+  remote_image_max_count?: number | null;
+  remote_image_max_bytes?: number | null;
+  remote_image_fetch_timeout_s?: number | null;
+  remote_image_total_budget_s?: number | null;
 }
 
 /**
@@ -363,9 +402,14 @@ interface V1TelemetryLocalConfig {
   console?: boolean;
 }
 
+interface V1TelemetryTrajectoryConfig {
+  allow_project_opt_out?: boolean;
+}
+
 interface V1TelemetryConfig {
   enabled?: boolean;
   enforced?: boolean;
+  trajectory?: V1TelemetryTrajectoryConfig;
   cloud?: V1TelemetryCloudConfig;
   hub?: V1TelemetryHubConfig;
   local?: V1TelemetryLocalConfig;
@@ -489,6 +533,8 @@ interface ServerConfigResponse {
   broker_policy?: { admin_managed_only?: boolean };
 
   agent_limits?: { max_turns?: number; max_model_calls?: number; max_duration?: string };
+
+  artifacts?: ArtifactsSettings;
 
   // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
@@ -721,6 +767,15 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // hub_observability section
   'server.hub.observability.metrics_enabled': 'Hub Metrics Export',
   'server.hub.observability.tracing_enabled': 'Hub Trace Export',
+  // uploads section
+  'server.hub.uploads.max_attachment_size': 'Uploads: Max Attachment Size',
+  'server.hub.uploads.max_workspace_file_size': 'Uploads: Max Workspace File Size',
+  'server.hub.uploads.chunk_bytes': 'Uploads: Chunk Size',
+  'server.hub.uploads.session_idle_ttl': 'Uploads: Session Idle TTL',
+  'server.hub.uploads.session_max_lifetime': 'Uploads: Session Max Lifetime',
+  'server.hub.uploads.max_sessions_per_user': 'Uploads: Max Sessions Per User',
+  'server.hub.uploads.max_pending_bytes_per_user': 'Uploads: Max Pending Bytes Per User',
+  'server.hub.uploads.max_pending_bytes_hub': 'Uploads: Max Pending Bytes (Hub)',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // quotas section
@@ -733,6 +788,21 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'agent_limits.max_turns': 'Agent Limit Ceilings: Max Turns',
   'agent_limits.max_model_calls': 'Agent Limit Ceilings: Max Model Calls',
   'agent_limits.max_duration': 'Agent Limit Ceilings: Max Duration',
+  // artifacts section
+  artifacts: 'Artifacts',
+  'artifacts.enabled': 'Artifacts: Enabled',
+  'artifacts.default_retention_days': 'Artifacts: Default Retention (days)',
+  'artifacts.gc_grace_hours': 'Artifacts: Blob GC Grace Period (hours)',
+  'artifacts.link_default_ttl_hours': 'Artifacts: Default Share Link TTL (hours)',
+  'artifacts.link_max_ttl_hours': 'Artifacts: Max Share Link TTL (hours)',
+  'artifacts.max_file_bytes': 'Artifacts: Max File Size (bytes)',
+  'artifacts.max_bundle_bytes': 'Artifacts: Max Bundle Size (bytes)',
+  'artifacts.max_files': 'Artifacts: Max Files Per Version',
+  'artifacts.remote_images_enabled': 'Artifacts: Fetch Remote Images',
+  'artifacts.remote_image_max_count': 'Artifacts: Max Remote Images Per Version',
+  'artifacts.remote_image_max_bytes': 'Artifacts: Max Remote Image Size (bytes)',
+  'artifacts.remote_image_fetch_timeout_s': 'Artifacts: Remote Image Fetch Timeout (seconds)',
+  'artifacts.remote_image_total_budget_s': 'Artifacts: Remote Image Total Budget (seconds)',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -894,6 +964,351 @@ const CLOUD_LOGGING_KEY = 'telemetry.cloud.cloud_logging';
 const PUBLIC_URL_KEY = 'server.hub.public_url';
 const HUB_METRICS_ENABLED_KEY = 'server.hub.observability.metrics_enabled';
 const HUB_TRACING_ENABLED_KEY = 'server.hub.observability.tracing_enabled';
+
+type HubUploadFieldKey = keyof V1ServerHubUploadsConfig;
+
+interface HubUploadFieldSpec {
+  key: HubUploadFieldKey;
+  label: string;
+  kind: 'int' | 'duration';
+  defaultLabel: string;
+  placeholder: string;
+  hint: string;
+  min?: number;
+  max?: number;
+}
+
+/**
+ * Editable fields under `server.hub.uploads` (Layer-1 section `uploads`).
+ * `max_workspace_file_size` intentionally omits a hard-coded `max` attribute
+ * so its upper bound stays data-driven / enforced by the server.
+ */
+const HUB_UPLOAD_FIELDS: readonly HubUploadFieldSpec[] = [
+  {
+    key: 'max_attachment_size',
+    label: 'Max Attachment Size (bytes)',
+    kind: 'int',
+    defaultLabel: '10 MiB (default)',
+    placeholder: '10485760',
+    hint: '0–104857600 bytes (default 10 MiB).',
+    min: 0,
+    max: 104857600,
+  },
+  {
+    key: 'max_workspace_file_size',
+    label: 'Max Workspace File Size (bytes)',
+    kind: 'int',
+    defaultLabel: '50 MiB (default)',
+    placeholder: '52428800',
+    hint: 'Maximum single workspace/shared-dir file size in bytes (default 50 MiB; validated by server).',
+    min: 0,
+  },
+  {
+    key: 'chunk_bytes',
+    label: 'Chunk Size (bytes)',
+    kind: 'int',
+    defaultLabel: '8 MiB (default)',
+    placeholder: '8388608',
+    hint: '1048576–16777216 bytes (1 MiB–16 MiB, default 8 MiB).',
+    min: 1048576,
+    max: 16777216,
+  },
+  {
+    key: 'session_idle_ttl',
+    label: 'Session Idle TTL',
+    kind: 'duration',
+    defaultLabel: '1h (default)',
+    placeholder: '1h',
+    hint: 'Go duration between 5m and 24h (default 1h).',
+  },
+  {
+    key: 'session_max_lifetime',
+    label: 'Session Max Lifetime',
+    kind: 'duration',
+    defaultLabel: '24h (default)',
+    placeholder: '24h',
+    hint: 'Go duration ≥ Session Idle TTL and ≤ 7d (default 24h).',
+  },
+  {
+    key: 'max_sessions_per_user',
+    label: 'Max Sessions Per User',
+    kind: 'int',
+    defaultLabel: '4 (default)',
+    placeholder: '4',
+    hint: '1–64 concurrent upload sessions per user (default 4).',
+    min: 1,
+    max: 64,
+  },
+  {
+    key: 'max_pending_bytes_per_user',
+    label: 'Max Pending Bytes Per User',
+    kind: 'int',
+    defaultLabel: '2 GiB (default)',
+    placeholder: '2147483648',
+    hint: '≥ 1 byte (default 2 GiB). Warns if below the largest per-file limit.',
+    min: 1,
+  },
+  {
+    key: 'max_pending_bytes_hub',
+    label: 'Max Pending Bytes (Hub)',
+    kind: 'int',
+    defaultLabel: '16 GiB (default)',
+    placeholder: '17179869184',
+    hint: '≥ Max Pending Bytes Per User (default 16 GiB).',
+    min: 1,
+  },
+];
+
+function emptyHubUploads(): Record<HubUploadFieldKey, string> {
+  return {
+    max_attachment_size: '',
+    max_workspace_file_size: '',
+    chunk_bytes: '',
+    session_idle_ttl: '',
+    session_max_lifetime: '',
+    max_sessions_per_user: '',
+    max_pending_bytes_per_user: '',
+    max_pending_bytes_hub: '',
+  };
+}
+
+function hubUploadsFrom(uploads?: V1ServerHubUploadsConfig): Record<HubUploadFieldKey, string> {
+  const out = emptyHubUploads();
+  if (!uploads) return out;
+  for (const field of HUB_UPLOAD_FIELDS) {
+    const val = uploads[field.key];
+    if (field.kind === 'int' && typeof val === 'number' && Number.isFinite(val)) {
+      out[field.key] = String(val);
+    } else if (field.kind === 'duration' && typeof val === 'string' && val.trim()) {
+      out[field.key] = val.trim();
+    }
+  }
+  return out;
+}
+
+type ArtifactFieldKey = keyof ArtifactsSettings;
+
+interface ArtifactFieldSpec {
+  key: ArtifactFieldKey;
+  label: string;
+  kind: 'bool' | 'int';
+  defaultLabel: string;
+  placeholder?: string;
+  hint: string;
+  min?: number;
+  max?: number;
+}
+
+/**
+ * Editable fields of the DB-only `artifacts` section (matching
+ * `opsettings.ArtifactsSettings` and its compiled defaults).
+ */
+const ARTIFACT_FIELDS: readonly ArtifactFieldSpec[] = [
+  {
+    key: 'enabled',
+    label: 'Artifact Service',
+    kind: 'bool',
+    defaultLabel: 'Enabled (default)',
+    hint: 'Hub-level switch for the artifact service on top of the hub.artifacts experiment (default enabled).',
+  },
+  {
+    key: 'default_retention_days',
+    label: 'Default Retention (days)',
+    kind: 'int',
+    defaultLabel: '0 — keep forever (default)',
+    placeholder: '0',
+    hint: 'Days to keep newly created artifacts when no expiry is set. 0 keeps forever; leave empty for default (0). Applies going forward only — existing artifacts with no expiry are unaffected.',
+    min: 0,
+  },
+  {
+    key: 'gc_grace_hours',
+    label: 'Blob GC Grace Period (hours)',
+    kind: 'int',
+    defaultLabel: '168 h / 7 days (default)',
+    placeholder: '168',
+    hint: 'Hours unreferenced blobs are kept before garbage collection (≥ 24; default 168 / 7 days).',
+    min: 24,
+  },
+  {
+    key: 'link_default_ttl_hours',
+    label: 'Default Share Link TTL (hours)',
+    kind: 'int',
+    defaultLabel: '168 h / 7 days (default)',
+    placeholder: '168',
+    hint: 'Default lifetime for share links without an explicit expiry (≥ 1, ≤ Max Share Link TTL; default 168).',
+    min: 1,
+  },
+  {
+    key: 'link_max_ttl_hours',
+    label: 'Max Share Link TTL (hours)',
+    kind: 'int',
+    defaultLabel: '720 h / 30 days (default)',
+    placeholder: '720',
+    hint: 'Maximum lifetime allowed for share links (≥ Default Share Link TTL; default 720).',
+    min: 1,
+  },
+  {
+    key: 'max_file_bytes',
+    label: 'Max File Size (bytes)',
+    kind: 'int',
+    defaultLabel: '32 MiB (default)',
+    placeholder: '33554432',
+    hint: 'Maximum size of a single file in an artifact version (≥ 1, ≤ Max Bundle Size; default 32 MiB).',
+    min: 1,
+  },
+  {
+    key: 'max_bundle_bytes',
+    label: 'Max Bundle Size (bytes)',
+    kind: 'int',
+    defaultLabel: '256 MiB (default)',
+    placeholder: '268435456',
+    hint: 'Maximum total size of all files in one artifact version (≥ Max File Size; default 256 MiB).',
+    min: 1,
+  },
+  {
+    key: 'max_files',
+    label: 'Max Files Per Version',
+    kind: 'int',
+    defaultLabel: '200 (default)',
+    placeholder: '200',
+    hint: 'Maximum number of files in one artifact version (≥ 1; default 200).',
+    min: 1,
+  },
+  {
+    key: 'remote_images_enabled',
+    label: 'Fetch Remote Images',
+    kind: 'bool',
+    defaultLabel: 'Enabled (default)',
+    hint: 'Fetch remote images referenced by markdown artifacts at publish time (default enabled).',
+  },
+  {
+    key: 'remote_image_max_count',
+    label: 'Max Remote Images Per Version',
+    kind: 'int',
+    defaultLabel: '32 (default)',
+    placeholder: '32',
+    hint: 'Maximum remote images fetched for one version (≥ 1, ≤ Max Files; default 32).',
+    min: 1,
+  },
+  {
+    key: 'remote_image_max_bytes',
+    label: 'Max Remote Image Size (bytes)',
+    kind: 'int',
+    defaultLabel: '5 MiB (default)',
+    placeholder: '5242880',
+    hint: 'Maximum size of one fetched remote image (≥ 1, ≤ Max File Size; default 5 MiB).',
+    min: 1,
+  },
+  {
+    key: 'remote_image_fetch_timeout_s',
+    label: 'Remote Image Fetch Timeout (seconds)',
+    kind: 'int',
+    defaultLabel: '10 s (default)',
+    placeholder: '10',
+    hint: 'Per-image fetch timeout in seconds (1–60, ≤ Total Budget; default 10).',
+    min: 1,
+    max: 60,
+  },
+  {
+    key: 'remote_image_total_budget_s',
+    label: 'Remote Image Total Budget (seconds)',
+    kind: 'int',
+    defaultLabel: '30 s (default)',
+    placeholder: '30',
+    hint: 'Total time budget for fetching all remote images in one version (1–60, ≥ Fetch Timeout; default 30).',
+    min: 1,
+    max: 60,
+  },
+];
+
+function emptyArtifactsSettings(): Record<ArtifactFieldKey, string> {
+  return {
+    enabled: '',
+    max_file_bytes: '',
+    max_bundle_bytes: '',
+    max_files: '',
+    default_retention_days: '',
+    link_default_ttl_hours: '',
+    link_max_ttl_hours: '',
+    gc_grace_hours: '',
+    remote_images_enabled: '',
+    remote_image_max_count: '',
+    remote_image_max_bytes: '',
+    remote_image_fetch_timeout_s: '',
+    remote_image_total_budget_s: '',
+  };
+}
+
+function artifactsSettingsFrom(art?: ArtifactsSettings): Record<ArtifactFieldKey, string> {
+  const out = emptyArtifactsSettings();
+  if (!art) return out;
+  for (const field of ARTIFACT_FIELDS) {
+    const val = art[field.key];
+    if (field.kind === 'bool' && typeof val === 'boolean') {
+      out[field.key] = val ? 'true' : 'false';
+    } else if (field.kind === 'int' && typeof val === 'number' && Number.isFinite(val)) {
+      out[field.key] = String(val);
+    }
+  }
+  return out;
+}
+
+/**
+ * Validates edited `artifacts` fields against the same range and cross-field
+ * rules enforced by `opsettings.ArtifactsSettings.Resolve`.
+ */
+function validateArtifactsSettings(values: Record<ArtifactFieldKey, string>): string[] {
+  const errors: string[] = [];
+  const parsed: Partial<Record<ArtifactFieldKey, number>> = {};
+
+  for (const field of ARTIFACT_FIELDS) {
+    if (field.kind !== 'int') continue;
+    const raw = values[field.key].trim();
+    if (raw === '') continue;
+    const num = Number(raw);
+    if (!Number.isInteger(num)) {
+      errors.push(`${field.label} must be a whole number.`);
+      continue;
+    }
+    if (field.min !== undefined && num < field.min) {
+      errors.push(`${field.label} must be at least ${field.min}.`);
+      continue;
+    }
+    if (field.max !== undefined && num > field.max) {
+      errors.push(`${field.label} must be at most ${field.max}.`);
+      continue;
+    }
+    parsed[field.key] = num;
+  }
+
+  const maxFile = parsed.max_file_bytes ?? 33554432;
+  const maxBundle = parsed.max_bundle_bytes ?? 268435456;
+  if (maxFile > maxBundle) {
+    errors.push('Max File Size cannot exceed Max Bundle Size.');
+  }
+
+  const linkDefault = parsed.link_default_ttl_hours ?? 168;
+  const linkMax = parsed.link_max_ttl_hours ?? 720;
+  if (linkDefault > linkMax) {
+    errors.push('Default Share Link TTL cannot exceed Max Share Link TTL.');
+  }
+
+  const maxFiles = parsed.max_files ?? 200;
+  if (parsed.remote_image_max_count !== undefined && parsed.remote_image_max_count > maxFiles) {
+    errors.push('Max Remote Images Per Version cannot exceed Max Files Per Version.');
+  }
+  if (parsed.remote_image_max_bytes !== undefined && parsed.remote_image_max_bytes > maxFile) {
+    errors.push('Max Remote Image Size cannot exceed Max File Size.');
+  }
+
+  const fetchTimeout = parsed.remote_image_fetch_timeout_s ?? 10;
+  const totalBudget = parsed.remote_image_total_budget_s ?? 30;
+  if (totalBudget < fetchTimeout) {
+    errors.push('Remote Image Total Budget cannot be less than Remote Image Fetch Timeout.');
+  }
+
+  return errors;
+}
 
 /**
  * Workstation fields that `scion server start` overrides at every start
@@ -1291,6 +1706,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryEnforced = false;
   private loadedTelemetryEnforced = false;
   @state() private telemetryEnforcedWarning = '';
+  @state() private telemetryTrajectoryAllowProjectOptOut = true;
+  private loadedTelemetryTrajectoryAllowProjectOptOut = true;
   @state() private telemetryCloudEnabled: boolean | null = null;
   private loadedTelemetryCloudEnabled: boolean | null = null;
   @state() private telemetryCloudEndpoint = '';
@@ -1375,6 +1792,16 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubTracingEnabled: boolean | null = null;
   private loadedHubMetricsEnabled: boolean | null = null;
   private loadedHubTracingEnabled: boolean | null = null;
+
+  // ── Hub uploads (server.hub.uploads, ptone/scion#9619 & #8654) ──
+  // Empty string = unset (hub default). Sent only when changed; cleared = null.
+  @state() private hubUploads: Record<HubUploadFieldKey, string> = emptyHubUploads();
+  private loadedHubUploads: Record<HubUploadFieldKey, string> = emptyHubUploads();
+
+  // ── Hub artifacts (DB-only Layer-1 section `artifacts`) ──
+  // Empty string = unset (compiled default). Sent only when changed; cleared = null.
+  @state() private artifactsSettings: Record<ArtifactFieldKey, string> = emptyArtifactsSettings();
+  private loadedArtifactsSettings: Record<ArtifactFieldKey, string> = emptyArtifactsSettings();
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   // Warnings the last save returned (accepted values worth a look, such
@@ -2416,6 +2843,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.telemetryEnabled = tel?.enabled ?? null;
     this.telemetryEnforced = tel?.enforced === true;
     this.telemetryEnforcedWarning = data.telemetry_enforced_warning || '';
+    this.telemetryTrajectoryAllowProjectOptOut = tel?.trajectory?.allow_project_opt_out ?? true;
     this.telemetryCloudEnabled = tel?.cloud?.enabled ?? null;
     this.telemetryCloudEndpoint = tel?.cloud?.endpoint || '';
     this.telemetryCloudProtocol = tel?.cloud?.protocol || '';
@@ -2430,6 +2858,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // true so leaving the switch unchecked while enabling telemetry sends
     // enforced:false and clears the stray flag instead of silently arming it.
     this.loadedTelemetryEnforced = this.telemetryEnforced || Boolean(this.telemetryEnforcedWarning);
+    this.loadedTelemetryTrajectoryAllowProjectOptOut = this.telemetryTrajectoryAllowProjectOptOut;
     this.loadedTelemetryCloudEnabled = this.telemetryCloudEnabled;
     this.loadedTelemetryCloudCloudLogging = this.telemetryCloudCloudLogging;
     this.loadedTelemetryHubEnabled = this.telemetryHubEnabled;
@@ -2456,6 +2885,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.hubTracingEnabled = obs?.tracing_enabled ?? null;
     this.loadedHubMetricsEnabled = this.hubMetricsEnabled;
     this.loadedHubTracingEnabled = this.hubTracingEnabled;
+
+    // Hub uploads — absent means unset (hub default).
+    this.hubUploads = hubUploadsFrom(data.server?.hub?.uploads);
+    this.loadedHubUploads = { ...this.hubUploads };
+
+    // Hub artifacts (DB-only Layer-1 section) — absent means unset (compiled defaults).
+    this.artifactsSettings = artifactsSettingsFrom(data.artifacts);
+    this.loadedArtifactsSettings = { ...this.artifactsSettings };
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
@@ -3050,6 +3487,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     )
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     this.addHubObservability(hub, ok);
+    this.addHubUploads(hub, ok);
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -3097,6 +3535,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         (Boolean(this.telemetryEnforcedWarning) && !this.telemetryEnforced)
       ) {
         telemetry.enforced = this.telemetryEnforced;
+      }
+      if (
+        trajectoryCaptureEnabled() &&
+        this.telemetryTrajectoryAllowProjectOptOut !==
+          this.loadedTelemetryTrajectoryAllowProjectOptOut
+      ) {
+        telemetry.trajectory = {
+          allow_project_opt_out: this.telemetryTrajectoryAllowProjectOptOut,
+        };
       }
       if (ok('telemetry.cloud.enabled')) {
         const cloud: Record<string, unknown> = {
@@ -3222,6 +3669,31 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
+   * Adds changed `server.hub.uploads` fields to a hub payload block:
+   * omitted keys keep their stored value, and clearing a field sends `null`
+   * to reset it to its default.
+   */
+  private addHubUploads(hub: Record<string, unknown>, ok: (key: string) => boolean): void {
+    const uploads: Record<string, unknown> = {};
+    for (const field of HUB_UPLOAD_FIELDS) {
+      const fullKey = `server.hub.uploads.${field.key}`;
+      if (!ok(fullKey)) continue;
+      const cur = this.hubUploads[field.key].trim();
+      const prev = this.loadedHubUploads[field.key].trim();
+      if (cur === prev) continue;
+      if (cur === '') {
+        uploads[field.key] = null;
+      } else if (field.kind === 'int') {
+        const parsed = Number(cur);
+        uploads[field.key] = Number.isFinite(parsed) ? Math.trunc(parsed) : cur;
+      } else {
+        uploads[field.key] = cur;
+      }
+    }
+    if (Object.keys(uploads).length > 0) hub.uploads = uploads;
+  }
+
+  /**
    * Adds server.hub.monitoring_dashboard_url to a hub payload block only
    * when the user edited the field and the trimmed value differs from the
    * loaded one. A cleared field is sent as "", which clears the setting.
@@ -3263,12 +3735,45 @@ export class ScionPageAdminServerConfig extends LitElement {
         payload.expected_revisions = dirty.expectedRevisions;
       }
     }
-    // agent_limits is DB-only with no KoanfPaths, so it is attached after
-    // dirtySectionsPayload (which would otherwise drop an empty clear and omit
-    // its expected_revisions entry).
+    // agent_limits and artifacts are DB-only with no KoanfPaths, so they are
+    // attached after dirtySectionsPayload (which would otherwise drop empty
+    // clears and omit their expected_revisions entries).
     this.addAgentLimitsToPayload(payload);
+    this.addArtifactsToPayload(payload);
     if (this.layer0Editable) mergePayload(payload, this.buildLayer0Payload());
     return payload;
+  }
+
+  private addArtifactsToPayload(payload: Record<string, unknown>): void {
+    const block: Record<string, unknown> = {};
+    for (const field of ARTIFACT_FIELDS) {
+      const cur = this.artifactsSettings[field.key].trim();
+      const prev = this.loadedArtifactsSettings[field.key].trim();
+      if (cur === prev) continue;
+      if (cur === '') {
+        block[field.key] = null;
+      } else if (field.kind === 'bool') {
+        block[field.key] = cur === 'true';
+      } else {
+        const parsed = Number(cur);
+        block[field.key] = Number.isFinite(parsed) ? Math.trunc(parsed) : cur;
+      }
+    }
+    if (Object.keys(block).length === 0) return;
+    payload.artifacts = block;
+    const expectedRevisions =
+      (payload.expected_revisions as Record<string, number> | undefined) ?? {};
+    expectedRevisions.artifacts = this.loadedRevisions['artifacts'] ?? 0;
+    payload.expected_revisions = expectedRevisions;
+  }
+
+  private get artifactsValidationErrors(): string[] {
+    if (this.settingsTier !== 'db') return [];
+    return validateArtifactsSettings(this.artifactsSettings);
+  }
+
+  private get hasArtifactsErrors(): boolean {
+    return this.artifactsValidationErrors.length > 0;
   }
 
   /**
@@ -3496,6 +4001,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     this.addHubObservability(hub, ok);
+    this.addHubUploads(hub, ok);
     server.hub = hub;
 
     // Broker
@@ -4494,6 +5000,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                   (${this.resourceQuantityIssues.errors.map((e) => e.path).join(', ')}).
                 </div>`
               : nothing}
+            ${this.hasArtifactsErrors
+              ? html`<div class="error artifacts-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the Artifacts settings errors on the Hub Server tab before
+                  saving.
+                </div>`
+              : nothing}
             <div class="actions">
               <sl-button
                 variant="primary"
@@ -4501,7 +5013,8 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ?disabled=${this.hasHarnessConfigErrors ||
                 this.hasResourceQuantityErrors ||
                 this.hasPlacementErrors ||
-                this.hasBrokerInstanceErrors}
+                this.hasBrokerInstanceErrors ||
+                this.hasArtifactsErrors}
                 @click=${() => {
                   void this.handleSave();
                 }}
@@ -4846,6 +5359,41 @@ export class ScionPageAdminServerConfig extends LitElement {
                               ${this.telemetryEnforcedWarning}
                             </sl-alert>`
                           : nothing}
+                      </div>`
+                    : nothing}
+                ${trajectoryCaptureEnabled()
+                  ? html`<div class="form-field full-width">
+                      <sl-switch
+                        data-testid="telemetry-trajectory-allow-opt-out-switch"
+                        ?checked=${this.telemetryTrajectoryAllowProjectOptOut}
+                        ?disabled=${this.settingsTier === 'file'}
+                        @sl-change=${(e: Event) => {
+                          this.telemetryTrajectoryAllowProjectOptOut = (
+                            e.target as HTMLInputElement
+                          ).checked;
+                        }}
+                      >
+                        Allow projects to opt out of trajectory capture
+                      </sl-switch>
+                      <span class="hint"
+                        >When turned off, all projects are locked to full trajectory capture and
+                        cannot lower their setting to metadata-only or off.</span
+                      >
+                    </div>`
+                  : !this.telemetryTrajectoryAllowProjectOptOut
+                    ? html`<div class="form-field full-width">
+                        <sl-alert
+                          variant="warning"
+                          open
+                          data-testid="telemetry-trajectory-opt-out-mismatch"
+                        >
+                          <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                          <code>telemetry.trajectory.allow_project_opt_out</code> is stored as
+                          <strong>false</strong>, but experiment
+                          <code>${TOKENOMICS_TRAJECTORY_CAPTURE_FLAG}</code> is off. Enable the
+                          experiment on <a href="/admin/experiments">Admin &gt; Experiments</a> to
+                          activate trajectory capture policy enforcement.
+                        </sl-alert>
                       </div>`
                     : nothing}
                 <div class="form-field full-width">
@@ -5765,6 +6313,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderStartTimings()}
       </div>
 
+      ${this.renderHubUploadsSection()} ${this.renderArtifactsSection()}
       ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
       ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
       <scion-admin-chat-retention></scion-admin-chat-retention>
@@ -5809,6 +6358,131 @@ export class ScionPageAdminServerConfig extends LitElement {
         })}
       </div>
     </div>`;
+  }
+
+  /**
+   * Hub upload limits, chunk sizing, and resumable session quotas
+   * (`server.hub.uploads`, Layer-1 section `uploads`).
+   */
+  private renderHubUploadsSection(): ReturnType<typeof html> {
+    return html`
+      <div class="section" data-section="uploads">
+        ${this.renderSectionHeader('Uploads', 'uploads')} ${this.renderSectionMeta('uploads')}
+        <p class="hint" style="margin: 0 0 1rem 0;">
+          Per-file upload limits, chunk sizing, and resumable session quotas. Leave a field empty to
+          use the hub default. Changes apply live across all replicas.
+        </p>
+        <div class="form-grid">
+          ${HUB_UPLOAD_FIELDS.map((field) => {
+            const fullKey = `server.hub.uploads.${field.key}`;
+            const val = this.hubUploads[field.key];
+            const display = val || field.defaultLabel;
+            return html`
+              <div class="form-field">
+                <label>${field.label}</label>
+                <span class="hint">${field.hint}</span>
+                ${this.renderFieldValue(
+                  fullKey,
+                  display,
+                  html`${this.renderEnvBadge(fullKey)}<sl-input
+                      data-field=${fullKey}
+                      type=${field.kind === 'int' ? 'number' : 'text'}
+                      min=${field.min !== undefined ? String(field.min) : nothing}
+                      max=${field.max !== undefined ? String(field.max) : nothing}
+                      value=${val}
+                      placeholder=${field.placeholder}
+                      @sl-input=${(e: Event): void => {
+                        this.hubUploads = {
+                          ...this.hubUploads,
+                          [field.key]: (e.target as HTMLInputElement).value,
+                        };
+                      }}
+                    ></sl-input>`
+                )}
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Hub artifact service settings (DB-only Layer-1 section `artifacts`).
+   */
+  private renderArtifactsSection(): ReturnType<typeof html> | typeof nothing {
+    if (this.settingsTier !== 'db') return nothing;
+    const validationErrors = this.artifactsValidationErrors;
+    return html`
+      <div class="section" data-section="artifacts">
+        ${this.renderSectionHeader('Artifacts', 'artifacts')} ${this.renderSectionMeta('artifacts')}
+        <p class="hint" style="margin: 0 0 1rem 0;">
+          Artifact retention, share link lifetimes, size limits, and remote image fetching. Leave a
+          field empty to use the hub default. Changes apply live without restart. Retention changes
+          apply going forward only: existing artifacts with no expiry are unaffected.
+        </p>
+        ${validationErrors.length > 0
+          ? html`
+              <sl-alert
+                variant="danger"
+                open
+                data-artifacts-validation-error
+                style="margin-bottom: 1rem;"
+              >
+                <ul style="margin: 0; padding-left: 1.25rem;">
+                  ${validationErrors.map((msg) => html`<li>${msg}</li>`)}
+                </ul>
+              </sl-alert>
+            `
+          : nothing}
+        <div class="form-grid">
+          ${ARTIFACT_FIELDS.map((field) => {
+            const fullKey = `artifacts.${field.key}`;
+            const val = this.artifactsSettings[field.key];
+            return html`
+              <div class="form-field">
+                ${field.kind === 'bool'
+                  ? html`
+                      <sl-select
+                        data-field=${fullKey}
+                        label=${field.label}
+                        value=${val}
+                        @sl-change=${(e: Event): void => {
+                          this.artifactsSettings = {
+                            ...this.artifactsSettings,
+                            [field.key]: (e.target as HTMLSelectElement).value,
+                          };
+                        }}
+                      >
+                        <sl-option value="">${field.defaultLabel}</sl-option>
+                        <sl-option value="true">Enabled</sl-option>
+                        <sl-option value="false">Disabled</sl-option>
+                      </sl-select>
+                    `
+                  : html`
+                      <sl-input
+                        data-field=${fullKey}
+                        label=${field.label}
+                        type="number"
+                        min=${field.min !== undefined ? String(field.min) : nothing}
+                        max=${field.max !== undefined ? String(field.max) : nothing}
+                        value=${val}
+                        placeholder=${field.placeholder ?? nothing}
+                        @sl-input=${(e: Event): void => {
+                          this.artifactsSettings = {
+                            ...this.artifactsSettings,
+                            [field.key]: (e.target as HTMLInputElement).value,
+                          };
+                        }}
+                      ></sl-input>
+                    `}
+                <span class="hint">${field.hint}</span>
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+    `;
   }
 
   /**

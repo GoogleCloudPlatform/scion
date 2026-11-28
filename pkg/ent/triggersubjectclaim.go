@@ -20,6 +20,8 @@ type TriggerSubjectClaim struct {
 	ID uuid.UUID `json:"id,omitempty"`
 	// TriggerID holds the value of the "trigger_id" field.
 	TriggerID uuid.UUID `json:"trigger_id,omitempty"`
+	// ActionIndex holds the value of the "action_index" field.
+	ActionIndex int `json:"action_index,omitempty"`
 	// Subject holds the value of the "subject" field.
 	Subject string `json:"subject,omitempty"`
 	// State holds the value of the "state" field.
@@ -48,6 +50,8 @@ func (*TriggerSubjectClaim) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggersubjectclaim.FieldAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
+		case triggersubjectclaim.FieldActionIndex:
+			values[i] = new(sql.NullInt64)
 		case triggersubjectclaim.FieldSubject, triggersubjectclaim.FieldState, triggersubjectclaim.FieldReleaseReason:
 			values[i] = new(sql.NullString)
 		case triggersubjectclaim.FieldClaimedAt, triggersubjectclaim.FieldBoundAt, triggersubjectclaim.FieldReleasedAt:
@@ -80,6 +84,12 @@ func (_m *TriggerSubjectClaim) assignValues(columns []string, values []any) erro
 				return fmt.Errorf("unexpected type %T for field trigger_id", values[i])
 			} else if value != nil {
 				_m.TriggerID = *value
+			}
+		case triggersubjectclaim.FieldActionIndex:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field action_index", values[i])
+			} else if value.Valid {
+				_m.ActionIndex = int(value.Int64)
 			}
 		case triggersubjectclaim.FieldSubject:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -176,6 +186,9 @@ func (_m *TriggerSubjectClaim) String() string {
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
 	builder.WriteString("trigger_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.TriggerID))
+	builder.WriteString(", ")
+	builder.WriteString("action_index=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ActionIndex))
 	builder.WriteString(", ")
 	builder.WriteString("subject=")
 	builder.WriteString(_m.Subject)

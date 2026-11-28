@@ -104,6 +104,9 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if g.CreatedByRef == SponsorReviewCreator || actor.Authority == AuthoritySponsorReview {
 		return GrantPutUnchanged, false, errSponsorReviewReserved
 	}
+	if g.CreatedByRef == BoundedReviewCreator {
+		return GrantPutUnchanged, false, errBoundedReviewReserved
+	}
 	if stewardActor(actor) && g.Permission == GrantAdmin {
 		return GrantPutUnchanged, false, ErrStewardActionNotAllowed
 	}
@@ -118,7 +121,7 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
 		return GrantPutUnchanged, false, err
 	}
-	put, notified, err := s.putGrantTx(ctx, tx, g, maxGrants, crossScope, actor, notify, time.Now())
+	put, notified, err := s.putGrantTx(ctx, tx, g, maxGrants, crossScope, actor, notify, time.Now(), false, false, 0)
 	if err != nil {
 		return GrantPutUnchanged, false, err
 	}
@@ -130,7 +133,12 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 
 // putGrantTx applies a principal or scope grant inside an open transaction
 // that already holds lockLiveArtifact and has passed refuseAttachmentTx.
-func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool, at time.Time) (GrantPut, bool, error) {
+// When fromReviewRequest is true, a same-level write over a role-gated or
+// expired grant rewrites it into an effective grant (clearing expired
+// expires_at and replacing created_by_ref). When allowBounded is true, g must
+// be a bounded review grant (CreatedByRef == BoundedReviewCreator) and
+// maxBoundedGrants caps the number of bounded grants per artifact.
+func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool, at time.Time, fromReviewRequest, allowBounded bool, maxBoundedGrants int) (GrantPut, bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
 		return GrantPutUnchanged, false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
@@ -140,9 +148,17 @@ func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGran
 	}
 	// Only a user is ever told.
 	notify = notify && g.SubjectKind == SubjectPrincipal && strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":")
-	// The automatic form is reserved to the creation path (ptone/scion#7134).
+	// The automatic sponsor form is reserved to the creation path (ptone/scion#7134).
 	if g.CreatedByRef == SponsorReviewCreator || actor.Authority == AuthoritySponsorReview {
 		return GrantPutUnchanged, false, errSponsorReviewReserved
+	}
+	if allowBounded {
+		if g.CreatedByRef != BoundedReviewCreator || g.SubjectKind != SubjectPrincipal ||
+			g.Permission != GrantReview || g.ExpiresAt != nil {
+			return GrantPutUnchanged, false, errBoundedReviewReserved
+		}
+	} else if g.CreatedByRef == BoundedReviewCreator {
+		return GrantPutUnchanged, false, errBoundedReviewReserved
 	}
 	if stewardActor(actor) && g.Permission == GrantAdmin {
 		return GrantPutUnchanged, false, ErrStewardActionNotAllowed
@@ -167,23 +183,66 @@ func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGran
 		perm     string
 		by       sql.NullString
 		created  dbTime
+		expires  dbTime
 		notified bool
 	)
-	err := tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_by_ref, created_at FROM artifact_grant
-		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created)
+	err := tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_by_ref, created_at, expires_at FROM artifact_grant
+		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created, &expires)
 	switch {
 	case err == nil:
-		if perm != g.Permission {
-			// A level change by a person ends an automatic grant's
-			// automatic form (ptone/scion#7134): its creator becomes that
-			// person, so it no longer depends on a role in the home
-			// project. Every other grant keeps its creator.
-			newBy := by
-			if by.String == SponsorReviewCreator {
-				newBy = sql.NullString{String: PrincipalRef(actor.Kind, actor.Ref), Valid: true}
+		existingExpired := expires.Valid && !at.Before(expires.Time)
+		wasRoleGated := isRoleGatedCreator(by.String)
+		var (
+			needUpdate bool
+			newBy      = by
+			newExpires = expires.ptr()
+		)
+		if allowBounded {
+			if !existingExpired {
+				if wasRoleGated && perm == GrantReview {
+					g.ID, g.CreatedAt = id, created.Time
+					return GrantPutUnchanged, false, nil
+				}
+				// Never overwrite an unexpired ordinary grant with a bounded
+				// grant or report bounded while the reviewer still cannot review.
+				return GrantPutUnchanged, false, ErrBoundedGrantConflict
 			}
-			if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ?, created_by_ref = ? WHERE id = ?`),
-				g.Permission, newBy, id); err != nil {
+			// Rewriting an expired grant into a live bounded review grant
+			// counts against the per-artifact bounded grant cap if it was not
+			// already counted as bounded.
+			if maxBoundedGrants > 0 && by.String != BoundedReviewCreator {
+				var boundedCount int
+				if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant
+					WHERE artifact_id = ? AND subject_kind = ? AND created_by_ref = ?`),
+					g.ArtifactID, SubjectPrincipal, BoundedReviewCreator).Scan(&boundedCount); err != nil {
+					return GrantPutUnchanged, false, fmt.Errorf("artifacts: count bounded grants: %w", err)
+				}
+				if boundedCount >= maxBoundedGrants {
+					return GrantPutUnchanged, false, ErrTooManyGrants
+				}
+			}
+			needUpdate = true
+			newBy = sql.NullString{String: BoundedReviewCreator, Valid: true}
+			newExpires = nil
+		} else {
+			needUpdate = perm != g.Permission || by.String == BoundedReviewCreator || (fromReviewRequest && (wasRoleGated || existingExpired))
+			if needUpdate {
+				// A level change by a person, a same-level human write over a
+				// bounded grant, or a review-request raise over a role-gated
+				// grant ends the role-gated form (ptone/scion#7134,
+				// ptone/scion#5548): its creator becomes that person, so it no
+				// longer depends on a role in the home project.
+				if wasRoleGated {
+					newBy = sql.NullString{String: PrincipalRef(actor.Kind, actor.Ref), Valid: true}
+				}
+				if fromReviewRequest && existingExpired {
+					newExpires = nil
+				}
+			}
+		}
+		if needUpdate {
+			if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ?, created_by_ref = ?, expires_at = ? WHERE id = ?`),
+				g.Permission, newBy, s.nullTimeArg(newExpires), id); err != nil {
 				return GrantPutUnchanged, false, fmt.Errorf("artifacts: update grant: %w", err)
 			}
 			detail := map[string]any{
@@ -201,12 +260,23 @@ func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGran
 			}
 		}
 		g.ID, g.CreatedAt = id, created.Time
-		if perm != g.Permission {
+		if needUpdate {
 			return GrantPutChanged, notified, nil
 		}
 		return GrantPutUnchanged, false, nil
 	case !errors.Is(err, sql.ErrNoRows):
 		return GrantPutUnchanged, false, fmt.Errorf("artifacts: find grant: %w", err)
+	}
+	if allowBounded && maxBoundedGrants > 0 {
+		var boundedCount int
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant
+			WHERE artifact_id = ? AND subject_kind = ? AND created_by_ref = ?`),
+			g.ArtifactID, SubjectPrincipal, BoundedReviewCreator).Scan(&boundedCount); err != nil {
+			return GrantPutUnchanged, false, fmt.Errorf("artifacts: count bounded grants: %w", err)
+		}
+		if boundedCount >= maxBoundedGrants {
+			return GrantPutUnchanged, false, ErrTooManyGrants
+		}
 	}
 	var n int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant
@@ -236,6 +306,10 @@ func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGran
 // an artifact, that carries the automatic review grant's creator or
 // authority.
 var errSponsorReviewReserved = errors.New("artifacts: the automatic review grant is written only when an artifact is created")
+
+// errBoundedReviewReserved refuses a grant write, other than an agent review
+// request's bounded path, that carries the bounded review grant's creator.
+var errBoundedReviewReserved = errors.New("artifacts: a bounded review grant is written only by an agent review request")
 
 func (s *sqlStore) insertGrant(ctx context.Context, tx *sql.Tx, g *Grant) error {
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_grant

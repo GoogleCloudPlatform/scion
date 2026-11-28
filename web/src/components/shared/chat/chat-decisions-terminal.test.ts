@@ -100,7 +100,7 @@ describe('replaced single card', () => {
     expect(root(el).querySelector('.row.replaced')).not.toBeNull();
     for (const id of ['a', 'b']) {
       expect(button(el, id).hasAttribute('disabled')).toBe(true);
-      expect(button(el, id).hasAttribute('outline')).toBe(false);
+      expect(button(el, id).getAttribute('data-look')).not.toBe('outline');
     }
     expect(root(el).querySelector('.hint')).toBeNull();
     expect(root(el).querySelector('.card')!.hasAttribute('aria-describedby')).toBe(false);
@@ -148,10 +148,10 @@ describe('interpreted answer', () => {
     const foot = root(el).querySelector('.row-foot')!;
     expect(text(foot)).toMatch(/^Interpreted by agent-x from alice's reply · \d\d:\d\d$/);
     expect(foot.querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
-    expect(button(el, 'b').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'b').getAttribute('data-look')).toBe('filled');
     expect(button(el, 'a').hasAttribute('disabled')).toBe(true);
     // No confirm/override controls (Phase 2).
-    expect(root(el).querySelectorAll('sl-button').length).toBe(2);
+    expect(root(el).querySelectorAll('button[data-choice]').length).toBe(2);
     expect(text(root(el).querySelector('.card'))).not.toMatch(/confirm|override/i);
   });
 

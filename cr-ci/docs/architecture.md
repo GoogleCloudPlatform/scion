@@ -124,8 +124,15 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
    `in_progress` or `completed` event whose `runner_name` is `cr-job-*`,
    whatever the job's labels, the mediator compares the job with the job the
    runner serves (from memory, or the ID in its name after a restart). If
-   they differ, it runs the fork guard on the job's run; a repo outside
-   `TARGET_REPOS` or a failed run lookup also fails (fail closed).
+   they differ, it runs the fork guard on the job's run, checking an in-memory
+   cache of immutable run metadata (populated from `ListRuns`, `onQueued`, and
+   prior guard lookups) before calling `GetRun`. A repo outside `TARGET_REPOS`
+   or a non-transient lookup failure (404, non-rate-limit 401/403, or decode
+   error) fails closed immediately. A transient lookup failure (rate limit,
+   5xx, or transport/context error) on an uncached run defers the verdict
+   (`runner_check_deferred`, webhook 503); `/reconcile` retries deferred
+   checks, and any check that stays transiently unverified past 15 minutes
+   fails closed (`run_lookup_failed`).
    - **Guard fails (hijack):** cancel that runner's execution, delete its
      registration (GitHub refuses while the job still runs; the reaper
      removes it later), drop its claim, and log
@@ -164,11 +171,13 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
    `/reconcile` repeats this check for every `in_progress` job on a `cr-job-*`
    runner, which covers a missed webhook.
 
-   Fail closed has a cost: if the run lookup fails during a legitimate swap
-   (a GitHub API error), the mediator cannot tell it from a hijack and kills
-   the runner, so that legitimate job fails and needs a re-run. This needs a
-   swap and an API failure at the same moment; refusing to vouch for an
-   unknown job is the safer trade.
+   Fail closed still has a cost for non-transient lookup failures (404,
+   permission errors, decode errors) and for transient outages that last longer
+   than 15 minutes: the mediator cannot vouch for an unknown job and kills the
+   runner (`run_lookup_failed`), so a legitimate swapped job fails and needs a
+   re-run. Short transient GitHub blips or rate limits defer instead of killing
+   legitimate swapped runners, while the runner-side job-started hook keeps
+   untrusted steps from executing during the deferral window.
 
    When the taker already has a runner of its own (idle, since its job runs
    elsewhere), that runner's record is rebound to the displaced job, so
@@ -189,8 +198,14 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
    `SCHEDULER_SA_NAME@GCP_PROJECT.iam.gserviceaccount.com`;
    `email_verified`), because the service is public. Then, with a 4 min
    budget:
-   - discovery, without holding the lock: `queued` and `in_progress` runs of
-     every repo in `TARGET_REPOS` and their jobs;
+   - discovery, without holding the lock (single-flight per `/reconcile`; an
+     overlapping tick answers `200 {"overlap":true}` and logs
+     `reconcile_overlap`): conditional (`If-None-Match` / `304`) `ListRuns` and
+     `ListJobs` for `queued` and `in_progress` runs of every repo in
+     `TARGET_REPOS`, prioritized P0 (runs with an active `cr-job-*` runner from
+     the previous pass) → P1 (`in_progress`) → P2 (`queued`, oldest first),
+     stopping non-P0 runs at the rate-limit reserve (`max(500, limit/10)`) and
+     stopping discovery immediately on a rate-limit response;
    - the hijack guard for jobs running on `cr-job-*` runners (step 4);
    - drops expired claims;
    - deletes offline, idle `cr-job-*` registrations of **this stack** older
@@ -214,10 +229,10 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      minute. (No in-process timer: request-based CPU throttles work done after
      a response.)
 
-   It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
-   one repo, run or job only skips that item, `reconcile_skip`, unless every
-   repo was skipped, `reconcile_all_skipped`, which is a 500) and logs
-   `reconcile`.
+   It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx or
+   rate-limit response for one repo, run or job only skips that item,
+   `reconcile_skip`, unless every repo was skipped, `reconcile_all_skipped`,
+   which is a 500) and logs `reconcile`.
 
 ### Mediator-to-runner contract (claim contract v2)
 
@@ -280,8 +295,13 @@ fixed in production. The entrypoint exits 5 on a refusal
 2.338.0 source for each of these points).
 
 The hijack guard (step 4) stays as the next layer: it kills a runner whose job does
-not match as soon as GitHub reports the job, with no extra App permissions, and
-deletes the registration. Before the hook, that kill landed within seconds but
+not match once GitHub reports the job, with no extra App permissions, and
+deletes the registration. When the run is uncached and GitHub lookups fail
+transiently, that kill can be delayed by up to 15 minutes (plus one reconcile
+pass) before failing closed; this opens no execution window because the
+runner-side job-started hook (`cr-ci-job-guard.sh`) already hard-stops
+untrusted jobs before any step runs, so deferral delays only execution and
+registration reclamation. Before the hook, that kill landed within seconds but
 **after** the job may have started, so a few steps of untrusted code could run.
 That case and any gap in the hook are also bounded by the other layers:
 

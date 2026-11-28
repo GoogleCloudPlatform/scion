@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -469,31 +468,6 @@ func TestCreateAttachmentLimits(t *testing.T) {
 	}
 }
 
-// TestOpenBoundAttachment: the delivery opener reads only an attachment
-// bound to the named message.
-func TestOpenBoundAttachment(t *testing.T) {
-	f := newAttachmentFixture(t, false)
-	ctx := context.Background()
-	sent := f.send(userU, "msg-1", pngBytes)
-	up := f.upload(userU, "a.txt", "text/plain", []byte("x"))
-
-	rc, info, err := f.svc.OpenBoundAttachment(ctx, sent, "msg-1")
-	if err != nil {
-		t.Fatalf("bound attachment: %v", err)
-	}
-	b, _ := io.ReadAll(rc)
-	_ = rc.Close()
-	if !bytes.Equal(b, pngBytes) || info.Name != "shot.png" {
-		t.Errorf("read %q, info %+v", b, info)
-	}
-	if _, _, err := f.svc.OpenBoundAttachment(ctx, sent, "msg-2"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("other message = %v, want ErrNotFound", err)
-	}
-	if _, _, err := f.svc.OpenBoundAttachment(ctx, up, "msg-1"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("unsent upload = %v, want ErrNotFound", err)
-	}
-}
-
 // TestMessageAttachmentsAndRetireScope: history lists a message's
 // attachments until the message is retired.
 func TestMessageAttachmentsAndRetireScope(t *testing.T) {
@@ -741,5 +715,68 @@ func TestServeBoundAttachment_NilAttachmentNotFound(t *testing.T) {
 	out := f.svc.ServeBoundAttachment(rec, httptest.NewRequest(http.MethodGet, "/x", nil), id, "msg-1")
 	if out != ServeNotFound || rec.Body.Len() != 0 {
 		t.Fatalf("nil attachment = %v, %d bytes written", out, rec.Body.Len())
+	}
+}
+
+// TestServeAttachment_ForceDownloadParam verifies that ?download=1 and
+// ?download=true force Content-Disposition: attachment on both local streaming
+// and object-storage signed-URL redirects for inline-safe media types
+// (ptone/scion#9913).
+func TestServeAttachment_ForceDownloadParam(t *testing.T) {
+	for _, objStore := range []bool{false, true} {
+		mode := "local"
+		if objStore {
+			mode = "object_store"
+		}
+		t.Run(mode, func(t *testing.T) {
+			f := newAttachmentFixture(t, objStore)
+			for _, tc := range []struct {
+				name string
+				mime string
+				body []byte
+			}{
+				{"notes.md", "text/markdown", []byte("# Notes\n")},
+				{"plain.txt", "text/plain", []byte("hello")},
+				{"shot.png", "image/png", pngBytes},
+			} {
+				id := f.upload(userU, tc.name, tc.mime, tc.body)
+				base := "/api/v1/chat/attachments/" + id
+				wantStatus := http.StatusOK
+				if objStore {
+					wantStatus = http.StatusFound
+				}
+
+				// Without ?download=1, inline-safe types serve inline.
+				out, rec := f.serve(&userU, base, id)
+				if out != ServeWritten || rec.Code != wantStatus {
+					t.Fatalf("%s inline: outcome %v status %d, want ServeWritten/%d", tc.name, out, rec.Code, wantStatus)
+				}
+				wantInline := "inline; filename=" + tc.name
+				if got := rec.Header().Get("Content-Disposition"); got != wantInline {
+					t.Errorf("%s inline: Content-Disposition = %q, want %q", tc.name, got, wantInline)
+				}
+
+				// With ?download=1 or ?download=true, every type forces attachment.
+				wantAttach := "attachment; filename=" + tc.name
+				for _, q := range []string{"?download=1", "?download=true"} {
+					out, rec := f.serve(&userU, base+q, id)
+					if out != ServeWritten || rec.Code != wantStatus {
+						t.Fatalf("%s%s: outcome %v status %d, want ServeWritten/%d", tc.name, q, out, rec.Code, wantStatus)
+					}
+					if got := rec.Header().Get("Content-Disposition"); got != wantAttach {
+						t.Errorf("%s%s: Content-Disposition = %q, want %q", tc.name, q, got, wantAttach)
+					}
+					if objStore {
+						rs := f.blobs.(*redirectingStorage)
+						rs.mu.Lock()
+						gotSigned := rs.last.ResponseContentDisposition
+						rs.mu.Unlock()
+						if gotSigned != wantAttach {
+							t.Errorf("%s%s: signed URL ResponseContentDisposition = %q, want %q", tc.name, q, gotSigned, wantAttach)
+						}
+					}
+				}
+			}
+		})
 	}
 }

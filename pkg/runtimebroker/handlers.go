@@ -142,14 +142,15 @@ func (s *Server) healthInfo(_ context.Context, conns []*HubConnection) *HealthRe
 		}
 	}
 
-	// project_storage: ONE evaluation site for both conditions that report on
+	// project_storage: ONE evaluation site for the conditions that report on
 	// this key. Invalid project storage settings win the value
 	// ("unavailable": the broker refuses every agent start; the fields at
 	// fault are in the startup log and in each refusal). Otherwise the share
-	// check on a shared Layout sets it: healthy, or share not visible, whose
-	// value names configuration fields, never the path. The status degrades
-	// when either condition holds (the worse of the two); readiness is
-	// unaffected, and stop, delete and status keep working.
+	// check on a shared Layout sets it: share not visible ("unhealthy", which
+	// degrades status), owner uid/gid mismatch ("warning", which does not
+	// degrade status or block agent starts), or "healthy". All detail strings
+	// name configuration fields and numeric ids only, never host paths.
+	// Readiness is unaffected, and stop, delete and status keep working.
 	storageInvalid := s.storageInvalid()
 	shareValue, shareNotVisible, shareChecked := s.shareHealthValue()
 	switch {
@@ -997,8 +998,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	defer s.finishOwnedCreate(r.Context(), w, ownedAbandon)
 
 	var req CreateAgentRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Every error answer to a home-resetting request says whether the home
@@ -2364,7 +2364,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isWorkspaceNotPermitted := workspaceNotPermittedFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
-		isEmptyGenericCmd := emptyGenericCommandFrom(err)
+		genericCmdMsg, isGenericCmdErr := genericCommandErrorFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
@@ -2380,8 +2380,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
 			markAttemptFailed(resourceLimitsStatus, resourceErr.PublicMessage())
-		case isEmptyGenericCmd:
-			markAttemptFailed(emptyGenericCommandStatus, emptyGenericCommandMessage())
+		case isGenericCmdErr:
+			markAttemptFailed(emptyGenericCommandStatus, genericCmdMsg)
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2482,8 +2482,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// The runtime refused the resource spec before creating
 			// anything (ptone/scion#7103). The full error is logged above.
 			writeResourceLimitsRefused(w, resourceErr, opCreateAgent, nil)
-		case isEmptyGenericCmd:
-			writeEmptyGenericCommandRefused(w, opCreateAgent, nil)
+		case isGenericCmdErr:
+			writeGenericCommandRefused(w, opCreateAgent, genericCmdMsg, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -4103,7 +4103,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		InitFirewall           *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
+		if err := readJSONWithLimit(w, r, defaultMaxJSONBodyBytes, &startReq); err != nil {
+			if isMaxBytesError(err) {
+				span.SetStatus(codes.Error, "start request body too large")
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+				return
+			}
 			// A flat instance must not read an undecodable body as "no
 			// expectedRuntimeTargetId". Unknown keys still decode.
 			if s.isFlat() {
@@ -4608,6 +4613,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
+		genericCmdMsg, isGenericCmdErr := genericCommandErrorFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
@@ -4622,8 +4628,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		case isResourceRefusal:
 			// As on create (ptone/scion#7103); logged above.
 			writeResourceLimitsRefused(w, resourceErr, "start agent", details)
-		case emptyGenericCommandFrom(err):
-			writeEmptyGenericCommandRefused(w, "start agent", details)
+		case isGenericCmdErr:
+			writeGenericCommandRefused(w, "start agent", genericCmdMsg, details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -5546,7 +5552,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		InitFirewall *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
+		if err := readJSONWithLimit(w, r, defaultMaxJSONBodyBytes, &restartReq); err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+				return
+			}
 			if s.isFlat() {
 				BadRequest(w, "Invalid request body: "+err.Error())
 				return
@@ -5885,8 +5895,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			writeResourceLimitsRefused(w, re, "restart agent", details)
 			return
 		}
-		if emptyGenericCommandFrom(err) {
-			writeEmptyGenericCommandRefused(w, "restart agent", details)
+		if genericCmdMsg, ok := genericCommandErrorFrom(err); ok {
+			writeGenericCommandRefused(w, "restart agent", genericCmdMsg, details)
 			return
 		}
 		// Start can re-provision the agent: a required skill reference that
@@ -5961,6 +5971,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	})
 }
 
+// maxBrokerSendMessageBodyBytes bounds POST /api/v1/agents/{id}/message at
+// 8 MiB. The Hub decodes user messages up to 1 MiB (which can expand after 3x
+// repetition and JSON HTML escaping); signed Hub-to-broker HTTP requests are
+// capped earlier at apiclient.MaxSignedRequestBodyBytes (2 MiB) by the HMAC
+// middleware, and control-channel frames are capped by the WebSocket frame
+// limit. This handler cap bounds unsigned/local requests against unbounded
+// reads while accommodating near-limit local/test deliveries.
+const maxBrokerSendMessageBodyBytes int64 = 8 << 20
+
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -5972,13 +5991,13 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		BadRequest(w, "Invalid request body: empty request body")
 		return
 	}
-	// No byte cap here, matching the previous behaviour: this route is
-	// Hub-only and HMAC-authenticated, and the Hub forwards a rebuilt
-	// request in which the message text can appear several times (msg plus
-	// the rendered delivery_text, nested and top level), so a cap tied to
-	// the Hub's public ingress limit would refuse ordinary messages.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBrokerSendMessageBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+			return
+		}
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
@@ -6437,8 +6456,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	ctx := r.Context()
 
 	var req ExecRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -6635,8 +6653,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	ctx := r.Context()
 
 	var req ResetAuthRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 

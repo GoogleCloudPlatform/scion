@@ -84,15 +84,20 @@ type AgentStore struct {
 	// shared with transactional copies of this store (usage_ledger_store.go).
 	// Nil when tokenomics.usage_ledger is off.
 	runAttribution *runAttributionConfigSlot
-	entTx          *ent.Tx
+	// trajectoryCapture is the optional Hub state reader used to stamp
+	// capture_policy and notice_version on new run_attribution rows. Shared
+	// with UsageLedgerStore and transactional copies of this store.
+	trajectoryCapture *trajectoryCaptureStateSlot
+	entTx             *ent.Tx
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
 func NewAgentStore(client *ent.Client) *AgentStore {
 	return &AgentStore{
-		client:         client,
-		lifecycle:      newLifecycleObserverSlot(),
-		runAttribution: newRunAttributionConfigSlot(),
+		client:            client,
+		lifecycle:         newLifecycleObserverSlot(),
+		runAttribution:    newRunAttributionConfigSlot(),
+		trajectoryCapture: newTrajectoryCaptureStateSlot(),
 	}
 }
 
@@ -783,11 +788,13 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// WP1 design 5.2 (N11): while an observer is installed, both fast
 		// paths take the transactional route, so the observer sees the
 		// locked before row and runs in the write's transaction.
-		if err := s.updateAgentObserved(ctx, obs, uid, a, expectedVersion, newVersion, now); err != nil {
+		effectiveLAE, err := s.updateAgentObserved(ctx, obs, uid, a, expectedVersion, newVersion, now)
+		if err != nil {
 			return err
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
 
@@ -799,7 +806,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// buildAgentUpdate reads the row's recorded native Cloud Run
 		// decision first (appliedConfigForWrite), so the write is one read
 		// and one conditional update.
-		update, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
+		update, effectiveLAE, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
 		if err != nil {
 			return err
 		}
@@ -812,6 +819,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
 
@@ -820,13 +828,14 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	// is already atomic on its own — no transaction needed — and it is the
 	// only path taken by a row that has never had a launch (the overwhelming
 	// majority of UpdateAgent calls while the feature is off or unused).
-	affected, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
+	affected, effectiveLAE, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
 	if err != nil {
 		return err
 	}
 	if affected {
 		a.Updated = now
 		a.StateVersion = newVersion
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
 
@@ -856,13 +865,14 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// failed UPDATE and this probe. Retry the fast path once; it should
 		// now match.
 		injectAgentRunningRace("before_retry")
-		affected, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
+		affected, effectiveLAE, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
 		if err != nil {
 			return err
 		}
 		if affected {
 			a.Updated = now
 			a.StateVersion = newVersion
+			a.LastActivityEvent = effectiveLAE
 			return nil
 		}
 		// Yet another race landed in between (e.g. a BeginLaunch
@@ -902,14 +912,17 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		// store.WithTx) — run directly on it so this participates in the
 		// caller's transaction instead of starting (and failing to start) a
 		// nested one. The caller owns commit/rollback.
-		if err := s.updateAgentRunningTx(ctx, s.client, uid, a, expectedVersion, newVersion, now); err != nil {
+		effectiveLAE, err := s.updateAgentRunningTx(ctx, s.client, uid, a, expectedVersion, newVersion, now)
+		if err != nil {
 			return err
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
+		a.LastActivityEvent = effectiveLAE
 		return nil
 	}
-	if err := s.updateAgentRunningTx(ctx, tx.Client(), uid, a, expectedVersion, newVersion, now); err != nil {
+	effectiveLAE, err = s.updateAgentRunningTx(ctx, tx.Client(), uid, a, expectedVersion, newVersion, now)
+	if err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -918,6 +931,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	}
 	a.Updated = now
 	a.StateVersion = newVersion
+	a.LastActivityEvent = effectiveLAE
 	return nil
 }
 
@@ -925,17 +939,17 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 // write, excluding rows with an active launch (agent_store.go's UpdateAgent
 // running branch). It reports whether the statement matched a row; it never
 // opens a transaction.
-func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, error) {
-	update, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
+func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, time.Time, error) {
+	update, effectiveLAE, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
 	if err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
 	update.Where(agent.Or(agent.LaunchStateIsNil(), agent.LaunchStateNEQ(store.LaunchStateActive)))
 	affected, err := update.Save(ctx)
 	if err != nil {
-		return false, mapError(err)
+		return false, time.Time{}, mapError(err)
 	}
-	return affected == 1, nil
+	return affected == 1, effectiveLAE, nil
 }
 
 // agentVersionAndLaunchState is the projection probeAgentVersionAndLaunchState
@@ -1016,21 +1030,21 @@ func injectAgentRunningRace(point string) {
 // tx-scoped client when s is already inside one. It returns
 // store.ErrNotFound / store.ErrVersionConflict, without touching
 // launch_state, when the CAS did not match a row.
-func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) error {
-	update, err := buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks())
+func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (time.Time, error) {
+	update, effectiveLAE, err := buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks())
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	affected, err := update.Save(ctx)
 	if err != nil {
-		return mapError(err)
+		return time.Time{}, mapError(err)
 	}
 	if affected == 0 {
-		return agentUpdateConflictError(ctx, client.Agent, uid)
+		return time.Time{}, agentUpdateConflictError(ctx, client.Agent, uid)
 	}
 
 	if err := injectAgentRunningTxFailure(); err != nil {
-		return err
+		return time.Time{}, err
 	}
 
 	// T1 async agent create (design §3.3): end any still-active launch as
@@ -1047,7 +1061,7 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 		SetLaunchState(store.LaunchStateEnded).
 		SetLaunchEndReason(store.LaunchEndReasonRunningObserved).
 		Save(ctx)
-	return err
+	return effectiveLAE, err
 }
 
 // updateAgentObserved is UpdateAgent while a lifecycle observer is
@@ -1056,22 +1070,22 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 // the running write's conditional launch end, a read of the after row and
 // the observer. A CAS miss returns ErrNotFound / ErrVersionConflict and
 // observes nothing.
-func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (err error) {
+func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (effectiveLAE time.Time, err error) {
 	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	defer done()
 	defer markOwnTxErr(&err, tx, s.entTx)
 	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if a.Phase == "running" {
-		err = s.updateAgentRunningTx(ctx, client, uid, a, expectedVersion, newVersion, now)
+		effectiveLAE, err = s.updateAgentRunningTx(ctx, client, uid, a, expectedVersion, newVersion, now)
 	} else {
 		var update *ent.AgentUpdate
-		if update, err = buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks()); err == nil {
+		if update, effectiveLAE, err = buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks()); err == nil {
 			var affected int
 			if affected, err = update.Save(ctx); err != nil {
 				err = mapError(err)
@@ -1081,20 +1095,20 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 		}
 	}
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if before != nil {
 		after, err := lifecycleAfterRow(ctx, client, uid)
 		if err != nil {
-			return err
+			return time.Time{}, err
 		}
 		if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
 			Op: store.AgentWriteUpdate, Before: before, After: after, Now: now,
 		}); err != nil {
-			return err
+			return time.Time{}, err
 		}
 	}
-	return commitLifecycleWriteTx(tx, s.entTx)
+	return effectiveLAE, commitLifecycleWriteTx(tx, s.entTx)
 }
 
 // buildAgentUpdate constructs the CAS update statement shared by both the
@@ -1107,10 +1121,10 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 // row lock for that read inside the caller's transaction). a.AppliedConfig
 // is updated to the row's value, so the caller's copy matches what is
 // written.
-func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time, lock bool) (*ent.AgentUpdate, error) {
+func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time, lock bool) (*ent.AgentUpdate, time.Time, error) {
 	appliedRaw, native, keepNative, prior, err := appliedConfigForWrite(ctx, ac, uid, a.AppliedConfig, lock)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	if a.AppliedConfig != nil {
 		a.AppliedConfig.NativeCloudRun = native
@@ -1170,7 +1184,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		update.ClearAppliedConfig()
 	}
 	if err := setPendingConfig(update.Mutation(), a.PendingConfig); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
@@ -1187,10 +1201,28 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	} else {
 		update.SetLastSeen(a.LastSeen)
 	}
-	if a.LastActivityEvent.IsZero() {
+	// Whole-row LastActivityEvent writes are monotonic: never rewind below the
+	// stored row's LastActivityEvent (for example when sciontool's first
+	// running status report lands before afterStart's stale-snapshot
+	// UpdateAgent on the sync resume path). Entering running from any
+	// non-running phase also anchors LastActivityEvent at now so a stale
+	// pre-suspension snapshot cannot cause an immediate STALLED false positive
+	// on the next stall sweep (ptone/scion#8304). Routine running -> running
+	// whole-row updates never refresh a stale LastActivityEvent to now.
+	effectiveLAE := a.LastActivityEvent
+	if prior != nil && prior.LastActivityEvent != nil && prior.LastActivityEvent.After(effectiveLAE) {
+		effectiveLAE = *prior.LastActivityEvent
+	}
+	anchoredLAE := prior != nil &&
+		prior.Phase != string(state.PhaseRunning) &&
+		a.Phase == string(state.PhaseRunning)
+	if anchoredLAE && now.After(effectiveLAE) {
+		effectiveLAE = now
+	}
+	if effectiveLAE.IsZero() {
 		update.ClearLastActivityEvent()
 	} else {
-		update.SetLastActivityEvent(a.LastActivityEvent)
+		update.SetLastActivityEvent(effectiveLAE)
 	}
 	if a.DeletedAt.IsZero() {
 		update.ClearDeletedAt()
@@ -1207,7 +1239,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 			priorOwnerID = prior.OwnerID.String()
 		}
 		if a.OwnerID != priorOwnerID {
-			return nil, store.ErrShellAgentOwnerImmutable
+			return nil, time.Time{}, store.ErrShellAgentOwnerImmutable
 		}
 	}
 	if a.OwnerID == "" {
@@ -1215,7 +1247,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	} else {
 		ownerUID, err := parseUUID(a.OwnerID)
 		if err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 		update.SetOwnerID(ownerUID)
 	}
@@ -1238,7 +1270,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		update.SetLaunchError("").SetLaunchCause("")
 	}
 
-	return update, nil
+	return update, effectiveLAE, nil
 }
 
 // agentUpdateConflictError distinguishes a missing agent from a stale write
@@ -2546,6 +2578,19 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// Entering running from any non-running phase (e.g. waking from suspended
+	// via starting, or a direct suspended/stopped -> running transition)
+	// anchors LastActivityEvent at now so a stall sweep landing before the
+	// container's first activity report does not inherit a stale
+	// pre-suspension timestamp (ptone/scion#8304). Rollback restores
+	// (su.Restore) and routine running -> running updates without activity
+	// leave LastActivityEvent untouched.
+	if !activityProvided && !su.Restore &&
+		current.Phase != string(state.PhaseRunning) &&
+		su.Phase == string(state.PhaseRunning) {
+		upd.SetLastActivityEvent(now)
+	}
+
 	// A stored signaled reason describes the run that ended; it is cleared
 	// when the agent next moves to starting or running, by any path (a
 	// reincarnation, or a start whose started-status write failed). This
@@ -3768,6 +3813,10 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtIsNil(),
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
+		agent.Or(
+			agent.LastDeliveryAtIsNil(),
+			agent.LastDeliveryAtLT(cutoff.UTC()),
+		),
 	)
 	if excludeNeverSuspend {
 		q = q.Where(agent.SuspendPolicyNEQ(agent.SuspendPolicyNever))
@@ -4320,7 +4369,7 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 					return n, mapError(err)
 				}
 				if runAttrCfg != nil {
-					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, priorRunID, runAttrCfg.HubID, "", s.beforeRunAttributionInsert); err != nil {
+					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, priorRunID, runAttrCfg.HubID, "", s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 						return 0, err
 					}
 				}
@@ -4377,7 +4426,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		if err != nil || n == 0 {
 			return n, mapError(err)
 		}
-		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, overrideLaunchID, s.beforeRunAttributionInsert); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, overrideLaunchID, s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 			return 0, err
 		}
 		return n, nil
@@ -4395,7 +4444,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		_ = tx.Rollback()
 		return 0, nil
 	}
-	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, overrideLaunchID, s.beforeRunAttributionInsert); err != nil {
+	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, overrideLaunchID, s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 		_ = tx.Rollback()
 		return 0, err
 	}
@@ -4425,7 +4474,7 @@ func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.Agen
 		return 0, nil
 	}
 	if runAttrCfg != nil {
-		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, "", s.beforeRunAttributionInsert); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, "", s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 			_ = tx.Rollback()
 			return 0, err
 		}
@@ -4603,7 +4652,7 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 				if err != nil || n == 0 || !needAttribution {
 					return n, err
 				}
-				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, launchID, s.beforeRunAttributionInsert); err != nil {
+				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, launchID, s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 					return 0, err
 				}
 				return n, nil

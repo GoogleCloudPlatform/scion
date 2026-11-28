@@ -61,11 +61,11 @@ async function mount(): Promise<any> {
 }
 
 function sortMenu(el: any): HTMLElement {
-  return el.shadowRoot.querySelector('.rail-toolbar sl-menu');
+  return el.shadowRoot.querySelector('[data-sort-menu]');
 }
 
 function refreshItem(el: any): HTMLElement {
-  return el.shadowRoot.querySelector('.rail-toolbar sl-menu-item[value="refresh"]');
+  return el.shadowRoot.querySelector('[data-sort-menu] sl-menu-item[value="refresh"]');
 }
 
 /** What the sort menu does for a click, Enter or Space on the item. */
@@ -108,7 +108,9 @@ describe('space rail — Refresh spaces in the sort menu', () => {
     // Not a checkbox like the sort modes: choosing it never sticks.
     expect(item.hasAttribute('type')).toBe(false);
     expect(item.querySelector('sl-icon')?.getAttribute('aria-hidden')).toBe('true');
-    const trigger = el.shadowRoot.querySelector('.rail-toolbar .sort-btn') as HTMLElement;
+    const trigger = el.shadowRoot.querySelector('.rail-header .sort-btn') as HTMLElement;
+    expect(trigger).not.toBeNull();
+    expect(el.shadowRoot.querySelector('.rail-toolbar .sort-btn')).toBeNull();
     expect(trigger.getAttribute('slot')).toBe('trigger');
     expect(trigger.getAttribute('label')).toBe('Sort');
   });
@@ -218,7 +220,9 @@ describe('space rail — Refresh spaces in the sort menu', () => {
     const mode = el.prefs.spaceSortMode;
     const checkedModes = (): (string | null)[] =>
       [
-        ...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item[type="checkbox"][checked]'),
+        ...el.shadowRoot.querySelectorAll(
+          '[data-sort-menu] sl-menu-item[type="checkbox"][checked]'
+        ),
       ].map((i: Element) => i.getAttribute('value'));
     const before = checkedModes();
     expect(before).toHaveLength(1);

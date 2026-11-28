@@ -108,11 +108,11 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			writeHostedConfigRefusalDetails(w, re, nil)
 			return false
 		}
-		if emptyGenericCommandFrom(err) {
-			markAttemptFailed(emptyGenericCommandStatus, emptyGenericCommandMessage())
-			s.agentLifecycleLog.Warn("Agent create failed: preflight: empty generic command",
-				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
-			writeEmptyGenericCommandRefused(w, opCreateAgent, nil)
+		if genericCmdMsg, ok := genericCommandErrorFrom(err); ok {
+			markAttemptFailed(emptyGenericCommandStatus, genericCmdMsg)
+			s.agentLifecycleLog.Warn("Agent create failed: preflight: invalid generic command",
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+			writeGenericCommandRefused(w, opCreateAgent, genericCmdMsg, nil)
 			return false
 		}
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {

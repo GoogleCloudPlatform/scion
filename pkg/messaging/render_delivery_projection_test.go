@@ -22,13 +22,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// Envelope shape for scratchpad projections (ptone/scion#5827):
-// the inbox path is the primary entry, the projection a second,
-// self-describing entry tagged with its mount.
+// Envelope shape for artifact-backed and legacy attachments (ptone/scion#9694):
+// artifact-backed attachments are listed once at their inbox path with no
+// scratchpad projection, no attachment_mounts, and no sibling-agents note;
+// legacy staged paths still carry attachment_mounts.
 
 const (
-	testInboxPath     = "~/.scion/inbox/m1/a.png"
-	testProjectedPath = "/scion-volumes/scratchpad/.attachments/_webchat/art1/a.png"
+	testInboxPath    = "~/.scion/inbox/m1/a.png"
+	testLegacyStaged = "/scion-volumes/scratchpad/.attachments/_webchat/art1/a.png"
 )
 
 func projectionTestMsg(plain bool) *messages.StructuredMessage {
@@ -43,13 +44,11 @@ func projectionTestMsg(plain bool) *messages.StructuredMessage {
 	}
 }
 
-func projectedEntry(state string) messages.AttachmentPlanEntry {
+func planEntry(state string) messages.AttachmentPlanEntry {
 	e := messages.AttachmentPlanEntry{
-		Delivery:       messages.AttachmentDelivery{ArtifactID: "art1", MessageID: "m1", Name: "a.png", Size: 10},
-		Name:           "a.png",
-		State:          state,
-		ProjectedPath:  testProjectedPath,
-		ProjectedMount: "scratchpad",
+		Delivery: messages.AttachmentDelivery{ArtifactID: "art1", MessageID: "m1", Name: "a.png", Size: 10},
+		Name:     "a.png",
+		State:    state,
 	}
 	if state != messages.AttachmentWithheld {
 		e.InboxPath = testInboxPath
@@ -57,82 +56,86 @@ func projectedEntry(state string) messages.AttachmentPlanEntry {
 	return e
 }
 
-func TestRenderDeliveryText_ProjectionAfterInboxWithMount(t *testing.T) {
+func TestRenderDeliveryText_DeliverableSingleInboxEntry(t *testing.T) {
 	env := extractDeliveryEnvelope(t, RenderDeliveryText(RenderDeliveryInput{
 		MessageID: "m1", Msg: projectionTestMsg(false), CreatedAt: time.Now().UTC(),
-		Plan: []messages.AttachmentPlanEntry{projectedEntry(messages.AttachmentDeliverable)},
+		Plan: []messages.AttachmentPlanEntry{planEntry(messages.AttachmentDeliverable)},
 	}))
-	if len(env.Attachments) != 2 || env.Attachments[0] != testInboxPath || env.Attachments[1] != testProjectedPath {
-		t.Fatalf("attachments = %q, want [inbox, projection]", env.Attachments)
+	if len(env.Attachments) != 1 || env.Attachments[0] != testInboxPath {
+		t.Fatalf("attachments = %q, want [inbox] only", env.Attachments)
 	}
-	if len(env.AttachmentMounts) != 1 || env.AttachmentMounts[testProjectedPath] != "scratchpad" {
-		t.Fatalf("attachment_mounts = %v, want only the projection tagged scratchpad", env.AttachmentMounts)
+	if len(env.AttachmentMounts) != 0 {
+		t.Fatalf("attachment_mounts = %v, want empty", env.AttachmentMounts)
 	}
-	if !strings.Contains(env.Msg, "also visible to sibling agents at "+testProjectedPath) {
-		t.Fatalf("body %q does not describe the projection", env.Msg)
+	if strings.Contains(env.Msg, "also visible to sibling agents") {
+		t.Fatalf("body %q must not mention sibling-agent scratchpad projection", env.Msg)
 	}
 }
 
-func TestRenderDeliveryText_UndeliverableKeepsProjection(t *testing.T) {
+func TestRenderDeliveryText_UndeliverableRuntimeHasNoScratchpadFallback(t *testing.T) {
 	env := extractDeliveryEnvelope(t, RenderDeliveryText(RenderDeliveryInput{
 		MessageID: "m1", Msg: projectionTestMsg(false), CreatedAt: time.Now().UTC(),
-		Plan: []messages.AttachmentPlanEntry{projectedEntry(messages.AttachmentUndeliverableRuntime)},
+		Plan: []messages.AttachmentPlanEntry{planEntry(messages.AttachmentUndeliverableRuntime)},
 	}))
-	if len(env.Attachments) != 1 || env.Attachments[0] != testProjectedPath {
-		t.Fatalf("attachments = %q, want only the projection", env.Attachments)
+	if len(env.Attachments) != 0 {
+		t.Fatalf("attachments = %q, want empty", env.Attachments)
 	}
-	if env.AttachmentMounts[testProjectedPath] != "scratchpad" {
-		t.Fatalf("attachment_mounts = %v", env.AttachmentMounts)
+	if len(env.AttachmentMounts) != 0 {
+		t.Fatalf("attachment_mounts = %v, want empty", env.AttachmentMounts)
 	}
 	if !strings.Contains(env.Msg, "Attachment not delivered: a.png") {
 		t.Fatalf("body %q lacks the not-delivered line", env.Msg)
 	}
+	if strings.Contains(env.Msg, "also visible to sibling agents") {
+		t.Fatalf("body %q must not mention sibling-agent scratchpad projection", env.Msg)
+	}
 }
 
-func TestRenderDeliveryText_WithheldMentionsNoProjection(t *testing.T) {
+func TestRenderDeliveryText_WithheldMentionsNothing(t *testing.T) {
 	text := RenderDeliveryText(RenderDeliveryInput{
 		MessageID: "m1", Msg: projectionTestMsg(false), CreatedAt: time.Now().UTC(),
-		Plan: []messages.AttachmentPlanEntry{projectedEntry(messages.AttachmentWithheld)},
+		Plan: []messages.AttachmentPlanEntry{planEntry(messages.AttachmentWithheld)},
 	})
-	if strings.Contains(text, testProjectedPath) || strings.Contains(text, "a.png") {
+	if strings.Contains(text, testInboxPath) || strings.Contains(text, "a.png") {
 		t.Fatalf("a withheld attachment must not be mentioned:\n%s", text)
 	}
 }
 
-func TestRenderDeliveryText_PlainListsProjectionLine(t *testing.T) {
+func TestRenderDeliveryText_PlainListsInboxOnly(t *testing.T) {
 	text := RenderDeliveryText(RenderDeliveryInput{
 		MessageID: "m1", Msg: projectionTestMsg(true), CreatedAt: time.Now().UTC(),
-		Plan: []messages.AttachmentPlanEntry{projectedEntry(messages.AttachmentDeliverable)},
+		Plan: []messages.AttachmentPlanEntry{planEntry(messages.AttachmentDeliverable)},
 	})
-	inbox := strings.Index(text, "Attachment: "+testInboxPath)
-	proj := strings.Index(text, "also visible to sibling agents at "+testProjectedPath)
-	if inbox < 0 || proj < 0 || proj < inbox {
-		t.Fatalf("plain text must list the inbox path, then the projection:\n%s", text)
+	if !strings.Contains(text, "Attachment: "+testInboxPath) {
+		t.Fatalf("plain text must list the inbox path:\n%s", text)
+	}
+	if strings.Contains(text, "also visible to sibling agents") {
+		t.Fatalf("plain text must not include sibling-agent projection line:\n%s", text)
 	}
 }
 
 func TestRenderDeliveryText_LegacyStagedPathTaggedWithMount(t *testing.T) {
 	msg := projectionTestMsg(false)
-	msg.Attachments = []string{testProjectedPath, "/home/hub/.scion/attachments/p/id/b.txt"}
-	msg.AttachmentMounts = map[string]string{testProjectedPath: "scratchpad"}
+	msg.Attachments = []string{testLegacyStaged, "/home/hub/.scion/attachments/p/id/b.txt"}
+	msg.AttachmentMounts = map[string]string{testLegacyStaged: "scratchpad"}
 	env := extractDeliveryEnvelope(t, RenderDeliveryText(RenderDeliveryInput{
 		MessageID: "m1", Msg: msg, CreatedAt: time.Now().UTC(),
 	}))
 	if len(env.Attachments) != 2 {
 		t.Fatalf("attachments = %q", env.Attachments)
 	}
-	if len(env.AttachmentMounts) != 1 || env.AttachmentMounts[testProjectedPath] != "scratchpad" {
+	if len(env.AttachmentMounts) != 1 || env.AttachmentMounts[testLegacyStaged] != "scratchpad" {
 		t.Fatalf("attachment_mounts = %v, want the staged path only", env.AttachmentMounts)
 	}
 }
 
-func TestApplyAttachmentPlanLegacy_ProjectionInBodyOnly(t *testing.T) {
+func TestApplyAttachmentPlanLegacy_InboxOnly(t *testing.T) {
 	msg := projectionTestMsg(false)
-	ApplyAttachmentPlanLegacy(msg, []messages.AttachmentPlanEntry{projectedEntry(messages.AttachmentDeliverable)})
+	ApplyAttachmentPlanLegacy(msg, []messages.AttachmentPlanEntry{planEntry(messages.AttachmentDeliverable)})
 	if len(msg.Attachments) != 1 || msg.Attachments[0] != testInboxPath {
 		t.Fatalf("legacy attachments = %q, want the inbox path only", msg.Attachments)
 	}
-	if !strings.Contains(msg.Msg, "also visible to sibling agents at "+testProjectedPath) {
-		t.Fatalf("legacy body %q does not describe the projection", msg.Msg)
+	if strings.Contains(msg.Msg, "also visible to sibling agents") {
+		t.Fatalf("legacy body %q must not mention sibling-agent scratchpad projection", msg.Msg)
 	}
 }

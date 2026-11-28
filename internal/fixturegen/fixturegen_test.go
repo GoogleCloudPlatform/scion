@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 125
+const expectedTableCount = 129
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -263,7 +263,7 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, "cel", trFire.DecidedDialect)
 	assert.Contains(t, trFire.RuleTrace, `"class":"matched"`)
 
-	trClaim, err := composite.GetActiveTriggerSubjectClaim(ctx, triggerID, "webhook:"+webhookEndpointID)
+	trClaim, err := composite.GetActiveTriggerSubjectClaim(ctx, triggerID, 0, "webhook:"+webhookEndpointID)
 	require.NoError(t, err, "trigger_subject_claims fixture row must be readable via TriggerStore")
 	assert.Equal(t, triggerSubjectClaimID, trClaim.ID)
 	assert.Equal(t, store.TriggerSubjectClaimStateActive, trClaim.State)
@@ -294,6 +294,25 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NotNil(t, otherDec.EffectiveAnswer())
 	assert.Equal(t, "$other", otherDec.EffectiveAnswer().ChoiceID)
 	assert.Equal(t, "europe-west4 canary", otherDec.EffectiveAnswer().OtherText)
+
+	budgetState, err := composite.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: limitDefID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           projectID,
+		WindowStartUTC:    time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err, "usage_budget_state fixture row must be readable via UsageBudgetStore")
+	assert.Equal(t, store.UsageBudgetStateOK, budgetState.State)
+	assert.Equal(t, int64(185), budgetState.ConsumedAtEval)
+	assert.Equal(t, int64(100000), budgetState.CapAtEval)
+	assert.Equal(t, int64(1), budgetState.StateVersion)
+
+	groupRollupTokens, err := composite.SumUsageGroupRollupTokens(ctx, groupID, "",
+		time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC),
+	)
+	require.NoError(t, err, "usage_group_rollups_daily fixture row must be readable via UsageBudgetStore")
+	assert.Equal(t, int64(185), groupRollupTokens)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

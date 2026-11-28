@@ -342,8 +342,20 @@ type TriggerFire func(*sql.Selector)
 // TriggerSubjectClaim is the predicate function for triggersubjectclaim builders.
 type TriggerSubjectClaim func(*sql.Selector)
 
+// UploadSession is the predicate function for uploadsession builders.
+type UploadSession func(*sql.Selector)
+
+// UsageBudgetState is the predicate function for usagebudgetstate builders.
+type UsageBudgetState func(*sql.Selector)
+
 // UsageEvent is the predicate function for usageevent builders.
 type UsageEvent func(*sql.Selector)
+
+// UsageGroupBudgetSeed is the predicate function for usagegroupbudgetseed builders.
+type UsageGroupBudgetSeed func(*sql.Selector)
+
+// UsageGroupRollupDaily is the predicate function for usagegrouprollupdaily builders.
+type UsageGroupRollupDaily func(*sql.Selector)
 
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)

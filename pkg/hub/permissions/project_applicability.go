@@ -63,6 +63,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.manage_visitors":             true, "project.manage_pre_start_hooks": true,
 	// project.chat_post targets an existing project's chat threads.
 	"project.chat_post": true,
+	// project.trajectory.read targets an existing project's raw trajectory segments.
+	"project.trajectory.read": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; *_global and register are explicitly hub-catalog actions.

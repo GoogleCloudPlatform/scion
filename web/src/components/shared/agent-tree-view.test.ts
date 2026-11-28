@@ -30,6 +30,11 @@ import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent, MessageMode } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
+  WHEEL_ZOOM_SENSITIVITY,
+  PINCH_ZOOM_SENSITIVITY,
+  LOW_GEAR_DIVISOR,
+} from '../../shared/graph-zoom.js';
+import {
   buildLineageForest,
   layoutForest,
   layoutForestWithUsers,
@@ -1820,6 +1825,270 @@ describe('modesCompatibleForParentChild', () => {
         expect(modesCompatibleForParentChild(pm, cm), `symmetry ${pm} <-> ${cm}`).toBe(
           modesCompatibleForParentChild(cm, pm)
         );
+      }
+    }
+  });
+});
+
+describe('scion-agent-tree-view wheel & trackpad zoom (ptone/scion#9714)', () => {
+  let el: ScionAgentTreeView;
+  let rafQueue: Array<{ id: number; cb: FrameRequestCallback }>;
+  let nextRafId: number;
+  let rafSpy: { mockRestore(): void };
+  let cancelRafSpy: { mockRestore(): void };
+
+  type TreeInternal = { scale: number; panX: number; panY: number };
+
+  function internal(): TreeInternal {
+    return el as unknown as TreeInternal;
+  }
+
+  function flushFrames(): void {
+    const batch = rafQueue.splice(0);
+    for (const item of batch) {
+      item.cb(performance.now());
+    }
+  }
+
+  function canvas(): HTMLElement {
+    return el.shadowRoot!.querySelector<HTMLElement>('.canvas')!;
+  }
+
+  function wheel(init: WheelEventInit): WheelEvent {
+    const clientX = init.clientX ?? 250;
+    const clientY = init.clientY ?? 200;
+    const ctrlKey = init.ctrlKey ?? false;
+    const altKey = init.altKey ?? false;
+    const ev = new WheelEvent('wheel', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      ctrlKey,
+      altKey,
+      ...init,
+    });
+    // HappyDOM's WheelEvent constructor drops MouseEventInit fields (clientX/Y,
+    // ctrlKey, altKey), so ensure the event exposes them as real browsers do.
+    Object.defineProperties(ev, {
+      clientX: { value: clientX },
+      clientY: { value: clientY },
+      ctrlKey: { value: ctrlKey },
+      altKey: { value: altKey },
+    });
+    canvas().dispatchEvent(ev);
+    return ev;
+  }
+
+  beforeEach(async () => {
+    rafQueue = [];
+    nextRafId = 1;
+    rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextRafId++;
+      rafQueue.push({ id, cb });
+      return id;
+    });
+    cancelRafSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      const idx = rafQueue.findIndex((item) => item.id === id);
+      if (idx >= 0) rafQueue.splice(idx, 1);
+    });
+
+    el = document.createElement('scion-agent-tree-view');
+    el.agents = [agent('a', 'alpha'), agent('b', 'beta', ['a'])];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    // Give the canvas a non-zero bounding rect for cursor-anchored zoom math.
+    vi.spyOn(canvas(), 'getBoundingClientRect').mockReturnValue({
+      left: 50,
+      top: 40,
+      width: 800,
+      height: 600,
+      right: 850,
+      bottom: 640,
+      x: 50,
+      y: 40,
+      toJSON: (): Record<string, never> => ({}),
+    });
+    // Flush initial auto-fit frame and reset to a known baseline.
+    flushFrames();
+    internal().scale = 1;
+    internal().panX = 0;
+    internal().panY = 0;
+  });
+
+  afterEach(() => {
+    el?.remove();
+    rafSpy.mockRestore();
+    cancelRafSpy.mockRestore();
+  });
+
+  it('coalesces a burst of small fractional trackpad scroll events into one animation frame', () => {
+    const events = [-1.5, -2.25, -3.75, -2.5].map((deltaY, i) =>
+      wheel({
+        deltaY,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        clientX: 250 + i * 10,
+        clientY: 200 + i * 5,
+      })
+    );
+    for (const ev of events) {
+      expect(ev.defaultPrevented).toBe(true);
+    }
+    // Only one rAF callback scheduled for the whole burst; scale hasn't mutated yet.
+    expect(rafQueue).toHaveLength(1);
+    expect(internal().scale).toBe(1);
+
+    flushFrames();
+    const expectedFactor = Math.exp(10 * WHEEL_ZOOM_SENSITIVITY);
+    expect(internal().scale).toBeCloseTo(expectedFactor, 8);
+    // Point under latest cursor (280 - 50 = 230, 215 - 40 = 175) stays anchored.
+    expect(internal().panX).toBeCloseTo(230 * (1 - expectedFactor), 6);
+    expect(internal().panY).toBeCloseTo(175 * (1 - expectedFactor), 6);
+  });
+
+  it('preserves classic mouse-wheel feel for quantized 100px and Firefox line-mode notches', () => {
+    wheel({ deltaY: -100, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
+    flushFrames();
+    const afterPixelNotch = internal().scale;
+    expect(afterPixelNotch).toBeCloseTo(Math.exp(100 * WHEEL_ZOOM_SENSITIVITY), 8);
+
+    internal().scale = 1;
+    wheel({ deltaY: -3, deltaMode: WheelEvent.DOM_DELTA_LINE });
+    flushFrames();
+    expect(Math.abs(internal().scale - afterPixelNotch)).toBeLessThan(0.01);
+  });
+
+  it('tracks a Chromium ctrlKey 2x pinch sequence (sum deltaY = -100*ln2) and supports Alt low-gear', () => {
+    const steps = 20;
+    const perEventDelta = (-100 * Math.LN2) / steps;
+    for (let i = 0; i < steps; i++) {
+      wheel({ deltaY: perEventDelta, ctrlKey: true, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
+      flushFrames();
+    }
+    const pinchScale = internal().scale;
+    expect(pinchScale).toBeGreaterThan(1.4);
+    expect(pinchScale).toBeCloseTo(Math.exp(100 * Math.LN2 * PINCH_ZOOM_SENSITIVITY), 6);
+
+    internal().scale = 1;
+    for (let i = 0; i < steps; i++) {
+      wheel({
+        deltaY: perEventDelta,
+        ctrlKey: true,
+        altKey: true,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      });
+      flushFrames();
+    }
+    expect(internal().scale).toBeCloseTo(
+      Math.exp((100 * Math.LN2 * PINCH_ZOOM_SENSITIVITY) / LOW_GEAR_DIVISOR),
+      6
+    );
+    expect(internal().scale).toBeLessThan(pinchScale);
+  });
+
+  it('engages low-gear fine zoom when Alt is held', () => {
+    wheel({ deltaY: -100, altKey: true });
+    flushFrames();
+    expect(internal().scale).toBeCloseTo(
+      Math.exp((100 * WHEEL_ZOOM_SENSITIVITY) / LOW_GEAR_DIVISOR),
+      8
+    );
+  });
+
+  it('cancels a pending wheel zoom frame on disconnect', () => {
+    wheel({ deltaY: -50 });
+    expect(rafQueue).toHaveLength(1);
+    el.remove();
+    expect(rafQueue).toHaveLength(0);
+    expect(internal().scale).toBe(1);
+  });
+
+  it('keeps wheel and ctrl-wheel pinch zoom working when localStorage throws SecurityError', async () => {
+    const origDesc = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException(
+          "Failed to read the 'localStorage' property from 'Window': The document is sandboxed.",
+          'SecurityError'
+        );
+      },
+    });
+    const sandboxed = document.createElement('scion-agent-tree-view');
+    try {
+      sandboxed.agents = [agent('a', 'alpha'), agent('b', 'beta', ['a'])];
+      document.body.appendChild(sandboxed);
+      await sandboxed.updateComplete;
+
+      const sandboxCanvas = sandboxed.shadowRoot!.querySelector<HTMLElement>('.canvas')!;
+      vi.spyOn(sandboxCanvas, 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        top: 0,
+        width: 800,
+        height: 600,
+        right: 800,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: (): Record<string, never> => ({}),
+      });
+      flushFrames();
+      const sInternal = sandboxed as unknown as TreeInternal;
+      sInternal.scale = 1;
+      sInternal.panX = 0;
+      sInternal.panY = 0;
+
+      // Two-finger scroll (non-ctrl wheel) must preventDefault and update scale.
+      const scrollEv = new WheelEvent('wheel', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        deltaY: -40,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      });
+      Object.defineProperties(scrollEv, {
+        clientX: { value: 400 },
+        clientY: { value: 300 },
+        ctrlKey: { value: false },
+        altKey: { value: false },
+      });
+      sandboxCanvas.dispatchEvent(scrollEv);
+      expect(scrollEv.defaultPrevented).toBe(true);
+      flushFrames();
+      expect(sInternal.scale).toBeCloseTo(Math.exp(40 * WHEEL_ZOOM_SENSITIVITY), 8);
+
+      // Pinch (ctrlKey wheel) must preventDefault and update scale.
+      const beforePinch = sInternal.scale;
+      const pinchEv = new WheelEvent('wheel', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        deltaY: -20,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        ctrlKey: true,
+      });
+      Object.defineProperties(pinchEv, {
+        clientX: { value: 400 },
+        clientY: { value: 300 },
+        ctrlKey: { value: true },
+        altKey: { value: false },
+      });
+      sandboxCanvas.dispatchEvent(pinchEv);
+      expect(pinchEv.defaultPrevented).toBe(true);
+      flushFrames();
+      expect(sInternal.scale).toBeCloseTo(beforePinch * Math.exp(20 * PINCH_ZOOM_SENSITIVITY), 6);
+
+      // Toggling "Show users" must also not throw when localStorage is unavailable.
+      const sw = sandboxed.shadowRoot!.querySelector<HTMLElement & { checked: boolean }>(
+        'sl-switch'
+      )!;
+      sw.checked = true;
+      expect(() => sw.dispatchEvent(new Event('sl-change', { bubbles: true }))).not.toThrow();
+    } finally {
+      sandboxed.remove();
+      if (origDesc) {
+        Object.defineProperty(window, 'localStorage', origDesc);
       }
     }
   });

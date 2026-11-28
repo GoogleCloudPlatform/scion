@@ -334,7 +334,7 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		convTarget := plugin.ResolveConversationTarget(msg)
 		sendReq := SendMessageRequest{
 			SpaceID:     link.SpaceID,
-			ThreadID:    convTarget.ExternalRef,
+			ThreadID:    resolveChatAppThreadID(msg, convTarget),
 			Text:        mentions,
 			Card:        &card,
 			Attachments: attachments,
@@ -361,6 +361,37 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 	}
 
 	return nil
+}
+
+// resolveChatAppThreadID selects the Google Chat thread name for an outbound
+// user-targeted message.
+//
+// Documented P5b exception: scion-chat-app delivers inbound messages via the
+// user-authenticated /api/v1/agents/{id}/message endpoint (not broker HMAC
+// ingress), so the hub stores Google Chat thread conversations with
+// Surface:"native", Kind:"group". After P5a, enrichConversation emits
+// Conversation{Surface:"native", Kind:"group"} with an empty ExternalRef.
+// Until scion-chat-app migrates to broker-authenticated ingress, fall back to
+// msg.ThreadID for non-direct conversations when ExternalRef is empty so
+// replies continue posting in the existing Google Chat thread.
+//
+// Direct conversations (Kind:"direct" or pre-P5a "dm:" ThreadIDs) always
+// return "" so DMs post unthreaded rather than passing a hub-internal "dm:"
+// key to the Google Chat API.
+func resolveChatAppThreadID(msg *messages.StructuredMessage, convTarget plugin.ConversationTarget) string {
+	if convTarget.Kind == "direct" {
+		return ""
+	}
+	if convTarget.ExternalRef != "" {
+		if strings.HasPrefix(convTarget.ExternalRef, "dm:") {
+			return ""
+		}
+		return convTarget.ExternalRef
+	}
+	if msg != nil && msg.ThreadID != "" && !strings.HasPrefix(msg.ThreadID, "dm:") {
+		return msg.ThreadID
+	}
+	return ""
 }
 
 // renderNotificationCard creates a card for an agent notification.

@@ -606,3 +606,96 @@ func TestPoll_StopChEarlyReturn(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
+func TestPoll_StartTail(t *testing.T) {
+	cases := []struct {
+		name     string
+		msgs     []store.Message
+		limit    int
+		filter   Filter
+		wantIDs  []string
+		wantHead int64
+		wantMore bool
+	}{
+		{
+			name: "head_less_than_limit",
+			msgs: []store.Message{
+				{ID: "m1", Sender: "agent:a1", SenderID: "a1", Msg: "one"},
+				{ID: "m2", Sender: "agent:a1", SenderID: "a1", Msg: "two"},
+			},
+			limit:    5,
+			filter:   FilterAll,
+			wantIDs:  []string{"msg:m1", "msg:m2"},
+			wantHead: 2,
+		},
+		{
+			name: "head_equals_limit",
+			msgs: []store.Message{
+				{ID: "m1", Sender: "agent:a1", SenderID: "a1", Msg: "one"},
+				{ID: "m2", Sender: "agent:a1", SenderID: "a1", Msg: "two"},
+				{ID: "m3", Sender: "agent:a1", SenderID: "a1", Msg: "three"},
+			},
+			limit:    3,
+			filter:   FilterAll,
+			wantIDs:  []string{"msg:m1", "msg:m2", "msg:m3"},
+			wantHead: 3,
+		},
+		{
+			name: "head_greater_than_limit",
+			msgs: []store.Message{
+				{ID: "m1", Sender: "agent:a1", SenderID: "a1", Msg: "one"},
+				{ID: "m2", Sender: "agent:a1", SenderID: "a1", Msg: "two"},
+				{ID: "m3", Sender: "agent:a1", SenderID: "a1", Msg: "three"},
+				{ID: "m4", Sender: "agent:a1", SenderID: "a1", Msg: "four"},
+				{ID: "m5", Sender: "agent:a1", SenderID: "a1", Msg: "five"},
+				{ID: "m6", Sender: "agent:a1", SenderID: "a1", Msg: "six"},
+			},
+			limit:    3,
+			filter:   FilterAll,
+			wantIDs:  []string{"msg:m4", "msg:m5", "msg:m6"},
+			wantHead: 6,
+		},
+		{
+			name: "non_all_filter_returns_up_to_limit",
+			msgs: []store.Message{
+				{ID: "m1", Sender: "agent:a1", SenderID: "a1", Msg: "one"},
+				{ID: "m2", Sender: "agent:a1", SenderID: "a1", Msg: "two"},
+				{ID: "m3", Sender: "user:u1", SenderID: "u1", Msg: "self-in-tail"},
+				{ID: "m4", Sender: "agent:a1", SenderID: "a1", Msg: "four"},
+				{ID: "m5", Sender: "agent:a1", SenderID: "a1", Msg: "five"},
+			},
+			limit:    3,
+			filter:   FilterOthers,
+			wantIDs:  []string{"msg:m4", "msg:m5"},
+			wantHead: 5,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			feed := NewFeed(st, newFakeWaker())
+			convID := "conv-tail-" + tc.name
+			for _, m := range tc.msgs {
+				st.append(convID, m)
+			}
+
+			res, err := feed.Poll(context.Background(), Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+				ConversationID: convID,
+				Start:          StartTail,
+				Filter:         tc.filter,
+				Limit:          tc.limit,
+				Wait:           0,
+			})
+			require.NoError(t, err)
+			gotIDs := make([]string, len(res.Events))
+			for i, ev := range res.Events {
+				gotIDs[i] = ev.EventID
+			}
+			assert.Equal(t, tc.wantIDs, gotIDs)
+			assert.Equal(t, EncodeCursor(convID, tc.wantHead), res.NextCursor)
+			assert.Equal(t, tc.wantMore, res.HasMore)
+			assert.False(t, res.TimedOut)
+		})
+	}
+}
