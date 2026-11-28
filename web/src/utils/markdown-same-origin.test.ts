@@ -54,13 +54,80 @@ describe('renderer sameOriginImagesOnly', () => {
     );
   });
 
-  it('replaces off-origin images with their alt text when asked', async () => {
+  it('replaces off-origin http(s) images with openable links when asked', async () => {
     const r = await getMarkdownRenderer();
-    const out = r.render('![remote alt](https://elsewhere.example/a.png) ![ok](/x.png)', {
+    const frag = r.renderFragment(
+      '![remote alt](https://elsewhere.example/a.png) ![ok](/x.png) ![inline](data:image/png;base64,AA==)',
+      { sameOriginImagesOnly: true }
+    );
+    const imgs = Array.from(frag.querySelectorAll('img')).map((img) => img.getAttribute('src'));
+    expect(imgs).toEqual(['/x.png', 'data:image/png;base64,AA==']);
+
+    const link = frag.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://elsewhere.example/a.png');
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(link?.textContent).toBe('remote alt');
+  });
+
+  it('falls back to the URL as link label when alt text is empty', async () => {
+    const r = await getMarkdownRenderer();
+    const frag = r.renderFragment('![](https://elsewhere.example/noalt.png)', {
       sameOriginImagesOnly: true,
     });
-    expect(out).not.toContain('elsewhere.example');
-    expect(out).toContain('remote alt');
-    expect(out).toContain('src="/x.png"');
+    expect(frag.querySelector('img')).toBeNull();
+    const link = frag.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://elsewhere.example/noalt.png');
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(link?.textContent).toBe('https://elsewhere.example/noalt.png');
+  });
+
+  it('links protocol-relative and uppercase HTTPS off-origin images without keeping img tags', async () => {
+    const r = await getMarkdownRenderer();
+    const frag = r.renderFragment(
+      '![proto](//host.example/x.png) ![upper](HTTPS://HOST.EXAMPLE/y.png)',
+      { sameOriginImagesOnly: true }
+    );
+    expect(frag.querySelector('img')).toBeNull();
+    const links = Array.from(frag.querySelectorAll('a'));
+    expect(links).toHaveLength(2);
+    expect(links[0].getAttribute('href')).toMatch(/^https?:\/\/host\.example\/x\.png$/);
+    expect(links[0].getAttribute('target')).toBe('_blank');
+    expect(links[0].getAttribute('rel')).toBe('noopener noreferrer');
+    expect(links[0].textContent).toBe('proto');
+    expect(links[1].getAttribute('href')).toBe('https://host.example/y.png');
+    expect(links[1].getAttribute('target')).toBe('_blank');
+    expect(links[1].getAttribute('rel')).toBe('noopener noreferrer');
+    expect(links[1].textContent).toBe('upper');
+  });
+
+  it('falls back to plain text for non-http(s) image schemes', async () => {
+    const r = await getMarkdownRenderer();
+    const frag = r.renderFragment(
+      '![js](javascript:alert(1)) ![vb](vbscript:msgbox) ![blob](blob:https://elsewhere.example/1)',
+      { sameOriginImagesOnly: true }
+    );
+    expect(frag.querySelector('img')).toBeNull();
+    expect(frag.querySelector('a')).toBeNull();
+    expect(frag.textContent).toContain('js');
+    expect(frag.textContent).toContain('vb');
+    expect(frag.textContent).toContain('blob');
+  });
+
+  it('does not create nested anchors when an off-origin image is inside a link', async () => {
+    const r = await getMarkdownRenderer();
+    const frag = r.renderFragment(
+      '[![badge](https://elsewhere.example/badge.svg)](https://example.com/build) [![](https://elsewhere.example/icon.png)](https://example.com/icon)',
+      { sameOriginImagesOnly: true }
+    );
+    expect(frag.querySelector('img')).toBeNull();
+    expect(frag.querySelector('a a')).toBeNull();
+    const links = Array.from(frag.querySelectorAll('a'));
+    expect(links).toHaveLength(2);
+    expect(links[0].getAttribute('href')).toBe('https://example.com/build');
+    expect(links[0].textContent).toBe('badge');
+    expect(links[1].getAttribute('href')).toBe('https://example.com/icon');
+    expect(links[1].textContent).toBe('https://elsewhere.example/icon.png');
   });
 });

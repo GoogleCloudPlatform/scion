@@ -279,13 +279,16 @@ describe('chat message markup boundary', () => {
     expect(content?.querySelector('a[href="https://example.com/docs"]')?.getAttribute('rel')).toBe(
       'noopener noreferrer'
     );
-    // Off-origin images in chat messages are replaced by alt text (ptone/scion#6676).
+    // Off-origin images in chat messages are replaced by openable links (ptone/scion#6676).
     expect(content?.querySelector('img')).toBeNull();
-    expect(content?.textContent).toContain('logo');
+    const logoLink = content?.querySelector('a[href="https://elsewhere.example/logo.png"]');
+    expect(logoLink?.textContent).toBe('logo');
+    expect(logoLink?.getAttribute('target')).toBe('_blank');
+    expect(logoLink?.getAttribute('rel')).toBe('noopener noreferrer');
     expect(flagged()).toEqual([]);
   });
 
-  it('keeps hub-served and data images in chat messages while dropping external hosts', async () => {
+  it('keeps hub-served and data images in chat messages while linking external hosts', async () => {
     const el = await mount(
       '![remote alt](https://elsewhere.example/tracker.png) ![hub](/api/v1/chat/attachments/a1) ![inline](data:image/png;base64,AA==)'
     );
@@ -295,8 +298,10 @@ describe('chat message markup boundary', () => {
       img.getAttribute('src')
     );
     expect(imgs).toEqual(['/api/v1/chat/attachments/a1', 'data:image/png;base64,AA==']);
-    expect(content?.textContent).toContain('remote alt');
-    expect(content?.innerHTML).not.toContain('elsewhere.example');
+    const extLink = content?.querySelector('a[href="https://elsewhere.example/tracker.png"]');
+    expect(extLink?.textContent).toBe('remote alt');
+    expect(extLink?.getAttribute('target')).toBe('_blank');
+    expect(extLink?.getAttribute('rel')).toBe('noopener noreferrer');
     expect(flagged()).toEqual([]);
   });
 

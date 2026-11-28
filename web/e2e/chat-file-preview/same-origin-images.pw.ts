@@ -28,16 +28,18 @@ const EXTERNAL_HOST = 'elsewhere.example';
 const TINY_PNG_DATA =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-test('chat surfaces block external image requests and keep hub-served images', async ({ page }) => {
+test('chat surfaces block external image requests, render them as links, and keep hub-served images', async ({
+  page,
+}) => {
   const externalRequests: string[] = [];
+
+  // Register catch-all first (Playwright evaluates page.route in LIFO order).
+  await page.route('**/api/**', (route) => route.abort());
 
   await page.route(`**://${EXTERNAL_HOST}/**`, (route) => {
     externalRequests.push(route.request().url());
     return route.abort();
   });
-
-  // Register catch-all first (Playwright evaluates page.route in LIFO order).
-  await page.route('**/api/**', (route) => route.abort());
 
   // Serve a 1x1 PNG for same-origin test images and mock markdown attachment/file endpoints.
   const pngBytes = Buffer.from(
@@ -89,7 +91,7 @@ test('chat surfaces block external image requests and keep hub-served images', a
         attachmentRefs: Array<{ id: string; name: string; mime: string; size: number }>;
         updateComplete: Promise<boolean>;
       };
-      el.body = `![ext-body](https://${host}/body.png) ![hub-body](/api/v1/chat/attachments/hub-img) ![data-body](${dataUri})`;
+      el.body = `![ext-body](https://${host}/body.png) ![](https://${host}/noalt.png) ![hub-body](/api/v1/chat/attachments/hub-img) ![data-body](${dataUri})`;
       el.attachmentRefs = [{ id: 'md-att', name: 'notes.md', mime: 'text/markdown', size: 80 }];
       document.body.appendChild(el);
 
@@ -108,6 +110,14 @@ test('chat surfaces block external image requests and keep hub-served images', a
         return !!preview?.shadowRoot?.querySelector('.preview-container p');
       });
 
+      const readLinks = (root: ParentNode) =>
+        Array.from(root.querySelectorAll('a')).map((a) => ({
+          href: a.getAttribute('href'),
+          target: a.getAttribute('target'),
+          rel: a.getAttribute('rel'),
+          text: a.textContent ?? '',
+        }));
+
       const bodyContent = el.shadowRoot!.querySelector('.md-content')!;
       const bodyImgSrcs = Array.from(bodyContent.querySelectorAll('img')).map((img) =>
         img.getAttribute('src')
@@ -121,20 +131,40 @@ test('chat surfaces block external image requests and keep hub-served images', a
 
       return {
         bodyImgSrcs,
-        bodyText: bodyContent.textContent ?? '',
+        bodyLinks: readLinks(bodyContent),
         inlineHasAttr: inlinePreview.hasAttribute('same-origin-images'),
         inlineImgSrcs,
-        inlineText: inlineContainer.textContent ?? '',
+        inlineLinks: readLinks(inlineContainer),
       };
     },
     { host: EXTERNAL_HOST, dataUri: TINY_PNG_DATA }
   );
 
   expect(messageResult.bodyImgSrcs).toEqual(['/api/v1/chat/attachments/hub-img', TINY_PNG_DATA]);
-  expect(messageResult.bodyText).toContain('ext-body');
+  expect(messageResult.bodyLinks).toEqual([
+    {
+      href: `https://${EXTERNAL_HOST}/body.png`,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      text: 'ext-body',
+    },
+    {
+      href: `https://${EXTERNAL_HOST}/noalt.png`,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      text: `https://${EXTERNAL_HOST}/noalt.png`,
+    },
+  ]);
   expect(messageResult.inlineHasAttr).toBe(true);
   expect(messageResult.inlineImgSrcs).toEqual(['/api/v1/chat/attachments/hub-img']);
-  expect(messageResult.inlineText).toContain('ext-att');
+  expect(messageResult.inlineLinks).toEqual([
+    {
+      href: `https://${EXTERNAL_HOST}/att.png`,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      text: 'ext-att',
+    },
+  ]);
 
   // 2. Inter-agent message popover
   const interagentResult = await page.evaluate(async () => {
@@ -178,12 +208,24 @@ test('chat surfaces block external image requests and keep hub-served images', a
     const body = el.shadowRoot!.querySelector('.ia-full-body')!;
     return {
       imgSrcs: Array.from(body.querySelectorAll('img')).map((img) => img.getAttribute('src')),
-      text: body.textContent ?? '',
+      links: Array.from(body.querySelectorAll('a')).map((a) => ({
+        href: a.getAttribute('href'),
+        target: a.getAttribute('target'),
+        rel: a.getAttribute('rel'),
+        text: a.textContent ?? '',
+      })),
     };
   });
 
   expect(interagentResult.imgSrcs).toEqual(['/api/v1/chat/attachments/hub-img']);
-  expect(interagentResult.text).toContain('ext-ia');
+  expect(interagentResult.links).toEqual([
+    {
+      href: `https://${EXTERNAL_HOST}/ia.png`,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      text: 'ext-ia',
+    },
+  ]);
 
   // 3. Full markdown file/attachment preview (<scion-chat-file-preview>)
   const filePreviewResult = await page.evaluate(async () => {
@@ -213,13 +255,25 @@ test('chat surfaces block external image requests and keep hub-served images', a
     return {
       hasAttr: preview.hasAttribute('same-origin-images'),
       imgSrcs: Array.from(container.querySelectorAll('img')).map((img) => img.getAttribute('src')),
-      text: container.textContent ?? '',
+      links: Array.from(container.querySelectorAll('a')).map((a) => ({
+        href: a.getAttribute('href'),
+        target: a.getAttribute('target'),
+        rel: a.getAttribute('rel'),
+        text: a.textContent ?? '',
+      })),
     };
   });
 
   expect(filePreviewResult.hasAttr).toBe(true);
   expect(filePreviewResult.imgSrcs).toEqual(['/api/v1/chat/attachments/hub-img']);
-  expect(filePreviewResult.text).toContain('ext-att');
+  expect(filePreviewResult.links).toEqual([
+    {
+      href: `https://${EXTERNAL_HOST}/att.png`,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      text: 'ext-att',
+    },
+  ]);
 
   // Confirm the browser never initiated any request to the external host.
   expect(externalRequests).toEqual([]);
