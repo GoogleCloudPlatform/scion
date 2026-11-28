@@ -1209,8 +1209,8 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		effectiveLAE = *prior.LastActivityEvent
 	}
 	anchoredLAE := prior != nil &&
-		!strings.EqualFold(prior.Phase, string(state.PhaseRunning)) &&
-		strings.EqualFold(a.Phase, string(state.PhaseRunning))
+		prior.Phase != string(state.PhaseRunning) &&
+		a.Phase == string(state.PhaseRunning)
 	if anchoredLAE && now.After(effectiveLAE) {
 		effectiveLAE = now
 	}
@@ -2581,8 +2581,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// (su.Restore) and routine running -> running updates without activity
 	// leave LastActivityEvent untouched.
 	if !activityProvided && !su.Restore &&
-		!strings.EqualFold(current.Phase, string(state.PhaseRunning)) &&
-		strings.EqualFold(su.Phase, string(state.PhaseRunning)) {
+		current.Phase != string(state.PhaseRunning) &&
+		su.Phase == string(state.PhaseRunning) {
 		upd.SetLastActivityEvent(now)
 	}
 
