@@ -432,8 +432,3 @@ export function diffOwnMarks(
   }
   return { ownStarts, failClosed: false };
 }
-
-/** Convenience wrapper returning only the own mark source start offsets. */
-export function ownMarkStarts(md: string, base: string): Set<number> {
-  return diffOwnMarks(md, base).ownStarts;
-}
