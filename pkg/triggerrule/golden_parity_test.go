@@ -87,8 +87,12 @@ func normalizeTraceDuration(trace triggerrule.RuleTrace) triggerrule.RuleTrace {
 // and EncodeRuleTrace JSON) across every outcome class and cap on unmodified
 // pre-chain behaviour (shared-rule-chain-design v1 §3.8, §4 acceptance 2, A1 P8).
 //
-// After migrating MatchAllWithTrace onto pkg/ruleengine ChainRun, these golden
-// expectations must continue to pass UNCHANGED.
+// All 17 non-late-success golden cases and the truncation test pass unchanged
+// after migrating MatchAllWithTrace onto pkg/ruleengine ChainRun. The single
+// contract-sanctioned delta (v1 §3.4, acceptance 5) is canceled_during_element_1
+// (originally canceled_mid_list at 8a719dd3), where discarding a late nil-error
+// decision after caller cancel moves Through from 2 to 1; mid-list cancellation
+// between elements is pinned separately by canceled_mid_list_before_element_2.
 func TestMatchAllWithTrace_GoldenByteParity(t *testing.T) {
 	var cancelMid context.CancelFunc
 	fake := &goldenFakeDialect{

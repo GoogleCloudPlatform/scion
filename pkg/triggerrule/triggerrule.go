@@ -925,8 +925,10 @@ func (r *Rules) MatchAllWithTrace(
 			break
 		}
 		if d.Declares().PerformsIO {
-			// IO elements must be pre-compiled (A1 §4 / P18); compile via
-			// trigger compile budget and execute via EvaluatePending when reached.
+			// T2: revisit eager IO compilation before earlier elements run once
+			// the trigger consumer admits IO dialects (today triggers grant CEL
+			// only, so this branch is unreachable in production). IO elements
+			// must be pre-compiled (A1 §4 / P18) and execute via EvaluatePending.
 			compiled, cErr := r.cachedCompileWithBudget(ctx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
 			if cErr != nil {
 				defect = &prefixDefect{index: through, dialect: dialect, err: cErr}

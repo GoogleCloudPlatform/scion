@@ -65,6 +65,31 @@ func newCountingFakeIODialect(name string, maxEvalTime time.Duration) *countingF
 
 func (d *countingFakeIODialect) Name() string { return d.name }
 
+func copyFakeDetail(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		cp := make(map[string]any, len(x))
+		for k, val := range x {
+			cp[k] = copyFakeDetail(val)
+		}
+		return cp
+	case map[string]bool:
+		cp := make(map[string]bool, len(x))
+		for k, val := range x {
+			cp[k] = val
+		}
+		return cp
+	case map[string]string:
+		cp := make(map[string]string, len(x))
+		for k, val := range x {
+			cp[k] = val
+		}
+		return cp
+	default:
+		return v
+	}
+}
+
 func (d *countingFakeIODialect) Declares() ruleengine.Capabilities {
 	return ruleengine.Capabilities{
 		PerformsIO:   d.performsIO,
@@ -72,6 +97,7 @@ func (d *countingFakeIODialect) Declares() ruleengine.Capabilities {
 		ResultKinds:  []ruleengine.Kind{ruleengine.KindFilter, ruleengine.KindJudgment},
 		TraceReasons: d.reasons,
 		TraceFields:  d.traceFields,
+		CopyDetail:   copyFakeDetail,
 	}
 }
 
@@ -1277,89 +1303,77 @@ func TestChain_FitCheck_R1_R2_R3_AndCompileBudgetPrecedence(t *testing.T) {
 			Tags:  []string{"a", "b"},
 		}
 
-		for _, withCustomCopier := range []bool{true, false} {
-			mode := "fallback_reflect_copier"
-			if withCustomCopier {
-				mode = "dialect_CopyDetail"
+		base := newCountingFakeIODialect("fit_io", time.Second)
+		base.setHandler("J", func(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+			_ = sleepWithCtx(ctx, 15*time.Millisecond)
+			return ruleengine.Decision{Kind: c.Kind(), Detail: origDetail}, nil
+		})
+		copyFn := func(v any) any {
+			customCopierCalls.Add(1)
+			src := v.(*fakeTypedDetail)
+			cp := &fakeTypedDetail{
+				ID:    src.ID,
+				Flags: make(map[string]bool, len(src.Flags)),
+				Tags:  slices.Clone(src.Tags),
 			}
-			t.Run(mode, func(t *testing.T) {
-				customCopierCalls.Store(0)
-				base := newCountingFakeIODialect("fit_io", time.Second)
-				base.setHandler("J", func(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
-					_ = sleepWithCtx(ctx, 15*time.Millisecond)
-					return ruleengine.Decision{Kind: c.Kind(), Detail: origDetail}, nil
-				})
-				var copyFn func(any) any
-				if withCustomCopier {
-					copyFn = func(v any) any {
-						customCopierCalls.Add(1)
-						src := v.(*fakeTypedDetail)
-						cp := &fakeTypedDetail{
-							ID:    src.ID,
-							Flags: make(map[string]bool, len(src.Flags)),
-							Tags:  slices.Clone(src.Tags),
-						}
-						for k, b := range src.Flags {
-							cp.Flags[k] = b
-						}
-						return cp
-					}
-				}
-				dial := &copyDetailDialect{countingFakeIODialect: base, copyFn: copyFn}
-				eng, _ := newChainTestEngine(t, consumer, dial)
-				cJ := mustCompile(t, eng, consumer, "fit_io", "J", ruleengine.KindJudgment)
+			for k, b := range src.Flags {
+				cp.Flags[k] = b
+			}
+			return cp
+		}
+		dial := &copyDetailDialect{countingFakeIODialect: base, copyFn: copyFn}
+		eng, _ := newChainTestEngine(t, consumer, dial)
+		cJ := mustCompile(t, eng, consumer, "fit_io", "J", ruleengine.KindJudgment)
 
-				tracker := ruleengine.NewBudgetTracker(time.Second)
-				dom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{Tracker: tracker}}
-				in := ruleengine.Input{AdmittedInputKey: "fit-r1-r2"}
+		tracker := ruleengine.NewBudgetTracker(time.Second)
+		dom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{Tracker: tracker}}
+		in := ruleengine.Input{AdmittedInputKey: "fit-r1-r2"}
 
-				r1, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: cJ, GroupKey: "gk"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
-				r2, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: cJ, GroupKey: "gk"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
+		r1, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: cJ, GroupKey: "gk"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
+		r2, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: cJ, GroupKey: "gk"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
 
-				_, p1, _, _ := r1.Next()
-				_, p2, _, _ := r2.Next()
-				if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
-					t.Fatalf("EvaluateGroup: %v", err)
-				}
-				_, _ = r1.Resume()
-				_, _ = r2.Resume()
+		_, p1, _, _ := r1.Next()
+		_, p2, _, _ := r2.Next()
+		if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
+			t.Fatalf("EvaluateGroup: %v", err)
+		}
+		_, _ = r1.Resume()
+		_, _ = r2.Resume()
 
-				// R1: Leader has Elapsed == GroupElapsed > 0; non-leader has Elapsed == 0 and GroupElapsed == leader.GroupElapsed.
-				res1, _ := r1.Result()
-				res2, _ := r2.Result()
-				if res1.Steps[0].Elapsed <= 0 || res1.Steps[0].GroupElapsed != res1.Steps[0].Elapsed {
-					t.Fatalf("leader timing = %+v, want Elapsed == GroupElapsed > 0", res1.Steps[0])
-				}
-				if res2.Steps[0].Elapsed != 0 || res2.Steps[0].GroupElapsed != res1.Steps[0].GroupElapsed {
-					t.Fatalf("member timing = %+v, want Elapsed=0 and GroupElapsed=%s", res2.Steps[0], res1.Steps[0].GroupElapsed)
-				}
-				if tracker.Spent() != res1.Steps[0].Elapsed {
-					t.Fatalf("tracker charged %s, want single charge %s", tracker.Spent(), res1.Steps[0].Elapsed)
-				}
+		// R1: Leader has Elapsed == GroupElapsed > 0; non-leader has Elapsed == 0 and GroupElapsed == leader.GroupElapsed.
+		res1, _ := r1.Result()
+		res2, _ := r2.Result()
+		if res1.Steps[0].Elapsed <= 0 || res1.Steps[0].GroupElapsed != res1.Steps[0].Elapsed {
+			t.Fatalf("leader timing = %+v, want Elapsed == GroupElapsed > 0", res1.Steps[0])
+		}
+		if res2.Steps[0].Elapsed != 0 || res2.Steps[0].GroupElapsed != res1.Steps[0].GroupElapsed {
+			t.Fatalf("member timing = %+v, want Elapsed=0 and GroupElapsed=%s", res2.Steps[0], res1.Steps[0].GroupElapsed)
+		}
+		if tracker.Spent() != res1.Steps[0].Elapsed {
+			t.Fatalf("tracker charged %s, want single charge %s", tracker.Spent(), res1.Steps[0].Elapsed)
+		}
 
-				// R2: Concrete pointer type *fakeTypedDetail preserved and no aliasing across runs.
-				j1, ok1 := r1.Judgments().Get(1)
-				j2, ok2 := r2.Judgments().Get(1)
-				if !ok1 || !ok2 {
-					t.Fatalf("missing judgments: ok1=%v ok2=%v", ok1, ok2)
-				}
-				d1, okType1 := j1.Detail.(*fakeTypedDetail)
-				d2, okType2 := j2.Detail.(*fakeTypedDetail)
-				if !okType1 || !okType2 {
-					t.Fatalf("concrete type not preserved: %T / %T", j1.Detail, j2.Detail)
-				}
-				if d1 == origDetail || d2 == origDetail || d1 == d2 {
-					t.Fatalf("pointer aliased across dialect/members")
-				}
-				d1.Flags["pii"] = false
-				d1.Tags[0] = "tampered"
-				if !d2.Flags["pii"] || d2.Tags[0] != "a" {
-					t.Fatalf("member 1 mutation leaked to member 2: %+v", d2)
-				}
-				if withCustomCopier && customCopierCalls.Load() == 0 {
-					t.Fatalf("expected Capabilities.CopyDetail to be invoked")
-				}
-			})
+		// R2: Concrete pointer type *fakeTypedDetail preserved and no aliasing across runs.
+		j1, ok1 := r1.Judgments().Get(1)
+		j2, ok2 := r2.Judgments().Get(1)
+		if !ok1 || !ok2 {
+			t.Fatalf("missing judgments: ok1=%v ok2=%v", ok1, ok2)
+		}
+		d1, okType1 := j1.Detail.(*fakeTypedDetail)
+		d2, okType2 := j2.Detail.(*fakeTypedDetail)
+		if !okType1 || !okType2 {
+			t.Fatalf("concrete type not preserved: %T / %T", j1.Detail, j2.Detail)
+		}
+		if d1 == origDetail || d2 == origDetail || d1 == d2 {
+			t.Fatalf("pointer aliased across dialect/members")
+		}
+		d1.Flags["pii"] = false
+		d1.Tags[0] = "tampered"
+		if !d2.Flags["pii"] || d2.Tags[0] != "a" {
+			t.Fatalf("member 1 mutation leaked to member 2: %+v", d2)
+		}
+		if customCopierCalls.Load() == 0 {
+			t.Fatalf("expected Capabilities.CopyDetail to be invoked")
 		}
 	})
 

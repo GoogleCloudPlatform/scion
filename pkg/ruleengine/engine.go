@@ -55,11 +55,10 @@ type Capabilities struct {
 	ResultKinds  []Kind
 	TraceReasons []string
 	TraceFields  []TraceField
-	// CopyDetail optionally returns an independent deep copy of a dialect's
-	// Decision.Detail value while preserving its concrete Go type (for example
-	// *systemone.Evaluation). When nil, the engine uses its reflection-based
-	// concrete-type-preserving deep copier (which checks interface{ Clone() any }
-	// first and deep-copies pointers, structs, maps, and slices without aliasing).
+	// CopyDetail returns an independent deep copy of a dialect's Decision.Detail
+	// value while preserving its concrete Go type (for example *systemone.Evaluation).
+	// Required for any Dialect used with KindJudgment chain elements: NewChainRun
+	// fails closed if a KindJudgment element's dialect declares CopyDetail == nil.
 	CopyDetail func(any) any
 }
 

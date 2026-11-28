@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
@@ -104,10 +105,10 @@ type ChainElement struct {
 }
 
 // ProgramID returns the element's stable semantic program identity before or
-// after compilation.
+// after compilation, or "" when a Compiled handle declares no explicit ProgramID.
 func (el ChainElement) ProgramID() string {
 	if !el.Compiled.IsZero() {
-		return compiledSemanticID(el.Compiled)
+		return el.Compiled.ProgramID()
 	}
 	if el.Source != nil {
 		return ComputeSourceProgramID(el.Dialect, *el.Source)
@@ -220,16 +221,17 @@ type ChainResult struct {
 // via EvaluatePending or EvaluateGroup. It carries no deadline (bound is
 // computed at dispatch) and is guarded by a single-use, run-and-step-bound token.
 type PendingStep struct {
-	run               *ChainRun
-	elemPos           int
-	index             int
-	dialect           string
-	kind              Kind
-	compiled          Compiled
-	input             Input
-	admittedInputHash string
-	groupKey          string
-	tokenID           uint64
+	run                *ChainRun
+	elemPos            int
+	index              int
+	dialect            string
+	kind               Kind
+	compiled           Compiled
+	input              Input
+	admittedInputHash  string
+	admittedInputValid bool
+	groupKey           string
+	tokenID            uint64
 
 	mu       sync.Mutex
 	consumed bool
@@ -411,8 +413,10 @@ func (e *Engine) NewChainRun(
 				return nil, fmt.Errorf("ruleengine: chain element %d Kind %q disagrees with Source.Kind %q", i, kind, src.Kind)
 			}
 			src.Kind = kind
+			if src.Scope.Consumer == "" {
+				src.Scope.Consumer = consumer
+			}
 			el.Source = &src
-			progID = ComputeSourceProgramID(dialect, src)
 		} else {
 			dialect = normalizeDialect(el.Compiled.Dialect())
 			if el.Dialect != "" && normalizeDialect(el.Dialect) != dialect {
@@ -426,7 +430,7 @@ func (e *Engine) NewChainRun(
 			if el.Compiled.Kind() != "" && el.Compiled.Kind() != kind {
 				return nil, fmt.Errorf("ruleengine: chain element %d Kind %q disagrees with Compiled.Kind %q", i, kind, el.Compiled.Kind())
 			}
-			progID = compiledSemanticID(el.Compiled)
+			progID = el.Compiled.ProgramID()
 		}
 
 		if kind != KindFilter && kind != KindSubject && kind != KindJudgment {
@@ -437,16 +441,43 @@ func (e *Engine) NewChainRun(
 		if err != nil {
 			return nil, fmt.Errorf("ruleengine: chain element %d admission failed: %w", i, err)
 		}
-		performsIO := dial.Declares().PerformsIO
+		caps := dial.Declares()
+		performsIO := caps.PerformsIO
 		if hasSource && performsIO {
 			return nil, fmt.Errorf("ruleengine: chain element %d dialect %q performs IO and cannot use Source form", i, dialect)
+		}
+		// R-3 option (b): KindJudgment elements require a dialect-declared
+		// concrete-type-preserving CopyDetail copier.
+		if kind == KindJudgment && caps.CopyDetail == nil {
+			return nil, fmt.Errorf("ruleengine: chain element %d dialect %q performs KindJudgment but declares no Capabilities.CopyDetail", i, dialect)
+		}
+		// N-1: populate EnvVersion from registered CELDialect when unset so
+		// pre-compile Source ProgramID matches post-compile CELDialect ProgramID.
+		if hasSource {
+			if el.Source.EnvVersion == 0 {
+				if cd, ok := dial.(*CELDialect); ok {
+					envName := el.Source.EnvRef.Name
+					if envName == "" {
+						envName = el.Source.EnvRef.Consumer
+					}
+					if celEng, found := cd.CELEngine(envName); found {
+						el.Source.EnvVersion = celEng.Environment().Version
+					}
+				}
+			}
+			progID = ComputeSourceProgramID(dialect, *el.Source)
+		}
+
+		// N-2: element indexes must be non-negative, unique, and strictly increasing.
+		if el.Index < 0 {
+			return nil, fmt.Errorf("ruleengine: chain element %d has negative index %d", i, el.Index)
+		}
+		if i > 0 && el.Index <= specs[i-1].elem.Index {
+			return nil, fmt.Errorf("ruleengine: chain element indexes must be strictly increasing (pos %d has index %d <= %d)", i, el.Index, specs[i-1].elem.Index)
 		}
 
 		el.Dialect = dialect
 		el.Kind = kind
-		if el.Index == 0 && i > 0 {
-			el.Index = i
-		}
 		specs[i] = chainElemSpec{
 			elem:       el,
 			dialect:    dialect,
@@ -460,11 +491,11 @@ func (e *Engine) NewChainRun(
 		policy = DefaultANDPolicy
 	}
 
-	// Defensive deep copy of base Input and Domains so callers cannot mutate
-	// run state after construction (v1 §3.2, A1 §3 rule 2).
+	// O-5: defensive copy of base Activation once at construction, shared
+	// read-only across steps; Payload is kept immutable by contract.
 	baseCopy := Input{
 		Activation:       deepCopyMap(base.Activation),
-		Payload:          deepCopyValue(base.Payload),
+		Payload:          base.Payload,
 		AdmittedInputKey: base.AdmittedInputKey,
 	}
 	domainsCopy := ChainDomains{
@@ -590,17 +621,19 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	// I/O element: park and yield PendingStep with single-use token and NO deadline.
 	if caps.PerformsIO {
 		r.tokenSeq++
+		inHash, hashErr := computeAdmittedInputHash(stepInput)
 		p := &PendingStep{
-			run:               r,
-			elemPos:           r.nextPos,
-			index:             spec.elem.Index,
-			dialect:           spec.dialect,
-			kind:              spec.elem.Kind,
-			compiled:          spec.elem.Compiled,
-			input:             stepInput,
-			admittedInputHash: computeAdmittedInputHash(stepInput),
-			groupKey:          spec.elem.GroupKey,
-			tokenID:           r.tokenSeq,
+			run:                r,
+			elemPos:            r.nextPos,
+			index:              spec.elem.Index,
+			dialect:            spec.dialect,
+			kind:               spec.elem.Kind,
+			compiled:           spec.elem.Compiled,
+			input:              stepInput,
+			admittedInputHash:  inHash,
+			admittedInputValid: hashErr == nil,
+			groupKey:           spec.elem.GroupKey,
+			tokenID:            r.tokenSeq,
 		}
 		r.state = chainStatePending
 		r.pending = p
@@ -966,12 +999,15 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		seenRuns[p.run] = struct{}{}
 		if !p.isLive() {
 			err := &FailedError{Reason: ReasonInvalidCompletion, Cause: errors.New("replayed or inactive pending step in group")}
+			// O-1: make the replayed member's run terminal consistently with EvaluatePending.
+			p.run.failInvalidCompletion(p, err)
 			e.failWholeGroupIncompatible(all, err)
 			return "", err
 		}
 	}
 
-	// Claim all tokens atomically (if any fails concurrently, fail-closed).
+	// Claim all tokens atomically (O-2: if any fails concurrently, fail-closed
+	// on ALL supplied steps so none stay live).
 	claimed := make([]*PendingStep, 0, len(all))
 	for _, p := range all {
 		if err := p.claimForCompletion(); err != nil {
@@ -986,6 +1022,8 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 					Err:     err,
 				}, nil, nil)
 			}
+			p.run.failInvalidCompletion(p, err)
+			e.failWholeGroupIncompatible(all, err)
 			return "", err
 		}
 		claimed = append(claimed, p)
@@ -1004,7 +1042,6 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	if err != nil {
 		return e.failClaimedGroup(claimed, fmt.Errorf("leader dialect admission failed: %w", err))
 	}
-	leaderProgID := compiledSemanticID(leader.compiled)
 
 	inlineCtxs := make([]context.Context, 0, len(claimed))
 	for _, m := range claimed {
@@ -1026,15 +1063,12 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		if !sameContextIdentity(mIO.Ctx, leaderIO.Ctx) {
 			return e.failClaimedGroup(claimed, errors.New("mismatched IO Ctx identity"))
 		}
-		// Safety floor: semantic compiled identity + admitted-input hash.
-		if m.compiled.Consumer() != leader.compiled.Consumer() ||
-			m.compiled.Dialect() != leader.compiled.Dialect() ||
-			m.compiled.Kind() != leader.compiled.Kind() ||
-			compiledSemanticID(m.compiled) != leaderProgID {
+		// R-1 fail-closed safety floor: semantic compiled identity + admitted-input hash.
+		if !sameCompiledSemanticIdentity(m.compiled, leader.compiled) {
 			return e.failClaimedGroup(claimed, errors.New("mismatched semantic compiled identity"))
 		}
-		if m.admittedInputHash != leader.admittedInputHash {
-			return e.failClaimedGroup(claimed, errors.New("mismatched admitted-input hash"))
+		if !leader.admittedInputValid || !m.admittedInputValid || m.admittedInputHash != leader.admittedInputHash {
+			return e.failClaimedGroup(claimed, errors.New("mismatched or unhashable admitted input"))
 		}
 		if _, admErr := e.resolveDialect(m.compiled.Consumer(), m.compiled.Dialect()); admErr != nil {
 			return e.failClaimedGroup(claimed, fmt.Errorf("member dialect admission failed: %w", admErr))
@@ -1103,19 +1137,40 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		return groupID, nil
 	}
 
-	// Step 3 & 4: ONE ordinary evaluation on leader's compiled rule and request,
-	// charging the shared IO tracker once.
-	evalCtx, stopCascade := cascadeCancelContext(leaderIO.Ctx, inlineCtxs...)
+	// Step 3 & 4: ONE ordinary evaluation on leader's compiled rule and request
+	// under leaderIO.Ctx only, cascading to cancel the evaluation ONLY when ALL
+	// members' Inline ctxs are done (R-2). Charges the shared IO tracker once.
+	evalCtx, stopCascade := cascadeAllCanceledContext(leaderIO.Ctx, inlineCtxs)
 	defer stopCascade()
 
 	dec, elapsed, evalErr := e.evaluateCore(evalCtx, leader.compiled, leader.input, leaderIO.Budget)
 	leaderOut := classifyDecisionToOutcome(leader.index, leader.dialect, leader.kind, DomainIO, groupID, caps, dec, elapsed, evalErr)
 	leaderOut.GroupElapsed = elapsed
 
-	// Step 5: Distribute identical outcome to leader (with Elapsed and
-	// GroupElapsed) and every member (Elapsed: 0, GroupElapsed: elapsed),
-	// each receiving an independent concrete-type-preserving deep copy of Detail.
+	// Step 5: Distribute outcome. R-2: any member whose own Inline ctx is done
+	// records canceled without affecting live members, which receive the shared
+	// outcome (Elapsed on leader, 0 on non-leaders, GroupElapsed on all, with
+	// independent concrete-type-preserving deep copies of Detail).
 	for i, m := range claimed {
+		if memberCtxErr := inlineCtxs[i].Err(); memberCtxErr != nil {
+			out := StepOutcome{
+				Index:        m.index,
+				Dialect:      m.dialect,
+				Kind:         m.kind,
+				Class:        StepClassCanceled,
+				Reason:       celengine.ReasonCanceled,
+				Elapsed:      0,
+				GroupElapsed: elapsed,
+				GroupID:      groupID,
+				Domain:       DomainIO,
+				Err:          &FailedError{Reason: celengine.ReasonCanceled, Cause: memberCtxErr},
+			}
+			if i == 0 {
+				out.Elapsed = elapsed
+			}
+			m.run.completePending(m, out, nil, nil)
+			continue
+		}
 		out := cloneStepOutcome(leaderOut)
 		out.Index = m.index
 		if i > 0 {
@@ -1348,6 +1403,15 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 	if r.state == chainStateDone {
 		return
 	}
+	// O-1: if a legitimate completion outcome was already recorded (before
+	// Resume), record it first so terminal outcomes are never suppressed by
+	// a subsequent replay rejection (§3.7 item 7).
+	if r.state == chainStatePendingCompleted {
+		r.recordStepLocked(r.pendingOutcome, Control{Stop: true}, r.pendingDetail, r.pendingCopier)
+		r.pendingOutcome = StepOutcome{}
+		r.pendingDetail = nil
+		r.pendingCopier = nil
+	}
 	out := StepOutcome{
 		Index:   p.index,
 		Dialect: p.dialect,
@@ -1436,26 +1500,23 @@ func (r *ChainRun) buildJudgmentViewLocked(currentStep int) JudgmentView {
 	return &stepJudgmentView{judgments: jm, steps: steps}
 }
 
-// copyJudgmentDetail returns an independent copy of detail preserving its
-// concrete Go type. Uses the dialect-declared copier when non-nil, and falls
-// back to deepCopyValue (Cloner interface -> typed maps/slices -> reflect deep
-// copy preserving pointer/struct concrete types without aliasing).
+// copyJudgmentDetail returns an independent copy of detail using the
+// dialect-declared concrete-type-preserving CopyDetail copier (R-3 option b).
 func copyJudgmentDetail(detail any, copier func(any) any) any {
-	if detail == nil {
+	if detail == nil || copier == nil {
 		return nil
 	}
-	if copier != nil {
-		return copier(detail)
-	}
-	return deepCopyValue(detail)
+	return copier(detail)
 }
 
 func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
-	act := deepCopyMap(r.base.Activation)
+	// O-5: base Activation was defensively copied once at construction and is
+	// shared read-only across steps; only allocate a fresh top-level map when
+	// the Enricher supplies additions.
 	if r.enricher == nil {
 		return Input{
-			Activation:       act,
-			Payload:          deepCopyValue(r.base.Payload),
+			Activation:       r.base.Activation,
+			Payload:          r.base.Payload,
 			AdmittedInputKey: r.base.AdmittedInputKey,
 		}, nil
 	}
@@ -1467,14 +1528,14 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
 	}
 	if len(additions) == 0 {
 		return Input{
-			Activation:       act,
-			Payload:          deepCopyValue(r.base.Payload),
+			Activation:       r.base.Activation,
+			Payload:          r.base.Payload,
 			AdmittedInputKey: r.base.AdmittedInputKey,
 		}, nil
 	}
-	if act == nil {
-		act = make(map[string]any, len(additions))
-	}
+
+	act := make(map[string]any, len(r.base.Activation)+len(additions))
+	maps.Copy(act, r.base.Activation)
 
 	var chainNS map[string]any
 	for k, v := range additions {
@@ -1524,7 +1585,7 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
 	}
 	return Input{
 		Activation:       act,
-		Payload:          deepCopyValue(r.base.Payload),
+		Payload:          r.base.Payload,
 		AdmittedInputKey: r.base.AdmittedInputKey,
 	}, nil
 }
@@ -1698,53 +1759,51 @@ func cloneStepOutcome(out StepOutcome) StepOutcome {
 	return out
 }
 
-func compiledSemanticID(c Compiled) string {
-	if c.programID != "" {
-		return c.programID
+// sameCompiledSemanticIdentity implements the R-1 fail-closed safety floor for
+// grouped evaluations: consumer, dialect, and kind must match, and either both
+// handles declare the same non-empty ProgramID or (with no declared ProgramID)
+// both carry the exact same non-nil rep pointer. Opaque reps are never JSON-hashed.
+func sameCompiledSemanticIdentity(a, b Compiled) bool {
+	if a.Consumer() != b.Consumer() || a.Dialect() != b.Dialect() || a.Kind() != b.Kind() {
+		return false
 	}
-	if idProvider, ok := c.rep.(interface{ ProgramIdentity() string }); ok {
-		if id := idProvider.ProgramIdentity(); id != "" {
-			return id
-		}
+	if a.programID != "" || b.programID != "" {
+		return a.programID != "" && a.programID == b.programID
 	}
-	if s, ok := c.rep.(string); ok {
-		h := sha256.Sum256([]byte(c.consumer + "\x00" + c.dialect + "\x00" + string(c.kind) + "\x00" + s))
-		return hex.EncodeToString(h[:])
+	if a.rep == nil || b.rep == nil {
+		return false
 	}
-	// Fallback: content-hash JSON if serializable, else type+fmt representation.
-	if raw, err := json.Marshal(c.rep); err == nil {
-		h := sha256.Sum256(append([]byte(c.consumer+"\x00"+c.dialect+"\x00"+string(c.kind)+"\x00"), raw...))
-		return hex.EncodeToString(h[:])
-	}
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%T:%v", c.consumer, c.dialect, c.kind, c.rep, c.rep)))
-	return hex.EncodeToString(h[:])
+	rvA, rvB := reflect.ValueOf(a.rep), reflect.ValueOf(b.rep)
+	return rvA.Kind() == reflect.Pointer && rvB.Kind() == reflect.Pointer &&
+		rvA.Type() == rvB.Type() && rvA.Pointer() == rvB.Pointer()
 }
 
-func computeAdmittedInputHash(in Input) string {
+// computeAdmittedInputHash implements the R-1 fail-closed admitted-input hash
+// (O-3: uses Input.AdmittedInputKey when present; otherwise JSON-marshals
+// Activation and Payload and fails closed on any marshal error).
+func computeAdmittedInputHash(in Input) (string, error) {
 	if in.AdmittedInputKey != "" {
 		h := sha256.Sum256([]byte("key:" + in.AdmittedInputKey))
-		return hex.EncodeToString(h[:])
-	}
-	if hp, ok := in.Payload.(interface{ AdmittedInputHash() string }); ok {
-		if key := hp.AdmittedInputHash(); key != "" {
-			h := sha256.Sum256([]byte("payload_key:" + key))
-			return hex.EncodeToString(h[:])
-		}
+		return hex.EncodeToString(h[:]), nil
 	}
 	h := sha256.New()
-	if raw, err := json.Marshal(in.Activation); err == nil {
+	if in.Activation != nil {
+		raw, err := json.Marshal(in.Activation)
+		if err != nil {
+			return "", fmt.Errorf("ruleengine: failed to marshal activation for admitted-input hash: %w", err)
+		}
 		h.Write([]byte("act:"))
 		h.Write(raw)
 	}
 	if in.Payload != nil {
-		if raw, err := json.Marshal(in.Payload); err == nil {
-			h.Write([]byte("|pay:"))
-			h.Write(raw)
-		} else {
-			_, _ = fmt.Fprintf(h, "|pay_fmt:%T:%v", in.Payload, in.Payload)
+		raw, err := json.Marshal(in.Payload)
+		if err != nil {
+			return "", fmt.Errorf("ruleengine: failed to marshal payload for admitted-input hash: %w", err)
 		}
+		h.Write([]byte("|pay:"))
+		h.Write(raw)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func sameContextIdentity(a, b context.Context) bool {
@@ -1770,8 +1829,9 @@ func firstCtxErr(ctxs ...context.Context) error {
 }
 
 // cascadeCancelContext returns a context derived from primary that is also
-// canceled immediately if any watchCtx finishes (D2 engine-observed cascade).
-// Uses context.AfterFunc so zero goroutines are leaked.
+// canceled immediately if any watchCtx finishes (D2 engine-observed cascade
+// for single-run EvaluatePending). Uses context.AfterFunc so zero goroutines
+// are leaked.
 func cascadeCancelContext(primary context.Context, watchCtxs ...context.Context) (context.Context, func()) {
 	var unique []context.Context
 	for _, wc := range watchCtxs {
@@ -1811,6 +1871,55 @@ func cascadeCancelContext(primary context.Context, watchCtxs ...context.Context)
 	}
 }
 
+// cascadeAllCanceledContext returns a context derived from primary that cancels
+// only when ALL watchCtxs have finished (R-2: one member's Inline-ctx
+// cancellation must never cancel a grouped evaluation while another member is
+// still live). Uses context.AfterFunc so zero goroutines are leaked.
+func cascadeAllCanceledContext(primary context.Context, watchCtxs []context.Context) (context.Context, func()) {
+	var live []context.Context
+	for _, wc := range watchCtxs {
+		if wc == nil || wc.Done() == nil {
+			// A non-cancelable member ctx (e.g. context.Background()) means
+			// "all members canceled" can never become true.
+			return primary, func() {}
+		}
+		if wc.Err() != nil {
+			continue
+		}
+		dup := false
+		for _, u := range live {
+			if sameContextIdentity(u, wc) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			live = append(live, wc)
+		}
+	}
+	if len(live) == 0 {
+		return primary, func() {}
+	}
+	ctx, cancel := context.WithCancelCause(primary)
+	var remaining atomic.Int32
+	remaining.Store(int32(len(live)))
+	stops := make([]func() bool, 0, len(live))
+	for _, wc := range live {
+		wc := wc
+		stops = append(stops, context.AfterFunc(wc, func() {
+			if remaining.Add(-1) == 0 {
+				cancel(context.Cause(wc))
+			}
+		}))
+	}
+	return ctx, func() {
+		for _, s := range stops {
+			s()
+		}
+		cancel(nil)
+	}
+}
+
 func deepCopyMap(m map[string]any) map[string]any {
 	if m == nil {
 		return nil
@@ -1822,14 +1931,11 @@ func deepCopyMap(m map[string]any) map[string]any {
 	return out
 }
 
-// deepCopyValue returns an independent copy of v so mutations to maps, slices,
-// pointers, or structs never cross between dialect, engine, runs, or views.
+// deepCopyValue copies standard activation container types (maps and slices)
+// without reflection or duck-typed Clone() conventions (R-3 option b, O-3).
 func deepCopyValue(v any) any {
 	if v == nil {
 		return nil
-	}
-	if cloner, ok := v.(interface{ Clone() any }); ok {
-		return cloner.Clone()
 	}
 	switch x := v.(type) {
 	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string, time.Time, time.Duration:
@@ -1864,59 +1970,7 @@ func deepCopyValue(v any) any {
 		return slices.Clone(x)
 	case []byte:
 		return slices.Clone(x)
-	}
-	return deepCopyReflect(reflect.ValueOf(v)).Interface()
-}
-
-func deepCopyReflect(rv reflect.Value) reflect.Value {
-	if !rv.IsValid() {
-		return rv
-	}
-	switch rv.Kind() {
-	case reflect.Pointer:
-		if rv.IsNil() {
-			return reflect.Zero(rv.Type())
-		}
-		cp := reflect.New(rv.Type().Elem())
-		cp.Elem().Set(deepCopyReflect(rv.Elem()))
-		return cp
-	case reflect.Interface:
-		if rv.IsNil() {
-			return reflect.Zero(rv.Type())
-		}
-		elem := deepCopyReflect(rv.Elem())
-		cp := reflect.New(rv.Type()).Elem()
-		cp.Set(elem)
-		return cp
-	case reflect.Slice:
-		if rv.IsNil() {
-			return reflect.Zero(rv.Type())
-		}
-		cp := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
-		for i := 0; i < rv.Len(); i++ {
-			cp.Index(i).Set(deepCopyReflect(rv.Index(i)))
-		}
-		return cp
-	case reflect.Map:
-		if rv.IsNil() {
-			return reflect.Zero(rv.Type())
-		}
-		cp := reflect.MakeMapWithSize(rv.Type(), rv.Len())
-		iter := rv.MapRange()
-		for iter.Next() {
-			cp.SetMapIndex(deepCopyReflect(iter.Key()), deepCopyReflect(iter.Value()))
-		}
-		return cp
-	case reflect.Struct:
-		cp := reflect.New(rv.Type()).Elem()
-		cp.Set(rv)
-		for i := 0; i < rv.NumField(); i++ {
-			if cp.Field(i).CanSet() {
-				cp.Field(i).Set(deepCopyReflect(rv.Field(i)))
-			}
-		}
-		return cp
 	default:
-		return rv
+		return v
 	}
 }

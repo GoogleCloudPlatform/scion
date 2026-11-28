@@ -145,6 +145,7 @@ func (d *CELDialect) Compile(ctx context.Context, rule string, kind Kind, env En
 	}
 	progID := ComputeSourceProgramID(DialectCEL, ChainElementSource{
 		Expr:       rule,
+		Scope:      celengine.CacheScope{Consumer: env.Consumer},
 		Kind:       kind,
 		EnvRef:     env,
 		EnvVersion: eng.Environment().Version,

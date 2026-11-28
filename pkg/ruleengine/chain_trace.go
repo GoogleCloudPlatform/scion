@@ -426,15 +426,6 @@ func EncodeChainTrace(trace ChainTrace, dialectCaps map[string]Capabilities, max
 		}
 	}
 
-	// Deterministic truncation step 3: drop earliest elements if maxBytes is
-	// smaller than even minimal metadata for all elements.
-	for len(work.Elements) > 1 {
-		work.Elements = work.Elements[1:]
-		if raw, err := json.Marshal(work); err == nil && len(raw) <= maxBytes {
-			return string(raw), nil
-		}
-	}
-
 	raw, err := json.Marshal(work)
 	if err != nil {
 		return "", err
@@ -442,7 +433,7 @@ func EncodeChainTrace(trace ChainTrace, dialectCaps map[string]Capabilities, max
 	if len(raw) <= maxBytes {
 		return string(raw), nil
 	}
-	return `{"elements":[]}`, nil
+	return "", fmt.Errorf("ruleengine: chain trace (%d bytes) exceeds maxBytes (%d) even with minimal {i, dialect, class} metadata", len(raw), maxBytes)
 }
 
 func cloneInt64Ptr(p *int64) *int64 {

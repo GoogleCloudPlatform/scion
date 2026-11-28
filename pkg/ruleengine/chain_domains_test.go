@@ -600,6 +600,108 @@ func TestChainDomains_P12_SourceFormColdCompileAndIdentity(t *testing.T) {
 	if inlineTracker.Spent() <= 0 {
 		t.Fatalf("expected cold Source compile+eval to charge Inline tracker, spent=%s", inlineTracker.Spent())
 	}
+	if inlineTracker.Spent() != out.Elapsed {
+		t.Fatalf("expected single charge on Inline tracker: spent=%s != step.Elapsed=%s", inlineTracker.Spent(), out.Elapsed)
+	}
+
+	// R-4: pin Source-form compile inside dispatch-time bound and exact single charge
+	// using a slow-compiling Inline fake dialect (kills mutants m12 and m13).
+	t.Run("R4_SlowCompileInsideBound_And_SingleCharge", func(t *testing.T) {
+		slowComp := &slowCompileInlineDialect{
+			name:         "slow_comp_inline",
+			compileDelay: 60 * time.Millisecond,
+			evalDelay:    20 * time.Millisecond,
+		}
+		eng2, _ := newChainTestEngine(t, consumer, slowComp)
+
+		// (a) Slow compile (60ms) under tight Inline tracker (25ms) -> budget from compile, 0 eval calls.
+		tightTracker := ruleengine.NewBudgetTracker(25 * time.Millisecond)
+		tightDom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{Tracker: tightTracker}}
+		rTight, err := eng2.NewChainRun(ruleengine.ChainDomains{Inline: tightDom, IO: tightDom}, ruleengine.Chain{
+			Elements: []ruleengine.ChainElement{{
+				Index:   1,
+				Dialect: "slow_comp_inline",
+				Kind:    ruleengine.KindFilter,
+				Source: &ruleengine.ChainElementSource{
+					Expr:   "slow_expr",
+					Kind:   ruleengine.KindFilter,
+					EnvRef: ruleengine.EnvironmentRef{Consumer: consumer, Name: "chain_test"},
+				},
+			}},
+		}, ruleengine.Input{}, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("NewChainRun tight: %v", err)
+		}
+		outTight, _, doneTight, err := rTight.Next()
+		if err != nil || !doneTight || outTight == nil || outTight.Class != ruleengine.StepClassBudget {
+			t.Fatalf("slow compile under tight tracker = (%+v, %v, %v), want budget", outTight, doneTight, err)
+		}
+		if slowComp.evalCalls != 0 {
+			t.Fatalf("eval should not run after compile hit budget: evalCalls=%d", slowComp.evalCalls)
+		}
+		if !tightTracker.Exhausted() {
+			t.Fatalf("expected tight Inline tracker to be exhausted after compile timeout")
+		}
+
+		// (b) Slow compile (60ms) + slow eval (20ms) under generous tracker (500ms) ->
+		// pass, Spent() == step.Elapsed (>= 75ms, charged ONCE, never 2x).
+		wideTracker := ruleengine.NewBudgetTracker(500 * time.Millisecond)
+		wideDom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{Tracker: wideTracker}}
+		rWide, err := eng2.NewChainRun(ruleengine.ChainDomains{Inline: wideDom, IO: wideDom}, ruleengine.Chain{
+			Elements: []ruleengine.ChainElement{{
+				Index:   1,
+				Dialect: "slow_comp_inline",
+				Kind:    ruleengine.KindFilter,
+				Source: &ruleengine.ChainElementSource{
+					Expr:   "slow_expr",
+					Kind:   ruleengine.KindFilter,
+					EnvRef: ruleengine.EnvironmentRef{Consumer: consumer, Name: "chain_test"},
+				},
+			}},
+		}, ruleengine.Input{}, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("NewChainRun wide: %v", err)
+		}
+		outWide, _, doneWide, err := rWide.Next()
+		if err != nil || !doneWide || outWide == nil || outWide.Class != ruleengine.StepClassPass {
+			t.Fatalf("slow compile under wide tracker = (%+v, %v, %v), want pass", outWide, doneWide, err)
+		}
+		if wideTracker.Spent() != outWide.Elapsed {
+			t.Fatalf("double charge detected: tracker.Spent()=%s != step.Elapsed=%s", wideTracker.Spent(), outWide.Elapsed)
+		}
+		if wideTracker.Spent() < 70*time.Millisecond {
+			t.Fatalf("compile time not charged to Inline tracker: spent=%s (compile=60ms + eval=20ms)", wideTracker.Spent())
+		}
+	})
+}
+
+type slowCompileInlineDialect struct {
+	name         string
+	compileDelay time.Duration
+	evalDelay    time.Duration
+	evalCalls    int
+}
+
+func (d *slowCompileInlineDialect) Name() string { return d.name }
+func (d *slowCompileInlineDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  false,
+		MaxEvalTime: time.Second,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *slowCompileInlineDialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	if err := sleepWithCtx(ctx, d.compileDelay); err != nil {
+		return ruleengine.Compiled{}, err
+	}
+	return ruleengine.NewCompiledWithIdentity(env.Consumer, d.name, kind, "slow:"+rule, rule), nil
+}
+func (d *slowCompileInlineDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.evalCalls++
+	if err := sleepWithCtx(ctx, d.evalDelay); err != nil {
+		return ruleengine.Decision{}, err
+	}
+	return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
 }
 
 // TestChainDomains_P14_NilDomainCtxConstructionError covers Amendment A1 P14.

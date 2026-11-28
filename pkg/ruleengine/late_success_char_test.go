@@ -46,7 +46,7 @@ func (d *lateSuccessFakeDialect) Declares() ruleengine.Capabilities {
 }
 
 func (d *lateSuccessFakeDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
-	return ruleengine.NewCompiled(env.Consumer, d.name, kind, rule), nil
+	return ruleengine.NewCompiledWithIdentity(env.Consumer, d.name, kind, "late:"+rule, rule), nil
 }
 
 func (d *lateSuccessFakeDialect) Evaluate(_ context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
