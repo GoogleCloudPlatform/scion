@@ -167,6 +167,10 @@ type Control struct {
 
 // StepPolicy decides whether a ChainRun stops or continues after a StepOutcome.
 // A nil StepPolicy defaults to DefaultANDPolicy.
+//
+// StepPolicy runs while the ChainRun's mutex is held: it MUST NOT call back
+// into the same ChainRun (which would self-deadlock), and it must be pure and
+// fast.
 type StepPolicy func(out StepOutcome) Control
 
 // DefaultANDPolicy continues on StepClassPass and stops on any other class.

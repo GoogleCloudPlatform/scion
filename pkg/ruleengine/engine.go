@@ -59,6 +59,9 @@ type Capabilities struct {
 	// value while preserving its concrete Go type (for example *systemone.Evaluation).
 	// Required for any Dialect used with KindJudgment chain elements: NewChainRun
 	// fails closed if a KindJudgment element's dialect declares CopyDetail == nil.
+	// CopyDetail runs while the ChainRun's mutex is held: it MUST NOT call back
+	// into the same ChainRun (which would self-deadlock), and it must be pure and
+	// fast.
 	CopyDetail func(any) any
 }
 
