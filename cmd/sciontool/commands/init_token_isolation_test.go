@@ -1434,3 +1434,117 @@ func TestStartCredentialFileWatch_IsolatedTakesPreExistingAgentHandoff(t *testin
 		t.Fatalf("pre-existing agent handoff still exists after watcher cycle: err=%v", err)
 	}
 }
+
+func TestStartCredentialFileWatch_IsolatedTakesPreExistingTransportHandoff(t *testing.T) {
+	h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+
+	// Configure a hub-provided transport source with an initial token.
+	curTransport := testCredential(t, "cur-transport", h.now)
+	if err := hub.WriteTransportTokenFile(curTransport, 0, 0); err != nil {
+		t.Fatalf("WriteTransportTokenFile: %v", err)
+	}
+	h.client.SetTransportAuth(hub.NewTransportTokenFileSource(), transportauth.HeaderProxyAuthorization)
+
+	// Write a transport handoff (even with the same value as current) BEFORE
+	// startCredentialFileWatch creates the watcher.
+	handoffTransport := hub.HandoffTransportTokenFilePath()
+	if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handoffTransport, []byte(curTransport), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fc := clock.NewFake(h.now)
+	notify := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := startCredentialFileWatch(ctx, h.client, hub.TokenWatchConfig{
+		Interval:    time.Second,
+		StableDelay: 100 * time.Millisecond,
+		Notify:      notify,
+		Clock:       fc,
+	})
+	w.RecheckAgent()
+	w.RecheckTransport()
+	h.r.watcher = w
+
+	deadline := time.Now().Add(2 * time.Second)
+	notified := false
+	for !notified && time.Now().Before(deadline) {
+		fc.Advance(time.Second)
+		select {
+		case <-notify:
+			notified = true
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+	if !notified {
+		t.Fatal("watcher did not report pre-existing transport handoff within one interval")
+	}
+
+	h.r.reset(authResetFileChange)
+	if _, err := os.Lstat(handoffTransport); !os.IsNotExist(err) {
+		t.Fatalf("pre-existing transport handoff still exists after watcher cycle: err=%v", err)
+	}
+}
+
+func TestRunInit_ShellIsolation_TransportStagingFailureFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+	origSetup := runSetupHostUser
+	origBeforeSup := beforeSupervisorRunForTest
+	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	t.Cleanup(func() {
+		runSetupHostUser = origSetup
+		beforeSupervisorRunForTest = origBeforeSup
+	})
+
+	// Block staging to ~/.scion/transport-token by placing a regular file at ~/.scion.
+	if err := os.WriteFile(filepath.Join(home, ".scion"), []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_AGENT_ID", "")
+	t.Setenv(transportauth.EnvTransportToken, "bootstrap-iap-secret")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+	supReached := false
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		supReached = true
+	}
+
+	code := RunInit([]string{"true"}, InitRunOptions{
+		DisableReExec:               true,
+		DisableTermSignalForwarding: true,
+		DisablePortForwarding:       true,
+	})
+	if code == 0 {
+		t.Fatal("RunInit exited 0, expected non-zero fail-closed exit when transport token staging fails")
+	}
+	if supReached {
+		t.Fatal("sup.Run was reached despite failed transport token staging under shellIsolation")
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("expected agent-info.json from reportInitFailure: %v", err)
+	}
+	var info struct {
+		Phase string `json:"phase"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatalf("unmarshal agent-info.json: %v", err)
+	}
+	if info.Phase != string(state.PhaseError) {
+		t.Fatalf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
+	}
+}

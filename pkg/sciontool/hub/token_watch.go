@@ -495,6 +495,14 @@ func (w *TokenFileWatcher) RecheckAgent() {
 	w.lastAgentSet = false
 }
 
+// RecheckTransport makes the watcher report the transport token file's
+// current value at its next check, even if it reported that value before.
+func (w *TokenFileWatcher) RecheckTransport() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastTransSet = false
+}
+
 // RetryAfter asks the watcher to report the agent credential with
 // fingerprint fp again once d has passed on its clock, if the file still
 // holds it then. It is for a credential whose check could not complete. A

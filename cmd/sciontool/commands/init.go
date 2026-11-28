@@ -561,6 +561,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var transportCleared bool
 	if shellIsolation {
 		transportCleared = stageTransportTokenWithPolicy(0, 0, true)
+		if !transportCleared && os.Getenv(transportauth.EnvTransportToken) != "" {
+			err := fmt.Errorf("failed to stage bootstrap transport token under shell isolation; refusing to leave credential in environment")
+			log.Error("%v", err)
+			reportInitFailure(agentHome, err)
+			return 1
+		}
 	} else {
 		transportCleared = stageTransportToken(targetUID, targetGID)
 	}
@@ -1900,6 +1906,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// and watcher startup must be reported on the first interval rather
 			// than recorded as already seen and left on disk.
 			authReset.watcher.RecheckAgent()
+			authReset.watcher.RecheckTransport()
 		}
 		if lateHandoffPending != "" && authReset.watcher != nil {
 			authReset.watcher.RetryPendingAfter(hub.TokenFingerprint(lateHandoffPending), 0)
@@ -2736,7 +2743,9 @@ func recheckDelay(attempts int) time.Duration {
 // its issue time is known when a newer credential arrives. That check is
 // not retried and changes nothing if it does not succeed.
 func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hub.TokenWatchConfig) *hub.TokenFileWatcher {
-	hubClient.NoteTransportTokenFile()
+	if !hub.IsIsolatedTokenStore() {
+		hubClient.NoteTransportTokenFile()
+	}
 	w := hub.NewTokenFileWatcher(cfg)
 	w.Run(ctx)
 	current := hubClient.GetToken()
@@ -3001,11 +3010,17 @@ func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
 // process wrote a new value there (reset-auth writes it after the agent
 // credential, so it can land after the agent credential was adopted).
 func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
-	if !r.hubClient.TransportTokenFileChanged() {
+	if !r.isolated && !r.hubClient.TransportTokenFileChanged() {
 		return
 	}
 	chownUID, chownGID := r.tokenChownOwner()
-	if adopted, err := r.hubClient.AdoptTransportTokenFile(chownUID, chownGID); err != nil {
+	adopted, err := r.hubClient.AdoptTransportTokenFile(chownUID, chownGID)
+	if r.isolated && r.watcher != nil {
+		// The transport handoff file has been unlinked; clear last-seen state
+		// so any subsequent broker write is reported again.
+		r.watcher.RecheckTransport()
+	}
+	if err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)
