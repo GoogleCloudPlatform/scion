@@ -55,6 +55,7 @@ const USED_ICONS = [
   'arrows-angle-contract',
   'arrows-angle-expand',
   'arrows-fullscreen',
+  'at',
   'bar-chart',
   'bell',
   'box-arrow-in-down-left',

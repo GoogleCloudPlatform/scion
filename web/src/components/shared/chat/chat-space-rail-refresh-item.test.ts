@@ -108,7 +108,9 @@ describe('space rail — Refresh spaces in the sort menu', () => {
     // Not a checkbox like the sort modes: choosing it never sticks.
     expect(item.hasAttribute('type')).toBe(false);
     expect(item.querySelector('sl-icon')?.getAttribute('aria-hidden')).toBe('true');
-    const trigger = el.shadowRoot.querySelector('.rail-toolbar .sort-btn') as HTMLElement;
+    const trigger = el.shadowRoot.querySelector('.rail-header .sort-btn') as HTMLElement;
+    expect(trigger).not.toBeNull();
+    expect(el.shadowRoot.querySelector('.rail-toolbar .sort-btn')).toBeNull();
     expect(trigger.getAttribute('slot')).toBe('trigger');
     expect(trigger.getAttribute('label')).toBe('Sort');
   });

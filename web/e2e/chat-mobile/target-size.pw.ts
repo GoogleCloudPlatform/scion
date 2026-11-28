@@ -91,9 +91,10 @@ test('@static the rail filter labels and title meet their mobile font-size minim
   expect(railTitle.fontSizePx).toBeGreaterThanOrEqual(MIN_RAIL_TITLE_FONT_PX);
 });
 
-for (const filterIndex of [0, 1] as const) {
-  const filterName = filterIndex === 0 ? 'All' : 'Unread';
-
+for (const { filterName, selector } of [
+  { filterName: 'All', selector: '.rail-toolbar .filter-toggle > button:first-of-type' },
+  { filterName: 'Unread', selector: '.rail-toolbar .filter-toggle [data-unread-filter-main]' },
+] as const) {
   test(`@static the ${filterName} filter button is a real 44px hit area, not clipped`, async ({
     page,
   }, testInfo) => {
@@ -108,30 +109,26 @@ for (const filterIndex of [0, 1] as const) {
     // claimed edge would actually hit. Both segments share the same
     // ancestor and CSS, so both are checked here — a rule scoped to one
     // cannot hide behind the other passing.
-    const box = await computedBoxDeepRetrying(
-      page,
-      `.rail-toolbar .filter-toggle button:nth-of-type(${filterIndex + 1})`
-    );
+    const box = await computedBoxDeepRetrying(page, selector);
     expect(box.heightPx).toBeGreaterThanOrEqual(MIN_ROW_PX);
 
     let hitsNearTop = false;
     let hitsNearBottom = false;
     await expect(async () => {
-      const result = await page.evaluate((index) => {
-        const findIn = (root: ParentNode, sel: string): Element | null => {
-          const hit = root.querySelector(sel);
+      const result = await page.evaluate((sel) => {
+        const findIn = (root: ParentNode, s: string): Element | null => {
+          const hit = root.querySelector(s);
           if (hit) return hit;
           for (const el of root.querySelectorAll('*')) {
             if (el.shadowRoot) {
-              const nested = findIn(el.shadowRoot, sel);
+              const nested = findIn(el.shadowRoot, s);
               if (nested) return nested;
             }
           }
           return null;
         };
         const root = findIn(document, 'scion-chat-space-rail')?.shadowRoot;
-        const buttons = root ? [...root.querySelectorAll('.filter-toggle button')] : [];
-        const button = buttons[index] ?? null;
+        const button = root ? root.querySelector(sel) : null;
         if (!root || !button) return null;
         const rect = button.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
@@ -141,7 +138,7 @@ for (const filterIndex of [0, 1] as const) {
           hitsTop: atTop === button || button.contains(atTop),
           hitsBottom: atBottom === button || button.contains(atBottom),
         };
-      }, filterIndex);
+      }, selector);
       expect(result, 'the filter-toggle button was found').not.toBeNull();
       hitsNearTop = result!.hitsTop;
       hitsNearBottom = result!.hitsBottom;
