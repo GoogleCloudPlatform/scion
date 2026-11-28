@@ -104,13 +104,17 @@ export class ScionTimezonePicker extends LitElement {
   }
 
   override updated(): void {
+    const listbox = this.searchOpen
+      ? this.shadowRoot?.getElementById('timezone-picker-listbox')
+      : null;
+    const activeOption =
+      this.searchOpen && this.activeDescendantIndex >= 0
+        ? this.shadowRoot?.getElementById(`timezone-picker-option-${this.activeDescendantIndex}`)
+        : null;
     syncSlInputComboboxAria(this.shadowRoot?.querySelector('sl-input'), {
       expanded: this.searchOpen,
-      controls: 'timezone-picker-listbox',
-      activeDescendant:
-        this.activeDescendantIndex >= 0
-          ? `timezone-picker-option-${this.activeDescendantIndex}`
-          : undefined,
+      controls: listbox,
+      activeDescendant: activeOption,
     });
   }
 

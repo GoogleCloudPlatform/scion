@@ -25,6 +25,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import type { AriaComboboxInputElement } from '../../utils/sl-input-combobox-aria.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let TimezonePickerCtor: any;
@@ -63,23 +64,33 @@ describe('scion-timezone-picker', () => {
 
     // Attach a shadow-DOM <input> matching Shoelace's upgraded <sl-input>
     // structure and verify collapsed and expanded states.
-    const inner = document.createElement('input');
+    const inner = document.createElement('input') as AriaComboboxInputElement;
     slInput!.attachShadow({ mode: 'open' }).appendChild(inner);
     el.requestUpdate();
     await el.updateComplete;
 
     expect(inner.getAttribute('role')).toBe('combobox');
     expect(inner.getAttribute('aria-expanded')).toBe('false');
-    expect(inner.getAttribute('aria-controls')).toBe('timezone-picker-listbox');
+    expect(inner.hasAttribute('aria-controls')).toBe(false);
+    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
+    expect(inner.ariaControlsElements).toBeNull();
+    expect(inner.ariaActiveDescendantElement).toBeNull();
 
     (el as Record<string, unknown>)['searchOpen'] = true;
     (el as Record<string, unknown>)['activeDescendantIndex'] = 1;
     el.requestUpdate();
     await el.updateComplete;
 
+    const listbox = el.shadowRoot?.getElementById('timezone-picker-listbox');
+    const option1 = el.shadowRoot?.getElementById('timezone-picker-option-1');
+    expect(listbox).not.toBeNull();
+    expect(option1).not.toBeNull();
     expect(slInput?.hasAttribute('aria-expanded')).toBe(false);
     expect(inner.getAttribute('aria-expanded')).toBe('true');
-    expect(inner.getAttribute('aria-activedescendant')).toBe('timezone-picker-option-1');
+    expect(inner.hasAttribute('aria-controls')).toBe(false);
+    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
+    expect(inner.ariaControlsElements).toEqual([listbox]);
+    expect(inner.ariaActiveDescendantElement).toBe(option1);
 
     (el as Record<string, unknown>)['searchOpen'] = false;
     (el as Record<string, unknown>)['activeDescendantIndex'] = -1;
@@ -87,7 +98,8 @@ describe('scion-timezone-picker', () => {
     await el.updateComplete;
 
     expect(inner.getAttribute('aria-expanded')).toBe('false');
-    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
+    expect(inner.ariaControlsElements).toBeNull();
+    expect(inner.ariaActiveDescendantElement).toBeNull();
   });
 
   it('displays the current value as the input text', async () => {

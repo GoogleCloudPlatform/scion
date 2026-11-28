@@ -16,11 +16,28 @@
 
 /**
  * Combobox ARIA state to forward onto a Shoelace `<sl-input>`'s inner `<input>`.
+ *
+ * `controls` and `activeDescendant` take DOM element references (not ID strings)
+ * because the listbox and options live in the picker's shadow tree while the
+ * inner `<input>` lives inside `<sl-input>`'s shadow root; IDREF strings cannot
+ * resolve across shadow boundaries, whereas ARIA element reflection
+ * (`ariaControlsElements` / `ariaActiveDescendantElement`) can reference
+ * elements in a shadow-including ancestor's tree.
  */
 export interface SlInputComboboxAriaState {
   expanded: boolean;
-  controls?: string | undefined;
-  activeDescendant?: string | undefined;
+  controls?: Element | null | undefined;
+  activeDescendant?: Element | null | undefined;
+}
+
+/**
+ * `HTMLInputElement` augmented with the ARIA element-reflection properties
+ * (`ariaControlsElements` / `ariaActiveDescendantElement`), which are not yet
+ * declared in TypeScript 5.3's `lib.dom.d.ts`.
+ */
+export interface AriaComboboxInputElement extends HTMLInputElement {
+  ariaControlsElements: Element[] | null;
+  ariaActiveDescendantElement: Element | null;
 }
 
 const latestState = new WeakMap<Element, SlInputComboboxAriaState>();
@@ -31,27 +48,31 @@ function applyComboboxAria(input: HTMLInputElement, state: SlInputComboboxAriaSt
   input.setAttribute('aria-autocomplete', 'list');
   input.setAttribute('aria-expanded', state.expanded ? 'true' : 'false');
 
-  if (state.controls) {
-    input.setAttribute('aria-controls', state.controls);
-  } else {
+  // Remove any string IDREF attributes before applying element reflection so
+  // removing a content attribute cannot clear the reflected element references.
+  if (input.hasAttribute('aria-controls')) {
     input.removeAttribute('aria-controls');
   }
-
-  if (state.activeDescendant) {
-    input.setAttribute('aria-activedescendant', state.activeDescendant);
-  } else {
+  if (input.hasAttribute('aria-activedescendant')) {
     input.removeAttribute('aria-activedescendant');
   }
+
+  const ariaInput = input as AriaComboboxInputElement;
+  ariaInput.ariaControlsElements = state.controls ? [state.controls] : null;
+  ariaInput.ariaActiveDescendantElement = state.activeDescendant ?? null;
 }
 
 /**
- * Forward combobox ARIA attributes onto a Shoelace `<sl-input>`'s shadow-DOM
+ * Forward combobox ARIA state onto a Shoelace `<sl-input>`'s shadow-DOM
  * `<input>` element.
  *
  * Shoelace does not forward host `role` or `aria-expanded` attributes to its
  * inner `<input>`, so placing them on `<sl-input>` leaves assistive technology
- * without combobox state. If the `<sl-input>` has not finished its initial Lit
- * render yet, the latest state is applied once `updateComplete` resolves.
+ * without combobox state. Listbox (`controls`) and option (`activeDescendant`)
+ * relations are set via ARIA element reflection (`ariaControlsElements` and
+ * `ariaActiveDescendantElement`) so they resolve across `<sl-input>`'s shadow
+ * root boundary. If the `<sl-input>` has not finished its initial Lit render
+ * yet, the latest state is applied once `updateComplete` resolves.
  */
 export function syncSlInputComboboxAria(
   slInput: Element | null | undefined,

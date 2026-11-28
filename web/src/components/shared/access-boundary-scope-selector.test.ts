@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import type { AriaComboboxInputElement } from '../../utils/sl-input-combobox-aria.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScopeSelectorCtor: any;
@@ -46,23 +47,36 @@ describe('scion-access-boundary-scope-selector', () => {
 
     // Attach a shadow-DOM <input> matching Shoelace's upgraded <sl-input>
     // structure and verify collapsed and expanded states.
-    const inner = document.createElement('input');
+    const inner = document.createElement('input') as AriaComboboxInputElement;
     slInput!.attachShadow({ mode: 'open' }).appendChild(inner);
     el.requestUpdate();
     await el.updateComplete;
 
     expect(inner.getAttribute('role')).toBe('combobox');
     expect(inner.getAttribute('aria-expanded')).toBe('false');
-    expect(inner.getAttribute('aria-controls')).toBe('project-search-listbox');
+    expect(inner.hasAttribute('aria-controls')).toBe(false);
+    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
+    expect(inner.ariaControlsElements).toBeNull();
+    expect(inner.ariaActiveDescendantElement).toBeNull();
 
+    (el as Record<string, unknown>)['projectSearchResults'] = [
+      { id: 'proj-1', name: 'Alpha Project', slug: 'alpha-project' },
+    ];
     (el as Record<string, unknown>)['projectSearchOpen'] = true;
     (el as Record<string, unknown>)['activeDescendantIndex'] = 0;
     el.requestUpdate();
     await el.updateComplete;
 
+    const listbox = el.shadowRoot?.getElementById('project-search-listbox');
+    const option0 = el.shadowRoot?.getElementById('project-option-0');
+    expect(listbox).not.toBeNull();
+    expect(option0).not.toBeNull();
     expect(slInput?.hasAttribute('aria-expanded')).toBe(false);
     expect(inner.getAttribute('aria-expanded')).toBe('true');
-    expect(inner.getAttribute('aria-activedescendant')).toBe('project-option-0');
+    expect(inner.hasAttribute('aria-controls')).toBe(false);
+    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
+    expect(inner.ariaControlsElements).toEqual([listbox]);
+    expect(inner.ariaActiveDescendantElement).toBe(option0);
 
     (el as Record<string, unknown>)['projectSearchOpen'] = false;
     (el as Record<string, unknown>)['activeDescendantIndex'] = -1;
@@ -70,6 +84,7 @@ describe('scion-access-boundary-scope-selector', () => {
     await el.updateComplete;
 
     expect(inner.getAttribute('aria-expanded')).toBe('false');
-    expect(inner.hasAttribute('aria-activedescendant')).toBe(false);
+    expect(inner.ariaControlsElements).toBeNull();
+    expect(inner.ariaActiveDescendantElement).toBeNull();
   });
 });

@@ -291,13 +291,17 @@ export class ScionProjectPicker extends LitElement {
       }
     }
 
+    const listbox = this.searchOpen
+      ? this.shadowRoot?.getElementById('project-picker-listbox')
+      : null;
+    const activeOption =
+      this.searchOpen && this.activeDescendantIndex >= 0
+        ? this.shadowRoot?.getElementById(`project-picker-option-${this.activeDescendantIndex}`)
+        : null;
     syncSlInputComboboxAria(this.shadowRoot?.querySelector('sl-input'), {
       expanded: this.searchOpen,
-      controls: 'project-picker-listbox',
-      activeDescendant:
-        this.activeDescendantIndex >= 0
-          ? `project-picker-option-${this.activeDescendantIndex}`
-          : undefined,
+      controls: listbox,
+      activeDescendant: activeOption,
     });
   }
 

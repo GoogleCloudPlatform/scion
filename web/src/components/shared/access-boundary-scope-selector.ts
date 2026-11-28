@@ -71,13 +71,17 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
 
   override updated(): void {
     if (this.scopeType === 'project') {
+      const listbox = this.projectSearchOpen
+        ? this.shadowRoot?.getElementById('project-search-listbox')
+        : null;
+      const activeOption =
+        this.projectSearchOpen && this.activeDescendantIndex >= 0
+          ? this.shadowRoot?.getElementById(`project-option-${this.activeDescendantIndex}`)
+          : null;
       syncSlInputComboboxAria(this.shadowRoot?.querySelector('sl-input'), {
         expanded: this.projectSearchOpen,
-        controls: 'project-search-listbox',
-        activeDescendant:
-          this.activeDescendantIndex >= 0
-            ? `project-option-${this.activeDescendantIndex}`
-            : undefined,
+        controls: listbox,
+        activeDescendant: activeOption,
       });
     }
   }
