@@ -253,10 +253,17 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 		return nil, fmt.Errorf("failed to finalize upload: %w", err)
 	}
 
-	// Get object attributes
-	attrs, err := obj.Attrs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get object attributes: %w", err)
+	// Read attributes from the writer rather than calling obj.Attrs(ctx):
+	// obj may carry a write precondition (e.g. DoesNotExist / GenerationMatch)
+	// that no longer holds once the write has committed, causing GCS to reject
+	// a conditioned metadata GET with 412.
+	attrs := writer.Attrs()
+	if attrs == nil {
+		var err error
+		attrs, err = s.bucket.Object(objectPath).Attrs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get object attributes: %w", err)
+		}
 	}
 
 	return &Object{

@@ -25,10 +25,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1346,4 +1349,214 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 			assert.True(t, strings.HasPrefix(gotURL, tc.wantPrefix), "got %q, want prefix %q", gotURL, tc.wantPrefix)
 		})
 	}
+}
+
+// gcsNoSignBlobWrapper embeds a real *storage.GCSStorage while failing
+// GenerateSignedURL locally so tests exercise the Hub-proxied PUT + real GCS
+// Upload/Download path without contacting IAM Credentials over the network.
+type gcsNoSignBlobWrapper struct {
+	*storage.GCSStorage
+}
+
+func (g *gcsNoSignBlobWrapper) GenerateSignedURL(context.Context, string, storage.SignedURLOptions) (*storage.SignedURL, error) {
+	return nil, errors.New("signBlob unavailable")
+}
+
+// TestTrajectorySegments_GCSConditionalCommitSucceedsFirstAttempt exercises
+// the real storage.GCSStorage against an in-process fake GCS server that
+// enforces ifGenerationMatch preconditions on both uploads and metadata GETs
+// (rejecting conditioned GETs with 412 like real GCS). Both the Hub-proxied
+// content PUT and the segments:commit manifest write use IfGenerationMatch=0
+// and must succeed on the very first attempt.
+func TestTrajectorySegments_GCSConditionalCommitSucceedsFirstAttempt(t *testing.T) {
+	type storedObj struct {
+		data        []byte
+		contentType string
+		generation  int64
+		metadata    map[string]string
+	}
+	var (
+		mu      sync.Mutex
+		objects = make(map[string]*storedObj)
+		nextGen int64
+	)
+	write412 := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = w.Write([]byte(`{"error":{"code":412,"message":"At least one of the pre-conditions you specified did not hold."}}`))
+	}
+	writeObjJSON := func(w http.ResponseWriter, name string, o *storedObj) {
+		resp := map[string]any{
+			"bucket":      "test-bucket",
+			"name":        name,
+			"generation":  strconv.FormatInt(o.generation, 10),
+			"size":        strconv.FormatInt(int64(len(o.data)), 10),
+			"contentType": o.contentType,
+			"etag":        "etag-" + strconv.FormatInt(o.generation, 10),
+			"timeCreated": "2026-11-28T16:00:00Z",
+			"updated":     "2026-11-28T16:00:00Z",
+		}
+		if len(o.metadata) > 0 {
+			resp["metadata"] = o.metadata
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+
+	fakeGCS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/upload/") {
+			mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			var (
+				name        = r.URL.Query().Get("name")
+				contentType = r.Header.Get("Content-Type")
+				metadata    map[string]string
+				data        []byte
+			)
+			if err == nil && strings.HasPrefix(mediaType, "multipart/") {
+				mr := multipart.NewReader(r.Body, params["boundary"])
+				p1, err := mr.NextPart()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				var meta struct {
+					Name        string            `json:"name"`
+					ContentType string            `json:"contentType"`
+					Metadata    map[string]string `json:"metadata"`
+				}
+				if err := json.NewDecoder(p1).Decode(&meta); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if meta.Name != "" {
+					name = meta.Name
+				}
+				contentType = meta.ContentType
+				metadata = meta.Metadata
+				p2, err := mr.NextPart()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				data, _ = io.ReadAll(p2)
+			} else {
+				data, _ = io.ReadAll(r.Body)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if r.URL.Query().Get("ifGenerationMatch") == "0" && objects[name] != nil {
+				write412(w)
+				return
+			}
+			nextGen++
+			o := &storedObj{
+				data:        data,
+				contentType: contentType,
+				generation:  nextGen,
+				metadata:    metadata,
+			}
+			objects[name] = o
+			writeObjJSON(w, name, o)
+			return
+		}
+
+		// JSON API metadata GET (or alt=media): /storage/v1/b/<bucket>/o/<object>
+		if idx := strings.Index(r.URL.Path, "/o/"); strings.HasPrefix(r.URL.Path, "/storage/v1/") && idx >= 0 {
+			rawName := r.URL.Path[idx+len("/o/"):]
+			name, err := url.PathUnescape(rawName)
+			if err != nil {
+				name = rawName
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			o := objects[name]
+			if r.URL.Query().Get("ifGenerationMatch") == "0" && o != nil {
+				write412(w)
+				return
+			}
+			if o == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":404,"message":"No such object"}}`))
+				return
+			}
+			if r.URL.Query().Get("alt") == "media" {
+				w.Header().Set("Content-Type", o.contentType)
+				w.Header().Set("X-Goog-Generation", strconv.FormatInt(o.generation, 10))
+				_, _ = w.Write(o.data)
+				return
+			}
+			writeObjJSON(w, name, o)
+			return
+		}
+
+		// XML API download: /<bucket>/<object>
+		const bucketPrefix = "/test-bucket/"
+		if strings.HasPrefix(r.URL.Path, bucketPrefix) {
+			name := strings.TrimPrefix(r.URL.Path, bucketPrefix)
+			mu.Lock()
+			o := objects[name]
+			mu.Unlock()
+			if o == nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", o.contentType)
+			w.Header().Set("X-Goog-Generation", strconv.FormatInt(o.generation, 10))
+			_, _ = w.Write(o.data)
+			return
+		}
+
+		http.Error(w, "unexpected GCS request: "+r.Method+" "+r.URL.String(), http.StatusBadRequest)
+	}))
+	t.Cleanup(fakeGCS.Close)
+
+	t.Setenv("STORAGE_EMULATOR_HOST", strings.TrimPrefix(fakeGCS.URL, "http://"))
+	gcs, err := storage.NewGCS(context.Background(), storage.Config{
+		Provider: storage.ProviderGCS,
+		Bucket:   "test-bucket",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = gcs.Close() })
+
+	srv, _, _, _, agent, tok := setupTrajectorySegmentFixture(t)
+	srv.SetStorage(&gcsNoSignBlobWrapper{GCSStorage: gcs})
+
+	raw := []byte("{\"msg\":\"first-attempt-gcs\"}\n")
+	comp, rawSHA, compSHA := gzipAndHash(t, raw)
+
+	prepReq := telemetrycontract.TrajectorySegmentPrepareRequest{
+		Harness:            "claude",
+		NativeRelativePath: ".claude/projects/-workspace/gcs-first.jsonl",
+		ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+		Generation:         0,
+		ByteStart:          0,
+		ByteEnd:            int64(len(raw)),
+		RawSHA256:          rawSHA,
+		CompressedSize:     int64(len(comp)),
+		CompressedSHA256:   compSHA,
+		ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
+	}
+
+	prepRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, prepReq)
+	require.Equal(t, http.StatusOK, prepRec.Code, prepRec.Body.String())
+
+	var prepResp telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(prepRec.Body.Bytes(), &prepResp))
+	require.NotNil(t, prepResp.Upload)
+
+	putRec := doTrajectoryAgentPut(t, srv, prepResp.Upload.URL, tok, comp, prepResp.Upload.Headers)
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+
+	commitRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
+		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepResp.SegmentID})
+	require.Equal(t, http.StatusOK, commitRec.Code, commitRec.Body.String())
+
+	mu.Lock()
+	objCount := len(objects)
+	mu.Unlock()
+	assert.Equal(t, 2, objCount, "expected both raw segment and commit manifest objects in fake GCS")
 }
