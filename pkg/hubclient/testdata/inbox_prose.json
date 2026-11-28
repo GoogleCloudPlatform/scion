@@ -124,6 +124,75 @@
       ]
     },
     {
+      "name": "agent_executions empty",
+      "category": "agent_executions",
+      "count": 0,
+      "capped": false,
+      "breakdown": { "agents": 0, "projects": 0 },
+      "expected": "Nothing Waiting",
+      "segments": null
+    },
+    {
+      "name": "agent_executions singular",
+      "category": "agent_executions",
+      "count": 1,
+      "capped": false,
+      "breakdown": { "agents": 1, "projects": 1 },
+      "expected": "1 execution request from 1 agent in 1 project",
+      "segments": [
+        { "text": "1 execution request", "link": "primary" },
+        { "text": " from 1 agent in 1 project" }
+      ]
+    },
+    {
+      "name": "agent_executions plural",
+      "category": "agent_executions",
+      "count": 3,
+      "capped": false,
+      "breakdown": { "agents": 2, "projects": 1 },
+      "expected": "3 execution requests from 2 agents in 1 project",
+      "segments": [
+        { "text": "3 execution requests", "link": "primary" },
+        { "text": " from 2 agents in 1 project" }
+      ]
+    },
+    {
+      "name": "agent_executions plural capped",
+      "category": "agent_executions",
+      "count": 50,
+      "capped": true,
+      "breakdown": { "agents": 4, "projects": 2 },
+      "expected": "50+ execution requests from 4 agents in 2 projects",
+      "segments": [
+        { "text": "50+ execution requests", "link": "primary" },
+        { "text": " from 4 agents in 2 projects" }
+      ]
+    },
+    {
+      "name": "agent_executions drops zero agents",
+      "category": "agent_executions",
+      "count": 2,
+      "capped": false,
+      "breakdown": { "agents": 0, "projects": 1 },
+      "expected": "2 execution requests in 1 project",
+      "segments": [
+        { "text": "2 execution requests", "link": "primary" },
+        { "text": " in 1 project" }
+      ]
+    },
+    {
+      "name": "agent_executions drops zero projects",
+      "category": "agent_executions",
+      "count": 2,
+      "capped": false,
+      "breakdown": { "agents": 2, "projects": 0 },
+      "expected": "2 execution requests from 2 agents",
+      "segments": [
+        { "text": "2 execution requests", "link": "primary" },
+        { "text": " from 2 agents" }
+      ]
+    },
+    {
       "name": "waiting empty",
       "category": "waiting",
       "count": 0,

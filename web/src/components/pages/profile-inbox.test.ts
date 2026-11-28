@@ -147,6 +147,11 @@ describe('<scion-page-profile-inbox>', () => {
         href: '/profile/agent-secrets',
         breakdown: { agents: 2, projects: 1, secretsProjects: 2 },
       }),
+      agent_executions: makeCat({
+        count: 3,
+        href: '/profile/agent-executions',
+        breakdown: { agents: 2, projects: 1 },
+      }),
       waiting: makeCat({
         count: 2,
         href: '/agents?q=activity%3Awaiting_for_input',
@@ -199,6 +204,7 @@ describe('<scion-page-profile-inbox>', () => {
     expect(cards.map((c) => c.getAttribute('data-inbox-card'))).toEqual([
       'decisions',
       'secrets',
+      'executions',
       'waiting',
       'reviews',
       'chat',
@@ -261,6 +267,13 @@ describe('<scion-page-profile-inbox>', () => {
         { text: '5 secret requests', href: '/profile/agent-secrets' },
         { text: '50+ pending secrets', href: '/profile/secrets' },
       ]
+    );
+    checkCard(
+      'executions',
+      'Agent Executions',
+      '3',
+      '3 execution requests from 2 agents in 1 project',
+      [{ text: '3 execution requests', href: '/profile/agent-executions' }]
     );
     checkCard('waiting', 'Agents Waiting', '2', '2 agents waiting in 1 project', [
       { text: '2 agents waiting', href: '/agents?q=activity%3Awaiting_for_input' },
@@ -782,5 +795,87 @@ describe('<scion-page-profile-inbox>', () => {
       { text: '2 reviews requested', href: '/artifacts?requested=1' },
       { text: '3 unfinished drafts', href: '/artifacts?drafts=1' },
     ]);
+  });
+
+  it('Agent Executions card hides when disabled, shows Nothing Waiting at 0, and shows sign-in note when unavailable (AC-10)', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    // 1. disabled -> card hidden
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeSummary({
+            agent_executions: makeCat({
+              state: 'disabled',
+              count: 0,
+              countsTowardTotal: false,
+              href: '/profile/agent-executions',
+            }),
+          })
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const page1 = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page1);
+    await flush();
+    await page1.updateComplete;
+    expect(page1.shadowRoot?.querySelector('[data-inbox-card="executions"]')).toBeNull();
+    page1.remove();
+    inboxSummaryStore.resetForTests();
+
+    // 2. ok with count 0 -> "Nothing Waiting", no badge, no links
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeSummary({
+            agent_executions: makeCat({
+              state: 'ok',
+              count: 0,
+              href: '/profile/agent-executions',
+              breakdown: { agents: 0, projects: 0 },
+            }),
+          })
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const page2 = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page2);
+    await flush();
+    await page2.updateComplete;
+    const card2 = page2.shadowRoot?.querySelector('[data-inbox-card="executions"]');
+    expect(card2).not.toBeNull();
+    expect(card2?.querySelector('[data-card-empty]')?.textContent?.trim()).toBe('Nothing Waiting');
+    expect(card2?.querySelector('[data-card-count]')).toBeNull();
+    expect(card2?.querySelector('a')).toBeNull();
+    page2.remove();
+    inboxSummaryStore.resetForTests();
+
+    // 3. unavailable -> sign-in note
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeSummary({
+            agent_executions: makeCat({
+              state: 'unavailable',
+              count: 0,
+              countsTowardTotal: false,
+              href: '/profile/agent-executions',
+            }),
+          })
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const page3 = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page3);
+    await flush();
+    await page3.updateComplete;
+    const card3 = page3.shadowRoot?.querySelector('[data-inbox-card="executions"]');
+    expect(card3?.querySelector('[data-card-unavailable]')?.textContent?.trim()).toBe(
+      'Not available with this sign-in'
+    );
+    expect(card3?.querySelector('a')).toBeNull();
   });
 });

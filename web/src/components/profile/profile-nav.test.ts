@@ -1152,6 +1152,7 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     inboxEnabled: boolean;
     decisionsEnabled?: boolean;
     agentSecretsEnabled?: boolean;
+    commandRequestsEnabled?: boolean;
     currentPath?: string;
     waitingOnYou?: number;
   }): Promise<HTMLElement & { updateComplete: Promise<boolean>; currentPath: string }> {
@@ -1171,6 +1172,9 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     }
     if (options.agentSecretsEnabled) {
       flags.setFeatureFlag(flags.AGENT_SECRETS_FLAG, true);
+    }
+    if (options.commandRequestsEnabled) {
+      flags.setFeatureFlag(flags.COMMAND_REQUESTS_FLAG, true);
     }
 
     vi.stubGlobal(
@@ -1254,6 +1258,10 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     await nav.updateComplete;
     expect(inboxLink()?.classList.contains('active')).toBe(true);
 
+    nav.currentPath = '/profile/agent-executions';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(true);
+
     nav.currentPath = '/profile/secrets';
     await nav.updateComplete;
     expect(inboxLink()?.classList.contains('active')).toBe(false);
@@ -1299,5 +1307,23 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     expect(agentSecretsLink).not.toBeNull();
     expect(agentSecretsLink?.getAttribute('href')).toBe('/profile/agent-secrets');
     expect(agentSecretsLink?.classList.contains('active')).toBe(true);
+  });
+
+  it('shows standalone Agent Executions nav item when Inbox is off and hub.command_requests is on (AC-14)', async () => {
+    const nav = await mountInboxNav({
+      inboxEnabled: false,
+      decisionsEnabled: false,
+      commandRequestsEnabled: true,
+      currentPath: '/profile/agent-executions',
+    });
+    element = nav;
+
+    expect(nav.shadowRoot?.querySelector('[data-inbox-nav-section]')).toBeNull();
+    const execLink = nav.shadowRoot?.querySelector<HTMLAnchorElement>(
+      '[data-agent-executions-nav-link]'
+    );
+    expect(execLink).not.toBeNull();
+    expect(execLink?.getAttribute('href')).toBe('/profile/agent-executions');
+    expect(execLink?.classList.contains('active')).toBe(true);
   });
 });

@@ -121,6 +121,7 @@ export interface SecretRequestCardResponse {
   intro?: string;
   rows: SecretRequestView[];
   canRespond: boolean;
+  promptAvailable?: boolean;
   reason?: string;
 }
 

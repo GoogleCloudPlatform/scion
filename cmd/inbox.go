@@ -50,6 +50,7 @@ const (
 var inboxCategoryOrder = []string{
 	hubclient.InboxCategoryDecisions,
 	inboxMergedSecretsKey,
+	hubclient.InboxCategoryAgentExecutions,
 	hubclient.InboxCategoryWaiting,
 	hubclient.InboxCategoryReviews,
 	hubclient.InboxCategoryChat,
@@ -90,12 +91,13 @@ func newInboxCmd() *cobra.Command {
 		Use:   "inbox",
 		Short: "Show a summary of items waiting on you across your projects",
 		Long: `Show a read-only summary of items waiting on you across your Hub projects:
-decisions, agents waiting for input, pending secrets, reviews, and unread chat
-conversations.
+decisions, secrets, agent execution requests, agents waiting for input,
+reviews, and unread chat conversations.
 
 Requires the web.inbox_dashboard experiment on the Hub. Under user access token
-(UAT) authentication, the token must carry the inbox:read scope; pending secrets
-are session-only and are shown as unavailable with a browser link.
+(UAT) authentication, the token must carry the inbox:read scope; secrets and
+agent execution requests are session-only and are shown as unavailable with a
+browser link.
 
 Examples:
   scion inbox
@@ -442,6 +444,8 @@ func inboxCategoryLabel(key string) string {
 		return "Decisions"
 	case hubclient.InboxCategoryAgentSecrets:
 		return "Agent Secrets"
+	case hubclient.InboxCategoryAgentExecutions:
+		return "Agent Executions"
 	case hubclient.InboxCategoryWaiting:
 		return "Agents Waiting"
 	case hubclient.InboxCategoryPendingSecrets:

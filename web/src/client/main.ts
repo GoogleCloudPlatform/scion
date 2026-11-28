@@ -705,6 +705,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-agent-secrets.js'),
   },
   {
+    pattern: /^\/profile\/agent-executions$/,
+    tag: 'scion-page-profile-agent-executions',
+    load: () => import('../components/pages/profile-agent-executions.js'),
+  },
+  {
     pattern: /^\/profile\/env$/,
     tag: 'scion-page-profile-env-vars',
     load: () => import('../components/pages/profile-env-vars.js'),
@@ -916,6 +921,7 @@ const PROFILE_ROUTES = new Set([
   'scion-page-profile-inbox',
   'scion-page-profile-decisions',
   'scion-page-profile-agent-secrets',
+  'scion-page-profile-agent-executions',
   'scion-page-profile-env-vars',
   'scion-page-profile-secrets',
   'scion-page-profile-settings',

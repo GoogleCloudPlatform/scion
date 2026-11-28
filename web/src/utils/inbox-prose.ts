@@ -144,6 +144,14 @@ export function formatInboxProseSegments(
         projects
       );
 
+    case 'agent_executions':
+      if (count <= 0) return 'nothing';
+      return primaryWithAgentsProjects(
+        formatCountNoun(count, capped, 'execution request', 'execution requests'),
+        agents,
+        projects
+      );
+
     case 'waiting': {
       if (count <= 0) return 'nothing';
       const segments: ProseSegment[] = [

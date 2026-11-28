@@ -60,7 +60,7 @@ import {
 import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
 import './not-found.js';
 
-export type InboxCardKey = 'decisions' | 'secrets' | 'waiting' | 'reviews' | 'chat';
+export type InboxCardKey = 'decisions' | 'secrets' | 'executions' | 'waiting' | 'reviews' | 'chat';
 
 export interface InboxCardConfig {
   key: InboxCardKey;
@@ -88,6 +88,13 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
     title: 'Secrets',
     descriptor: 'Secret requests from agents and secrets awaiting your approval',
     defaultHref: '/profile/secrets',
+  },
+  {
+    key: 'executions',
+    icon: 'terminal',
+    title: 'Agent Executions',
+    descriptor: 'Command execution requests from agents, awaiting your approval',
+    defaultHref: '/profile/agent-executions',
   },
   {
     key: 'waiting',
@@ -219,6 +226,9 @@ function resolveCardCategory(
 ): InboxCategory | null {
   if (cardKey === 'secrets') {
     return resolveMergedSecretsCategory(categories);
+  }
+  if (cardKey === 'executions') {
+    return categories.agent_executions ?? null;
   }
   return categories[cardKey] ?? null;
 }
@@ -552,9 +562,10 @@ export class ScionPageProfileInbox extends LitElement {
     if (cat.state === 'disabled') return nothing;
 
     const countText = cat.capped ? `${cat.count}+` : String(cat.count);
+    const proseCategory = card.key === 'executions' ? 'agent_executions' : card.key;
     const segments =
       cat.state === 'ok'
-        ? formatInboxProseSegments(card.key, cat.count, cat.capped, cat.breakdown)
+        ? formatInboxProseSegments(proseCategory, cat.count, cat.capped, cat.breakdown)
         : 'nothing';
 
     return html`

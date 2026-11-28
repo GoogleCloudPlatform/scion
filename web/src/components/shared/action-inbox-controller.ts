@@ -45,6 +45,8 @@ export const ACTION_INBOX_SEARCH_DEBOUNCE_MS = 250;
 export interface ActionInboxKindConfig<TCard> {
   /** Message-action kind name used to filter `message-action-updated` SSE events. */
   kind: string;
+  /** Inbox summary category key used to filter `inbox-changed` SSE hints. */
+  category: string;
   /** Entry in `INBOX_TABS` highlighted in the Inbox tab strip. */
   tabId: InboxTabId;
   /** Hub endpoint path (e.g. `'/api/v1/users/me/<kind-path>'`). */
@@ -108,6 +110,20 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       | undefined;
     const data = raw?.data ?? raw;
     if (data?.kind !== this.config.kind) return;
+    this.handleLiveHint();
+  };
+
+  private readonly onInboxChanged = (e: Event): void => {
+    if (!this.config || !this.config.isEnabled() || this.unavailable404) return;
+    const raw = (e as CustomEvent).detail as
+      | ({ data?: { category?: unknown } } & { category?: unknown })
+      | undefined;
+    const data = raw?.data ?? raw;
+    if (data?.category !== this.config.category) return;
+    this.handleLiveHint();
+  };
+
+  private handleLiveHint(): void {
     if (this.pagesLoaded > 1) {
       if (!this.hasNewActivity) {
         this.hasNewActivity = true;
@@ -116,7 +132,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       return;
     }
     this.scheduleLiveRefresh();
-  };
+  }
 
   private readonly onFeatureFlagsChanged = (): void => {
     this.host.requestUpdate();
@@ -169,6 +185,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
     this.hydrateFromUrl();
 
     stateManager.addEventListener('message-action-updated', this.onMessageActionUpdated);
+    stateManager.addEventListener('inbox-changed', this.onInboxChanged);
     if (typeof window !== 'undefined') {
       window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
     }
@@ -186,6 +203,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
     this.clearTimers();
 
     stateManager.removeEventListener('message-action-updated', this.onMessageActionUpdated);
+    stateManager.removeEventListener('inbox-changed', this.onInboxChanged);
     if (typeof window !== 'undefined') {
       window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
     }

@@ -749,4 +749,165 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await context.close();
     }
   });
+
+  test('Agent Executions card, /profile/agent-executions live refresh on thread request, and Open in chat link (ptone/scion#9698 AC-10, AC-12, AC-14, AC-16)', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      baseURL: hub.baseURL,
+      storageState: user.storageStatePath,
+    });
+    const page1 = await context.newPage();
+    const page2 = await context.newPage();
+    const pageErrors: string[] = [];
+    page1.on('pageerror', (err) => pageErrors.push(`page1: ${err.message}`));
+    page2.on('pageerror', (err) => pageErrors.push(`page2: ${err.message}`));
+
+    try {
+      // Page 1: /profile/inbox shows Agent Executions card after Secrets, initially empty.
+      await page1.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
+      const execCard = page1.locator('[data-inbox-card="executions"]');
+      await expect(execCard).toBeVisible({ timeout: 15_000 });
+      await expect(execCard.locator('.card-title')).toHaveText('Agent Executions');
+      await expect(execCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+        timeout: 10_000,
+      });
+
+      const cardOrder = await page1.evaluate(() => {
+        const inbox = document.querySelector('scion-page-profile-inbox');
+        return Array.from(inbox?.shadowRoot?.querySelectorAll('[data-inbox-card]') ?? []).map(
+          (el) => el.getAttribute('data-inbox-card')
+        );
+      });
+      const secretsIdx = cardOrder.indexOf('secrets');
+      const execIdx = cardOrder.indexOf('executions');
+      expect(secretsIdx).toBeGreaterThanOrEqual(0);
+      expect(execIdx).toBe(secretsIdx + 1);
+
+      // Page 2: /profile/agent-executions renders active tab, active sidebar Inbox link, and empty state.
+      await page2.goto('/profile/agent-executions', { waitUntil: 'domcontentloaded' });
+      const actionPage = page2.locator('scion-page-profile-agent-executions');
+      await expect(actionPage).toBeVisible({ timeout: 15_000 });
+      await expect(actionPage.locator('[data-inbox-tab="agent-executions"]')).toHaveAttribute(
+        'aria-current',
+        'page',
+        { timeout: 10_000 }
+      );
+      await expect(
+        page2.locator('scion-profile-nav').first().locator('[data-inbox-nav-link]')
+      ).toHaveClass(/active/);
+      await expect(actionPage.locator('[data-action-empty]')).toContainText('Nothing Waiting', {
+        timeout: 10_000,
+      });
+
+      // Plant sentinels to verify live updates happen without reload.
+      await page1.evaluate(() => {
+        (window as unknown as { __execSentinel?: string }).__execSentinel = 'alive';
+      });
+      await page2.evaluate(() => {
+        (window as unknown as { __execSentinel?: string }).__execSentinel = 'alive';
+      });
+
+      // Create a project thread (as user so user is a participant) and send a structured command request from the agent targeting user.
+      const threadName = `exec-live-${Date.now()}`;
+      const threadRes = await hubApi<{ id: string }>(
+        hub,
+        user.accessToken,
+        'POST',
+        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`,
+        { name: threadName }
+      );
+      expect(threadRes.status, JSON.stringify(threadRes.body)).toBeLessThan(300);
+      const topicId = threadRes.body.id;
+
+      const sendRes = await agent.request<{
+        message_id?: string;
+        command_request?: { rowId?: string };
+      }>(`/api/v1/agents/${encodeURIComponent(agent.id)}/outbound-message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversation_ref: `#${threadName}`,
+          msg: 'Please approve this command request.',
+          command_request: {
+            key: `e2e-exec-${Date.now()}`,
+            description: 'Echo E2E verification',
+            script: 'echo e2e-ok',
+            approver: user.user.email,
+          },
+        }),
+      });
+      expect(sendRes.status, sendRes.text).toBeLessThan(300);
+
+      // Page 1 (/profile/inbox) live-updates without reload: count 1, prose, inline link.
+      await expect(execCard.locator('[data-card-count]')).toHaveText('1', { timeout: 7_000 });
+      await expect(execCard.locator('[data-card-prose]')).toHaveText(
+        '1 execution request from 1 agent in 1 project',
+        { timeout: 7_000 }
+      );
+      const execLink = execCard.locator('a.card-prose-link');
+      await expect(execLink).toHaveCount(1);
+      await expect(execLink).toHaveText('1 execution request');
+      await expect(execLink).toHaveAttribute('href', '/profile/agent-executions');
+
+      // Page 2 (/profile/agent-executions) live-updates via inbox-changed without reload.
+      const cardEl = actionPage.locator('[data-command-request-card]').first();
+      await expect(cardEl).toBeVisible({ timeout: 7_000 });
+      const rowId = (await cardEl.getAttribute('data-command-request-card')) ?? '';
+      expect(rowId).toBeTruthy();
+
+      const openInChat = cardEl.locator('[data-open-in-chat]');
+      await expect(openInChat).toBeVisible();
+      const chatHref = (await openInChat.getAttribute('href')) ?? '';
+      expect(chatHref).toMatch(new RegExp(`^/chat/space/${projectId}/thread/${topicId}#msg-.+`));
+
+      // Dismiss the request from Page 1's session (simulating another tab) -> both pages update live.
+      const dismissStatus = await page1.evaluate(async (id) => {
+        const res = await fetch(`/api/v1/command-requests/${encodeURIComponent(id)}/dismiss`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            surface: 'standalone_page',
+            idempotency_key: `e2e-dismiss-${Date.now()}`,
+          }),
+        });
+        return res.status;
+      }, rowId);
+      expect(dismissStatus).toBe(200);
+
+      // Page 1 returns to "Nothing Waiting" and Page 2 Open tab empties without reload.
+      await expect(execCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+        timeout: 7_000,
+      });
+      await expect(execCard.locator('[data-card-count]')).toHaveCount(0, { timeout: 7_000 });
+      await expect(actionPage.locator('[data-action-empty]')).toContainText('Nothing Waiting', {
+        timeout: 7_000,
+      });
+
+      // Confirm neither tab reloaded.
+      expect(
+        await page1.evaluate(
+          () => (window as unknown as { __execSentinel?: string }).__execSentinel
+        )
+      ).toBe('alive');
+      expect(
+        await page2.evaluate(
+          () => (window as unknown as { __execSentinel?: string }).__execSentinel
+        )
+      ).toBe('alive');
+
+      // Switch to Resolved tab on Page 2, confirm dismissed card appears, and click Open in chat.
+      await actionPage.locator('[data-action-tab="resolved"]').click();
+      const resolvedCard = actionPage.locator(`[data-command-request-card="${rowId}"]`);
+      await expect(resolvedCard).toBeVisible({ timeout: 10_000 });
+      await resolvedCard.locator('[data-open-in-chat]').click();
+      await expect(page2).toHaveURL(new RegExp(`/chat/space/${projectId}/thread/${topicId}`), {
+        timeout: 15_000,
+      });
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
 });
