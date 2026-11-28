@@ -150,6 +150,21 @@ describe('Markdown Execute on fenced shell blocks (§4.14, AC-F9)', () => {
       expect(sha).toContain(expectedHash);
     });
 
+    // Confirm dialog also organizes content into What Runs & Execution Environment sections.
+    expect(
+      dialog!.shadowRoot?.querySelector('[data-testid="section-what-runs"] .command-section-label')
+        ?.textContent
+    ).toBe('What Runs');
+    expect(
+      dialog!.shadowRoot?.querySelector('[data-testid="section-exec-env"] .command-section-label')
+        ?.textContent
+    ).toBe('Execution Environment');
+    const dialogCrumb = dialog!.shadowRoot?.querySelector(
+      '[data-testid="exec-container-breadcrumb"]'
+    );
+    expect(dialogCrumb?.textContent).toContain('alpha');
+    expect(dialogCrumb?.textContent).toContain('alice-shell');
+
     const shareCheckbox = dialog!.shadowRoot?.querySelector(
       '[data-testid="confirm-share-output-checkbox"]'
     ) as HTMLElement & { checked?: boolean };
