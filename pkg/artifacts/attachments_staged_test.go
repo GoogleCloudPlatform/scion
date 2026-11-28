@@ -109,7 +109,7 @@ func TestCreateAttachmentFromStaged_HappyPathAndIdempotentRetry(t *testing.T) {
 	}
 
 	// Staging prefix should have been cleaned up best-effort.
-	exists, err := guard.LocalStorage.Exists(ctx, part0)
+	exists, err := guard.Exists(ctx, part0)
 	if err != nil {
 		t.Fatalf("Exists(part0): %v", err)
 	}
