@@ -115,6 +115,14 @@ type GenerationDeleter interface {
 	DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error
 }
 
+// Composer is implemented by providers that can concatenate existing objects
+// within the bucket into a destination object (ptone/scion#8654 §3.6).
+type Composer interface {
+	// Compose concatenates srcs, in order, into dst within the bucket,
+	// overwriting any existing object at dst.
+	Compose(ctx context.Context, dst string, srcs []string, opts UploadOptions) (*Object, error)
+}
+
 // ContentLengthRange bounds the allowed byte length of a signed PUT upload.
 // When Min == Max, the object store enforces an exact body size.
 type ContentLengthRange struct {

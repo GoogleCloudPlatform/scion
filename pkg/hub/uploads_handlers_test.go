@@ -105,7 +105,7 @@ func TestWorkspaceUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 	setLargeUploadsExperiment(t, srv, true)
 	project, wsPath := createTestHubManagedProject(t, srv, "Uploads Happy")
 
-	payload := bytes.Repeat([]byte("scion-large-upload-test-"), 200) // 4800 bytes
+	payload := bytes.Repeat([]byte("scion-large-upload-test-01234567"), (uploadMinChunkBytes/32)+64) // 1 MiB + 2 KiB
 	wantSum := sha256.Sum256(payload)
 	wantHex := hex.EncodeToString(wantSum[:])
 
@@ -128,13 +128,13 @@ func TestWorkspaceUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 	assert.Equal(t, srv.WorkspaceUploadMaxFileBytes(context.Background()), started.MaxBytes)
 	assert.Positive(t, started.ChunkBytes)
 
-	// 2. Chunk 1 (first 2000 bytes)
+	// 2. Chunk 1 (1 MiB non-final chunk)
 	chunkURL := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
-	c1 := doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:2000])
+	c1 := doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:uploadMinChunkBytes])
 	require.Equal(t, http.StatusOK, c1.Code, "body: %s", c1.Body.String())
 	var c1Resp UploadChunkResponse
 	require.NoError(t, json.Unmarshal(c1.Body.Bytes(), &c1Resp))
-	assert.Equal(t, int64(2000), c1Resp.Received)
+	assert.Equal(t, int64(uploadMinChunkBytes), c1Resp.Received)
 
 	// Partial file exists on disk but is hidden from workspace file listing.
 	partialDisk := filepath.Join(wsPath, "nested", "dir", uploadPartialName(started.ID))
@@ -150,8 +150,8 @@ func TestWorkspaceUploads_HappyPathSHA256AndPartialHidden(t *testing.T) {
 		assert.False(t, isUploadPartialName(filepath.Base(f.Path)), "partial leaked into listing: %s", f.Path)
 	}
 
-	// 3. Chunk 2 (remaining bytes)
-	c2 := doChunkPut(t, srv, "", chunkURL+"?offset=2000", payload[2000:])
+	// 3. Chunk 2 (remaining 2 KiB final short chunk)
+	c2 := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), payload[uploadMinChunkBytes:])
 	require.Equal(t, http.StatusOK, c2.Code, "body: %s", c2.Body.String())
 	var c2Resp UploadChunkResponse
 	require.NoError(t, json.Unmarshal(c2.Body.Bytes(), &c2Resp))
@@ -184,7 +184,7 @@ func TestWorkspaceUploads_OffsetMismatchResumeAndNoExpiryExtension(t *testing.T)
 	setLargeUploadsExperiment(t, srv, true)
 	project, wsPath := createTestHubManagedProject(t, srv, "Uploads Resume")
 
-	payload := []byte("0123456789abcdef")
+	payload := append(bytes.Repeat([]byte("0123456789abcdef"), uploadMinChunkBytes/16), []byte("tail-bytes")...)
 	startRec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
 		UploadStartRequest{Name: "res.bin", Path: "res.bin", Size: int64(len(payload)), Overwrite: true})
@@ -193,8 +193,8 @@ func TestWorkspaceUploads_OffsetMismatchResumeAndNoExpiryExtension(t *testing.T)
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	chunkURL := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
 
-	// Upload first 6 bytes.
-	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:6]).Code)
+	// Upload first 1 MiB chunk.
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:uploadMinChunkBytes]).Code)
 
 	origSess, err := st.GetUploadSession(context.Background(), started.ID)
 	require.NoError(t, err)
@@ -205,15 +205,15 @@ func TestWorkspaceUploads_OffsetMismatchResumeAndNoExpiryExtension(t *testing.T)
 	t.Cleanup(func() { uploadNowFn = origNow })
 	uploadNowFn = func() time.Time { return time.Now().UTC().Add(5 * time.Minute).Truncate(time.Microsecond) }
 
-	// Wrong offset -> 409 offset_mismatch with received=6; must NOT extend idle_expires_at.
-	badOff := doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:6])
+	// Wrong offset -> 409 offset_mismatch with received=uploadMinChunkBytes; must NOT extend idle_expires_at.
+	badOff := doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:uploadMinChunkBytes])
 	require.Equal(t, http.StatusConflict, badOff.Code, "body: %s", badOff.Body.String())
 	errObj := decodeUploadAPIError(t, badOff)
 	assert.Equal(t, errCodeUploadOffsetMismatch, errObj.Code)
-	assert.Equal(t, float64(6), errObj.Details["received"])
+	assert.Equal(t, float64(uploadMinChunkBytes), errObj.Details["received"])
 
 	// Declared size exceeded -> 413 declared_size_exceeded; must NOT extend idle_expires_at.
-	tooFar := doChunkPut(t, srv, "", chunkURL+"?offset=6", bytes.Repeat([]byte("x"), 20))
+	tooFar := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), bytes.Repeat([]byte("x"), 20))
 	require.Equal(t, http.StatusRequestEntityTooLarge, tooFar.Code)
 	assert.Equal(t, errCodeUploadDeclaredExceeded, decodeUploadAPIError(t, tooFar).Code)
 
@@ -228,15 +228,15 @@ func TestWorkspaceUploads_OffsetMismatchResumeAndNoExpiryExtension(t *testing.T)
 	var statusResp UploadStatusResponse
 	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &statusResp))
 	assert.Equal(t, store.UploadStateUploading, statusResp.State)
-	assert.Equal(t, int64(6), statusResp.Received)
+	assert.Equal(t, int64(uploadMinChunkBytes), statusResp.Received)
 
 	afterRefused, err := st.GetUploadSession(context.Background(), started.ID)
 	require.NoError(t, err)
 	assert.True(t, afterRefused.IdleExpiresAt.Equal(origIdle),
 		"refused calls/status extended idle_expires_at: got %v, want %v", afterRefused.IdleExpiresAt, origIdle)
 
-	// Resume from offset 6 -> 200 and extends idle_expires_at.
-	c2 := doChunkPut(t, srv, "", chunkURL+"?offset=6", payload[6:])
+	// Resume from offset uploadMinChunkBytes -> 200 and extends idle_expires_at.
+	c2 := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), payload[uploadMinChunkBytes:])
 	require.Equal(t, http.StatusOK, c2.Code)
 	afterCommit, err := st.GetUploadSession(context.Background(), started.ID)
 	require.NoError(t, err)
@@ -304,7 +304,7 @@ func TestWorkspaceUploads_TakeoverRehashIntegrityMismatch(t *testing.T) {
 	existing := []byte("original-intact-content")
 	require.NoError(t, os.WriteFile(filepath.Join(wsPath, "target.bin"), existing, 0o644))
 
-	payload := []byte("0123456789")
+	payload := append(bytes.Repeat([]byte("0123456789abcdef"), uploadMinChunkBytes/16), []byte("56789")...)
 	startRec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
 		UploadStartRequest{Name: "target.bin", Path: "target.bin", Size: int64(len(payload)), Overwrite: true})
@@ -313,18 +313,20 @@ func TestWorkspaceUploads_TakeoverRehashIntegrityMismatch(t *testing.T) {
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	chunkURL := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
 
-	// Upload first half, then force an expired lease so next claim increments takeovers.
-	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:5]).Code)
-	_, err := st.ClaimUploadLease(context.Background(), started.ID, store.UploadStateUploading, 5, "stale-tok", time.Millisecond)
+	// Upload first chunk (1 MiB), then force an expired lease so next claim increments takeovers.
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", chunkURL+"?offset=0", payload[:uploadMinChunkBytes]).Code)
+	_, err := st.ClaimUploadLease(context.Background(), started.ID, store.UploadStateUploading, uploadMinChunkBytes, "stale-tok", time.Millisecond)
 	require.NoError(t, err)
 	time.Sleep(15 * time.Millisecond)
 
 	// Second chunk takes over the expired lease (takeovers -> 1).
-	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", chunkURL+"?offset=5", payload[5:]).Code)
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", chunkURL, uploadMinChunkBytes), payload[uploadMinChunkBytes:]).Code)
 
 	// Corrupt the partial file on disk (simulating a stale writer landing bytes after takeover).
 	partialPath := filepath.Join(wsPath, uploadPartialName(started.ID))
-	require.NoError(t, os.WriteFile(partialPath, []byte("CORRUPTED!"), 0o644))
+	corrupted := make([]byte, len(payload))
+	copy(corrupted, []byte("CORRUPTED!"))
+	require.NoError(t, os.WriteFile(partialPath, corrupted, 0o644))
 
 	// Complete detects mismatch -> 409 integrity_mismatch, session becomes failed, existing target untouched.
 	compRec := doRequest(t, srv, http.MethodPost, chunkURL+"/complete", nil)
@@ -501,12 +503,12 @@ func TestWorkspaceUploads_SecurityPathTraversalSymlinkAndAtomicity(t *testing.T)
 	// Case A: abort after uploading a chunk.
 	s1Rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
-		UploadStartRequest{Name: "keep.txt", Path: "keep.txt", Size: 10, Overwrite: true})
+		UploadStartRequest{Name: "keep.txt", Path: "keep.txt", Size: uploadMinChunkBytes + 5, Overwrite: true})
 	require.Equal(t, http.StatusCreated, s1Rec.Code)
 	var s1 UploadStartResponse
 	require.NoError(t, json.Unmarshal(s1Rec.Body.Bytes(), &s1))
 	u1 := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, s1.ID)
-	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u1+"?offset=0", []byte("12345")).Code)
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u1+"?offset=0", bytes.Repeat([]byte("1"), uploadMinChunkBytes)).Code)
 	abortRec := doRequest(t, srv, http.MethodDelete, u1, nil)
 	require.Equal(t, http.StatusNoContent, abortRec.Code)
 	_, err := os.Stat(filepath.Join(wsPath, uploadPartialName(s1.ID)))
@@ -556,12 +558,12 @@ func TestWorkspaceUploads_SweeperRemovesPartialsAndRowsRegardlessOfExperiment(t 
 
 	startRec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
-		UploadStartRequest{Name: "sweep.bin", Path: "sweep.bin", Size: 20, Overwrite: true})
+		UploadStartRequest{Name: "sweep.bin", Path: "sweep.bin", Size: uploadMinChunkBytes + 10, Overwrite: true})
 	require.Equal(t, http.StatusCreated, startRec.Code)
 	var started UploadStartResponse
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
-	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", []byte("0123456789")).Code)
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", bytes.Repeat([]byte("0"), uploadMinChunkBytes)).Code)
 
 	partialPath := filepath.Join(wsPath, uploadPartialName(started.ID))
 	_, err := os.Stat(partialPath)
@@ -800,7 +802,7 @@ func TestWorkspaceUploads_CommitFailureReleasesLease(t *testing.T) {
 	setLargeUploadsExperiment(t, srv, true)
 	project, _ := createTestHubManagedProject(t, srv, "Uploads Commit Fault")
 
-	payload := []byte("retry-after-commit-err")
+	payload := append(bytes.Repeat([]byte("r"), uploadMinChunkBytes), []byte("retry-after-commit-err")...)
 	startRec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
 		UploadStartRequest{Name: "f.bin", Path: "f.bin", Size: int64(len(payload)), Overwrite: true})
@@ -809,16 +811,16 @@ func TestWorkspaceUploads_CommitFailureReleasesLease(t *testing.T) {
 	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
 
-	// Upload chunk 1 cleanly, then inject a one-shot commit fault on chunk 2.
-	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", payload[:10]).Code)
+	// Upload chunk 1 cleanly (1 MiB), then inject a one-shot commit fault on chunk 2.
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", payload[:uploadMinChunkBytes]).Code)
 
 	wrapped.failOnce.Store(true)
 	fault.Arm()
-	failRec := doChunkPut(t, srv, "", u+"?offset=10", payload[10:])
+	failRec := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), payload[uploadMinChunkBytes:])
 	require.Equal(t, http.StatusInternalServerError, failRec.Code)
 
-	// Lease must have been released: immediate retry at offset 10 succeeds (not 409 upload_busy).
-	okRec := doChunkPut(t, srv, "", u+"?offset=10", payload[10:])
+	// Lease must have been released: immediate retry at offset uploadMinChunkBytes succeeds (not 409 upload_busy).
+	okRec := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), payload[uploadMinChunkBytes:])
 	require.Equal(t, http.StatusOK, okRec.Code, "body: %s", okRec.Body.String())
 }
 
@@ -1046,19 +1048,20 @@ func TestWorkspaceUploads_MissingOrShortPartialAtOffsetFailsWith409(t *testing.T
 	setLargeUploadsExperiment(t, srv, true)
 	project, wsDir := createTestHubManagedProject(t, srv, "Uploads O1 Partial")
 
+	minChunk := bytes.Repeat([]byte("0"), uploadMinChunkBytes)
 	t.Run("deleted partial after chunk 1", func(t *testing.T) {
 		startRec := doRequest(t, srv, http.MethodPost,
 			fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
-			UploadStartRequest{Name: "del.bin", Path: "del.bin", Size: 20, Overwrite: true})
+			UploadStartRequest{Name: "del.bin", Path: "del.bin", Size: uploadMinChunkBytes + 10, Overwrite: true})
 		require.Equal(t, http.StatusCreated, startRec.Code)
 		var started UploadStartResponse
 		require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 		u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
 
-		require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", []byte("0123456789")).Code)
+		require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", minChunk).Code)
 		require.NoError(t, os.Remove(filepath.Join(wsDir, uploadPartialName(started.ID))))
 
-		rec := doChunkPut(t, srv, "", u+"?offset=10", []byte("abcdefghij"))
+		rec := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), []byte("abcdefghij"))
 		require.Equal(t, http.StatusConflict, rec.Code, "deleted partial must return 409; body: %s", rec.Body.String())
 		errObj := decodeUploadAPIError(t, rec)
 		assert.Equal(t, errCodeUploadIntegrityMismatch, errObj.Code)
@@ -1071,17 +1074,17 @@ func TestWorkspaceUploads_MissingOrShortPartialAtOffsetFailsWith409(t *testing.T
 	t.Run("truncated partial shorter than received", func(t *testing.T) {
 		startRec := doRequest(t, srv, http.MethodPost,
 			fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
-			UploadStartRequest{Name: "short.bin", Path: "short.bin", Size: 20, Overwrite: true})
+			UploadStartRequest{Name: "short.bin", Path: "short.bin", Size: uploadMinChunkBytes + 10, Overwrite: true})
 		require.Equal(t, http.StatusCreated, startRec.Code)
 		var started UploadStartResponse
 		require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
 		u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
 
-		require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", []byte("0123456789")).Code)
+		require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", minChunk).Code)
 		partialPath := filepath.Join(wsDir, uploadPartialName(started.ID))
 		require.NoError(t, os.Truncate(partialPath, 5))
 
-		rec := doChunkPut(t, srv, "", u+"?offset=10", []byte("abcdefghij"))
+		rec := doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), []byte("abcdefghij"))
 		require.Equal(t, http.StatusConflict, rec.Code, "truncated partial must return 409; body: %s", rec.Body.String())
 		errObj := decodeUploadAPIError(t, rec)
 		assert.Equal(t, errCodeUploadIntegrityMismatch, errObj.Code)
@@ -1129,4 +1132,58 @@ func TestWorkspaceUploads_IdempotentFinalizeVerifiesDestDigest(t *testing.T) {
 	require.NoError(t, os.WriteFile(destPath, []byte("abcdefghij"), 0o600))
 	retryRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
 	require.Equal(t, http.StatusOK, retryRec.Code, "matching dest digest on retry should succeed; body: %s", retryRec.Body.String())
+}
+
+// TestWorkspaceUploads_MinChunkFloor verifies ptone decision p2-min-chunk-floor
+// on the workspace target as a P1 regression guard: non-final chunks below
+// min(1 MiB, chunk_bytes) are refused with 400 chunk_too_small before lease
+// claim (no partial created, idle_expires_at unchanged), while a 1 MiB chunk
+// followed by a short final chunk succeeds.
+func TestWorkspaceUploads_MinChunkFloor(t *testing.T) {
+	srv, st := testServer(t)
+	setLargeUploadsExperiment(t, srv, true)
+	project, wsDir := createTestHubManagedProject(t, srv, "Uploads MinChunk Floor")
+
+	chunk0 := bytes.Repeat([]byte("w"), uploadMinChunkBytes)
+	chunk1 := []byte("tail123")
+	payload := append(append([]byte(nil), chunk0...), chunk1...)
+
+	startRec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/uploads", project.ID),
+		UploadStartRequest{Name: "floor.bin", Path: "floor.bin", Size: int64(len(payload)), Overwrite: true})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	u := fmt.Sprintf("/api/v1/projects/%s/workspace/uploads/%s", project.ID, started.ID)
+
+	before, err := st.GetUploadSession(context.Background(), started.ID)
+	require.NoError(t, err)
+
+	origNow := uploadNowFn
+	t.Cleanup(func() { uploadNowFn = origNow })
+	uploadNowFn = func() time.Time { return time.Now().UTC().Add(5 * time.Minute).Truncate(time.Microsecond) }
+
+	// Sub-floor non-final chunk is refused before lease claim.
+	smallRec := doChunkPut(t, srv, "", u+"?offset=0", []byte("too-small"))
+	require.Equal(t, http.StatusBadRequest, smallRec.Code, "body: %s", smallRec.Body.String())
+	errObj := decodeUploadAPIError(t, smallRec)
+	assert.Equal(t, errCodeUploadChunkTooSmall, errObj.Code)
+	assert.Equal(t, float64(uploadMinChunkBytes), errObj.Details["minChunkBytes"])
+
+	after, err := st.GetUploadSession(context.Background(), started.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), after.Received)
+	assert.True(t, before.IdleExpiresAt.Equal(after.IdleExpiresAt), "refused sub-floor chunk must not extend idle_expires_at")
+	_, statErr := os.Stat(filepath.Join(wsDir, uploadPartialName(started.ID)))
+	assert.True(t, os.IsNotExist(statErr), "refused sub-floor chunk must not create partial file")
+
+	// Valid 1 MiB chunk + short 7-byte final chunk succeeds.
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", u+"?offset=0", chunk0).Code)
+	require.Equal(t, http.StatusOK, doChunkPut(t, srv, "", fmt.Sprintf("%s?offset=%d", u, uploadMinChunkBytes), chunk1).Code)
+	compRec := doRequest(t, srv, http.MethodPost, u+"/complete", nil)
+	require.Equal(t, http.StatusOK, compRec.Code, "body: %s", compRec.Body.String())
+
+	got, err := os.ReadFile(filepath.Join(wsDir, "floor.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, sha256.Sum256(payload), sha256.Sum256(got))
 }

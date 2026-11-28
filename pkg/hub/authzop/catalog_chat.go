@@ -1023,9 +1023,14 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.attachment.upload.project",
 		Domain:      "chat",
-		Description: "Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)",
+		Description: "Upload chat attachments to a space (single-request multipart or resumable chunked session behind hub.large_uploads). Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST", Variant: "project"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads", Method: "POST", Variant: "project"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}", Method: "PUT", Variant: "project"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}", Method: "GET", Variant: "project"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}/complete", Method: "POST", Variant: "project"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}", Method: "DELETE", Variant: "project"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1037,15 +1042,21 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatProjectUpload_RequiresInboxWriteAndProjectRead"},
+			{Package: "pkg/hub", Function: "TestChatUploads_OwnerScopeBindingAndAuthz"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.attachment.upload.noproject",
 		Domain:      "chat",
-		Description: "Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary",
+		Description: "Upload project-less chat attachments (single-request multipart or resumable chunked session behind hub.large_uploads), reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST", Variant: "noproject"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads", Method: "POST", Variant: "noproject"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}", Method: "PUT", Variant: "noproject"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}", Method: "GET", Variant: "noproject"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}/complete", Method: "POST", Variant: "noproject"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/uploads/{sid}", Method: "DELETE", Variant: "noproject"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1058,6 +1069,7 @@ var chatOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatProjectlessUpload_RequiresHubBoundary"},
 			{Package: "pkg/hub", Function: "TestChatProfileWrites_FederatedUserRefused"},
+			{Package: "pkg/hub", Function: "TestChatUploads_OwnerScopeBindingAndAuthz"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryHub),
 	},

@@ -22,6 +22,7 @@ import {
   formatUploadSize,
   MIN_CHUNK_BYTES,
   UploadCancelledError,
+  uploadChatAttachments,
   uploadFileChunked,
   UploadHttpError,
   uploadWorkspaceFiles,
@@ -686,6 +687,60 @@ describe('chunked-upload', () => {
     expect(putSizes).toEqual([20, 10, 10]);
   });
 
+  it('slow-link adaptation never drops non-final chunks below the 1 MiB floor', async () => {
+    let clock = 0;
+    _setUploadTestConfig({
+      retryDelayMs: 0,
+      maxBackoffMs: 0,
+      minChunkBytes: MIN_CHUNK_BYTES,
+      slowLinkTargetMs: 30_000,
+      now: () => clock,
+    });
+    // Server chunkBytes = 2 MiB; file = 3 MiB + 123 B.
+    // First chunk of 2 MiB takes 3,000 s (100x slower than 30 s target) →
+    // raw proportional target would be ~20 KiB, which must clamp at 1 MiB.
+    const twoMiB = 2 * MIN_CHUNK_BYTES;
+    const tail = 123;
+    const hub = createFakeHub({
+      chunkBytes: twoMiB,
+      now: () => clock,
+      onChunk: () => {
+        clock += 3_000_000;
+      },
+    });
+    const file = makeFile(twoMiB + MIN_CHUNK_BYTES + tail);
+    const res = await uploadFileChunked('/api/v1/projects/p1/workspace/uploads', file);
+    expect(res.ok).toBe(true);
+
+    const putSizes = hub.calls.filter((c) => c.method === 'PUT').map((c) => c.size);
+    expect(putSizes).toEqual([twoMiB, MIN_CHUNK_BYTES, tail]);
+  });
+
+  it('treats 400 chunk_too_small as a terminal client error without retrying', async () => {
+    const hub = createFakeHub({
+      chunkBytes: 10,
+      failChunkCalls: {
+        1: {
+          kind: 'status',
+          status: 400,
+          code: 'chunk_too_small',
+          message: 'Non-final chunk size is below minimum',
+          details: { minChunkBytes: MIN_CHUNK_BYTES },
+        },
+      },
+    });
+    let err: unknown;
+    try {
+      await uploadFileChunked('/api/v1/projects/p1/workspace/uploads', makeFile(20));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(UploadHttpError);
+    expect((err as UploadHttpError).status).toBe(400);
+    expect((err as UploadHttpError).code).toBe('chunk_too_small');
+    expect(hub.calls.filter((c) => c.method === 'PUT').length).toBe(1);
+  });
+
   it('uploadWorkspaceFiles uses single multipart request when ≤ chunkBytes, chunked when larger, and falls back on proxy 413', async () => {
     // Small file ≤ chunkBytes (2048) → single POST to /files
     const hub1 = createFakeHub({ chunkBytes: 2048 });
@@ -731,5 +786,357 @@ describe('chunked-upload', () => {
     expect(hub3.calls.at(-1)?.path).toBe(
       '/api/v1/projects/p1/workspace/uploads/upl_test123/complete'
     );
+  });
+
+  it('uploadChatAttachments uses single request when ≤ chunkBytes and chunked with concurrency 2 when larger', async () => {
+    // Small file ≤ chunkBytes → single POST /api/v1/chat/attachments
+    const smallCalls: Array<{ method: string; path: string; projectId: string | null }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const fd = init?.body as FormData;
+        smallCalls.push({
+          method: (init?.method ?? 'GET').toUpperCase(),
+          path: url.pathname,
+          projectId: fd?.get('project_id') as string | null,
+        });
+        return Promise.resolve(
+          json(
+            {
+              attachments: [
+                { id: 'att-s', name: 'small.txt', mime: 'text/plain', size: 100, url: '/u/att-s' },
+              ],
+            },
+            201
+          )
+        );
+      })
+    );
+
+    const smallRes = await uploadChatAttachments([makeFile(100, 'small.txt')], {
+      projectId: 'proj-1',
+      chunkBytes: 4096,
+    });
+    expect(smallCalls).toEqual([
+      { method: 'POST', path: '/api/v1/chat/attachments', projectId: 'proj-1' },
+    ]);
+    expect(smallRes.attachments).toHaveLength(1);
+    expect(smallRes.attachments[0].id).toBe('att-s');
+
+    // 4 files exceeding chunkBytes → 4 chunked sessions with max concurrency 2
+    let activeSessions = 0;
+    let maxConcurrent = 0;
+    let nextSid = 1;
+    const startPayloads: Array<Record<string, unknown>> = [];
+    const sessionFileNames = new Map<string, string>();
+    const sessionReceived = new Map<string, number>();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const method = (init?.method ?? 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+          activeSessions++;
+          maxConcurrent = Math.max(maxConcurrent, activeSessions);
+          const parsed = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+            string,
+            unknown
+          >;
+          startPayloads.push(parsed);
+          const sid = `upl_chat_${nextSid++}`;
+          sessionFileNames.set(sid, String(parsed.name));
+          sessionReceived.set(sid, 0);
+          return json(
+            {
+              id: sid,
+              transport: 'hub_chunked',
+              chunkBytes: 10,
+              maxBytes: 1000,
+              received: 0,
+              expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+            },
+            201
+          );
+        }
+
+        if (method === 'PUT' && url.pathname.startsWith('/api/v1/chat/attachments/uploads/')) {
+          const sid = url.pathname.split('/').pop()!;
+          const chunk = init?.body as Blob;
+          // Yield to microtask/timer so concurrent workers overlap cleanly.
+          await new Promise((r) => setTimeout(r, 5));
+          const nextOff = (sessionReceived.get(sid) ?? 0) + chunk.size;
+          sessionReceived.set(sid, nextOff);
+          return json({
+            received: nextOff,
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          });
+        }
+
+        if (method === 'POST' && url.pathname.endsWith('/complete')) {
+          const parts = url.pathname.split('/');
+          const sid = parts[parts.length - 2];
+          activeSessions--;
+          const name = sessionFileNames.get(sid) ?? 'file';
+          const size = sessionReceived.get(sid) ?? 0;
+          return json({
+            id: `att_${sid}`,
+            name,
+            mime: 'application/octet-stream',
+            size,
+            url: `/api/v1/chat/attachments/att_${sid}`,
+          });
+        }
+
+        return new Response('unexpected', { status: 500 });
+      })
+    );
+
+    const progress: Array<[number, number]> = [];
+    const batch = [
+      makeFile(15, 'f1.bin'),
+      makeFile(15, 'f2.bin'),
+      makeFile(15, 'f3.bin'),
+      makeFile(15, 'f4.bin'),
+    ];
+    const res = await uploadChatAttachments(batch, {
+      projectId: 'proj-1',
+      chunkBytes: 10,
+      onProgress: (sent, total) => progress.push([sent, total]),
+    });
+
+    expect(maxConcurrent).toBe(2);
+    expect(startPayloads).toHaveLength(4);
+    expect(startPayloads.every((p) => p.projectId === 'proj-1')).toBe(true);
+    expect(res.failures).toEqual([]);
+    expect(res.attachments.map((a) => a.name)).toEqual(['f1.bin', 'f2.bin', 'f3.bin', 'f4.bin']);
+    expect(progress.at(-1)).toEqual([60, 60]);
+  });
+
+  it('uploadChatAttachments surfaces clear errors for artifact_attachments_required, disallowed_media_type, large_uploads_unsupported_storage, and experiment_disabled', async () => {
+    const stubStartError = (status: number, code: string, message?: string): void => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() =>
+          Promise.resolve(json({ error: { code, ...(message ? { message } : {}) } }, status))
+        )
+      );
+    };
+
+    // 409 artifact_attachments_required with a file over the legacy limit → throws UploadHttpError without falling back
+    stubStartError(409, 'artifact_attachments_required');
+    await expect(
+      uploadChatAttachments([makeFile(20, 'big.bin')], { chunkBytes: 10, legacyMaxFileSize: 15 })
+    ).rejects.toMatchObject({
+      name: 'UploadHttpError',
+      code: 'artifact_attachments_required',
+      message: expect.stringContaining('artifact-backed attachments'),
+    });
+
+    // 501 large_uploads_unsupported_storage → throws UploadHttpError with clear message
+    stubStartError(501, 'large_uploads_unsupported_storage');
+    await expect(
+      uploadChatAttachments([makeFile(20, 'big.bin')], { chunkBytes: 10 })
+    ).rejects.toMatchObject({
+      name: 'UploadHttpError',
+      code: 'large_uploads_unsupported_storage',
+      message: expect.stringContaining('blob storage does not support'),
+    });
+
+    // 404 experiment_disabled → throws UploadHttpError with "Large uploads were disabled."
+    stubStartError(404, 'experiment_disabled');
+    await expect(
+      uploadChatAttachments([makeFile(20, 'big.bin')], { chunkBytes: 10 })
+    ).rejects.toMatchObject({
+      name: 'UploadHttpError',
+      code: 'experiment_disabled',
+      message: 'Large uploads were disabled.',
+    });
+
+    // 400 disallowed_media_type at first chunk → recorded as per-file failure without failing sibling files
+    let sidSeq = 1;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.pathname === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+          const body = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as {
+            name: string;
+          };
+          const sid = body.name === 'bad.exe' ? 'upl_bad' : `upl_ok_${sidSeq++}`;
+          return Promise.resolve(
+            json(
+              {
+                id: sid,
+                transport: 'hub_chunked',
+                chunkBytes: 10,
+                maxBytes: 1000,
+                received: 0,
+                expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+              },
+              201
+            )
+          );
+        }
+        if (method === 'PUT' && url.pathname.endsWith('/upl_bad')) {
+          return Promise.resolve(
+            json(
+              {
+                error: {
+                  code: 'disallowed_media_type',
+                  message: 'Executable files are not allowed',
+                },
+              },
+              400
+            )
+          );
+        }
+        if (method === 'DELETE') {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        if (method === 'PUT') {
+          const chunk = init?.body as Blob;
+          const off = Number(url.searchParams.get('offset') ?? '0');
+          return Promise.resolve(
+            json({
+              received: off + chunk.size,
+              expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+            })
+          );
+        }
+        if (method === 'POST' && url.pathname.endsWith('/complete')) {
+          return Promise.resolve(
+            json({
+              id: 'att_good',
+              name: 'good.txt',
+              mime: 'text/plain',
+              size: 15,
+              url: '/api/v1/chat/attachments/att_good',
+            })
+          );
+        }
+        return Promise.resolve(new Response('unexpected', { status: 500 }));
+      })
+    );
+
+    const mixed = await uploadChatAttachments([makeFile(15, 'bad.exe'), makeFile(15, 'good.txt')], {
+      chunkBytes: 10,
+    });
+    expect(mixed.attachments).toHaveLength(1);
+    expect(mixed.attachments[0].name).toBe('good.txt');
+    expect(mixed.failures).toEqual([
+      { name: 'bad.exe', error: 'Executable files are not allowed' },
+    ]);
+  });
+
+  it('uploadChatAttachments falls back to legacy multipart on 409 artifact_attachments_required for 3 × 5 MiB and errors when a file exceeds the legacy limit', async () => {
+    const fiveMiB = 5 * 1024 * 1024;
+    const elevenMiB = 11 * 1024 * 1024;
+    const sizedFile = (bytes: number, name: string): File => {
+      const f = new File(['x'], name, { type: 'application/octet-stream' });
+      Object.defineProperty(f, 'size', { value: bytes });
+      return f;
+    };
+
+    // Case 1: 3 × 5 MiB (= 15 MiB > 8 MiB chunkBytes) with artifacts off → falls back to legacy POST /api/v1/chat/attachments
+    const calls1: Array<{ method: string; path: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        calls1.push({ method, path: url.pathname });
+        if (url.pathname === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+          return Promise.resolve(
+            json(
+              {
+                error: {
+                  code: 'artifact_attachments_required',
+                  message: 'Large chat attachments require hub.attachment_artifacts',
+                },
+              },
+              409
+            )
+          );
+        }
+        if (url.pathname === '/api/v1/chat/attachments' && method === 'POST') {
+          return Promise.resolve(
+            json(
+              {
+                attachments: [
+                  {
+                    id: 'a1',
+                    name: 'f1.bin',
+                    mime: 'application/octet-stream',
+                    size: fiveMiB,
+                    url: '/u/a1',
+                  },
+                  {
+                    id: 'a2',
+                    name: 'f2.bin',
+                    mime: 'application/octet-stream',
+                    size: fiveMiB,
+                    url: '/u/a2',
+                  },
+                  {
+                    id: 'a3',
+                    name: 'f3.bin',
+                    mime: 'application/octet-stream',
+                    size: fiveMiB,
+                    url: '/u/a3',
+                  },
+                ],
+                failures: [],
+              },
+              201
+            )
+          );
+        }
+        return Promise.resolve(new Response('unexpected', { status: 500 }));
+      })
+    );
+
+    const res = await uploadChatAttachments(
+      [sizedFile(fiveMiB, 'f1.bin'), sizedFile(fiveMiB, 'f2.bin'), sizedFile(fiveMiB, 'f3.bin')],
+      { projectId: 'proj-1' }
+    );
+    expect(res.failures).toEqual([]);
+    expect(res.attachments.map((a) => a.id)).toEqual(['a1', 'a2', 'a3']);
+    expect(calls1.some((c) => c.path === '/api/v1/chat/attachments/uploads')).toBe(true);
+    expect(calls1.filter((c) => c.path === '/api/v1/chat/attachments')).toHaveLength(1);
+
+    // Case 2: 1 × 11 MiB (exceeds 10 MiB legacy limit) → does NOT call legacy endpoint, rejects with clear error
+    const calls2: Array<{ method: string; path: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(requestUrl(input), 'http://hub.test');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        calls2.push({ method, path: url.pathname });
+        return Promise.resolve(
+          json(
+            {
+              error: {
+                code: 'artifact_attachments_required',
+                message: 'Large chat attachments require hub.attachment_artifacts',
+              },
+            },
+            409
+          )
+        );
+      })
+    );
+
+    await expect(
+      uploadChatAttachments([sizedFile(elevenMiB, 'too-big.bin')], { projectId: 'proj-1' })
+    ).rejects.toMatchObject({
+      name: 'UploadHttpError',
+      code: 'artifact_attachments_required',
+      message: 'Large chat attachments require hub.attachment_artifacts',
+    });
+    expect(calls2.filter((c) => c.path === '/api/v1/chat/attachments')).toHaveLength(0);
   });
 });

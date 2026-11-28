@@ -31,7 +31,10 @@ import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 const apiFetch = vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })));
 const showToast = vi.fn();
 
-vi.mock('../../../client/api.js', () => ({ apiFetch }));
+vi.mock('../../../client/api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../client/api.js')>();
+  return { ...actual, apiFetch };
+});
 vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
 /** The hub's upload limits as GET /api/v1/settings/public publishes them. */
@@ -976,5 +979,346 @@ describe('composer — reply target warning', () => {
 
     expect(el.shadowRoot?.querySelector('.reply-bar')).not.toBeNull();
     expect(el.shadowRoot?.querySelector('.reply-warning')).toBeNull();
+  });
+});
+
+describe('composer — large uploads (hub.large_uploads)', () => {
+  afterEach(async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', false);
+    publicUploads = undefined;
+  });
+
+  it('uses chunked upload path with progress and cancel when hub.large_uploads is enabled', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', true);
+
+    const el = createComposer();
+    el.projectId = 'proj-large';
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic:proj-large:t1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // 9 MiB file (> default 8 MiB chunkBytes) triggers chunked session
+    const big = new File([new Uint8Array(9 * 1024 * 1024)], 'big.bin', {
+      type: 'application/octet-stream',
+    });
+
+    const paths: string[] = [];
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      paths.push(`${method} ${url}`);
+      if (url === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'upl_c1',
+              transport: 'hub_chunked',
+              chunkBytes: 8 * 1024 * 1024,
+              maxBytes: 1024 * 1024 * 1024,
+              received: 0,
+              expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+            }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url.startsWith('/api/v1/chat/attachments/uploads/upl_c1?offset=') && method === 'PUT') {
+        const off = Number(new URL(url, 'http://hub.test').searchParams.get('offset'));
+        const chunk = init?.body as Blob;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              received: off + chunk.size,
+              expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url === '/api/v1/chat/attachments/uploads/upl_c1/complete' && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'att-large-1',
+              name: 'big.bin',
+              mime: 'application/octet-stream',
+              size: big.size,
+              url: '/api/v1/chat/attachments/att-large-1',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 500 }));
+    });
+
+    await el.uploadFiles([big]);
+    await el.updateComplete;
+
+    expect(paths).toEqual([
+      'POST /api/v1/chat/attachments/uploads',
+      'PUT /api/v1/chat/attachments/uploads/upl_c1?offset=0',
+      'PUT /api/v1/chat/attachments/uploads/upl_c1?offset=8388608',
+      'POST /api/v1/chat/attachments/uploads/upl_c1/complete',
+    ]);
+    expect(el.pendingFiles).toEqual([
+      {
+        id: 'att-large-1',
+        name: 'big.bin',
+        mime: 'application/octet-stream',
+        size: big.size,
+        url: '/api/v1/chat/attachments/att-large-1',
+      },
+    ]);
+    expect(el.uploading).toBe(false);
+  });
+
+  it('cancels an in-flight large upload via the Cancel button and sends DELETE', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', true);
+
+    const el = createComposer();
+    el.projectId = 'proj-large';
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic:proj-large:t2';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const big = new File([new Uint8Array(9 * 1024 * 1024)], 'cancel-me.bin', {
+      type: 'application/octet-stream',
+    });
+
+    let deleteCalled = false;
+    let putStarted!: () => void;
+    const putStartedPromise = new Promise<void>((r) => {
+      putStarted = r;
+    });
+
+    apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            id: 'upl_cancel',
+            transport: 'hub_chunked',
+            chunkBytes: 8 * 1024 * 1024,
+            maxBytes: 1024 * 1024 * 1024,
+            received: 0,
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (method === 'PUT') {
+        putStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError'))
+          );
+        });
+      }
+      if (method === 'DELETE' && url === '/api/v1/chat/attachments/uploads/upl_cancel') {
+        deleteCalled = true;
+        return new Response(null, { status: 204 });
+      }
+      return new Response('{}', { status: 500 });
+    });
+
+    const errors: string[] = [];
+    el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+      errors.push(e.detail.message)
+    );
+
+    const uploadPromise = el.uploadFiles([big]);
+    await putStartedPromise;
+    await el.updateComplete;
+
+    const cancelBtn = el.shadowRoot?.querySelector('.upload-cancel-btn') as HTMLElement | null;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn!.click();
+
+    await uploadPromise;
+    await el.updateComplete;
+
+    expect(deleteCalled).toBe(true);
+    expect(errors).toEqual([]);
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.uploading).toBe(false);
+  });
+
+  it('surfaces composer-error when hub.attachment_artifacts is off (artifact_attachments_required)', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', true);
+    publicUploads = { maxAttachmentSize: 1024 * 1024 * 1024 };
+
+    const el = createComposer();
+    el.projectId = 'proj-large';
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic:proj-large:t3';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // 110 MiB exceeds the 100 MiB legacy multipart fallback ceiling, so no legacy fallback is attempted.
+    const big = new File(['x'], 'big.bin');
+    Object.defineProperty(big, 'size', { value: 110 * 1024 * 1024 });
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'artifact_attachments_required',
+              message:
+                'Large chat attachments require hub.attachment_artifacts and configured artifact storage',
+            },
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    );
+
+    const errors: string[] = [];
+    el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+      errors.push(e.detail.message)
+    );
+
+    await el.uploadFiles([big]);
+    expect(errors).toEqual([
+      'Large chat attachments require hub.attachment_artifacts and configured artifact storage',
+    ]);
+  });
+
+  it('pre-send size check on the large path uses the effective chat max (not 100 MiB clamp) and reports oversize files immediately', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', true);
+    const oneGiB = 1024 * 1024 * 1024;
+    publicUploads = { maxAttachmentSize: oneGiB };
+
+    const el = createComposer();
+    el.projectId = 'proj-large';
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic:proj-large:t4';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Over 1 GiB → rejected immediately before any network call
+    const tooBig = new File(['x'], 'huge.bin');
+    Object.defineProperty(tooBig, 'size', { value: oneGiB + 1 });
+    await el.uploadFiles([tooBig]);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(el.uploadFailures).toEqual([
+      { name: 'huge.bin', error: 'exceeds the maximum size of 1 GiB' },
+    ]);
+
+    // 150 MiB (over 100 MiB legacy clamp, under 1 GiB) → NOT rejected by pre-send check; starts chunked upload
+    const medium = new File(['x'], 'model-150m.bin');
+    Object.defineProperty(medium, 'size', { value: 150 * 1024 * 1024 });
+    let sawUploadStart = false;
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/v1/chat/attachments/uploads' && (init?.method ?? 'GET') === 'POST') {
+        sawUploadStart = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: 'experiment_disabled', message: 'disabled' },
+            }),
+            { status: 404, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 500 }));
+    });
+    await el.uploadFiles([medium]);
+    expect(sawUploadStart).toBe(true);
+  });
+
+  it('falls back to legacy multipart for 3 × 5 MiB when hub.attachment_artifacts is off, and rejects >10 MiB pre-send', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', true);
+    const fiveMiB = 5 * 1024 * 1024;
+    const tenMiB = 10 * 1024 * 1024;
+    publicUploads = { maxAttachmentSize: tenMiB };
+
+    const el = createComposer();
+    el.projectId = 'proj-legacy-fallback';
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic:proj-legacy-fallback:t1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const sized = (bytes: number, name: string): File => {
+      const f = new File(['x'], name, { type: 'application/octet-stream' });
+      Object.defineProperty(f, 'size', { value: bytes });
+      return f;
+    };
+
+    // 3 × 5 MiB = 15 MiB > 8 MiB chunkBytes → chunked start returns 409 artifact_attachments_required → legacy POST succeeds
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'artifact_attachments_required',
+                message: 'Large chat attachments require hub.attachment_artifacts',
+              },
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url === '/api/v1/chat/attachments' && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments: [
+                {
+                  id: 'att-1',
+                  name: 'a.bin',
+                  mime: 'application/octet-stream',
+                  size: fiveMiB,
+                  url: '/u/1',
+                },
+                {
+                  id: 'att-2',
+                  name: 'b.bin',
+                  mime: 'application/octet-stream',
+                  size: fiveMiB,
+                  url: '/u/2',
+                },
+                {
+                  id: 'att-3',
+                  name: 'c.bin',
+                  mime: 'application/octet-stream',
+                  size: fiveMiB,
+                  url: '/u/3',
+                },
+              ],
+              failures: [],
+            }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 500 }));
+    });
+
+    await el.uploadFiles([
+      sized(fiveMiB, 'a.bin'),
+      sized(fiveMiB, 'b.bin'),
+      sized(fiveMiB, 'c.bin'),
+    ]);
+    expect(el.uploadFailures).toEqual([]);
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1', 'att-2', 'att-3']);
+
+    // One file over the 10 MiB legacy limit → immediate per-file error
+    apiFetch.mockClear();
+    await el.uploadFiles([sized(tenMiB + 1, 'over.bin')]);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(el.uploadFailures).toEqual([
+      { name: 'over.bin', error: 'exceeds the maximum size of 10 MiB' },
+    ]);
   });
 });

@@ -378,14 +378,136 @@ func (s *LocalStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Obje
 	}, nil
 }
 
+// Compose implements Composer by streaming srcs in order into a temporary file
+// beside dst and atomically renaming it into place.
+func (s *LocalStorage) Compose(ctx context.Context, dst string, srcs []string, opts UploadOptions) (*Object, error) {
+	if dst == "" || len(srcs) == 0 {
+		return nil, ErrInvalidPath
+	}
+	dstClean := strings.TrimPrefix(dst, "/")
+	if dstClean == "" {
+		return nil, ErrInvalidPath
+	}
+	srcPaths := make([]string, len(srcs))
+	for i, src := range srcs {
+		srcClean := strings.TrimPrefix(src, "/")
+		if srcClean == "" {
+			return nil, ErrInvalidPath
+		}
+		srcPaths[i] = s.fullPath(srcClean)
+	}
+
+	dstFullPath := s.fullPath(dstClean)
+	dir := filepath.Dir(dstFullPath)
+	if err := mkdirAllSynced(dir); err != nil {
+		return nil, fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	tmp, tmpName, err := createTemp(dir, UploadTempPrefix+filepath.Base(dstFullPath)+"-")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create compose temp file: %w", err)
+	}
+	done := false
+	defer func() {
+		if !done {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	hash := sha256.New()
+	mw := io.MultiWriter(tmp, hash)
+	buf := make([]byte, 64*1024)
+	var totalSize int64
+
+	for _, srcFull := range srcPaths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n, err := copyFileToWriter(ctx, srcFull, mw, buf)
+		if err != nil {
+			return nil, err
+		}
+		totalSize += n
+	}
+
+	if err := tmp.Sync(); err != nil {
+		return nil, fmt.Errorf("failed to sync composed file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close composed file: %w", err)
+	}
+	if err := os.Rename(tmpName, dstFullPath); err != nil {
+		_ = os.Remove(tmpName)
+		done = true
+		return nil, fmt.Errorf("failed to move composed file into place: %w", err)
+	}
+	done = true
+	if err := syncDir(dir); err != nil {
+		return nil, fmt.Errorf("failed to sync directory: %w", err)
+	}
+	info, err := os.Stat(dstFullPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat composed file: %w", err)
+	}
+
+	return &Object{
+		Name:        dstClean,
+		Size:        totalSize,
+		ContentType: opts.ContentType,
+		ETag:        hex.EncodeToString(hash.Sum(nil)),
+		Created:     info.ModTime(),
+		Updated:     info.ModTime(),
+		Metadata:    opts.Metadata,
+	}, nil
+}
+
+func copyFileToWriter(ctx context.Context, path string, w io.Writer, buf []byte) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("failed to open compose source: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		nr, rerr := f.Read(buf)
+		if nr > 0 {
+			nw, werr := w.Write(buf[:nr])
+			total += int64(nw)
+			if werr != nil {
+				return total, fmt.Errorf("failed to write composed data: %w", werr)
+			}
+			if nw != nr {
+				return total, io.ErrShortWrite
+			}
+		}
+		if rerr == io.EOF {
+			return total, nil
+		}
+		if rerr != nil {
+			return total, fmt.Errorf("failed to read compose source: %w", rerr)
+		}
+	}
+}
+
 // Close releases any resources held by the storage client.
 func (s *LocalStorage) Close() error {
 	// Nothing to close for local storage
 	return nil
 }
 
-// Ensure LocalStorage implements Storage interface.
-var _ Storage = (*LocalStorage)(nil)
+// Ensure LocalStorage implements Storage and Composer interfaces.
+var (
+	_ Storage  = (*LocalStorage)(nil)
+	_ Composer = (*LocalStorage)(nil)
+)
 
 // UploadTempPrefix starts the name of the temporary file an upload writes
 // before renaming it over its target. Such files are never listed, and

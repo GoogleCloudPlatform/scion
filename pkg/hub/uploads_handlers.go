@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -32,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -51,17 +53,41 @@ var (
 const (
 	uploadTransportHubChunked = "hub_chunked"
 	uploadHeadCaptureBytes    = 512
+	uploadMinChunkBytes       = 1 << 20 // 1 MiB floor for non-final chunks
 
 	// Upload-specific API error codes (§3.3, §3.5, §3.6, §3.8).
-	errCodeUploadQuotaExceeded     = "upload_quota_exceeded"
-	errCodeUploadOffsetMismatch    = "offset_mismatch"
-	errCodeUploadBusy              = "upload_busy"
-	errCodeUploadChunkTooLarge     = "chunk_too_large"
-	errCodeUploadDeclaredExceeded  = "declared_size_exceeded"
-	errCodeUploadIncomplete        = "upload_incomplete"
-	errCodeUploadInvalidState      = "upload_invalid_state"
-	errCodeUploadIntegrityMismatch = "integrity_mismatch"
+	errCodeUploadQuotaExceeded            = "upload_quota_exceeded"
+	errCodeUploadOffsetMismatch           = "offset_mismatch"
+	errCodeUploadBusy                     = "upload_busy"
+	errCodeUploadChunkTooLarge            = "chunk_too_large"
+	errCodeUploadChunkTooSmall            = "chunk_too_small"
+	errCodeUploadTooManyParts             = "too_many_parts"
+	errCodeUploadDeclaredExceeded         = "declared_size_exceeded"
+	errCodeUploadIncomplete               = "upload_incomplete"
+	errCodeUploadInvalidState             = "upload_invalid_state"
+	errCodeUploadIntegrityMismatch        = "integrity_mismatch"
+	errCodeUploadDisallowedMediaType      = "disallowed_media_type"
+	errCodeArtifactAttachmentsRequired    = "artifact_attachments_required"
+	errCodeLargeUploadsUnsupportedStorage = "large_uploads_unsupported_storage"
 )
+
+// uploadMinChunk returns the minimum allowed non-final chunk size:
+// min(1 MiB, chunkBytes).
+func uploadMinChunk(chunkBytes int64) int64 {
+	if chunkBytes > 0 && chunkBytes < uploadMinChunkBytes {
+		return chunkBytes
+	}
+	return uploadMinChunkBytes
+}
+
+// uploadMaxParts returns the defensive upper bound on ObjectSink part count:
+// ceil(declaredSize/minChunk) + 1. Commits reaching this count are refused.
+func uploadMaxParts(declaredSize, minChunk int64) int {
+	if declaredSize <= 0 || minChunk <= 0 {
+		return 1
+	}
+	return int((declaredSize+minChunk-1)/minChunk) + 1
+}
 
 // UploadStartRequest is the JSON body for POST …/uploads (§3.3).
 type UploadStartRequest struct {
@@ -70,6 +96,9 @@ type UploadStartRequest struct {
 	MediaType string `json:"mediaType"`
 	Path      string `json:"path,omitempty"`
 	Overwrite bool   `json:"overwrite,omitempty"`
+	// ProjectID optionally scopes a chat_attachment upload to a project space
+	// (matching POST /api/v1/chat/attachments's project_id form field).
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // UploadStartResponse is the 201 JSON response for POST …/uploads (§3.3).
@@ -122,6 +151,15 @@ func (s *Server) uploadHubID() string {
 		return id
 	}
 	return "local"
+}
+
+func (s *Server) uploadMaxFileBytes(ctx context.Context, kind store.UploadTargetKind) int64 {
+	switch kind {
+	case store.UploadTargetChatAttachment:
+		return s.attachmentMaxBytes(ctx, true)
+	default:
+		return s.WorkspaceUploadMaxFileBytes(ctx)
+	}
 }
 
 func effectiveUploadExpiry(idle, hard time.Time) time.Time {
@@ -580,6 +618,17 @@ func (s *Server) handleUploadChunk(
 			map[string]interface{}{"declaredSize": sess.DeclaredSize})
 		return
 	}
+	// Enforce a minimum non-final chunk size on all upload targets so offset-0
+	// always carries min(512, declared_size) head bytes and bounds ObjectSink
+	// part counts (ptone decision p2-min-chunk-floor (2026-11-28), supersedes
+	// design §3.2 'server does not police chunk sizes').
+	minChunk := uploadMinChunk(cfg.ChunkBytes)
+	if offset+n < sess.DeclaredSize && n < minChunk {
+		writeError(w, http.StatusBadRequest, errCodeUploadChunkTooSmall,
+			fmt.Sprintf("Non-final chunk size %d is below minimum %d bytes", n, minChunk),
+			map[string]interface{}{"minChunkBytes": minChunk})
+		return
+	}
 
 	token, err := newUploadRandomHex(16)
 	if err != nil {
@@ -633,16 +682,45 @@ func (s *Server) handleUploadChunk(
 		}
 	}
 
-	var headBuf []byte
+	var (
+		headBuf []byte
+		tee     io.Reader
+	)
 	bodyReader := io.LimitReader(r.Body, n+1)
-	tee := io.TeeReader(bodyReader, h)
-	if offset == 0 {
+	if offset == 0 && scope.kind == store.UploadTargetChatAttachment {
+		// Classify the first <=512 bytes before staging anything (§3.5).
 		capLen := n
 		if capLen > uploadHeadCaptureBytes {
 			capLen = uploadHeadCaptureBytes
 		}
-		headBuf = make([]byte, 0, capLen)
-		tee = io.TeeReader(tee, &headCaptureWriter{buf: &headBuf, limit: int(capLen)})
+		headBuf = make([]byte, capLen)
+		if _, rerr := io.ReadFull(bodyReader, headBuf); rerr != nil {
+			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
+			if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
+				BadRequest(w, "Chunk body shorter than Content-Length")
+				return
+			}
+			slog.WarnContext(ctx, "upload chunk head read failed", "session_id", sid, "error", rerr)
+			InternalError(w)
+			return
+		}
+		if _, cerr := ClassifyAttachment(claimed.FileName, headBuf); cerr != nil {
+			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
+			writeError(w, http.StatusBadRequest, errCodeUploadDisallowedMediaType, cerr.Error(), nil)
+			return
+		}
+		_, _ = h.Write(headBuf)
+		tee = io.MultiReader(bytes.NewReader(headBuf), io.TeeReader(bodyReader, h))
+	} else {
+		tee = io.TeeReader(bodyReader, h)
+		if offset == 0 {
+			capLen := n
+			if capLen > uploadHeadCaptureBytes {
+				capLen = uploadHeadCaptureBytes
+			}
+			headBuf = make([]byte, 0, capLen)
+			tee = io.TeeReader(tee, &headCaptureWriter{buf: &headBuf, limit: int(capLen)})
+		}
 	}
 
 	partRef, writeErr := sink.WriteChunk(chunkCtx, claimed, offset, token, tee, n)
@@ -693,6 +771,16 @@ func (s *Server) handleUploadChunk(
 		parts := make([]string, len(claimed.Parts)+1)
 		copy(parts, claimed.Parts)
 		parts[len(claimed.Parts)] = partRef
+		maxParts := uploadMaxParts(claimed.DeclaredSize, minChunk)
+		if len(parts) >= maxParts {
+			relCtx, relCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.store.ReleaseUploadLease(relCtx, sid, token)
+			relCancel()
+			writeError(w, http.StatusBadRequest, errCodeUploadTooManyParts,
+				fmt.Sprintf("Upload part count %d reaches defensive limit %d for declared size %d", len(parts), maxParts, claimed.DeclaredSize),
+				map[string]interface{}{"maxParts": maxParts - 1})
+			return
+		}
 		commit.Parts = parts
 	}
 
@@ -765,7 +853,7 @@ func (s *Server) handleUploadComplete(
 	}
 
 	// Re-check effective per-file limit at complete (§3.4).
-	maxBytes := s.WorkspaceUploadMaxFileBytes(ctx)
+	maxBytes := s.uploadMaxFileBytes(ctx, scope.kind)
 	if sess.DeclaredSize > maxBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, errCodeUploadDeclaredExceeded,
 			fmt.Sprintf("File size %d exceeds maximum allowed size of %d bytes", sess.DeclaredSize, maxBytes),
@@ -849,6 +937,24 @@ func (s *Server) handleUploadComplete(
 			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
 			_ = sink.Cleanup(context.Background(), claimed)
 			writeWorkspaceFileError(w, "upload", claimed.DestPath, finErr)
+		case errors.Is(finErr, errUploadDisallowedMediaType):
+			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(context.Background(), claimed)
+			writeError(w, http.StatusBadRequest, errCodeUploadDisallowedMediaType, finErr.Error(), nil)
+		case errors.Is(finErr, artifacts.ErrAttachmentTooLarge):
+			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(context.Background(), claimed)
+			writeError(w, http.StatusRequestEntityTooLarge, errCodeUploadDeclaredExceeded,
+				fmt.Sprintf("File size %d exceeds maximum allowed size of %d bytes", claimed.DeclaredSize, maxBytes),
+				map[string]interface{}{"maxBytes": maxBytes})
+		case errors.Is(finErr, artifacts.ErrAttachmentName):
+			_ = s.store.TransitionUploadSession(context.Background(), sid, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, token, nil)
+			_ = sink.Cleanup(context.Background(), claimed)
+			BadRequest(w, "Invalid attachment filename")
+		case errors.Is(finErr, artifacts.ErrComposerUnsupported):
+			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
+			writeError(w, http.StatusNotImplemented, errCodeLargeUploadsUnsupportedStorage,
+				"Configured blob storage does not support compose required for large chat attachments", nil)
 		default:
 			// Transient error: release the finalize lease so a retry can re-claim.
 			_ = s.store.ReleaseUploadLease(context.Background(), sid, token)
