@@ -430,6 +430,81 @@ func TestChatUploads_OwnerScopeBindingAndAuthz(t *testing.T) {
 	agentRec := chatUploadJSONReq(t, env.srv, agentTok, http.MethodPost, "/api/v1/chat/attachments/uploads",
 		UploadStartRequest{Name: "a.txt", Size: 5})
 	assert.Equal(t, http.StatusForbidden, agentRec.Code, "body: %s", agentRec.Body.String())
+
+	// Scoped UAT bearer disposition checks (review-1 R3, cases i-iv):
+	// Give env.user project-member access on two distinct projects (projA, projB)
+	// so account permissions allow both and token boundary/scope governs.
+	projA, _ := createTestHubManagedProject(t, env.srv, "Chat Upload UAT ProjA")
+	projB, _ := createTestHubManagedProject(t, env.srv, "Chat Upload UAT ProjB")
+	memberRole, err := env.st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	for _, pid := range []string{projA.ID, projB.ID} {
+		_, err := env.st.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: memberRole.ID,
+			PrincipalType:    "user",
+			PrincipalID:      env.user.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          pid,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+	}
+
+	tokProjA := mintHubConfigToken(t, env.srv, env.user.ID, projectBoundary(projA.ID), "inbox:write", "project:read")
+	tokProjB := mintHubConfigToken(t, env.srv, env.user.ID, projectBoundary(projB.ID), "inbox:write", "project:read")
+	tokNoInboxWrite := mintHubConfigToken(t, env.srv, env.user.ID, hubBoundary(), "project:read")
+	tokHubInboxWrite := mintHubConfigToken(t, env.srv, env.user.ID, hubBoundary(), "inbox:write")
+
+	// (i) Project-A boundary token with inbox:write + project:read starts a projA session (201)
+	// and can PUT chunks on it (200).
+	startProjA := chatUploadJSONReq(t, env.srv, tokProjA, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "a.txt", Size: 10, ProjectID: projA.ID})
+	require.Equal(t, http.StatusCreated, startProjA.Code, "case (i) start projA: %s", startProjA.Body.String())
+	var sessA UploadStartResponse
+	require.NoError(t, json.Unmarshal(startProjA.Body.Bytes(), &sessA))
+	putProjA := chatUploadChunkReq(t, env.srv, tokProjA, "/api/v1/chat/attachments/uploads/"+sessA.ID+"?offset=0", []byte("01234"))
+	assert.Equal(t, http.StatusOK, putProjA.Code, "case (i) PUT projA: %s", putProjA.Body.String())
+
+	// Start a projB session with tokProjB so case (ii) can exercise PUT on an existing projB session.
+	startProjB := chatUploadJSONReq(t, env.srv, tokProjB, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "b.txt", Size: 10, ProjectID: projB.ID})
+	require.Equal(t, http.StatusCreated, startProjB.Code, "setup projB: %s", startProjB.Body.String())
+	var sessB UploadStartResponse
+	require.NoError(t, json.Unmarshal(startProjB.Body.Bytes(), &sessB))
+
+	// (ii) Project-A boundary token gets 403 on starting projB, on PUT/GET/DELETE/complete
+	// of an existing projB session, and on starting project-less.
+	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokProjA, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "b2.txt", Size: 5, ProjectID: projB.ID}).Code, "case (ii) start projB with projA token")
+	assert.Equal(t, http.StatusForbidden, chatUploadChunkReq(t, env.srv, tokProjA,
+		"/api/v1/chat/attachments/uploads/"+sessB.ID+"?offset=0", []byte("01234")).Code, "case (ii) PUT existing projB session with projA token")
+	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokProjA, http.MethodGet,
+		"/api/v1/chat/attachments/uploads/"+sessB.ID, nil).Code, "case (ii) GET existing projB session with projA token")
+	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokProjA, http.MethodPost,
+		"/api/v1/chat/attachments/uploads/"+sessB.ID+"/complete", nil).Code, "case (ii) complete existing projB session with projA token")
+	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokProjA, http.MethodDelete,
+		"/api/v1/chat/attachments/uploads/"+sessB.ID, nil).Code, "case (ii) DELETE existing projB session with projA token")
+
+	// (iii) Token without inbox:write gets 403 on start and on PUT of an existing session.
+	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokNoInboxWrite, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "no-scope.txt", Size: 5, ProjectID: projA.ID}).Code, "case (iii) start without inbox:write")
+	assert.Equal(t, http.StatusForbidden, chatUploadChunkReq(t, env.srv, tokNoInboxWrite,
+		"/api/v1/chat/attachments/uploads/"+sessA.ID+"?offset=5", []byte("56789")).Code, "case (iii) PUT without inbox:write")
+
+	// (iv) Project-boundary token gets 403 on project-less start and on PUT of an existing
+	// project-less session; hub-boundary token with inbox:write gets 201 on start and 200 on PUT.
+	assert.Equal(t, http.StatusForbidden, chatUploadJSONReq(t, env.srv, tokProjA, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "dm.txt", Size: 5}).Code, "case (iv) project-less start with project-boundary token")
+	assert.Equal(t, http.StatusForbidden, chatUploadChunkReq(t, env.srv, tokProjA,
+		chunkURL+"?offset=0", []byte("12345")).Code, "case (iv) project-less PUT with project-boundary token")
+
+	startHubDM := chatUploadJSONReq(t, env.srv, tokHubInboxWrite, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "dm-hub.txt", Size: 5})
+	require.Equal(t, http.StatusCreated, startHubDM.Code, "case (iv) project-less start with hub-boundary token: %s", startHubDM.Body.String())
+	var sessHubDM UploadStartResponse
+	require.NoError(t, json.Unmarshal(startHubDM.Body.Bytes(), &sessHubDM))
+	assert.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, tokHubInboxWrite,
+		"/api/v1/chat/attachments/uploads/"+sessHubDM.ID+"?offset=0", []byte("hello")).Code, "case (iv) project-less PUT with hub-boundary token")
 }
 
 func TestChatUploads_StaleWriterPartNeverReplacesCommittedPart(t *testing.T) {
