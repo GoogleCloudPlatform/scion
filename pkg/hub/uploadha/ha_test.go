@@ -538,6 +538,57 @@ func TestWorkspaceUploads_TwoProcessHA(t *testing.T) {
 		"overrides":         map[string]any{"hub.large_uploads": true},
 	}, http.StatusOK)
 
+	// When testing above the 50 MiB default (or when explicitly requested via
+	// SCION_UPLOAD_HA_MAX_FILE_BYTES), configure server.hub.uploads.max_workspace_file_size
+	// through Hub A's Admin API and confirm Hub B observes the new limit live.
+	maxFileBytes := parseEnvInt64("SCION_UPLOAD_HA_MAX_FILE_BYTES", 0)
+	if maxFileBytes == 0 && totalBytes > 50<<20 {
+		maxFileBytes = totalBytes
+	}
+	if maxFileBytes > 0 {
+		putPayload := map[string]any{
+			"server": map[string]any{
+				"hub": map[string]any{
+					"uploads": map[string]any{
+						"max_workspace_file_size": maxFileBytes,
+					},
+				},
+			},
+		}
+		putReqBytes, _ := json.Marshal(putPayload)
+		putStatus, putRespBytes := hubA.doJSON(http.MethodPut, "/api/v1/admin/server-config", putPayload)
+		if putStatus != http.StatusOK {
+			t.Fatalf("PUT /api/v1/admin/server-config on hub-A: status %d, body: %s", putStatus, string(putRespBytes))
+		}
+		t.Logf("admin PUT /api/v1/admin/server-config on hub-A: req=%s status=%d resp=%s",
+			string(putReqBytes), putStatus, string(bytes.TrimSpace(putRespBytes)))
+
+		// Confirm Hub B observes the updated max_workspace_file_size live via
+		// GET /api/v1/settings/public (propagated via Postgres LISTEN/NOTIFY).
+		limitPropStart := time.Now()
+		limitDeadline := limitPropStart.Add(30 * time.Second)
+		for {
+			pubStatus, pubBody := hubB.doJSON(http.MethodGet, "/api/v1/settings/public", nil)
+			if pubStatus == http.StatusOK {
+				var pub struct {
+					Uploads struct {
+						MaxWorkspaceFileSize int64 `json:"maxWorkspaceFileSize"`
+					} `json:"uploads"`
+				}
+				if err := json.Unmarshal(pubBody, &pub); err == nil && pub.Uploads.MaxWorkspaceFileSize == maxFileBytes {
+					t.Logf("hub-B observed uploads.maxWorkspaceFileSize=%d live in %s (GET /api/v1/settings/public)",
+						pub.Uploads.MaxWorkspaceFileSize, time.Since(limitPropStart).Round(time.Millisecond))
+					break
+				}
+			}
+			if time.Now().After(limitDeadline) {
+				t.Fatalf("hub-B did not observe uploads.maxWorkspaceFileSize=%d within 30s (last status=%d body=%s)",
+					maxFileBytes, pubStatus, string(pubBody))
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
 	// Create a hub-managed project through Hub A.
 	projResp := hubA.mustJSON(http.MethodPost, "/api/v1/projects", map[string]any{
 		"name": "Upload HA Gate",
