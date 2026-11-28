@@ -594,74 +594,20 @@ func applicableTokenBudgetSpecs(projectID, billingUserID string, groupIDs []stri
 		if gid == "" {
 			continue
 		}
-		specs = append(specs,
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupDay,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: "",
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			},
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupMonth,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: "",
-				bindingScope:   store.QuotaScopeSystem,
-				bindingScopeID: "",
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			},
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupDay,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: projectID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: projectID,
-				windowStartUTC: dayStart,
-				windowEndUTC:   dayEnd,
-			},
-			budgetEvalSpec{
-				limitName:      store.LimitLLMTokensPerGroupMonth,
-				scopeKind:      store.UsageScopeKindGroup,
-				scopeID:        gid,
-				projectScopeID: projectID,
-				bindingScope:   store.QuotaScopeProject,
-				bindingScopeID: projectID,
-				windowStartUTC: monthStart,
-				windowEndUTC:   monthEnd,
-			},
-		)
+		specs = append(specs, groupTokenBudgetSpecs(gid, "", dayStart, dayEnd, monthStart, monthEnd)...)
+		specs = append(specs, groupTokenBudgetSpecs(gid, projectID, dayStart, dayEnd, monthStart, monthEnd)...)
 	}
 	return specs
 }
 
-// EvaluateGroupScope evaluates the active UTC day and month pooled-group
-// budgets for (groupID, projectScopeID) at `now`. Called by the pooled-group
-// seeder right after writing origin="seed" rows so usage_budget_state reflects
-// newly seeded spend immediately.
-func (e *TokenBudgetEvaluator) EvaluateGroupScope(ctx context.Context, groupID, projectScopeID string, now time.Time) error {
-	if !e.enabled() || groupID == "" {
-		return nil
-	}
-	if now.IsZero() {
-		now = e.now()
-	} else {
-		now = now.UTC()
-	}
-	dayStart, dayEnd := utcDayWindow(now)
-	monthStart, monthEnd := utcMonthWindow(now)
+func groupTokenBudgetSpecs(groupID, projectScopeID string, dayStart, dayEnd, monthStart, monthEnd time.Time) []budgetEvalSpec {
 	bindingScope := store.QuotaScopeSystem
 	bindingScopeID := ""
 	if projectScopeID != "" {
 		bindingScope = store.QuotaScopeProject
 		bindingScopeID = projectScopeID
 	}
-	specs := []budgetEvalSpec{
+	return []budgetEvalSpec{
 		{
 			limitName:      store.LimitLLMTokensPerGroupDay,
 			scopeKind:      store.UsageScopeKindGroup,
@@ -683,6 +629,24 @@ func (e *TokenBudgetEvaluator) EvaluateGroupScope(ctx context.Context, groupID, 
 			windowEndUTC:   monthEnd,
 		},
 	}
+}
+
+// EvaluateGroupScope evaluates the active UTC day and month pooled-group
+// budgets for (groupID, projectScopeID) at `now`. Called by the pooled-group
+// seeder right after writing origin="seed" rows so usage_budget_state reflects
+// newly seeded spend immediately.
+func (e *TokenBudgetEvaluator) EvaluateGroupScope(ctx context.Context, groupID, projectScopeID string, now time.Time) error {
+	if !e.enabled() || groupID == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = e.now()
+	} else {
+		now = now.UTC()
+	}
+	dayStart, dayEnd := utcDayWindow(now)
+	monthStart, monthEnd := utcMonthWindow(now)
+	specs := groupTokenBudgetSpecs(groupID, projectScopeID, dayStart, dayEnd, monthStart, monthEnd)
 	evalCache := newTokenLimitEvalCache(e.quota)
 	for _, spec := range specs {
 		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
