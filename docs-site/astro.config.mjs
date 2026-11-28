@@ -119,6 +119,7 @@ export default defineConfig({
 							label: 'Release Notes',
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'v0.4.0-preview.5', slug: 'release-notes/v0-4-0-preview-5' },
 								{ label: 'v0.4.0-preview.4', slug: 'release-notes/v0-4-0-preview-4' },
 								{ label: 'v0.4.0-preview.3', slug: 'release-notes/v0-4-0-preview-3' },
 								{ label: 'v0.4.0-preview.2', slug: 'release-notes/v0-4-0-preview-2' },
