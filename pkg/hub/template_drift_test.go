@@ -835,13 +835,15 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 			}
 		})
 
-		t.Run("project credential sends Bearer token and follows GH_OWNER__REPO precedence", func(t *testing.T) {
+		t.Run("project credential sends Bearer token and follows GH_OWNER__REPO precedence without Info log spam", func(t *testing.T) {
 			fg := newHTTPTestDriftGitHub(t)
 			fg.branches["main"] = commitNew
 			fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
 			fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
 
 			f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, nil)
+			var infoBuf bytes.Buffer
+			f.srv.resourceLog = slog.New(slog.NewTextHandler(&infoBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 			f.srv.SetSecretBackend(&importCredSecretBackend{
 				scope:     secret.ScopeProject,
 				projectID: f.project.ID,
@@ -860,8 +862,152 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 			for _, r := range reqs {
 				assert.Equal(t, "Bearer ghp_repo_specific_token", r.auth)
 			}
+			assert.NotContains(t, infoBuf.String(), "using project credential", "drift credential lookup must not log at Info level")
 			fg.assertNoContentsOrRecursiveCalls(t)
 		})
+	})
+
+	t.Run("shared source URL at different commits: fresh then stale and stale then fresh within TTL", func(t *testing.T) {
+		const sharedURL = "https://github.com/o/r/tree/main/.scion/templates/my-tmpl"
+
+		t.Run("fresh checked first then stale within TTL warns for stale", func(t *testing.T) {
+			now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+			var clockMu sync.Mutex
+			clock := func() time.Time {
+				clockMu.Lock()
+				defer clockMu.Unlock()
+				return now
+			}
+
+			fg := newHTTPTestDriftGitHub(t)
+			fg.branches["main"] = commitNew
+			fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+			fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+
+			f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+			seedDriftTemplate(t, f, "fresh-tmpl", sharedURL, commitNew)
+			seedDriftTemplate(t, f, "stale-tmpl", sharedURL, commitOld)
+
+			// 1. Fresh template checked first: resolves ref (headCommit == sourceCommit), no warning
+			rec1 := f.create(t, map[string]any{"name": "ag-fresh-1", "task": "t", "template": "fresh-tmpl"})
+			require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+			var resp1 CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+			assert.Empty(t, resp1.Warnings)
+			assert.Equal(t, 1, fg.callCount())
+
+			// 2. Stale template checked within 60s TTL: must fetch head + source trees and emit warning
+			clockMu.Lock()
+			now = now.Add(15 * time.Second)
+			clockMu.Unlock()
+			rec2 := f.create(t, map[string]any{"name": "ag-stale-2", "task": "t", "template": "stale-tmpl"})
+			require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+			var resp2 CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+			want := `template "stale-tmpl" may be out of date: it was imported from github.com/o/r/.scion/templates/my-tmpl at abc1234, and that folder has changed on "main" since. Run "scion templates update stale-tmpl" (or Refresh from Source) to update.`
+			assert.Equal(t, []string{want}, resp2.Warnings)
+			callsAfterStale := fg.callCount()
+			assert.Equal(t, 3, callsAfterStale, "stale check should fetch head and source trees without re-resolving ref")
+
+			// 3. Second stale check within TTL: 0 new calls, warning still returned
+			clockMu.Lock()
+			now = now.Add(15 * time.Second)
+			clockMu.Unlock()
+			rec3 := f.create(t, map[string]any{"name": "ag-stale-3", "task": "t", "template": "stale-tmpl"})
+			require.Equal(t, http.StatusCreated, rec3.Code, rec3.Body.String())
+			var resp3 CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec3.Body.Bytes(), &resp3))
+			assert.Equal(t, []string{want}, resp3.Warnings)
+			assert.Equal(t, callsAfterStale, fg.callCount())
+			fg.assertNoContentsOrRecursiveCalls(t)
+		})
+
+		t.Run("stale checked first then fresh within TTL warns for stale and not for fresh", func(t *testing.T) {
+			now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+			var clockMu sync.Mutex
+			clock := func() time.Time {
+				clockMu.Lock()
+				defer clockMu.Unlock()
+				return now
+			}
+
+			fg := newHTTPTestDriftGitHub(t)
+			fg.branches["main"] = commitNew
+			fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+			fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+
+			f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+			seedDriftTemplate(t, f, "fresh-tmpl", sharedURL, commitNew)
+			seedDriftTemplate(t, f, "stale-tmpl", sharedURL, commitOld)
+
+			// 1. Stale template checked first: warns
+			rec1 := f.create(t, map[string]any{"name": "ag-stale-1", "task": "t", "template": "stale-tmpl"})
+			require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+			var resp1 CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+			assert.Len(t, resp1.Warnings, 1)
+			callsAfterStale := fg.callCount()
+			assert.Equal(t, 3, callsAfterStale)
+
+			// 2. Fresh template checked within 60s TTL: 0 new calls, no warning
+			clockMu.Lock()
+			now = now.Add(15 * time.Second)
+			clockMu.Unlock()
+			rec2 := f.create(t, map[string]any{"name": "ag-fresh-2", "task": "t", "template": "fresh-tmpl"})
+			require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+			var resp2 CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+			assert.Empty(t, resp2.Warnings)
+			assert.Equal(t, callsAfterStale, fg.callCount())
+			fg.assertNoContentsOrRecursiveCalls(t)
+		})
+	})
+
+	t.Run("cache entry populated under PAT scope is never served to anonymous scope", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		clock := func() time.Time { return now }
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+		fg.override = func(w http.ResponseWriter, r *http.Request) bool {
+			// Private repo: anonymous requests receive 404
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return true
+			}
+			return false
+		}
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		f.srv.SetSecretBackend(&importCredSecretBackend{
+			scope:     secret.ScopeProject,
+			projectID: f.project.ID,
+			values:    map[string]string{"GITHUB_TOKEN": "ghp_private_repo_pat"},
+		})
+		seedDriftTemplate(t, f, "priv-tmpl", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
+
+		// 1. Create with PAT: succeeds and populates PAT-scoped drift caches
+		rec1 := f.create(t, map[string]any{"name": "ag-pat-1", "task": "t", "template": "priv-tmpl"})
+		require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Len(t, resp1.Warnings, 1)
+		callsWithPAT := fg.callCount()
+		assert.Equal(t, 3, callsWithPAT)
+
+		// 2. Remove PAT and create again immediately (within 60s TTL):
+		// must NOT reuse PAT-scoped cache; must hit fake anonymously (404 -> fail-open, no warning)
+		f.srv.SetSecretBackend(nil)
+		rec2 := f.create(t, map[string]any{"name": "ag-anon-2", "task": "t", "template": "priv-tmpl"})
+		require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Empty(t, resp2.Warnings, "anonymous scope must not reuse PAT-scoped drift cache entry")
+		assert.Greater(t, fg.callCount(), callsWithPAT, "anonymous check must miss PAT cache and query GitHub")
+		reqs := fg.snapshotReqs()
+		assert.Empty(t, reqs[len(reqs)-1].auth, "post-PAT-removal request must be anonymous")
 	})
 }
 

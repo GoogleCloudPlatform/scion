@@ -187,6 +187,15 @@ func (c *templateDriftChecker) putBranchTree(key templateDriftKey, entry templat
 	c.branchItems[key] = entry
 }
 
+func (c *templateDriftChecker) setBranchTreeSHA(key templateDriftKey, commitSHA, treeSHA string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.branchItems[key]; ok && entry.commitSHA == commitSHA {
+		entry.treeSHA = treeSHA
+		c.branchItems[key] = entry
+	}
+}
+
 func (s *Server) templateDriftLimits() githubfetch.Limits {
 	budget := s.templateDrift.effectiveBudget()
 	return githubfetch.Limits{
@@ -295,6 +304,7 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 		ScopeID: project.ID,
 		Owner:   src.Owner,
 		Repo:    src.Repo,
+		Quiet:   true,
 	})
 	scope := cred.EffectiveScope()
 	now := s.templateDrift.clock()
@@ -326,6 +336,19 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 		if headCommit == target.sourceCommit {
 			return ""
 		}
+		if branchTree == "" {
+			headTreeKey := templateDriftKey{
+				owner: ownerLower,
+				repo:  repoLower,
+				ref:   headCommit,
+				path:  resolvedPath,
+				scope: scope,
+			}
+			if cachedHeadTree, ok := s.templateDrift.getCommitTree(headTreeKey); ok {
+				branchTree = cachedHeadTree
+				s.templateDrift.setBranchTreeSHA(branchKey, headCommit, branchTree)
+			}
+		}
 		commitKey := templateDriftKey{
 			owner: ownerLower,
 			repo:  repoLower,
@@ -336,7 +359,7 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 		commitTree, hasCommit = s.templateDrift.getCommitTree(commitKey)
 	}
 
-	if !hasBranch || !hasCommit {
+	if !hasBranch || branchTree == "" || !hasCommit {
 		if _, cooling := s.githubCooldown().Active(scope); cooling {
 			s.agentLifecycleLog.Debug("template drift check skipped (rate-limit cooldown)",
 				"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
@@ -372,7 +395,9 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 				}, s.templateDrift.clock())
 				return ""
 			}
+		}
 
+		if branchTree == "" {
 			headTreeKey := templateDriftKey{
 				owner: ownerLower,
 				repo:  repoLower,
@@ -394,12 +419,16 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 				branchTree = tree.TreeSHA
 				s.templateDrift.putCommitTree(headTreeKey, branchTree)
 			}
-			s.templateDrift.putBranchTree(branchKey, templateDriftBranchEntry{
-				resolvedRef:  resolvedRef,
-				resolvedPath: resolvedPath,
-				commitSHA:    headCommit,
-				treeSHA:      branchTree,
-			}, s.templateDrift.clock())
+			if !hasBranch {
+				s.templateDrift.putBranchTree(branchKey, templateDriftBranchEntry{
+					resolvedRef:  resolvedRef,
+					resolvedPath: resolvedPath,
+					commitSHA:    headCommit,
+					treeSHA:      branchTree,
+				}, s.templateDrift.clock())
+			} else {
+				s.templateDrift.setBranchTreeSHA(branchKey, headCommit, branchTree)
+			}
 		}
 
 		commitKey := templateDriftKey{

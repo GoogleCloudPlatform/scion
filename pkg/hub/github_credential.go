@@ -83,6 +83,7 @@ type ghCredRequest struct {
 	Owner     string
 	Repo      string
 	Requester UserIdentity // optional; defaults to GetUserIdentityFromContext(ctx)
+	Quiet     bool         // log credential selection at Debug instead of Info (e.g. per-agent-create drift checks)
 }
 
 // githubCredential resolves the GitHub credential and principal scope for a
@@ -106,9 +107,9 @@ func (s *Server) githubCredential(ctx context.Context, r ghCredRequest) githubfe
 		if r.ScopeID == "" {
 			return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}
 		}
-		return s.projectGitHubCredential(ctx, r.ScopeID, r.Owner, r.Repo)
+		return s.projectGitHubCredential(ctx, r.ScopeID, r.Owner, r.Repo, r.Quiet)
 	case store.TemplateScopeGlobal:
-		return s.scopedGitHubCredential(ctx, secret.ScopeHub, s.HubID(), r.Owner, r.Repo)
+		return s.scopedGitHubCredential(ctx, secret.ScopeHub, s.HubID(), r.Owner, r.Repo, r.Quiet)
 	case store.TemplateScopeUser:
 		user := r.Requester
 		if user == nil {
@@ -117,14 +118,22 @@ func (s *Server) githubCredential(ctx context.Context, r ghCredRequest) githubfe
 		if r.ScopeID == "" || user == nil || user.ID() != r.ScopeID {
 			return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}
 		}
-		return s.scopedGitHubCredential(ctx, secret.ScopeUser, r.ScopeID, r.Owner, r.Repo)
+		return s.scopedGitHubCredential(ctx, secret.ScopeUser, r.ScopeID, r.Owner, r.Repo, r.Quiet)
 	}
 	return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}
 }
 
-func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, repo string) githubfetch.Credential {
+func (s *Server) logGitHubCredentialSelection(quiet bool, msg string, args ...any) {
+	if quiet {
+		s.resourceLog.Debug(msg, args...)
+		return
+	}
+	s.resourceLog.Info(msg, args...)
+}
+
+func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, repo string, quiet bool) githubfetch.Credential {
 	if val, key := s.ghConventionCredential(ctx, secret.ScopeProject, projectID, owner, repo); val != "" {
-		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", key)
+		s.logGitHubCredentialSelection(quiet, "using project credential for resource import", "projectID", projectID, "secret", key)
 		return githubfetch.Credential{
 			Token: val,
 			Scope: s.secretCredentialScope(val),
@@ -151,7 +160,7 @@ func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, 
 	}
 
 	if val := s.credentialForImport(ctx, secret.ScopeProject, projectID, ghauth.DefaultKey); val != "" {
-		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", ghauth.DefaultKey)
+		s.logGitHubCredentialSelection(quiet, "using project credential for resource import", "projectID", projectID, "secret", ghauth.DefaultKey)
 		if hint != "" {
 			hint += "; fell back to GITHUB_TOKEN"
 		}
@@ -170,7 +179,7 @@ func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, 
 	}
 }
 
-func (s *Server) scopedGitHubCredential(ctx context.Context, credScope, scopeID, owner, repo string) githubfetch.Credential {
+func (s *Server) scopedGitHubCredential(ctx context.Context, credScope, scopeID, owner, repo string, quiet bool) githubfetch.Credential {
 	val, key := s.ghConventionCredential(ctx, credScope, scopeID, owner, repo)
 	if val == "" {
 		val, key = s.credentialForImport(ctx, credScope, scopeID, ghauth.DefaultKey), ghauth.DefaultKey
@@ -178,7 +187,7 @@ func (s *Server) scopedGitHubCredential(ctx context.Context, credScope, scopeID,
 	if val == "" {
 		return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}
 	}
-	s.resourceLog.Info("using credential for resource import", "scope", credScope, "scopeID", scopeID, "secret", key)
+	s.logGitHubCredentialSelection(quiet, "using credential for resource import", "scope", credScope, "scopeID", scopeID, "secret", key)
 	return githubfetch.Credential{
 		Token: val,
 		Scope: s.secretCredentialScope(val),
