@@ -55,11 +55,11 @@ const (
 	uploadHeadCaptureBytes    = 512
 
 	// Upload-specific API error codes (§3.3, §3.5, §3.6, §3.8).
-	errCodeUploadQuotaExceeded     = "upload_quota_exceeded"
-	errCodeUploadOffsetMismatch    = "offset_mismatch"
-	errCodeUploadBusy              = "upload_busy"
-	errCodeUploadChunkTooLarge     = "chunk_too_large"
-	errCodeUploadDeclaredExceeded  = "declared_size_exceeded"
+	errCodeUploadQuotaExceeded            = "upload_quota_exceeded"
+	errCodeUploadOffsetMismatch           = "offset_mismatch"
+	errCodeUploadBusy                     = "upload_busy"
+	errCodeUploadChunkTooLarge            = "chunk_too_large"
+	errCodeUploadDeclaredExceeded         = "declared_size_exceeded"
 	errCodeUploadIncomplete               = "upload_incomplete"
 	errCodeUploadInvalidState             = "upload_invalid_state"
 	errCodeUploadIntegrityMismatch        = "integrity_mismatch"
