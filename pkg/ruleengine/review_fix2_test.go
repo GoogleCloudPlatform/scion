@@ -111,9 +111,12 @@ func TestReviewFix2_RV2_1_ResumeVsCompletionNoDeadlock(t *testing.T) {
 		}
 		cancel()
 
-		var wg sync.WaitGroup
+		var (
+			wg        sync.WaitGroup
+			resumeErr error
+		)
 		wg.Add(2)
-		go func() { defer wg.Done(); _, _ = run.Resume() }()
+		go func() { defer wg.Done(); _, resumeErr = run.Resume() }()
 		go func() { defer wg.Done(); _ = eng.EvaluatePending(p) }()
 
 		done := make(chan struct{})
@@ -124,6 +127,18 @@ func TestReviewFix2_RV2_1_ResumeVsCompletionNoDeadlock(t *testing.T) {
 			buf := make([]byte, 1<<20)
 			n := runtime.Stack(buf, true)
 			t.Fatalf("DEADLOCK Resume vs EvaluatePending:\n%s", buf[:n])
+		}
+		// Under C1, if EvaluatePending claimed first (Pending -> Dispatched),
+		// the racing Resume intentionally returns a "step in flight" error
+		// with no transition, leaving the canceled outcome in PendingCompleted
+		// once EvaluatePending finishes. Consume it now.
+		if resumeErr != nil {
+			if _, err := run.Resume(); err != nil {
+				t.Fatalf("follow-up Resume after in-flight error (%v) failed: %v", resumeErr, err)
+			}
+		}
+		if io.callCount() != 0 {
+			t.Fatalf("expected 0 dialect calls on canceled context, got %d", io.callCount())
 		}
 		res, _ := run.Result()
 		if len(res.Steps) == 0 || res.Steps[0].Class != ruleengine.StepClassCanceled {
