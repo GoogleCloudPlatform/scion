@@ -110,7 +110,7 @@ func newMPChainP1Fixture(t *testing.T, policiesOn, chainsOn bool) *mpChainP1Fixt
 
 	conv := &store.Conversation{
 		ID:          tid("mp-chain-p1-conv"),
-		ProjectID:   project.ID,
+		ProjectID:   &project.ID,
 		Kind:        "group",
 		Surface:     "web",
 		ExternalRef: "thread:team-chat",
