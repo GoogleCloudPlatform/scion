@@ -20,6 +20,44 @@ scion exec-container set <execution-container-name>
 
 Execution containers started before `hub.command_requests` was enabled do not advertise the Conduit exec routes until restarted.
 
+## Logging in inside your execution container
+
+Inside an execution container, the `scion` CLI runs in **human mode** rather than agent mode. On first start, `sciontool` isolates PID 1's agent identity from the workload and seeds `~/.scion/context.yaml` (if absent) with the container's Hub endpoint, so you can authenticate as yourself with zero flags:
+
+```bash
+scion login
+```
+
+- **Zero-flag device flow:** `scion login` (a top-level alias for `scion hub auth login`) detects the headless container environment and runs the OAuth device authorization flow against the seeded Hub endpoint. Your browser completes verification directly with the OAuth provider (Google or GitHub) while the CLI polls the Hub, so your browser does not need direct access to an internal Hub URL.
+- **Separate credentials:** Your login is stored in `~/.scion/credentials.json` keyed by the container's Hub URL (typically the internal route configured by the Hub operator). It is separate from your workstation login to the public Hub URL.
+- **Registering from inside the container:** Because the workload runs in human mode, you can also run `scion exec-container set <execution-container-name>` directly from the container's shell (as shown in the login MOTD).
+- **Switching Hubs:** Because `SCION_HUB_ENDPOINT` and `SCION_HUB_URL` are not set in the workload environment, `scion use --hub <hub>` works normally and updates `~/.scion/context.yaml`. On runtimes with a persistent `$HOME`, `sciontool` never overwrites an existing `~/.scion/context.yaml` on restart.
+
+### What approved commands can and cannot use
+
+- **Cannot use:** Approved commands (as well as the interactive tmux shell, Conduit SSH sessions, and sidecar services) have no `SCION_*` control environment variables — except `SCION_TRIGGER_CONTEXT`, which is injected per-run only for trigger-routed commands. They cannot read PID 1's runtime agent token (`~/.scion/scion-token` is removed before the workload starts), cannot use the agent delegation helper or auto-exposed ports, and receive no project GitHub App token or project default GCP identity. Before you run `scion login`, `scion hub status` and `scion whoami` report unauthenticated rather than falling back to the agent token.
+- **Can use:** Approved commands run as the container user (`scion`) and can use any CLI credentials you sign into inside `$HOME` (such as `gh`, `gcloud`, `kubectl`, and your `scion` login once you run `scion login`), along with user-scope environment variables and secrets (non-`SCION_*` names).
+
+:::caution[Approval card is the security boundary]
+After you run `scion login`, your user OAuth credential sits in `~/.scion/credentials.json` under the same OS user as approved commands. Any command you approve can therefore run `scion` as you, just as it can use `gh` or `gcloud` credentials in `$HOME`. Always review the exact script, working directory, and SHA-256 hash on the approval card before approving, and keep credentials in `$HOME` — never in `/workspace`, which may be shared with LLM agents.
+:::
+
+### Known limitations
+
+- **Cloud Run in-place restarts (`ptone/scion#9821`):** On Cloud Run, an in-place platform restart replays the creation-time agent and transport tokens because refreshed tokens are not persisted back to `$HOME`.
+- **Proxy-auth Hubs (`ptone/scion#9808`):** When the Hub sits behind IAP or Cloud Run invoker proxy authentication, `sciontool` seeds `transport: {mode, audience}` into `~/.scion/context.yaml` (without copying PID 1's transport token) and prints a MOTD reminder, but the `scion` CLI does not yet apply the `transport` block from the current-hub context entry.
+- **Plain HTTP internal Hub URL:** The seeded Hub endpoint comes from PID 1's `SCION_HUB_ENDPOINT` (the container-reachable agent route), which may be plain `http://` on an internal cluster or VPC network.
+- **Linked project precedence:** If you run `scion login` or `scion hub auth login` from inside a directory linked to a Hub project (for example, bound to a public Hub URL via `scion hub link`), that linked project's Hub URL takes precedence over the seeded `current_hub` in `~/.scion/context.yaml` (see [Hub resolution order](/scion/reference/cli/#global-flags)). Run `scion login` from `$HOME` or pass `--hub <nickname>` to target the seeded Hub explicitly.
+- **`sciontool doctor` inside the shell:** Running `sciontool doctor` from the interactive shell inside an execution container reports that no agent token is found. This is expected because PID 1's runtime token is isolated from the workload user.
+- **Planted directory or symlink on a persistent `$HOME`:** PID 1 fails closed and refuses to start the workload if it cannot unlink `~/.scion/scion-token` (or `~/.scion/transport-token`) — for example, if a directory is planted at `~/.scion/scion-token`, `~/.scion` itself is a symlink, or `~/.scion` is not writable. Fix the persistent home directory on the host and restart the container. (A leaf symlink at `~/.scion/scion-token` is refused and unlinked rather than followed.)
+- **Pre-cap child agents:** Any pre-existing child agents created by an execution container before the runtime scope cap shipped keep their stored-role authority at delegation checks.
+- **Legacy tokens on running execution containers:** After a Hub upgrade, already-running execution containers keep their previous broader token until the next automatic refresh (up to roughly 8 hours under the default 10-hour token TTL). Run `scion reset-auth <agent> --reissue-scopes` to narrow a running execution container's token immediately.
+
+### Verifying isolation (operators)
+
+- **Root-init runtimes (Docker, rootful Podman, Kubernetes with privilege drop):** Inspect the runtime token store as root (for example, `docker exec -u 0 <container> stat /run/sciontool/auth/scion-token`). `/run/sciontool/auth` should be `0700 root:root` and `/run/sciontool/auth/scion-token` (plus `/run/sciontool/auth/transport-token` when proxy transport is active) should be `0600 root:root`. From the workload user (`scion`), `~/.scion/scion-token` must not exist and reading `/run/sciontool/auth/scion-token` must fail with `Permission denied`.
+- **Rootless or shared-UID runtimes (Apple Container, rootless Podman, non-root Kubernetes) and read-only `/run`:** PID 1 keeps the runtime token in memory only (nothing is written under `/run/sciontool/auth/` or `$HOME`) and logs a warning noting the in-memory fallback. `~/.scion/scion-token` is still removed before the workload starts, and the Hub's runtime scope cap (`agent:status:update`, `agent:token:refresh`, `agent:port:forward`) bounds token authority.
+
 ## Proposing a command (agents)
 
 Inside an agent container (agent mode), propose a command with `scion message --command-request`:
