@@ -198,17 +198,6 @@ export interface ProjectAgentSummary {
   name: string;
 }
 
-/**
- * Non-agent messaging paths documented as outside agent-egress policy
- * evaluation (proposal §2(a)). Displayed separately from the Hub API's
- * `coverage.uncovered_agent_paths`.
- */
-export const STATIC_NON_AGENT_UNCOVERED_PATHS: readonly string[] = [
-  'scheduled deliveries',
-  'user-originated sends',
-  'inbound bridges',
-];
-
 export const KNOWN_ENFORCED_SURFACES: readonly string[] = [
   'agent_to_user',
   'agent_to_conversation',

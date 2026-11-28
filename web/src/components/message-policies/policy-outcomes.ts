@@ -78,6 +78,8 @@ export class ScionMessagePolicyOutcomes extends LitElement {
   @state() private selectedDecision: MessagePolicyDecision | null = null;
   @state() private drawerOpen = false;
 
+  private loadSeq = 0;
+
   static override styles = css`
     :host {
       display: block;
@@ -340,6 +342,7 @@ export class ScionMessagePolicyOutcomes extends LitElement {
   public async loadDecisions(): Promise<void> {
     if (!this.projectId) return;
 
+    const seq = ++this.loadSeq;
     this.loading = true;
     this.error = null;
     this.forbidden = false;
@@ -358,7 +361,7 @@ export class ScionMessagePolicyOutcomes extends LitElement {
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/message-policies/decisions?${params.toString()}`
       );
-      if (!this.isConnected) return;
+      if (!this.isConnected || seq !== this.loadSeq) return;
       if (res.status === 403) {
         this.forbidden = true;
         this.decisions = [];
@@ -370,17 +373,17 @@ export class ScionMessagePolicyOutcomes extends LitElement {
       }
 
       const data = (await res.json()) as ListMessagePolicyDecisionsResponse;
-      if (!this.isConnected) return;
+      if (!this.isConnected || seq !== this.loadSeq) return;
 
       this.decisions = Array.isArray(data.decisions) ? data.decisions : [];
       this.totalCount =
         typeof data.total_count === 'number' ? data.total_count : this.decisions.length;
       this.nextCursor = data.next_cursor ?? '';
     } catch (err) {
-      if (!this.isConnected) return;
+      if (!this.isConnected || seq !== this.loadSeq) return;
       this.error = err instanceof Error ? err.message : 'Failed to load policy outcomes';
     } finally {
-      if (this.isConnected) {
+      if (this.isConnected && seq === this.loadSeq) {
         this.loading = false;
       }
     }
@@ -461,9 +464,6 @@ export class ScionMessagePolicyOutcomes extends LitElement {
   }
 
   private actionLabel(d: MessagePolicyDecision): string {
-    if (d.action === 'shadow' && d.class === 'violation') {
-      return 'would reject (shadow)';
-    }
     return d.action;
   }
 
@@ -767,6 +767,11 @@ export class ScionMessagePolicyOutcomes extends LitElement {
         >
           <sl-option value="">All policies</sl-option>
           ${this.policies.map((p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
+          ${this.policyFilter && !this.policies.some((p) => p.id === this.policyFilter)
+            ? html`<sl-option value=${this.policyFilter} data-active-policy-fallback
+                >${this.policyFilter}</sl-option
+              >`
+            : nothing}
         </sl-select>
 
         <sl-select

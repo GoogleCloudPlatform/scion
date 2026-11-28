@@ -405,8 +405,12 @@ export class ScionPageProjectMessagePolicies extends LitElement {
               .systemOneEnabled=${this.systemOneOn}
               .canManage=${this.canManagePolicies}
               .agents=${this.agents}
-              @policies-loaded=${(e: CustomEvent<{ policies: MessagePolicy[] }>) => {
-                this.policies = e.detail.policies;
+              @policies-loaded=${(
+                e: CustomEvent<{ policies: MessagePolicy[]; filtered?: boolean }>
+              ) => {
+                if (!e.detail.filtered || this.policies.length === 0) {
+                  this.policies = e.detail.policies;
+                }
               }}
               @view-policy-outcomes=${(e: CustomEvent<{ policyId: string }>) => {
                 this.handleViewPolicyOutcomes(e.detail.policyId);

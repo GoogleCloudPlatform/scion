@@ -26,7 +26,6 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone, formatRelativeTime } from '../../utils/time.js';
 import {
-  STATIC_NON_AGENT_UNCOVERED_PATHS,
   formatSurfaceLabel,
   hasSystemOneRule,
   type CoverageInfo,
@@ -71,6 +70,9 @@ export class ScionMessagePolicyList extends LitElement {
   @state() private detailPolicy: MessagePolicy | null = null;
   @state() private detailLoading = false;
   @state() private detailError: string | null = null;
+
+  private loadSeq = 0;
+  private detailSeq = 0;
 
   static override styles = css`
     :host {
@@ -141,16 +143,6 @@ export class ScionMessagePolicyList extends LitElement {
     .chip-uncovered {
       background: var(--scion-surface);
       border-style: dashed;
-      color: var(--scion-text-muted);
-    }
-
-    .chip-static {
-      font-family: var(--scion-font-sans);
-    }
-
-    .composition-note {
-      margin: 0.75rem 0 0 0;
-      font-size: 0.8125rem;
       color: var(--scion-text-muted);
     }
 
@@ -386,6 +378,7 @@ export class ScionMessagePolicyList extends LitElement {
   public async loadPolicies(): Promise<void> {
     if (!this.projectId) return;
 
+    const seq = ++this.loadSeq;
     this.loading = true;
     this.error = null;
     this.forbidden = false;
@@ -401,7 +394,7 @@ export class ScionMessagePolicyList extends LitElement {
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/message-policies?${params.toString()}`
       );
-      if (!this.isConnected) return;
+      if (!this.isConnected || seq !== this.loadSeq) return;
       if (res.status === 403) {
         this.forbidden = true;
         this.policies = [];
@@ -413,7 +406,7 @@ export class ScionMessagePolicyList extends LitElement {
       }
 
       const data = (await res.json()) as ListMessagePoliciesResponse;
-      if (!this.isConnected) return;
+      if (!this.isConnected || seq !== this.loadSeq) return;
 
       this.policies = Array.isArray(data.policies) ? data.policies : [];
       this.coverage = data.coverage ?? null;
@@ -423,16 +416,19 @@ export class ScionMessagePolicyList extends LitElement {
 
       this.dispatchEvent(
         new CustomEvent('policies-loaded', {
-          detail: { policies: this.policies },
+          detail: {
+            policies: this.policies,
+            filtered: Boolean(this.modeFilter || this.enabledFilter || this.pageIndex > 0),
+          },
           bubbles: true,
           composed: true,
         })
       );
     } catch (err) {
-      if (!this.isConnected) return;
+      if (!this.isConnected || seq !== this.loadSeq) return;
       this.error = err instanceof Error ? err.message : 'Failed to load message policies';
     } finally {
-      if (this.isConnected) {
+      if (this.isConnected && seq === this.loadSeq) {
         this.loading = false;
       }
     }
@@ -464,6 +460,7 @@ export class ScionMessagePolicyList extends LitElement {
   }
 
   private async openDetail(policy: MessagePolicy): Promise<void> {
+    const seq = ++this.detailSeq;
     this.detailPolicy = policy;
     this.detailOpen = true;
     this.detailError = null;
@@ -473,19 +470,19 @@ export class ScionMessagePolicyList extends LitElement {
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/message-policies/${encodeURIComponent(policy.id)}`
       );
-      if (!this.isConnected || !this.detailOpen) return;
+      if (!this.isConnected || !this.detailOpen || seq !== this.detailSeq) return;
       if (!res.ok) {
         this.detailError = await extractApiError(res, `HTTP ${res.status}`);
         return;
       }
       const fresh = (await res.json()) as MessagePolicy;
-      if (!this.isConnected || !this.detailOpen) return;
+      if (!this.isConnected || !this.detailOpen || seq !== this.detailSeq) return;
       this.detailPolicy = fresh;
     } catch (err) {
-      if (!this.isConnected || !this.detailOpen) return;
+      if (!this.isConnected || !this.detailOpen || seq !== this.detailSeq) return;
       this.detailError = err instanceof Error ? err.message : 'Failed to load policy details';
     } finally {
-      if (this.isConnected) {
+      if (this.isConnected && seq === this.detailSeq) {
         this.detailLoading = false;
       }
     }
@@ -535,18 +532,7 @@ export class ScionMessagePolicyList extends LitElement {
                 )
               : html`<span class="muted">None</span>`}
           </div>
-          <div class="coverage-label">NOT evaluated (other)</div>
-          <div class="chip-row" data-coverage-static>
-            ${STATIC_NON_AGENT_UNCOVERED_PATHS.map(
-              (label) => html`<span class="chip chip-uncovered chip-static">${label}</span>`
-            )}
-          </div>
         </div>
-        <p class="composition-note">
-          Policies veto independently; there is no ordered chain. If several enforce policies
-          reject, the sender sees the first by policy name; every evaluated policy's outcome is
-          recorded.
-        </p>
       </section>
     `;
   }

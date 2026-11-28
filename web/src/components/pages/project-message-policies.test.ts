@@ -224,16 +224,29 @@ describe('scion-page-project-message-policies', () => {
       expect(listEl?.shadowRoot?.querySelector('[data-policies-table]')).toBeTruthy();
     });
 
-    // Coverage banner renders API values verbatim (including agent_dm in enforced, no extra qualification).
+    // Coverage banner renders API values verbatim and contains no extra static claims or notes.
+    const banner = listEl!.shadowRoot!.querySelector('[data-coverage-banner]')!;
+    expect(banner.querySelector('[data-coverage-static]')).toBeNull();
     const enforcedChips = Array.from(
-      listEl!.shadowRoot!.querySelectorAll('[data-coverage-enforced] [data-surface]')
+      banner.querySelectorAll('[data-coverage-enforced] [data-surface]')
     ).map((n) => n.textContent?.trim());
     expect(enforcedChips).toEqual(SAMPLE_COVERAGE.enforced_surfaces);
 
     const uncoveredChips = Array.from(
-      listEl!.shadowRoot!.querySelectorAll('[data-coverage-uncovered] [data-uncovered]')
+      banner.querySelectorAll('[data-coverage-uncovered] [data-uncovered]')
     ).map((n) => n.textContent?.trim());
     expect(uncoveredChips).toEqual(SAMPLE_COVERAGE.uncovered_agent_paths);
+
+    const normalizedBannerText = banner.textContent?.replace(/\s+/g, ' ').trim();
+    expect(normalizedBannerText).toBe(
+      [
+        'Coverage on this Hub',
+        'Evaluated',
+        SAMPLE_COVERAGE.enforced_surfaces.join(''),
+        'NOT evaluated (agent)',
+        SAMPLE_COVERAGE.uncovered_agent_paths.join(''),
+      ].join(' ')
+    );
 
     // hub.system_one off hides the Rule engines column and System One badges.
     expect(listEl!.shadowRoot!.querySelector('[data-col-engines]')).toBeNull();
@@ -633,5 +646,309 @@ describe('scion-page-project-message-policies', () => {
     expect((shell as unknown as { getPageTitle(): string }).getPageTitle()).toBe(
       'Message Policies'
     );
+  });
+
+  it('renders mutated coverage fixture verbatim with one enforced surface and empty uncovered list (R1)', async () => {
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
+    const mutatedCoverage = {
+      enforced_surfaces: ['agent_to_user'],
+      uncovered_agent_paths: [] as string[],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/message-policies/decisions')) {
+          return Promise.resolve(jsonResponse({ decisions: [], total_count: 0 }));
+        }
+        if (url.includes('/message-policies')) {
+          return Promise.resolve(
+            jsonResponse({ policies: [], coverage: mutatedCoverage, total_count: 0 })
+          );
+        }
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [] }));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            id: 'proj-1',
+            name: 'Billing',
+            _capabilities: { actions: ['read_message_policies'] },
+          })
+        );
+      })
+    );
+
+    const el = document.createElement(
+      'scion-page-project-message-policies'
+    ) as ScionPageProjectMessagePolicies;
+    document.body.appendChild(el);
+
+    let listEl: ScionMessagePolicyList | null = null;
+    await vi.waitFor(() => {
+      listEl = el.shadowRoot?.querySelector(
+        'scion-message-policy-list'
+      ) as ScionMessagePolicyList | null;
+      expect(listEl?.shadowRoot?.querySelector('[data-coverage-banner]')).toBeTruthy();
+    });
+
+    const banner = listEl!.shadowRoot!.querySelector('[data-coverage-banner]')!;
+    expect(banner.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Coverage on this Hub Evaluated agent_to_user NOT evaluated (agent) None'
+    );
+  });
+
+  it('ignores stale out-of-order responses in loadDecisions and loadPolicies (O1)', async () => {
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
+    window.history.replaceState({}, '', '/projects/proj-1/message-policies?tab=outcomes');
+
+    let resolveFirstDecisions!: (res: Response) => void;
+    let resolveSecondDecisions!: (res: Response) => void;
+    let decisionCall = 0;
+
+    let resolveFirstPolicies!: (res: Response) => void;
+    let resolveSecondPolicies!: (res: Response) => void;
+    let policyCall = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/message-policies/decisions')) {
+          decisionCall += 1;
+          if (decisionCall === 1) {
+            return new Promise<Response>((resolve) => {
+              resolveFirstDecisions = resolve;
+            });
+          }
+          return new Promise<Response>((resolve) => {
+            resolveSecondDecisions = resolve;
+          });
+        }
+        if (url.includes('/message-policies')) {
+          policyCall += 1;
+          if (policyCall === 1) {
+            return new Promise<Response>((resolve) => {
+              resolveFirstPolicies = resolve;
+            });
+          }
+          return new Promise<Response>((resolve) => {
+            resolveSecondPolicies = resolve;
+          });
+        }
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [] }));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            id: 'proj-1',
+            name: 'Billing',
+            _capabilities: { actions: ['read_message_policies'] },
+          })
+        );
+      })
+    );
+
+    const el = document.createElement(
+      'scion-page-project-message-policies'
+    ) as ScionPageProjectMessagePolicies;
+    document.body.appendChild(el);
+
+    let outcomesEl: ScionMessagePolicyOutcomes | null = null;
+    let listEl: ScionMessagePolicyList | null = null;
+    await vi.waitFor(() => {
+      outcomesEl = el.shadowRoot?.querySelector(
+        'scion-message-policy-outcomes'
+      ) as ScionMessagePolicyOutcomes | null;
+      listEl = el.shadowRoot?.querySelector(
+        'scion-message-policy-list'
+      ) as ScionMessagePolicyList | null;
+      expect(decisionCall).toBe(1);
+      expect(policyCall).toBe(1);
+    });
+
+    // Trigger second requests before first requests resolve.
+    const modeSel = outcomesEl!.shadowRoot!.querySelector(
+      '[data-outcome-filter-mode]'
+    ) as HTMLSelectElement;
+    modeSel.value = 'enforce';
+    modeSel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+
+    const policyModeSel = listEl!.shadowRoot!.querySelector(
+      '[data-filter-mode]'
+    ) as HTMLSelectElement;
+    policyModeSel.value = 'enforce';
+    policyModeSel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+
+    await vi.waitFor(() => {
+      expect(decisionCall).toBe(2);
+      expect(policyCall).toBe(2);
+    });
+
+    // Resolve SECOND (newer) responses first.
+    resolveSecondDecisions(
+      jsonResponse({
+        decisions: [{ ...SAMPLE_DECISIONS_PAGE_1[0], id: 'dec-newer' }],
+        total_count: 1,
+      })
+    );
+    resolveSecondPolicies(
+      jsonResponse({
+        policies: [{ ...SAMPLE_POLICIES[0], id: 'pol-newer', name: 'newer-policy' }],
+        coverage: SAMPLE_COVERAGE,
+        total_count: 1,
+      })
+    );
+
+    await vi.waitFor(() => {
+      expect(outcomesEl!.shadowRoot!.querySelector('[data-outcome-row="dec-newer"]')).toBeTruthy();
+      expect(listEl!.shadowRoot!.querySelector('[data-policy-row="pol-newer"]')).toBeTruthy();
+    });
+
+    // Now resolve FIRST (stale) responses -> must be ignored.
+    resolveFirstDecisions(
+      jsonResponse({
+        decisions: [{ ...SAMPLE_DECISIONS_PAGE_1[0], id: 'dec-stale' }],
+        total_count: 1,
+      })
+    );
+    resolveFirstPolicies(
+      jsonResponse({
+        policies: [{ ...SAMPLE_POLICIES[0], id: 'pol-stale', name: 'stale-policy' }],
+        coverage: SAMPLE_COVERAGE,
+        total_count: 1,
+      })
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+    await outcomesEl!.updateComplete;
+    await listEl!.updateComplete;
+
+    expect(outcomesEl!.shadowRoot!.querySelector('[data-outcome-row="dec-newer"]')).toBeTruthy();
+    expect(outcomesEl!.shadowRoot!.querySelector('[data-outcome-row="dec-stale"]')).toBeNull();
+    expect(listEl!.shadowRoot!.querySelector('[data-policy-row="pol-newer"]')).toBeTruthy();
+    expect(listEl!.shadowRoot!.querySelector('[data-policy-row="pol-stale"]')).toBeNull();
+  });
+
+  it('retains active policyFilter option, shows shadow action verbatim, hides System One drawer when off, suppresses message_id on rejected rows, and never renders extra disclosure keys (O2/O3/O4)', async () => {
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': false });
+    window.history.replaceState(
+      {},
+      '',
+      '/projects/proj-1/message-policies?tab=outcomes&policy=pol-deleted-999'
+    );
+
+    const decisionsFixture = [
+      {
+        ...SAMPLE_DECISIONS_PAGE_1[0],
+        id: 'dec-rej-with-msg',
+        action: 'rejected',
+        message_id: 'msg-should-never-render',
+      },
+      {
+        ...SAMPLE_DECISIONS_PAGE_1[1],
+        id: 'dec-shadow-viol',
+        mode: 'shadow',
+        class: 'violation',
+        action: 'shadow',
+        evaluation: {
+          ...SAMPLE_DECISIONS_PAGE_1[1].evaluation,
+          body: 'SECRET_BODY_TEXT',
+          prompt: 'SECRET_PROMPT_TEXT',
+          copy_facts: { leak: 'SECRET_COPY_FACT' },
+          answers: {
+            on_topic: {
+              question_id: 'on_topic',
+              primitive: 'choice',
+              status: 'answered',
+              required: true,
+              choice: 'out_of_scope',
+              notes: ['SECRET_NOTE_TEXT'],
+            },
+          },
+        },
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/message-policies/decisions')) {
+          return Promise.resolve(jsonResponse({ decisions: decisionsFixture, total_count: 2 }));
+        }
+        if (url.includes('/message-policies')) {
+          return Promise.resolve(
+            jsonResponse({
+              policies: SAMPLE_POLICIES,
+              coverage: SAMPLE_COVERAGE,
+              total_count: 2,
+            })
+          );
+        }
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [] }));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            id: 'proj-1',
+            name: 'Billing',
+            _capabilities: { actions: ['read_message_policies'] },
+          })
+        );
+      })
+    );
+
+    const el = document.createElement(
+      'scion-page-project-message-policies'
+    ) as ScionPageProjectMessagePolicies;
+    document.body.appendChild(el);
+
+    let outcomesEl: ScionMessagePolicyOutcomes | null = null;
+    await vi.waitFor(() => {
+      outcomesEl = el.shadowRoot?.querySelector(
+        'scion-message-policy-outcomes'
+      ) as ScionMessagePolicyOutcomes | null;
+      expect(outcomesEl?.shadowRoot?.querySelector('[data-outcomes-table]')).toBeTruthy();
+    });
+
+    // O2: deep-linked policy ID not in current policies list still has a selectable option.
+    expect(
+      outcomesEl!.shadowRoot!.querySelector(
+        '[data-outcome-filter-policy] sl-option[value="pol-deleted-999"][data-active-policy-fallback]'
+      )
+    ).toBeTruthy();
+
+    // O4: rejected decision WITH a message_id fixture renders NO message link in row or drawer.
+    const rejRow = outcomesEl!.shadowRoot!.querySelector('[data-outcome-row="dec-rej-with-msg"]')!;
+    expect(rejRow.querySelector('[data-outcome-message-ref]')).toBeNull();
+    (rejRow.querySelector('[data-outcome-open="dec-rej-with-msg"]') as HTMLButtonElement).click();
+    await outcomesEl!.updateComplete;
+    expect(outcomesEl!.shadowRoot!.querySelector('[data-drawer-message-id]')).toBeNull();
+
+    // O3: shadow row with class=violation renders action verbatim ("shadow"), not "would reject".
+    const shadowRow = outcomesEl!.shadowRoot!.querySelector(
+      '[data-outcome-row="dec-shadow-viol"]'
+    )!;
+    expect(shadowRow.textContent).not.toContain('would reject');
+    expect(shadowRow.textContent).toContain('shadow');
+
+    // O4: opening outcome drawer with hub.system_one OFF hides the System One projection section.
+    (shadowRow.querySelector('[data-outcome-open="dec-shadow-viol"]') as HTMLButtonElement).click();
+    await outcomesEl!.updateComplete;
+    expect(outcomesEl!.shadowRoot!.querySelector('[data-evaluation-projection]')).toBeNull();
+
+    // O4 disclosure regression: flip hub.system_one ON -> projection renders, but extra/unknown
+    // keys (body, prompt, copy_facts, answers[*].notes) are NEVER rendered.
+    resetServerFlagStateForTests();
+    delete window.__SCION_FEATURES__;
+    setServerFlags({ 'hub.message_policies': true, 'hub.system_one': true });
+    await el.updateComplete;
+    await outcomesEl!.updateComplete;
+
+    const drawer = outcomesEl!.shadowRoot!.querySelector('[data-outcome-drawer]')!;
+    expect(drawer.querySelector('[data-evaluation-projection]')).toBeTruthy();
+    expect(drawer.textContent).not.toContain('SECRET_BODY_TEXT');
+    expect(drawer.textContent).not.toContain('SECRET_PROMPT_TEXT');
+    expect(drawer.textContent).not.toContain('SECRET_COPY_FACT');
+    expect(drawer.textContent).not.toContain('SECRET_NOTE_TEXT');
   });
 });
