@@ -946,7 +946,7 @@ export class ScionPageSkillCreate extends LitElement {
 
       <div class="page-header">
         <h1>
-          <sl-icon name="lightning-charge"></sl-icon>
+          <sl-icon name="book"></sl-icon>
           Create Skill
         </h1>
         <p>Create a new skill, optionally publishing its first version in one step.</p>
@@ -1242,7 +1242,7 @@ export class ScionPageSkillCreate extends LitElement {
                   ?disabled=${isSubmitting}
                   @click=${() => this.handleCreateAndPublish()}
                 >
-                  <sl-icon slot="prefix" name="lightning-charge"></sl-icon>
+                  <sl-icon slot="prefix" name="book"></sl-icon>
                   Create &amp; Publish v${this.version || '1.0.0'}
                 </sl-button>
                 <sl-button
@@ -1260,7 +1260,7 @@ export class ScionPageSkillCreate extends LitElement {
                   ?disabled=${isSubmitting}
                   @click=${() => this.handleCreateOnly()}
                 >
-                  <sl-icon slot="prefix" name="lightning-charge"></sl-icon>
+                  <sl-icon slot="prefix" name="book"></sl-icon>
                   Create Skill
                 </sl-button>
               `}

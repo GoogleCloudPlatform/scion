@@ -613,7 +613,7 @@ export class ScionPageSkillDetail extends LitElement {
           slot="back"
           .crumbs=${[{ label: 'Skills', href: '/skills' }, current(skill.name || this.skillId)]}
         ></scion-breadcrumb>
-        <sl-icon slot="icon" name="lightning-charge"></sl-icon>
+        <sl-icon slot="icon" name="book"></sl-icon>
         <scion-status-badge
           status=${skill.status}
           label=${skill.status}
