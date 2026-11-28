@@ -66,6 +66,9 @@ func Render(opts Options) ([]byte, error) {
 	if opts.Transport != nil {
 		mode := strings.TrimSpace(opts.Transport.Mode)
 		audience := strings.TrimSpace(opts.Transport.Audience)
+		// Hardcoded to keep this leaf package free of pkg/transportauth's
+		// cloud.google.com/go/compute/metadata dependency; callers gate on
+		// transportauth.IsProxyMode.
 		if mode != "" && mode != "iap" && mode != "cloudrun_invoker" {
 			return nil, fmt.Errorf("unsupported transport mode %q", mode)
 		}

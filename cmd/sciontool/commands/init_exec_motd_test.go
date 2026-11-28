@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
@@ -147,11 +148,15 @@ func TestBuildExecContainerMOTD_ProxyTransportLine(t *testing.T) {
 			for _, persistent := range []string{"true", "false"} {
 				got := buildExecContainerMOTD(baseEnv(mode, persistent))
 				assert.Contains(t, got, "transport auth")
-				assert.Contains(t, got, "gcloud auth application-default login")
+				assert.Contains(t, got, "your own credentials")
 				// Combined with P3's 3-line login block, worst case (persistent=false)
 				// must stay within the 20-line one-screen budget (17 + 3 = 20).
 				assert.LessOrEqual(t, strings.Count(got, "\n"), 17,
 					"MOTD in proxy mode (persistent=%s) must leave 3 lines for P3 login block within 20-line budget", persistent)
+				for _, line := range strings.Split(got, "\n") {
+					assert.LessOrEqual(t, utf8.RuneCountInString(line), 70,
+						"MOTD line exceeds 70 runes (mode=%s persistent=%s): %q", mode, persistent, line)
+				}
 			}
 		})
 	}
@@ -160,7 +165,7 @@ func TestBuildExecContainerMOTD_ProxyTransportLine(t *testing.T) {
 		t.Run("non_proxy_mode_"+mode, func(t *testing.T) {
 			got := buildExecContainerMOTD(baseEnv(mode, "true"))
 			assert.NotContains(t, got, "transport auth")
-			assert.NotContains(t, got, "application-default login")
+			assert.NotContains(t, got, "your own credentials")
 		})
 	}
 }

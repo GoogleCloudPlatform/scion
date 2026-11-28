@@ -108,14 +108,14 @@ func buildExecContainerMOTD(getenv func(string) string) string {
 	case "true":
 		persistenceLine = "Home persistence: enabled ($HOME survives restarts on this runtime)."
 	case "false":
-		persistenceLine = "WARNING: $HOME is NOT persistent on this runtime. Logins and files in $HOME\nwill be lost when this container stops or restarts."
+		persistenceLine = "WARNING: $HOME is NOT persistent on this runtime. Logins and files\nin $HOME will be lost when this container stops or restarts."
 	default:
 		persistenceLine = "Home persistence: unknown (check whether this runtime persists $HOME)."
 	}
 
 	var transportLine string
 	if transportauth.IsProxyMode(strings.TrimSpace(getenv(transportauth.EnvTransportMode))) {
-		transportLine = "Hub requires transport auth: log in first (e.g. gcloud auth application-default login).\n"
+		transportLine = "Hub requires transport auth with your own credentials first.\n"
 	}
 
 	return fmt.Sprintf(`======================================================================
