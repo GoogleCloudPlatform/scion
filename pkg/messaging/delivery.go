@@ -15,7 +15,9 @@
 package messaging
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -145,11 +147,15 @@ func FormatNewDelivery(
 		}
 	}
 
-	jsonBytes, err := json.MarshalIndent(env, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(env); err != nil {
 		// Fallback to plain text if JSON marshaling fails.
 		return msg.Body
 	}
+	jsonBytes := strings.TrimSuffix(buf.String(), "\n")
 
 	intro := messages.DeliveryIntro
 	if env.Type == "event" && env.Event != nil {
@@ -160,7 +166,7 @@ func FormatNewDelivery(
 		}
 	}
 
-	return intro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
+	return intro + "\n\n" + beginDelimiter + "\n" + jsonBytes + "\n" + endDelimiter
 }
 
 // typeString maps internal MessageKind and the explicit mention/reply flags to

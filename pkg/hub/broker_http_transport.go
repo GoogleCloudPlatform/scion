@@ -443,14 +443,15 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 	return nil
 }
 
-func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/message", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
-	if projectID != "" {
-		endpoint += "?projectId=" + url.QueryEscape(projectID)
-	}
-	endpoint = withRecordedRuntimeURL(ctx, endpoint)
-
-	// Build the request body with structured message if available
+// marshalBrokerMessageRequest builds and JSON-encodes the hub-to-broker
+// POST /api/v1/agents/{id}/message body. When structuredMsg carries a
+// pre-rendered DeliveryText, the rendered text is promoted to the top-level
+// delivery_text field and omitted from the nested structured_message copy
+// (along with structured_message.msg) so the text is sent once instead of
+// three times, keeping near-1 MiB messages under the broker's 2 MiB HMAC
+// signed-body cap (ptone/scion#9877). HTML escaping is disabled so '<', '>',
+// and '&' are not expanded 6x into \u003c/\u003e/\u0026.
+func marshalBrokerMessageRequest(ctx context.Context, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) ([]byte, error) {
 	reqBody := map[string]interface{}{
 		"interrupt": interrupt,
 	}
@@ -458,11 +459,17 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 		reqBody["project_id"] = projectID
 	}
 	if structuredMsg != nil {
-		reqBody["structured_message"] = structuredMsg
-		// Phase 9b(i): promote DeliveryText to the top-level wire field
-		// so the broker can prefer it without parsing StructuredMessage.
 		if structuredMsg.DeliveryText != "" {
+			// Shallow copy so the caller's StructuredMessage is untouched.
+			// Retain non-body metadata (sender, recipient, type, etc.) for
+			// broker lifecycle logging while avoiding 3x text duplication.
+			wireMsg := *structuredMsg
+			wireMsg.Msg = ""
+			wireMsg.DeliveryText = ""
+			reqBody["structured_message"] = &wireMsg
 			reqBody["delivery_text"] = structuredMsg.DeliveryText
+		} else {
+			reqBody["structured_message"] = structuredMsg
 		}
 	} else {
 		reqBody["message"] = message
@@ -481,9 +488,25 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 		}
 	}
 
-	body, err := json.Marshal(reqBody)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(reqBody); err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/message", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
+	if projectID != "" {
+		endpoint += "?projectId=" + url.QueryEscape(projectID)
+	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
+
+	body, err := marshalBrokerMessageRequest(ctx, projectID, message, interrupt, structuredMsg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return err
 	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
 	if err != nil {
