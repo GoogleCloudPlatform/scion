@@ -35,6 +35,12 @@ command:
   task_position: after_base_args
   resume_flag: "-continue"
 
+# Default model for agents started without an explicit --model. The broker
+# layers this under the template config and resolves it through model_aliases
+# (pkg/agent/provision.go), so both SCION_MODEL and argv --model carry the
+# concrete medium model. agy 1.5.18's settings.json "model" field matches
+# display labels only, whereas --model accepts model IDs (ptone/scion#9679).
+model: medium
 model_aliases:
   small: "gemini-4-hydrogen-low"
   medium: "gemini-4-hydrogen-medium"
