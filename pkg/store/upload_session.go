@@ -243,6 +243,13 @@ type UploadSessionStore interface {
 	//     updated_at < now-15m.
 	ListExpiredUploadSessions(ctx context.Context, now time.Time, limit int) ([]*UploadSession, error)
 
+	// TouchUploadSessionUpdatedAt advances updated_at to at without altering
+	// state, lease, or idle_expires_at. Used by the sweeper to back off a
+	// terminal row whose staging cleanup failed so it cannot head-of-line block
+	// subsequent batches ordered by updated_at ASC. Returns ErrNotFound if the
+	// row does not exist.
+	TouchUploadSessionUpdatedAt(ctx context.Context, id string, at time.Time) error
+
 	// DeleteUploadSession deletes the session row by ID, or returns ErrNotFound.
 	DeleteUploadSession(ctx context.Context, id string) error
 }

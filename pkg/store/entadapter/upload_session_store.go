@@ -600,6 +600,32 @@ func (s *UploadSessionStore) ListExpiredUploadSessions(ctx context.Context, now 
 	return out, nil
 }
 
+// TouchUploadSessionUpdatedAt advances updated_at to at without modifying
+// state, lease, or idle_expires_at.
+func (s *UploadSessionStore) TouchUploadSessionUpdatedAt(ctx context.Context, id string, at time.Time) error {
+	if id == "" {
+		return store.ErrNotFound
+	}
+	d := s.client.Driver().Dialect()
+	ub := entsql.Dialect(d).
+		Update(uploadsession.Table).
+		Set(uploadsession.FieldUpdatedAt, timeArg(d, truncUTC(at))).
+		Where(entsql.EQ(uploadsession.FieldID, id))
+	query, args := ub.Query()
+	var res stdsql.Result
+	if err := s.client.Driver().Exec(ctx, query, args, &res); err != nil {
+		return mapError(err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("touch upload session rows affected: %w", err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // DeleteUploadSession deletes an upload session row by ID.
 func (s *UploadSessionStore) DeleteUploadSession(ctx context.Context, id string) error {
 	if id == "" {

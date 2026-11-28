@@ -27,6 +27,7 @@ import (
 const (
 	uploadSessionSweepJobName = "upload-session-sweep"
 	uploadSweepBatchLimit     = 100
+	uploadSweepMaxBatches     = 20
 )
 
 // uploadSessionSweepHandler returns the recurring singleton job that expires
@@ -46,53 +47,79 @@ func (s *Server) sweepUploadSessions(ctx context.Context, now time.Time) {
 	if s.store == nil {
 		return
 	}
-	sessions, err := s.store.ListExpiredUploadSessions(ctx, now, uploadSweepBatchLimit)
-	if err != nil {
-		slog.WarnContext(ctx, "upload-session-sweep: failed to list expired sessions", "error", err)
-		return
-	}
-
-	for _, sess := range sessions {
+	for batch := 0; batch < uploadSweepMaxBatches; batch++ {
 		if ctx.Err() != nil {
 			return
 		}
-		switch {
-		case sess.State == store.UploadStateUploading:
-			if err := s.store.TransitionUploadSession(ctx, sess.ID, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateExpired, "", nil); err != nil {
-				if !errors.Is(err, store.ErrBusy) && !errors.Is(err, store.ErrStateChanged) && !errors.Is(err, store.ErrNotFound) {
-					slog.WarnContext(ctx, "upload-session-sweep: failed to expire uploading session",
-						"session_id", sess.ID, "error", err)
-				}
-				continue
-			}
-			if cerr := s.cleanupUploadSessionStaging(ctx, sess); cerr != nil {
-				slog.WarnContext(ctx, "upload-session-sweep: best-effort staging cleanup after expiry failed",
-					"session_id", sess.ID, "error", cerr)
-			}
+		sessions, err := s.store.ListExpiredUploadSessions(ctx, now, uploadSweepBatchLimit)
+		if err != nil {
+			slog.WarnContext(ctx, "upload-session-sweep: failed to list expired sessions", "error", err)
+			return
+		}
+		if len(sessions) == 0 {
+			return
+		}
 
-		case sess.State == store.UploadStateFinalizing:
-			if err := s.store.TransitionUploadSession(ctx, sess.ID, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, "", nil); err != nil {
-				if !errors.Is(err, store.ErrBusy) && !errors.Is(err, store.ErrStateChanged) && !errors.Is(err, store.ErrNotFound) {
-					slog.WarnContext(ctx, "upload-session-sweep: failed to mark stuck finalizing session failed",
-						"session_id", sess.ID, "error", err)
+		progressed := false
+		for _, sess := range sessions {
+			if ctx.Err() != nil {
+				return
+			}
+			switch {
+			case sess.State == store.UploadStateUploading:
+				if err := s.store.TransitionUploadSession(ctx, sess.ID, []store.UploadSessionState{store.UploadStateUploading}, store.UploadStateExpired, "", nil); err != nil {
+					if !errors.Is(err, store.ErrBusy) && !errors.Is(err, store.ErrStateChanged) && !errors.Is(err, store.ErrNotFound) {
+						slog.WarnContext(ctx, "upload-session-sweep: failed to expire uploading session",
+							"session_id", sess.ID, "error", err)
+					}
+					continue
 				}
-				continue
-			}
-			if cerr := s.cleanupUploadSessionStaging(ctx, sess); cerr != nil {
-				slog.WarnContext(ctx, "upload-session-sweep: best-effort staging cleanup after finalizing failure failed",
-					"session_id", sess.ID, "error", cerr)
-			}
+				progressed = true
+				if cerr := s.cleanupUploadSessionStaging(ctx, sess); cerr != nil {
+					slog.WarnContext(ctx, "upload-session-sweep: best-effort staging cleanup after expiry failed",
+						"session_id", sess.ID, "error", cerr)
+				}
 
-		case sess.State.IsTerminal():
-			if err := s.cleanupUploadSessionStaging(ctx, sess); err != nil {
-				slog.WarnContext(ctx, "upload-session-sweep: staging cleanup failed; keeping row for retry",
-					"session_id", sess.ID, "state", sess.State, "error", err)
-				continue
+			case sess.State == store.UploadStateFinalizing:
+				if err := s.store.TransitionUploadSession(ctx, sess.ID, []store.UploadSessionState{store.UploadStateFinalizing}, store.UploadStateFailed, "", nil); err != nil {
+					if !errors.Is(err, store.ErrBusy) && !errors.Is(err, store.ErrStateChanged) && !errors.Is(err, store.ErrNotFound) {
+						slog.WarnContext(ctx, "upload-session-sweep: failed to mark stuck finalizing session failed",
+							"session_id", sess.ID, "error", err)
+					}
+					continue
+				}
+				progressed = true
+				if cerr := s.cleanupUploadSessionStaging(ctx, sess); cerr != nil {
+					slog.WarnContext(ctx, "upload-session-sweep: best-effort staging cleanup after finalizing failure failed",
+						"session_id", sess.ID, "error", cerr)
+				}
+
+			case sess.State.IsTerminal():
+				if err := s.cleanupUploadSessionStaging(ctx, sess); err != nil {
+					slog.WarnContext(ctx, "upload-session-sweep: staging cleanup failed; backing off row for retry",
+						"session_id", sess.ID, "state", sess.State, "error", err)
+					if terr := s.store.TouchUploadSessionUpdatedAt(ctx, sess.ID, now); terr != nil && !errors.Is(terr, store.ErrNotFound) {
+						slog.WarnContext(ctx, "upload-session-sweep: failed to back off terminal session row",
+							"session_id", sess.ID, "error", terr)
+					} else {
+						progressed = true
+					}
+					continue
+				}
+				if err := s.store.DeleteUploadSession(ctx, sess.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+					slog.WarnContext(ctx, "upload-session-sweep: failed to delete terminal session row",
+						"session_id", sess.ID, "error", err)
+					if terr := s.store.TouchUploadSessionUpdatedAt(ctx, sess.ID, now); terr == nil {
+						progressed = true
+					}
+				} else {
+					progressed = true
+				}
 			}
-			if err := s.store.DeleteUploadSession(ctx, sess.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-				slog.WarnContext(ctx, "upload-session-sweep: failed to delete terminal session row",
-					"session_id", sess.ID, "error", err)
-			}
+		}
+
+		if len(sessions) < uploadSweepBatchLimit || !progressed {
+			return
 		}
 	}
 }
