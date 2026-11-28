@@ -2567,15 +2567,27 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 
 	// A move from a pre-running phase to running is the new run's first
-	// running write: the exit code and reason describe the previous run, so
-	// they are cleared, whichever path brings running (ptone/scion#5384).
+	// running write: the exit code, exit reason, prior message, and stalled
+	// marker describe the previous run or a prior failed launch, so they are
+	// cleared, whichever path brings running (ptone/scion#5384, ptone/scion#9889).
 	// The provisional starting write keeps them, since a rollback restores
 	// the prior stopped or error phase, which still needs them. A running to
 	// running write keeps them too: a disruption reason can be recorded on a
-	// live agent. This reads the final phase, after every guard above.
+	// live agent, and routine heartbeats must not wipe a live status message.
+	// This reads the final phase, after every guard above.
 	if su.Phase == string(state.PhaseRunning) && isPreRunningPhase(current.Phase) {
 		upd.ClearExitCode()
 		upd.SetExitReason("")
+		if su.Message == "" {
+			upd.SetMessage("")
+		}
+		upd.SetStalledFromActivity("")
+	}
+	// A direct suspended -> running write also starts a new run; clear any
+	// stale message from before suspension unless the update sets one or
+	// restores a rollback (ptone/scion#9889).
+	if su.Phase == string(state.PhaseRunning) && current.Phase == string(state.PhaseSuspended) && !su.Restore && su.Message == "" {
+		upd.SetMessage("")
 	}
 
 	// Entering running from any non-running phase (e.g. waking from suspended

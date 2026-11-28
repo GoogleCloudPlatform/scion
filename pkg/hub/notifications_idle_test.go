@@ -868,3 +868,73 @@ func TestNotificationDispatcher_AutoSuspendVsManualSuspendNotice(t *testing.T) {
 		assert.Equal(t, wantMsg, notifs[0].Message)
 	})
 }
+
+// TestNotificationDispatcher_StaleLaunchErrorNotQuotedAfterSuccessfulStart
+// reproduces ptone/scion#9889: a prior launch failure's error text stored on
+// agent.Message must be quoted while the agent is in ERROR, must be cleared
+// when a subsequent start/launch succeeds, and must NOT be quoted in a later
+// IDLE notification.
+func TestNotificationDispatcher_StaleLaunchErrorNotQuotedAfterSuccessfulStart(t *testing.T) {
+	const launchErr = "agent start refused: the configured metadata protection could not be set up in this container (metadata_protection_unavailable)."
+
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(
+		ctx, env.sub.ID, []string{"ERROR", "IDLE"},
+	))
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	// 1. Genuine launch failure: phase=error with launch refusal message.
+	//    The ERROR notification must quote the error.
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseError),
+		Message: launchErr,
+	}))
+	env.pub.PublishAgentStatus(ctx, mustGetAgent(t, env.store, env.watched.ID))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Equal(t, env.watched.Slug+" has reached a state of ERROR: "+launchErr, env.dispatcher.getCalls()[0].Message)
+
+	// 2. Subsequent async start succeeds without a notice message.
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseStarting),
+		IfPhase: string(state.PhaseError),
+	}))
+	launchID, err := env.store.BeginStartLaunch(ctx, env.watched.ID, store.LaunchKindStart, 5*time.Minute, store.BeginLaunchOptions{
+		PriorPhase: string(state.PhaseError),
+	})
+	require.NoError(t, err)
+	_, updated, err := env.store.ApplyLaunchReport(ctx, env.watched.ID, env.watched.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
+	})
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseRunning), updated.Phase)
+
+	// 3. Agent later transitions to IDLE without an explicit message.
+	//    The IDLE notification must NOT quote the stale launch refusal error.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Equal(t, env.watched.Slug+" is IDLE", env.dispatcher.getCalls()[1].Message)
+	assert.NotContains(t, env.dispatcher.getCalls()[1].Message, "agent start refused")
+
+	// 4. Agent works and goes IDLE with a current status message -> quoted.
+	time.Sleep(15 * time.Millisecond)
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}))
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityIdle),
+		Message:  "Between assignments",
+	}))
+	env.pub.PublishAgentStatus(ctx, mustGetAgent(t, env.store, env.watched.ID))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 3
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Equal(t, env.watched.Slug+" is IDLE: Between assignments", env.dispatcher.getCalls()[2].Message)
+}

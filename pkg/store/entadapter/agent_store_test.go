@@ -2179,20 +2179,29 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	row.StalledFromActivity = "working"
 	require.NoError(t, s.UpdateAgent(ctx, row))
 
-	// Without the flag, starting -> running keeps the message; the exit
-	// fields are cleared by the pre-running to running rule.
+	// Starting -> running is the new run's first running write, so it clears
+	// stale remnants (message, stalled marker, exit fields) even without the flag.
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
-	assert.NotEmpty(t, got.Message)
+	assert.Empty(t, got.Message)
+	assert.Empty(t, got.StalledFromActivity)
 	assert.Nil(t, got.ExitCode)
 	assert.Empty(t, got.ExitReason)
 
-	// Seed the exit fields again on the running row, so the flag's own
-	// clear is what the next step checks.
-	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ExitCode: &code, ExitReason: "crashed"}))
+	// Seed remnants on the running row, so the flag's own clear on a
+	// running -> running restart is what the next step checks.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Message: "Agent crashed with exit code 137", ExitCode: &code, ExitReason: "crashed",
+	}))
+	row, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	row.StalledFromActivity = "working"
+	require.NoError(t, s.UpdateAgent(ctx, row))
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
+	require.NotEmpty(t, got.Message)
+	require.NotEmpty(t, got.StalledFromActivity)
 	require.NotNil(t, got.ExitCode)
 	require.Equal(t, "crashed", got.ExitReason)
 
@@ -2209,6 +2218,80 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "fresh", got.Message)
+}
+
+// TestUpdateAgentStatus_PreRunningToRunningClearsStaleMessage verifies that
+// moving an agent from a pre-running phase (e.g. starting after a prior failed
+// launch) or suspended to running clears any stale Message and
+// StalledFromActivity when the running update does not supply a new Message,
+// while preserving explicit messages and error rollbacks (ptone/scion#9889).
+func TestUpdateAgentStatus_PreRunningToRunningClearsStaleMessage(t *testing.T) {
+	ctx := context.Background()
+	const staleErr = "agent start refused: the configured metadata protection could not be set up in this container (metadata_protection_unavailable)."
+
+	t.Run("starting to running clears stale error message", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "starting-clear-msg")
+		a.Phase = "error"
+		a.Message = staleErr
+		a.StalledFromActivity = "working"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		// Provisional starting write keeps the error message in case start rolls back.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting", IfPhase: "error"}))
+		mid, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.Equal(t, staleErr, mid.Message)
+
+		// First running write without an explicit message clears stale error and stalled marker.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+		assert.Empty(t, got.Message, "stale launch error must be cleared on starting -> running")
+		assert.Empty(t, got.StalledFromActivity, "stale stalled marker must be cleared on starting -> running")
+	})
+
+	t.Run("starting to running keeps explicit message", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "starting-explicit-msg")
+		a.Phase = "starting"
+		a.Message = staleErr
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Message: "Agent started"}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "Agent started", got.Message)
+	})
+
+	t.Run("suspended to running clears stale message", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "suspended-clear-msg")
+		a.Phase = "suspended"
+		a.Message = staleErr
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+		assert.Empty(t, got.Message, "stale message must be cleared on suspended -> running")
+	})
+
+	t.Run("suspended restore to running preserves message", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "suspended-restore-msg")
+		a.Phase = "suspended"
+		a.Message = "prior status"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Restore: true}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+		assert.Equal(t, "prior status", got.Message, "Restore write must not clear message")
+	})
 }
 
 // seedExitedAgent creates an agent in phase stopped carrying a previous
