@@ -1581,7 +1581,7 @@ func TestDispatcher_Reuse_NonDispatchActionRunsOwnActionDespiteLiveClaim(t *test
 // its event as a reuse message to the winner's agent.
 func TestDispatcher_SubjectModeReuse_LostClaimRaceDefersAndDelivers(t *testing.T) {
 	ctx := context.Background()
-	entClient := enttest.NewClient(t)
+	entClient := sharedRaceEntClient(t)
 	t.Logf("dialect=%s", entClient.Driver().Dialect())
 	cs := entadapter.NewCompositeStore(entClient)
 	projID := seedProjectForDispatch(t, cs)
@@ -1611,7 +1611,7 @@ func TestDispatcher_SubjectModeReuse_LostClaimRaceDefersAndDelivers(t *testing.T
 	const subject = "github:octo/repo#9135"
 	ev1 := uuid.NewString()
 	ev2 := uuid.NewString()
-	for i, evID := range []string{ev1, ev2} {
+	for _, evID := range []string{ev1, ev2} {
 		require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
 			ID:         evID,
 			ProjectID:  projID,
@@ -1619,7 +1619,7 @@ func TestDispatcher_SubjectModeReuse_LostClaimRaceDefersAndDelivers(t *testing.T
 			SourceID:   "1001",
 			Type:       "github.issue_comment.created",
 			Subject:    subject,
-			DedupKey:   fmt.Sprintf("del-race-%d", i),
+			DedupKey:   "del-race-" + evID,
 			OccurredAt: clock(),
 			ReceivedAt: clock(),
 			Status:     store.TriggerEventStatusPending,
@@ -1790,7 +1790,7 @@ func TestDispatcher_SubjectModeReuse_LostClaimRaceDefersAndDelivers(t *testing.T
 // lost-lease re-handle) and Case 2 (post-reap revival after hub outage).
 func TestDispatcher_SubjectModeReuse_CrashMidDeferralResumesExactlyOnce(t *testing.T) {
 	ctx := context.Background()
-	entClient := enttest.NewClient(t)
+	entClient := sharedRaceEntClient(t)
 	t.Logf("dialect=%s", entClient.Driver().Dialect())
 	cs := entadapter.NewCompositeStore(entClient)
 	projID := seedProjectForDispatch(t, cs)
@@ -1824,7 +1824,7 @@ func TestDispatcher_SubjectModeReuse_CrashMidDeferralResumesExactlyOnce(t *testi
 			SourceID:   "1001",
 			Type:       "github.issue_comment.created",
 			Subject:    subject,
-			DedupKey:   dedup,
+			DedupKey:   dedup + "-" + id,
 			OccurredAt: clock(),
 			ReceivedAt: clock(),
 			Status:     store.TriggerEventStatusPending,
