@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"regexp"
@@ -30,37 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// errTemplateSourceTooLarge, cappedReader and extractFileMode are retained for
-// welcome_stage.go until Phase 7 migrates welcome archive extraction.
-var errTemplateSourceTooLarge = errors.New("template source exceeds the size limit")
-
-type cappedReader struct {
-	r         io.Reader
-	remaining int64
-}
-
-func (c *cappedReader) Read(p []byte) (int, error) {
-	if c.remaining < 0 {
-		return 0, errTemplateSourceTooLarge
-	}
-	if int64(len(p)) > c.remaining+1 {
-		p = p[:c.remaining+1]
-	}
-	n, err := c.r.Read(p)
-	c.remaining -= int64(n)
-	if c.remaining < 0 {
-		return n, errTemplateSourceTooLarge
-	}
-	return n, err
-}
-
-func extractFileMode(archiveMode int64) os.FileMode {
-	if archiveMode&0o111 != 0 {
-		return 0o755
-	}
-	return 0o644
-}
 
 var sourceCommitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
