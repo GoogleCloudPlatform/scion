@@ -319,7 +319,8 @@ func TestInstallSkillsIntoHome_EmptySkillsDir(t *testing.T) {
 		require.True(t, errors.As(err, &skillErr), "expected *SkillResolutionError, got %T: %v", err, err)
 		assert.Equal(t, "gh://org/repo/skills/example", skillErr.URI)
 		assert.Equal(t, SkillErrCodeInstallFailed, skillErr.Code)
-		assert.Contains(t, skillErr.Message, "no skills directory configured")
+		assert.Contains(t, skillErr.Message, "no skills_dir configured")
+		assert.Contains(t, skillErr.Message, "set skills_dir in the harness config or mark the skill optional")
 	})
 
 	t.Run("non-shell mixed optional and required fails closed on required", func(t *testing.T) {

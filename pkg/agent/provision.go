@@ -5527,7 +5527,7 @@ func installSkillsIntoHome(ctx context.Context, agentName, projectDir string, h 
 				return nil, &SkillResolutionError{
 					URI:     requiredURIs[0],
 					Code:    SkillErrCodeInstallFailed,
-					Message: "harness does not support skills (no skills directory configured)",
+					Message: "harness does not support skills (no skills_dir configured; set skills_dir in the harness config or mark the skill optional)",
 				}
 			}
 		}
