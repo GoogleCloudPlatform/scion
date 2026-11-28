@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -374,22 +376,38 @@ func TestTriggerUntrustedVarsDerive_WebhookDefaultTriggerToSelf(t *testing.T) {
 func TestTriggerUntrustedVarsDerive_PerPrincipalAuthoringRegression(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 
-	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
-		Name:               "principal-derive-ep",
-		AllowProjectAgents: true,
-	})
-	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
-	var ep WebhookEndpointCreatedResponse
-	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+	// Member-owned agent so member can authorize message targeting.
+	memberAgent := &store.Agent{
+		ID:        tid("trig-agent-member-own"),
+		Slug:      "member-own",
+		Name:      "member-own",
+		ProjectID: f.projectID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: f.member.ID,
+		OwnerID:   f.member.ID,
+		Ancestry:  []string{f.member.ID},
+	}
+	require.NoError(t, f.store.CreateAgent(context.Background(), memberAgent))
+
+	mkEP := func(auth Identity, name string) string {
+		rec := f.doWebhookEndpoint(t, auth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: name,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var ep WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ep))
+		return ep.ID
+	}
 
 	principals := []struct {
 		name          string
 		auth          Identity
+		endpointID    string
 		targetAgentID string
 	}{
-		{"admin", f.adminAuth, f.targetAgent.ID},
-		{"member", f.memberAuth, f.targetAgent.ID},
-		{"agent", f.agentAAuth, f.agentA.ID},
+		{"admin", f.adminAuth, mkEP(f.adminAuth, "principal-ep-admin"), f.targetAgent.ID},
+		{"member", f.memberAuth, mkEP(f.memberAuth, "principal-ep-member"), memberAgent.ID},
+		{"agent", f.agentAAuth, mkEP(f.agentAAuth, "principal-ep-agent"), f.agentA.ID},
 	}
 
 	for _, p := range principals {
@@ -397,7 +415,7 @@ func TestTriggerUntrustedVarsDerive_PerPrincipalAuthoringRegression(t *testing.T
 			// Omitted untrustedVars derives ONLY the exact template paths (no widening).
 			rec := f.doTrigger(t, p.auth, "", http.MethodPost, CreateTriggerRequest{
 				Name:   "principal-derive-" + p.name,
-				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: p.endpointID},
 				Action: TriggerActionSpec{
 					Type:    store.TriggerActionMessage,
 					AgentID: p.targetAgentID,
@@ -412,7 +430,7 @@ func TestTriggerUntrustedVarsDerive_PerPrincipalAuthoringRegression(t *testing.T
 			// Supplied narrower list still refuses missing paths.
 			recFail := f.doTrigger(t, p.auth, "", http.MethodPost, CreateTriggerRequest{
 				Name:   "principal-narrow-" + p.name,
-				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: p.endpointID},
 				Action: TriggerActionSpec{
 					Type:          store.TriggerActionMessage,
 					AgentID:       p.targetAgentID,
