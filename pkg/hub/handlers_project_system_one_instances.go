@@ -20,10 +20,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 )
 
 const (
@@ -37,6 +40,29 @@ const (
 type ProjectSystemOneInstancesResponse struct {
 	ProjectID string   `json:"projectId"`
 	Instances []string `json:"instances"`
+}
+
+// ProjectSystemOneAvailableInstanceSummary is the credential-free, read-only
+// discovery projection of a Hub System One provider instance returned by
+// GET /api/v1/projects/{id}/system-one/available-instances.
+// It intentionally omits endpoints, auth metadata, secret names/values,
+// options, limits, and internal IDs.
+type ProjectSystemOneAvailableInstanceSummary struct {
+	Name                     string                         `json:"name"`
+	Adapter                  string                         `json:"adapter"`
+	Model                    string                         `json:"model,omitempty"`
+	Enabled                  bool                           `json:"enabled"`
+	QuestionTypes            []string                       `json:"questionTypes"`
+	DistributionCompleteness map[string]string              `json:"distributionCompleteness"`
+	NativeMetrics            []systemoneprovider.MetricDecl `json:"nativeMetrics"`
+	Abstains                 bool                           `json:"abstains"`
+}
+
+// ProjectSystemOneAvailableInstancesResponse is the response body for
+// GET /api/v1/projects/{id}/system-one/available-instances.
+type ProjectSystemOneAvailableInstancesResponse struct {
+	ProjectID string                                     `json:"projectId"`
+	Instances []ProjectSystemOneAvailableInstanceSummary `json:"instances"`
 }
 
 // SetProjectSystemOneInstancesRequest is the request body for
@@ -402,4 +428,117 @@ func (s *Server) handleRemoveProjectSystemOneInstance(w http.ResponseWriter, r *
 		ProjectID: project.ID,
 		Instances: updated,
 	})
+}
+
+// handleProjectSystemOneAvailableInstances serves
+// GET /api/v1/projects/{id}/system-one/available-instances.
+//
+// Returns a read-only, credential-free summary of Hub System One instances for
+// callers who already pass the project's System One binding authorization
+// (authorizeProjectSystemOneManage). Answers 404 unless both hub.system_one
+// and hub.message_policies experiments are enabled.
+func (s *Server) handleProjectSystemOneAvailableInstances(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !s.experimentEnabled(experiments.SystemOne) || !s.experimentEnabled(experiments.MessagePolicies) {
+		NotFound(w, "route")
+		return
+	}
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	ctx := r.Context()
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !s.authorizeProjectSystemOneManage(w, r, project) {
+		return
+	}
+
+	reg := s.SystemOneProviderRegistry()
+	summaries := make([]ProjectSystemOneAvailableInstanceSummary, 0)
+	cursor := ""
+	seen := make(map[string]struct{})
+	for {
+		res, err := s.store.ListSystemOneInstances(ctx, store.SystemOneInstanceFilter{}, store.ListOptions{
+			Limit:          systemOneInstancesListPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			slog.Error("failed to list available System One instances", "project_id", project.ID, "error", err)
+			RuntimeError(w, "Failed to list available System One instances")
+			return
+		}
+		for i := range res.Items {
+			summaries = append(summaries, toProjectSystemOneAvailableInstanceSummary(reg, &res.Items[i]))
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		if _, dup := seen[res.NextCursor]; dup {
+			slog.Error("System One instance pagination returned repeated cursor", "project_id", project.ID, "cursor", res.NextCursor)
+			RuntimeError(w, "Failed to list available System One instances")
+			return
+		}
+		seen[res.NextCursor] = struct{}{}
+		cursor = res.NextCursor
+	}
+
+	writeJSON(w, http.StatusOK, ProjectSystemOneAvailableInstancesResponse{
+		ProjectID: project.ID,
+		Instances: summaries,
+	})
+}
+
+func toProjectSystemOneAvailableInstanceSummary(
+	reg *systemoneprovider.Registry,
+	inst *store.SystemOneInstance,
+) ProjectSystemOneAvailableInstanceSummary {
+	summary := ProjectSystemOneAvailableInstanceSummary{
+		Name:                     inst.Name,
+		Adapter:                  inst.Adapter,
+		Model:                    inst.Model,
+		Enabled:                  inst.Enabled,
+		QuestionTypes:            []string{},
+		DistributionCompleteness: map[string]string{},
+		NativeMetrics:            []systemoneprovider.MetricDecl{},
+	}
+	if reg == nil {
+		return summary
+	}
+	adapter, ok := reg.Lookup(inst.Adapter)
+	if !ok {
+		return summary
+	}
+	caps, err := adapter.Capabilities(systemoneprovider.InstanceView{
+		Name:     inst.Name,
+		Revision: inst.Revision,
+		Model:    inst.Model,
+		Endpoint: inst.Endpoint,
+		Location: inst.Location,
+		Options:  inst.Options,
+	})
+	if err != nil {
+		return summary
+	}
+	questionTypes := make([]string, 0, len(caps.Primitives))
+	completeness := make(map[string]string, len(caps.Primitives))
+	for prim, lim := range caps.Primitives {
+		if !lim.Supported {
+			continue
+		}
+		questionTypes = append(questionTypes, prim)
+		completeness[prim] = lim.DistributionCompleteness
+	}
+	sort.Strings(questionTypes)
+	summary.QuestionTypes = questionTypes
+	summary.DistributionCompleteness = completeness
+	if len(caps.NativeMetrics) > 0 {
+		summary.NativeMetrics = slices.Clone(caps.NativeMetrics)
+	}
+	summary.Abstains = caps.Abstains
+	return summary
 }

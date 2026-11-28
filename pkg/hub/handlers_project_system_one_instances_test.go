@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1039,4 +1041,368 @@ func TestProjectSystemOneInstances_ViewAsMemberOwnerRuleIndependentOfKernel(t *t
 			require.Equal(t, http.StatusOK, recDel.Code, "normal item DELETE: %s", recDel.Body.String())
 		})
 	}
+}
+
+func TestProjectSystemOneAvailableInstances_AuthzAndNoSecretLeakage(t *testing.T) {
+	ctx := context.Background()
+
+	setExperiments := func(t *testing.T, srv *Server, sysOne, msgPol bool) {
+		t.Helper()
+		ops := srv.GetOperationalSettings()
+		doc := fmt.Sprintf(`{"overrides":{%q:%t,%q:%t}}`, experiments.SystemOne, sysOne, experiments.MessagePolicies, msgPol)
+		_, err := ops.Update(ctx, "experiments", json.RawMessage(doc), "test", ops.SectionRevision("experiments"), "managed")
+		require.NoError(t, err)
+	}
+
+	t.Run("experiment gating requires both hub.system_one and hub.message_policies", func(t *testing.T) {
+		srv, s, _ := newSystemOneTestServer(t, false)
+		superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-exp-super", store.SystemRoleSuperAdmin))
+		require.NoError(t, err)
+		proj := &store.Project{
+			ID:      uuid.NewString(),
+			Name:    "Available Instances Exp Gate",
+			Slug:    "s1-avail-exp-gate",
+			OwnerID: superAdmin.ID,
+		}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		availPath := "/api/v1/projects/" + proj.ID + "/system-one/available-instances"
+
+		for _, tc := range []struct {
+			name   string
+			sysOne bool
+			msgPol bool
+			want   int
+		}{
+			{name: "both_off", sysOne: false, msgPol: false, want: http.StatusNotFound},
+			{name: "only_system_one_on", sysOne: true, msgPol: false, want: http.StatusNotFound},
+			{name: "only_message_policies_on", sysOne: false, msgPol: true, want: http.StatusNotFound},
+			{name: "both_on", sysOne: true, msgPol: true, want: http.StatusOK},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				setExperiments(t, srv, tc.sysOne, tc.msgPol)
+				rec := doRequestAsUser(t, srv, superAdmin, http.MethodGet, availPath, nil)
+				assert.Equal(t, tc.want, rec.Code, "GET %s: %s", availPath, rec.Body.String())
+				if tc.want == http.StatusNotFound {
+					recPost := doRequestAsUser(t, srv, superAdmin, http.MethodPost, availPath, nil)
+					assert.Equal(t, http.StatusNotFound, recPost.Code, "POST when experiment off must be 404")
+				}
+			})
+		}
+
+		// With both experiments on, non-GET methods return 405 with Allow: GET.
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			rec := doRequestAsUser(t, srv, superAdmin, method, availPath, nil)
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "%s should be 405: %s", method, rec.Body.String())
+			assert.Equal(t, http.MethodGet, rec.Header().Get("Allow"))
+		}
+	})
+
+	t.Run("empty results return empty JSON array", func(t *testing.T) {
+		srv, s, _ := newSystemOneTestServer(t, true)
+		setExperiments(t, srv, true, true)
+		owner, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-empty-owner", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		proj := &store.Project{
+			ID:      uuid.NewString(),
+			Name:    "Available Empty",
+			Slug:    "s1-avail-empty",
+			OwnerID: owner.ID,
+		}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		ownerRole, err := s.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               uuid.NewString(),
+			RoleDefinitionID: ownerRole.ID,
+			PrincipalType:    "user",
+			PrincipalID:      owner.ID,
+			ScopeType:        "project",
+			ScopeID:          proj.ID,
+		})
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/projects/"+proj.ID+"/system-one/available-instances", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"instances":[]`)
+
+		var resp ProjectSystemOneAvailableInstancesResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, proj.ID, resp.ProjectID)
+		assert.NotNil(t, resp.Instances)
+		assert.Empty(t, resp.Instances)
+	})
+
+	t.Run("authz matrix and strict field allowlist without secret leakage", func(t *testing.T) {
+		srv, s, localBackend := newSystemOneTestServer(t, true)
+		setExperiments(t, srv, true, true)
+
+		superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-super", store.SystemRoleSuperAdmin))
+		require.NoError(t, err)
+		hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-hubadmin", store.SystemRoleHubAdmin))
+		require.NoError(t, err)
+		owner, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-owner", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		projAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-projadmin", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		member, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-member", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		viewer, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-viewer", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		nonMember, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-nonmember", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		customRoleUser, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-avail-custom", store.SystemRoleHubMember))
+		require.NoError(t, err)
+
+		proj := &store.Project{
+			ID:      uuid.NewString(),
+			Name:    "Available Authz Project",
+			Slug:    "s1-avail-authz",
+			OwnerID: owner.ID,
+		}
+		require.NoError(t, s.CreateProject(ctx, proj))
+
+		bindRole := func(u *store.User, roleName string) {
+			role, rErr := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
+			require.NoError(t, rErr)
+			_, rbErr := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				ID:               uuid.NewString(),
+				RoleDefinitionID: role.ID,
+				PrincipalType:    "user",
+				PrincipalID:      u.ID,
+				ScopeType:        "project",
+				ScopeID:          proj.ID,
+			})
+			require.NoError(t, rbErr)
+		}
+		bindRole(owner, "project-owner")
+		bindRole(projAdmin, "project-admin")
+		bindRole(member, "project-member")
+		bindRole(viewer, "project-viewer")
+
+		// Custom role granting project.manage_system_one_instances without project-owner/admin.
+		customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			ID:          uuid.NewString(),
+			Name:        "custom-s1-avail-role",
+			ScopeType:   store.RoleScopeProject,
+			Permissions: []string{"project.read", "project.manage_system_one_instances"},
+		})
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               uuid.NewString(),
+			RoleDefinitionID: customRole.ID,
+			PrincipalType:    "user",
+			PrincipalID:      customRoleUser.ID,
+			ScopeType:        "project",
+			ScopeID:          proj.ID,
+		})
+		require.NoError(t, err)
+
+		// Seed two instances with sensitive endpoints, secret names, options, and an actual stored secret value.
+		const (
+			secretEndpoint  = "https://internal-secret-host.typesafe.example"
+			secretKeyName   = "systemone.instance.avail-secret-1"
+			secretHeader    = "X-Hidden-Auth-Header"
+			secretOptVal    = "hidden-option-value"
+			secretAPIKeyVal = "super-secret-api-key-value-9999"
+		)
+		_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+			Name:    secretKeyName,
+			Value:   secretAPIKeyVal,
+			Scope:   secret.ScopeHub,
+			ScopeID: "test-hub-id",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       uuid.NewString(),
+			Name:     "typesafe-prod",
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: secretEndpoint,
+			Location: "us-central1",
+			Auth: store.SystemOneInstanceAuth{
+				Kind:       store.SystemOneAuthKindAPIKey,
+				SecretName: secretKeyName,
+				HeaderName: secretHeader,
+			},
+			Options: map[string]string{"custom_opt": secretOptVal},
+			Enabled: true,
+		}))
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       uuid.NewString(),
+			Name:     "gemini-staging",
+			Adapter:  "gemini_decisions",
+			Model:    "gemini-2.5-flash",
+			Endpoint: "https://generativelanguage.googleapis.com",
+			Auth: store.SystemOneInstanceAuth{
+				Kind:       store.SystemOneAuthKindAPIKey,
+				SecretName: "GEMINI_API_KEY",
+			},
+			Options: map[string]string{"secret_scope": "project_or_hub"},
+			Enabled: false,
+		}))
+
+		availPath := "/api/v1/projects/" + proj.ID + "/system-one/available-instances"
+
+		// Allowed callers: superAdmin, hubAdmin, project-owner, project-admin.
+		for _, tc := range []struct {
+			name string
+			user *store.User
+		}{
+			{name: "super_admin", user: superAdmin},
+			{name: "hub_admin", user: hubAdmin},
+			{name: "project_owner", user: owner},
+			{name: "project_admin", user: projAdmin},
+		} {
+			t.Run("allowed_"+tc.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, availPath, nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+				rawBody := rec.Body.String()
+				// Assert zero secret/endpoint/credential/option leakage.
+				for _, forbidden := range []string{
+					secretEndpoint,
+					secretKeyName,
+					secretHeader,
+					secretOptVal,
+					secretAPIKeyVal,
+					"GEMINI_API_KEY",
+					"project_or_hub",
+					"generativelanguage.googleapis.com",
+					"us-central1",
+				} {
+					assert.NotContains(t, rawBody, forbidden, "response must not leak %q", forbidden)
+				}
+
+				// Assert strict JSON field allowlist on top-level and every instance item.
+				var raw map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+				rawKeys := make([]string, 0, len(raw))
+				for k := range raw {
+					rawKeys = append(rawKeys, k)
+				}
+				assert.ElementsMatch(t, []string{"projectId", "instances"}, rawKeys)
+
+				allowedItemKeys := map[string]bool{
+					"name":                     true,
+					"adapter":                  true,
+					"model":                    true,
+					"enabled":                  true,
+					"questionTypes":            true,
+					"distributionCompleteness": true,
+					"nativeMetrics":            true,
+					"abstains":                 true,
+				}
+				items, ok := raw["instances"].([]any)
+				require.True(t, ok)
+				require.Len(t, items, 2)
+				for _, elem := range items {
+					m, ok := elem.(map[string]any)
+					require.True(t, ok)
+					for k := range m {
+						assert.True(t, allowedItemKeys[k], "unexpected field %q in available-instances summary", k)
+					}
+				}
+
+				// Verify decoded capabilities for both instances.
+				var resp ProjectSystemOneAvailableInstancesResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				assert.Equal(t, proj.ID, resp.ProjectID)
+				require.Len(t, resp.Instances, 2)
+
+				// Ordered by Name ASC: gemini-staging, typesafe-prod.
+				gem := resp.Instances[0]
+				assert.Equal(t, "gemini-staging", gem.Name)
+				assert.Equal(t, "gemini_decisions", gem.Adapter)
+				assert.Equal(t, "gemini-2.5-flash", gem.Model)
+				assert.False(t, gem.Enabled)
+				assert.Equal(t, []string{spec.PrimitiveBinary, spec.PrimitiveChoice}, gem.QuestionTypes)
+				assert.Equal(t, map[string]string{
+					spec.PrimitiveBinary: systemoneprovider.CompletenessComplete,
+					spec.PrimitiveChoice: systemoneprovider.CompletenessComplete,
+				}, gem.DistributionCompleteness)
+				require.Len(t, gem.NativeMetrics, 1)
+				assert.Equal(t, "gemini.confidence", gem.NativeMetrics[0].Name)
+				assert.False(t, gem.Abstains)
+
+				ts := resp.Instances[1]
+				assert.Equal(t, "typesafe-prod", ts.Name)
+				assert.Equal(t, "typesafe", ts.Adapter)
+				assert.Equal(t, "jev-1.14.0", ts.Model)
+				assert.True(t, ts.Enabled)
+				assert.Equal(t, []string{spec.PrimitiveBinary, spec.PrimitiveChoice}, ts.QuestionTypes)
+				assert.Equal(t, map[string]string{
+					spec.PrimitiveBinary: systemoneprovider.CompletenessComplete,
+					spec.PrimitiveChoice: systemoneprovider.CompletenessComplete,
+				}, ts.DistributionCompleteness)
+				require.Len(t, ts.NativeMetrics, 1)
+				assert.Equal(t, "typesafe.confidence", ts.NativeMetrics[0].Name)
+				assert.False(t, ts.Abstains)
+			})
+		}
+
+		// Allowed: project-owner with scoped UAT carrying project:manage_system_one_instances.
+		uatOwner := projectOpsMint(t, srv, owner.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
+		recUATAllowed := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, uatOwner, nil)
+		assert.Equal(t, http.StatusOK, recUATAllowed.Code, "owner UAT with manage scope should be allowed: %s", recUATAllowed.Body.String())
+
+		// Forbidden: project-member, project-viewer, non-member, custom-role user.
+		for _, tc := range []struct {
+			name string
+			user *store.User
+		}{
+			{name: "project_member", user: member},
+			{name: "project_viewer", user: viewer},
+			{name: "non_member", user: nonMember},
+			{name: "custom_role_non_owner_admin", user: customRoleUser},
+		} {
+			t.Run("forbidden_"+tc.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, availPath, nil)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s should be 403: %s", tc.name, rec.Body.String())
+			})
+		}
+
+		// Forbidden: owner UAT with only project:read (lacks manage scope).
+		uatReadOnly := projectOpsMint(t, srv, owner.ID, projectBoundary(proj.ID), "project:read")
+		recUATDenied := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, uatReadOnly, nil)
+		assert.Equal(t, http.StatusForbidden, recUATDenied.Code, "read-only UAT should be 403: %s", recUATDenied.Body.String())
+
+		// Forbidden: hub admin under View-as-member (not a project owner/admin).
+		vamTok, _, err := srv.GetUserTokenService().MintAccessToken(UserTokenSubject{
+			UserID:       hubAdmin.ID,
+			Email:        hubAdmin.Email,
+			DisplayName:  hubAdmin.DisplayName,
+			Role:         hubAdmin.Role,
+			ClientType:   ClientTypeWeb,
+			ViewAsMember: true,
+		})
+		require.NoError(t, err)
+		recVAM := doRequestWithToken(t, srv, vamTok, http.MethodGet, availPath, nil)
+		assert.Equal(t, http.StatusForbidden, recVAM.Code, "hub admin under VAM should be 403: %s", recVAM.Body.String())
+
+		// Forbidden: agent JWT and delegated-agent credentials.
+		for _, tc := range []struct {
+			name  string
+			ident Identity
+			cc    CredentialContext
+		}{
+			{"agent_jwt", dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline), CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-avail"}},
+			{"delegated_agent", dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline), CredentialContext{Kind: CredentialKindDelegatedAgent, ID: "dcred-avail"}},
+		} {
+			req := httptest.NewRequest(http.MethodGet, availPath, nil)
+			reqCtx := contextWithIdentity(req.Context(), tc.ident)
+			reqCtx = contextWithCredentialContext(reqCtx, tc.cc)
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req.WithContext(reqCtx))
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s should be 403: %s", tc.name, rec.Body.String())
+		}
+
+		// Unauthenticated -> 401.
+		recUnauth := doProjectSystemOneBearerReq(t, srv, http.MethodGet, availPath, "", nil)
+		assert.Equal(t, http.StatusUnauthorized, recUnauth.Code)
+
+		// Unknown project -> 404.
+		recMissing := doRequestAsUser(t, srv, superAdmin, http.MethodGet, "/api/v1/projects/"+uuid.NewString()+"/system-one/available-instances", nil)
+		assert.Equal(t, http.StatusNotFound, recMissing.Code)
+	})
 }

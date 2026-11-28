@@ -1233,6 +1233,7 @@ var hubOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/adapters", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/instances", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/instances/{name}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/instances/{name}/projects", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},

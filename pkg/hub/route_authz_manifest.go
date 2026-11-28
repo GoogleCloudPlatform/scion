@@ -241,7 +241,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/decision-retention":           "admin", // Admin decision retention settings (session only)
 	"/api/v1/admin/system-one/adapters":          "admin", // System One provider adapter capabilities (session only; 404 when hub.system_one is off)
 	"/api/v1/admin/system-one/instances":         "admin", // System One provider instances (session only; 404 when hub.system_one is off)
-	"/api/v1/admin/system-one/instances/":        "admin", // System One provider instance by name and probe (session only; 404 when hub.system_one is off)
+	"/api/v1/admin/system-one/instances/":        "admin", // System One provider instance by name, probe, and allowlisting projects (session only; 404 when hub.system_one is off)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
 	"/api/v1/admin/conduit/grant-keys/revoke":    "admin", // POST {kid}: revoke a conduit grant key at once; returns the kid only; 404 when hub.conduit is off
 	"/api/v1/admin/keys/status":                  "admin", // GET: this instance's server key status report (IDs, deadlines, counts; never key material); platform admin only; 404 when server.secret_rotation is off

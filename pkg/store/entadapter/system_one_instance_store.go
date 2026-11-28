@@ -524,3 +524,31 @@ func (s *SystemOneInstanceStore) DeleteSystemOneInstanceByName(ctx context.Conte
 	}
 	return nil
 }
+
+// ListSystemOneInstanceProjects returns the minimal references (ID, Name) of
+// all projects whose System One allowlist contains instanceName, ordered by
+// Name ascending then ID ascending. Returns an empty slice when no project
+// allowlists the instance.
+func (s *SystemOneInstanceStore) ListSystemOneInstanceProjects(ctx context.Context, instanceName string) ([]store.SystemOneInstanceProjectRef, error) {
+	if instanceName == "" {
+		return []store.SystemOneInstanceProjectRef{}, nil
+	}
+	rows, err := s.client.Project.Query().
+		Where(project.SystemOneAllowedInstancesNotNil()).
+		Order(ent.Asc(project.FieldName), ent.Asc(project.FieldID)).
+		Select(project.FieldID, project.FieldName, project.FieldSystemOneAllowedInstances).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.SystemOneInstanceProjectRef, 0)
+	for _, p := range rows {
+		if slices.Contains(p.SystemOneAllowedInstances, instanceName) {
+			out = append(out, store.SystemOneInstanceProjectRef{
+				ID:   p.ID.String(),
+				Name: p.Name,
+			})
+		}
+	}
+	return out, nil
+}

@@ -614,12 +614,16 @@ const ProjectSelfLeave = "hub.project_self_leave"
 // step in the setup wizard.
 const WelcomeProject = "hub.welcome_project"
 
-// SystemOne gates Hub-scoped System One provider instance administration and
-// probing (ptone/scion#8044): /api/v1/admin/system-one/instances[/{name}[/probe]]
-// and scion admin system-one instance create|list|delete|probe, with runtime
-// probe evaluations bounded by server.hub.system_one.max_eval_time. While it is
-// off, the System One admin routes answer 404 and stored provider instances are
-// kept. The design names it "hub.system-one"; NamePattern allows no hyphen.
+// SystemOne gates Hub-scoped System One provider instance administration,
+// allowlisting-project lookup, and probing (ptone/scion#8044):
+// /api/v1/admin/system-one/instances[/{name}[/probe|/projects]],
+// /api/v1/projects/{id}/system-one/instances[/{name}],
+// GET /api/v1/projects/{id}/system-one/available-instances (also gated on
+// hub.message_policies), and scion admin system-one instance
+// create|list|delete|probe, with runtime probe evaluations bounded by
+// server.hub.system_one.max_eval_time. While it is off, the System One admin
+// and project routes answer 404 and stored provider instances are kept. The
+// design names it "hub.system-one"; NamePattern allows no hyphen.
 const SystemOne = "hub.system_one"
 
 // GitHubTriggers gates routing GitHub App webhook deliveries into the trigger
@@ -1416,7 +1420,7 @@ var compiled = []Experiment{
 	{
 		Name:        SystemOne,
 		Title:       "System One message guardrails",
-		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe]], /api/v1/admin/system-one/adapters, admin web UI, and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin routes answer 404, the admin web page is hidden, and stored provider instances are kept.",
+		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe|/projects]], /api/v1/admin/system-one/adapters, /api/v1/projects/{id}/system-one/instances[/{name}], GET /api/v1/projects/{id}/system-one/available-instances when hub.message_policies is also on, admin web UI, and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin and project routes answer 404, the admin web page is hidden, and stored provider instances are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
