@@ -3125,6 +3125,7 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 				affected, uErr := client.TriggerFire.Update().
 					Where(triggerfire.IDEQ(ex.ID), triggerfire.StatusEQ(ex.Status)).
 					SetStatus(store.TriggerFireStatusFiring).
+					ClearError().
 					SetLeaseUntil(now.Add(leaseHorizon)).
 					Save(ctx)
 				if uErr != nil {
@@ -3264,7 +3265,7 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 	return claimed, promoted, superseded, existing, nil
 }
 
-func (s *TriggerStore) DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error) {
+func (s *TriggerStore) DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time, errMsg string) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
@@ -3286,6 +3287,11 @@ func (s *TriggerStore) DeferTriggerFire(ctx context.Context, id string, deferred
 			SetStatus(store.TriggerFireStatusDeferred).
 			SetNotBefore(notBefore.UTC()).
 			SetLeaseUntil(leaseUntil.UTC())
+		if errMsg != "" {
+			u.SetError(errMsg)
+		} else {
+			u.ClearError()
+		}
 		// Preserve the first deferral timestamp across subsequent deferrals
 		// and hub restarts (Stage 3 §6.2 rev 1.16).
 		if ex.DeferredAt == nil && !deferredAt.IsZero() {
