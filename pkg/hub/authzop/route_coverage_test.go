@@ -271,6 +271,128 @@ func routePrefixCovered(method, base string, cov routeCoverageSet, exactRoutes m
 }
 
 // ---------------------------------------------------------------------------
+// Trailing-slash prefix classification (fail-closed, ptone/scion#4883)
+// ---------------------------------------------------------------------------
+
+// enumeratedSubRoutePrefixes lists trailing-slash routeMetadataTable prefixes
+// whose concrete sub-routes are discovered and verified individually by
+// discoverPrefixSubRoutes.
+var enumeratedSubRoutePrefixes = map[string]string{
+	"/api/v1/agents/":    "enumerated per-method from pkg/hub/agent_routes.go (agentSubRouteTable)",
+	"/api/v1/artifacts/": "enumerated per-method from pkg/artifacts/service.go ((*Service).ServeHTTP)",
+	"/api/v1/projects/":  "enumerated per-segment from pkg/hub/project_subroutes.go (projectSubRouteTable)",
+}
+
+// ownerOnlyTrailingSlashPrefixes is the explicit, audited allowlist of
+// trailing-slash routeMetadataTable keys that are currently verified by
+// owner-scoped (and method-aware, when method-qualified) prefix matching
+// rather than per-operation sub-route enumeration.
+//
+// Any new trailing-slash key added to routeMetadataTable that is not in
+// enumeratedSubRoutePrefixes or this map fails TestEntryPointsCoverRouteMetadata
+// until it is either enumerated by a sub-route discoverer or explicitly
+// classified here. Stale entries no longer in routeMetadataTable also fail.
+var ownerOnlyTrailingSlashPrefixes = map[string]string{
+	// Prefix-level EntryPointExemptions (public, internal, auth-only, or hub-admin)
+	"/api/v1/agent/command-requests/": "exempt (ExemptionInternalOnly: agent-JWT self-scoped)",
+	"/api/v1/agent/decisions/":        "exempt (ExemptionInternalOnly: agent-JWT self-scoped)",
+	"/api/v1/agent/secret-requests/":  "exempt (ExemptionInternalOnly: agent-JWT self-scoped)",
+	"/api/v1/artifacts/shared/":       "exempt (ExemptionPublicEndpoint: public share link)",
+	"/api/v1/artifacts/view/":         "exempt (ExemptionPublicEndpoint: signed view capability)",
+	"/api/v1/brokers/":                "exempt (ExemptionInternalOnly: broker-HMAC internal)",
+	"/api/v1/metrics/session/":        "exempt (ExemptionAuthenticationOnly: self-service session metrics)",
+	"/api/v1/portview/":               "exempt (ExemptionPublicEndpoint: signed port view link)",
+	"/api/v1/pre-start-hooks/":        "exempt (ExemptionHubAdmin: hub pre-start hooks by ID)",
+	"/api/v1/principals/":             "exempt (ExemptionAuthenticationOnly: self-service principal lookup)",
+
+	// Method-qualified trailing-slash prefixes (method-aware owner-scoped check)
+	"DELETE /api/v1/github-app/installations/": "method-qualified prefix (DELETE installation)",
+	"GET /api/v1/github-app/installations/":    "method-qualified prefix (GET installation)",
+	"PUT /api/v1/github-app/installations/":    "method-qualified prefix (PUT installation)",
+
+	// Admin prefix dispatchers (owner-scoped prefix check; per-op enumeration tracked in follow-up)
+	"/api/v1/admin/access-constraint-previews/": "owner-scoped prefix (admin access-constraint previews)",
+	"/api/v1/admin/access-constraints/":         "owner-scoped prefix (admin access-constraints by ID)",
+	"/api/v1/admin/allow-list/":                 "owner-scoped prefix (admin allow-list by email)",
+	"/api/v1/admin/entitlements/":               "owner-scoped prefix (admin entitlements by ID)",
+	"/api/v1/admin/integrations/":               "owner-scoped prefix (admin integrations by name)",
+	"/api/v1/admin/invites/":                    "owner-scoped prefix (admin invites by ID)",
+	"/api/v1/admin/lifecycle-hooks/":            "owner-scoped prefix (admin lifecycle-hooks by ID)",
+	"/api/v1/admin/limits/":                     "owner-scoped prefix (admin limits by ID)",
+	"/api/v1/admin/maintenance/migrations/":     "owner-scoped prefix (admin maintenance migrations)",
+	"/api/v1/admin/maintenance/operations/":     "owner-scoped prefix (admin maintenance operations)",
+	"/api/v1/admin/role-bindings/":              "owner-scoped prefix (admin role-bindings by ID)",
+	"/api/v1/admin/roles/":                      "owner-scoped prefix (admin roles by ID)",
+	"/api/v1/admin/server-config/sections/":     "owner-scoped prefix (admin server-config sections)",
+	"/api/v1/admin/system-one/instances/":       "owner-scoped prefix (admin system-one instances)",
+	"/api/v1/admin/usage/":                      "owner-scoped prefix (admin usage by limit)",
+
+	// Resource, user, chat, and messaging prefix dispatchers (owner-scoped prefix check; per-op enumeration tracked in follow-up)
+	"/api/v1/attachment-deliveries/":    "owner-scoped prefix (attachment delivery redemption)",
+	"/api/v1/auth/tokens/":              "owner-scoped prefix (auth tokens by ID)",
+	"/api/v1/chat/attachments/":         "owner-scoped prefix (chat attachments by ID)",
+	"/api/v1/chat/conversations/":       "owner-scoped prefix (chat conversations by ID)",
+	"/api/v1/chat/spaces/":              "owner-scoped prefix (chat spaces by ID)",
+	"/api/v1/chat/stars/":               "owner-scoped prefix (chat stars by ID)",
+	"/api/v1/chat/topics/":              "owner-scoped prefix (chat topics by ID)",
+	"/api/v1/command-requests/":         "owner-scoped prefix (command requests by ID)",
+	"/api/v1/conversations/":            "owner-scoped prefix (conversations by ID)",
+	"/api/v1/decision-prompts/":         "owner-scoped prefix (decision prompts by ID)",
+	"/api/v1/decisions/":                "owner-scoped prefix (decisions by ID)",
+	"/api/v1/env/":                      "owner-scoped prefix (env vars by key)",
+	"/api/v1/gcp-service-accounts/":     "owner-scoped prefix (GCP service accounts by ID)",
+	"/api/v1/groups/":                   "owner-scoped prefix (groups and group sub-routes)",
+	"/api/v1/harness-configs/":          "owner-scoped prefix (harness configs by ID)",
+	"/api/v1/messages/":                 "owner-scoped prefix (messages by ID)",
+	"/api/v1/metrics/":                  "owner-scoped prefix (metrics dashboard sub-routes)",
+	"/api/v1/notifications/":            "owner-scoped prefix (notifications by ID)",
+	"/api/v1/pending-secrets/":          "owner-scoped prefix (pending secrets decision)",
+	"/api/v1/policies/":                 "owner-scoped prefix (policies by ID)",
+	"/api/v1/runtime-brokers/":          "owner-scoped prefix (runtime brokers by ID)",
+	"/api/v1/secret-requests/":          "owner-scoped prefix (secret requests by message ID)",
+	"/api/v1/secrets/":                  "owner-scoped prefix (secrets by key)",
+	"/api/v1/skill-registries/":         "owner-scoped prefix (skill registries by ID)",
+	"/api/v1/skills/":                   "owner-scoped prefix (skills by ID)",
+	"/api/v1/templates/":                "owner-scoped prefix (templates by ID)",
+	"/api/v1/thread-groups/":            "owner-scoped prefix (thread groups by ID)",
+	"/api/v1/users/":                    "owner-scoped prefix (users by ID)",
+	"/api/v1/users/me/injected-skills/": "owner-scoped prefix (user injected-skills by ID)",
+	"/api/v1/users/me/templates/":       "owner-scoped prefix (user templates by ID)",
+}
+
+// findUnclassifiedTrailingSlashPrefixes checks that every trailing-slash key
+// in routeKeys is listed in either enumerated or ownerOnly, and that neither
+// map contains stale entries absent from routeKeys.
+func findUnclassifiedTrailingSlashPrefixes(routeKeys map[string]bool, enumerated, ownerOnly map[string]string) (unclassified, stale []string) {
+	for route := range routeKeys {
+		_, pathOnly := splitRoutePattern(route)
+		if _, hasSuffix := normalizeTrailingSlash(normalizeRoutePattern(pathOnly)); !hasSuffix {
+			continue
+		}
+		if _, ok := enumerated[route]; ok {
+			continue
+		}
+		if _, ok := ownerOnly[route]; ok {
+			continue
+		}
+		unclassified = append(unclassified, route)
+	}
+	for k := range enumerated {
+		if !routeKeys[k] {
+			stale = append(stale, k)
+		}
+	}
+	for k := range ownerOnly {
+		if !routeKeys[k] {
+			stale = append(stale, k)
+		}
+	}
+	sort.Strings(unclassified)
+	sort.Strings(stale)
+	return unclassified, stale
+}
+
+// ---------------------------------------------------------------------------
 // Sub-route coverage under trailing-slash prefixes (ptone/scion#4883)
 // ---------------------------------------------------------------------------
 
@@ -432,14 +554,23 @@ func discoverArtifactSubRoutes(t *testing.T, repoRoot string) []discoveredSubRou
 	// Locate the main segment dispatch switch in ServeHTTP (the top-level switch
 	// whose cases inspect len(segs)).
 	var mainSwitch *ast.SwitchStmt
-	for _, stmt := range serveHTTP.Body.List {
+	mainSwitchIdx := -1
+	for i, stmt := range serveHTTP.Body.List {
 		if sw, ok := stmt.(*ast.SwitchStmt); ok && switchInspectsSegs(sw) {
 			mainSwitch = sw
+			mainSwitchIdx = i
 			break
 		}
 	}
 	if mainSwitch == nil {
 		t.Fatal("could not locate segment dispatch switch in (*Service).ServeHTTP")
+	}
+
+	// Fail closed on any top-level `if segs[0] == <val>` branch before the main
+	// switch that is not in the explicit allowlist of segments with their own
+	// routeMetadataTable prefixes ("shared", "view").
+	if err := checkArtifactPreSwitchBranches(serveHTTP.Body.List[:mainSwitchIdx], consts); err != nil {
+		t.Fatal(err)
 	}
 
 	var out []discoveredSubRoute
@@ -448,6 +579,59 @@ func discoverArtifactSubRoutes(t *testing.T, repoRoot string) []discoveredSubRou
 		t.Fatal("discovered 0 artifact sub-routes from pkg/artifacts/service.go — parser is broken")
 	}
 	return out
+}
+
+// allowedArtifactPreSwitchSegs are top-level segs[0] values dispatched before
+// the main len(segs) switch in (*Service).ServeHTTP that have their own
+// routeMetadataTable prefix keys (/api/v1/artifacts/shared/, /api/v1/artifacts/view/).
+var allowedArtifactPreSwitchSegs = map[string]bool{
+	"shared": true,
+	"view":   true,
+}
+
+// checkArtifactPreSwitchBranches inspects statements preceding the main
+// len(segs) switch in (*Service).ServeHTTP and returns an error if any `if`
+// condition checks `segs[0] == <val>` for a value outside
+// allowedArtifactPreSwitchSegs (or an unrecognized expression).
+func checkArtifactPreSwitchBranches(stmts []ast.Stmt, consts map[string]string) error {
+	for _, stmt := range stmts {
+		ifStmt, ok := stmt.(*ast.IfStmt)
+		if !ok {
+			continue
+		}
+		var err error
+		ast.Inspect(ifStmt.Cond, func(n ast.Node) bool {
+			if err != nil {
+				return false
+			}
+			bin, ok := n.(*ast.BinaryExpr)
+			if !ok || bin.Op != token.EQL {
+				return true
+			}
+			var valExpr ast.Expr
+			if idx, ok := segsIndex(bin.X); ok && idx == 0 {
+				valExpr = bin.Y
+			} else if idx, ok := segsIndex(bin.Y); ok && idx == 0 {
+				valExpr = bin.X
+			} else {
+				return true
+			}
+			val, ok := stringExprValue(valExpr, consts)
+			if !ok {
+				err = fmt.Errorf("artifact ServeHTTP pre-switch branch compares segs[0] to unrecognized expression %T — classify or extend parser", valExpr)
+				return false
+			}
+			if !allowedArtifactPreSwitchSegs[val] {
+				err = fmt.Errorf("artifact ServeHTTP pre-switch branch segs[0] == %q is not in allowedArtifactPreSwitchSegs — add route metadata / sub-route discovery or allowlist", val)
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func switchInspectsSegs(sw *ast.SwitchStmt) bool {
@@ -781,24 +965,36 @@ func discoverAgentSubRoutes(t *testing.T, repoRoot string) []discoveredSubRoute 
 					opaque = true
 				}
 			case "segs":
-				if cl, ok := kv.Value.(*ast.CompositeLit); ok {
-					for _, se := range cl.Elts {
-						switch v := se.(type) {
-						case *ast.BasicLit:
-							if v.Kind == token.STRING {
-								if unq, err := strconv.Unquote(v.Value); err == nil {
-									segs = append(segs, unq)
-								}
-							}
-						case *ast.Ident:
-							if v.Name == "agentRouteParam" {
-								segs = append(segs, "{}")
-							}
+				cl, ok := kv.Value.(*ast.CompositeLit)
+				if !ok {
+					t.Fatalf("agentSubRouteTable row has non-composite-literal segs expression %T", kv.Value)
+				}
+				for _, se := range cl.Elts {
+					switch v := se.(type) {
+					case *ast.BasicLit:
+						if v.Kind != token.STRING {
+							t.Fatalf("agentSubRouteTable row has non-string literal in segs: %s", v.Value)
 						}
+						unq, err := strconv.Unquote(v.Value)
+						if err != nil {
+							t.Fatalf("agentSubRouteTable row has invalid string literal in segs: %v", err)
+						}
+						segs = append(segs, unq)
+					case *ast.Ident:
+						if v.Name != "agentRouteParam" {
+							t.Fatalf("agentSubRouteTable row has unrecognized identifier %q in segs — extend discoverAgentSubRoutes", v.Name)
+						}
+						segs = append(segs, "{}")
+					default:
+						t.Fatalf("agentSubRouteTable row has unrecognized segs element %T — extend discoverAgentSubRoutes", se)
 					}
 				}
 			case "ops":
-				methods = extractAgentRowMethods(kv.Value)
+				var err error
+				methods, err = extractAgentRowMethods(kv.Value)
+				if err != nil {
+					t.Fatalf("agentSubRouteTable row ops: %v", err)
+				}
 			}
 		}
 
@@ -841,31 +1037,35 @@ func discoverAgentSubRoutes(t *testing.T, repoRoot string) []discoveredSubRoute 
 	return out
 }
 
-func extractAgentRowMethods(expr ast.Expr) []string {
+func extractAgentRowMethods(expr ast.Expr) ([]string, error) {
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		if id, ok := e.Fun.(*ast.Ident); ok {
 			switch id.Name {
 			case "postOp":
-				return []string{"POST"}
+				return []string{"POST"}, nil
 			case "getOp":
-				return []string{"GET"}
+				return []string{"GET"}, nil
 			}
 		}
+		return nil, fmt.Errorf("unrecognized ops call expression %T — extend extractAgentRowMethods", e.Fun)
 	case *ast.CompositeLit:
 		var methods []string
 		for _, elt := range e.Elts {
 			kv, ok := elt.(*ast.KeyValueExpr)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("unrecognized ops composite element %T", elt)
 			}
-			if m, ok := httpMethodValue(kv.Key); ok {
-				methods = append(methods, m)
+			m, ok := httpMethodValue(kv.Key)
+			if !ok {
+				return nil, fmt.Errorf("unrecognized HTTP method key %T in ops map", kv.Key)
 			}
+			methods = append(methods, m)
 		}
-		return methods
+		return methods, nil
+	default:
+		return nil, fmt.Errorf("unrecognized ops expression %T — extend extractAgentRowMethods", expr)
 	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,4 +1355,69 @@ func TestProofMethodPrefixedRouteNotMaskedByOtherMethod(t *testing.T) {
 			t.Errorf("expected PUT /api/v1/github-app/installations/ to be reported uncovered, got %v", uncovered)
 		}
 	})
+}
+
+// TestProofUnclassifiedTrailingSlashPrefixRejected proves that adding a new
+// trailing-slash route-metadata prefix without either a sub-route discoverer
+// or an explicit ownerOnlyTrailingSlashPrefixes classification fails the gate,
+// and that stale entries in the classification maps are also rejected.
+func TestProofUnclassifiedTrailingSlashPrefixRejected(t *testing.T) {
+	t.Run("new trailing-slash prefix fails closed", func(t *testing.T) {
+		routeKeys := routeMetadataKeys(t)
+		routeKeys["/api/v1/unclassified-probe/"] = true
+
+		unclassified, stale := findUnclassifiedTrailingSlashPrefixes(
+			routeKeys, enumeratedSubRoutePrefixes, ownerOnlyTrailingSlashPrefixes,
+		)
+		if len(stale) != 0 {
+			t.Errorf("unexpected stale entries: %v", stale)
+		}
+		if len(unclassified) != 1 || unclassified[0] != "/api/v1/unclassified-probe/" {
+			t.Errorf("expected [/api/v1/unclassified-probe/] unclassified, got %v", unclassified)
+		}
+	})
+
+	t.Run("stale allowlist entry is rejected", func(t *testing.T) {
+		routeKeys := routeMetadataKeys(t)
+		ownerCopy := make(map[string]string, len(ownerOnlyTrailingSlashPrefixes)+1)
+		for k, v := range ownerOnlyTrailingSlashPrefixes {
+			ownerCopy[k] = v
+		}
+		ownerCopy["/api/v1/removed-prefix/"] = "stale entry"
+
+		unclassified, stale := findUnclassifiedTrailingSlashPrefixes(
+			routeKeys, enumeratedSubRoutePrefixes, ownerCopy,
+		)
+		if len(unclassified) != 0 {
+			t.Errorf("unexpected unclassified entries: %v", unclassified)
+		}
+		if len(stale) != 1 || stale[0] != "/api/v1/removed-prefix/" {
+			t.Errorf("expected [/api/v1/removed-prefix/] stale, got %v", stale)
+		}
+	})
+}
+
+// TestProofArtifactPreSwitchBranchRejected proves that adding an unrecognized
+// `if segs[0] == "<x>"` branch before the main switch in (*Service).ServeHTTP
+// fails closed rather than being silently skipped.
+func TestProofArtifactPreSwitchBranchRejected(t *testing.T) {
+	src := `package artifacts
+func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if segs[0] == "shared" { return }
+	if segs[0] == "view" { return }
+	if segs[0] == "probe3" { return }
+}`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "probe.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic ServeHTTP: %v", err)
+	}
+	fn := f.Decls[0].(*ast.FuncDecl)
+	err = checkArtifactPreSwitchBranches(fn.Body.List, nil)
+	if err == nil {
+		t.Fatal("expected checkArtifactPreSwitchBranches to reject segs[0] == \"probe3\", got nil")
+	}
+	if !strings.Contains(err.Error(), `"probe3"`) {
+		t.Errorf("expected error to mention \"probe3\", got: %v", err)
+	}
 }

@@ -442,18 +442,21 @@ func normalizeTrailingSlash(pattern string) (base string, hasTrailingSlash bool)
 	return pattern, false
 }
 
-// TestEntryPointsCoverRouteMetadata verifies every route-metadata entry and
-// every concrete sub-route dispatched under covered trailing-slash prefixes
+// TestEntryPointsCoverRouteMetadata verifies every route-metadata entry,
+// every trailing-slash prefix classification (fail-closed via
+// enumeratedSubRoutePrefixes / ownerOnlyTrailingSlashPrefixes), and every
+// concrete sub-route dispatched under the three enumerated prefixes
 // (artifacts, agents, projects) is covered by a catalog entry point, an
 // EntryPointExemption, or (for sub-routes) PendingBearerDispositions. This is
 // the R2 automated bidirectional reconciliation gate.
 //
 // Route-metadata trailing-slash patterns are checked with owner-scoped and
 // method-aware matching so a more-specific route or a different HTTP method
-// never masks an uncovered prefix, and concrete sub-routes under covered
-// prefixes are verified individually so one covered operation under a prefix
-// (e.g. GET /api/v1/artifacts/{id}) never hides uncovered sibling operations
-// (ptone/scion#4883).
+// never masks an uncovered prefix. Concrete sub-routes under /api/v1/artifacts/,
+// /api/v1/agents/, and /api/v1/projects/ are verified individually; all other
+// trailing-slash prefixes must be explicitly listed in
+// ownerOnlyTrailingSlashPrefixes so any new prefix fails closed until
+// classified (ptone/scion#4883).
 func TestEntryPointsCoverRouteMetadata(t *testing.T) {
 	routeKeys := routeMetadataKeys(t)
 	cov := newRouteCoverageSet(Catalog, EntryPointExemptions, PendingBearerDispositions)
@@ -462,6 +465,18 @@ func TestEntryPointsCoverRouteMetadata(t *testing.T) {
 	if len(uncoveredRoutes) > 0 {
 		t.Errorf("route-metadata entries not covered by any catalog operation or exemption (%d/%d):\n  %s",
 			len(uncoveredRoutes), len(routeKeys), strings.Join(uncoveredRoutes, "\n  "))
+	}
+
+	unclassifiedPrefixes, stalePrefixes := findUnclassifiedTrailingSlashPrefixes(
+		routeKeys, enumeratedSubRoutePrefixes, ownerOnlyTrailingSlashPrefixes,
+	)
+	if len(unclassifiedPrefixes) > 0 {
+		t.Errorf("trailing-slash route-metadata prefixes not classified in enumeratedSubRoutePrefixes or ownerOnlyTrailingSlashPrefixes (%d) — add a sub-route discoverer or explicitly classify with a reason:\n  %s",
+			len(unclassifiedPrefixes), strings.Join(unclassifiedPrefixes, "\n  "))
+	}
+	if len(stalePrefixes) > 0 {
+		t.Errorf("stale entries in enumeratedSubRoutePrefixes / ownerOnlyTrailingSlashPrefixes no longer in routeMetadataTable (%d):\n  %s",
+			len(stalePrefixes), strings.Join(stalePrefixes, "\n  "))
 	}
 
 	subRoutes := discoverPrefixSubRoutes(t, findRepoRoot(t))
