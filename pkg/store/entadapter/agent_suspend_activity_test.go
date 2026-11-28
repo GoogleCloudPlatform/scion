@@ -380,7 +380,7 @@ func TestUpdateAgentStatus_ResumeToRunningRefreshesLastActivityEvent(t *testing.
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	staleAct := now.Add(-6 * time.Hour)
 	cutoffs := store.StallCutoffs{
 		Activity: now.Add(-5 * time.Minute),
@@ -574,7 +574,7 @@ func TestUpdateAgent_WholeRowResumeToRunningRefreshesLastActivityEvent(t *testin
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	staleAct := now.Add(-6 * time.Hour)
 	cutoffs := store.StallCutoffs{
 		Activity: now.Add(-5 * time.Minute),
@@ -775,7 +775,7 @@ func TestResumeLastActivityEvent_Orderings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, projectID := newTestAgentStore(t)
 
-			now := time.Now()
+			now := time.Now().UTC().Truncate(time.Microsecond)
 			staleAct := now.Add(-6 * time.Hour)
 
 			a := makeAgent(projectID, fmt.Sprintf("ord-resume-%d", i))
@@ -903,7 +903,7 @@ func TestResumeLastActivityEvent_Orderings(t *testing.T) {
 	// metadata edit keeps its old LastActivityEvent and IS marked STALLED.
 	t.Run("guard: genuinely stalled running agent stays stalled", func(t *testing.T) {
 		s, projectID := newTestAgentStore(t)
-		now := time.Now()
+		now := time.Now().UTC().Truncate(time.Microsecond)
 		oldAct := now.Add(-30 * time.Minute)
 
 		a := makeAgent(projectID, "ord-genuinely-stalled")
@@ -939,7 +939,7 @@ func TestResumeLastActivityEvent_Orderings(t *testing.T) {
 	// Guard: failed-start rollback via Restore preserves pre-suspension LAE.
 	t.Run("guard: failed-start Restore rollback keeps pre-suspend LAE", func(t *testing.T) {
 		s, projectID := newTestAgentStore(t)
-		now := time.Now()
+		now := time.Now().UTC().Truncate(time.Microsecond)
 		staleAct := now.Add(-6 * time.Hour)
 
 		a := makeAgent(projectID, "ord-rollback-restore")
