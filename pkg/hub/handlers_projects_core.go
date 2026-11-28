@@ -3383,7 +3383,7 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	var req CreateAgentRequest
-	if _, ok := readBoundedCreateAgentRequest(w, r, &req, nil); !ok {
+	if !readBoundedCreateAgentRequest(w, r, &req, nil) {
 		return
 	}
 

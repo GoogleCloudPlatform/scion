@@ -39,6 +39,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type countingSlugLookupStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	slugLookups atomic.Int64
+}
+
+func (c *countingSlugLookupStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
+	if c.fault.Active() {
+		c.slugLookups.Add(1)
+	}
+	return c.Store.GetProjectBySlug(ctx, slug)
+}
+
 type failingTrackingReader struct {
 	bytesRead atomic.Int64
 	readCalls atomic.Int64
@@ -183,7 +196,7 @@ func TestCreateAgent_NonAgentUnauthorizedRejectedBeforeFullDecode(t *testing.T) 
 		assert.Less(t, body.bytesRead.Load(), int64(64*1024), "pathological prefix must fail fast without reading full body")
 	})
 
-	t.Run("duplicate projectId cannot bypass authorization", func(t *testing.T) {
+	t.Run("duplicate projectId is rejected and cannot bypass authorization", func(t *testing.T) {
 		ctx := context.Background()
 		outsiderProj := &store.Project{
 			ID:      api.NewUUID(),
@@ -197,12 +210,98 @@ func TestCreateAgent_NonAgentUnauthorizedRejectedBeforeFullDecode(t *testing.T) 
 		payload := fmt.Sprintf(`{"projectId":%q,"projectId":%q,"name":"dup-project-bypass"}`,
 			outsiderProj.ID, project.ID)
 		rec := doRawRequestWithUser(t, srv, outsider, http.MethodPost, "/api/v1/agents", strings.NewReader(payload))
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "duplicate projectId")
 
 		_, err := s.GetAgentBySlug(ctx, project.ID, "dup-project-bypass")
 		assert.ErrorIs(t, err, store.ErrNotFound)
 		_, err = s.GetAgentBySlug(ctx, outsiderProj.ID, "dup-project-bypass")
 		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("repeated authorized projectId alternating UUID and slug with case variants is rejected with at most one authz and slug lookup", func(t *testing.T) {
+		ctx := context.Background()
+		countSrv, countStore, slugCounter, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *countingSlugLookupStore {
+			return &countingSlugLookupStore{Store: inner, fault: f}
+		})
+		testOwner := &store.User{
+			ID:          api.NewUUID(),
+			Email:       "dup-owner@example.com",
+			DisplayName: "Dup Owner",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}
+		require.NoError(t, countStore.CreateUser(ctx, testOwner))
+		testProj := &store.Project{
+			ID:      api.NewUUID(),
+			Name:    "Dup Authz Project",
+			Slug:    "dup-authz-proj",
+			OwnerID: testOwner.ID,
+		}
+		require.NoError(t, countStore.CreateProject(ctx, testProj))
+		grantProjectRole(t, countStore, testOwner.ID, testProj.ID, store.ProjectRoleMember)
+
+		emitter := &recordingDecisionAuditEmitter{}
+		countSrv.authzService.SetDecisionAuditEmitter(emitter)
+		t.Cleanup(func() { countSrv.authzService.SetDecisionAuditEmitter(nil) })
+
+		keyVariants := []string{"projectId", "PROJECTID", "projectid", "ProjectId"}
+		buildAlternating := func(firstVal, secondVal string, pairs int) []byte {
+			var b strings.Builder
+			b.WriteByte('{')
+			for i := 0; i < pairs; i++ {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				k1 := keyVariants[(2*i)%len(keyVariants)]
+				k2 := keyVariants[(2*i+1)%len(keyVariants)]
+				fmt.Fprintf(&b, `%q:%q,%q:%q`, k1, firstVal, k2, secondVal)
+			}
+			b.WriteString(`,"name":"dup-amp"}`)
+			return []byte(b.String())
+		}
+
+		cases := []struct {
+			name            string
+			payload         []byte
+			wantMaxAuthz    int
+			wantSlugLookups int64
+		}{
+			{
+				name:            "UUID first alternating with slug",
+				payload:         buildAlternating(testProj.ID, testProj.Slug, 1024),
+				wantMaxAuthz:    1,
+				wantSlugLookups: 0,
+			},
+			{
+				name:            "slug first alternating with UUID",
+				payload:         buildAlternating(testProj.Slug, testProj.ID, 1024),
+				wantMaxAuthz:    1,
+				wantSlugLookups: 1,
+			},
+			{
+				name:            "null followed by projectId is rejected as duplicate",
+				payload:         []byte(fmt.Sprintf(`{"projectId":null,"PROJECTID":%q,"name":"dup-null"}`, testProj.ID)),
+				wantMaxAuthz:    0,
+				wantSlugLookups: 0,
+			},
+		}
+
+		fault.Arm()
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				emitter.records = nil
+				slugCounter.slugLookups.Store(0)
+
+				body := newBodyLimitCountingReader(tc.payload)
+				rec := doRawRequestWithUser(t, countSrv, testOwner, http.MethodPost, "/api/v1/agents", body)
+				assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "duplicate projectId")
+				assert.Less(t, body.bytesRead.Load(), int64(32*1024), "duplicate projectId must fail fast without scanning tail")
+				assert.LessOrEqual(t, len(emitter.records), tc.wantMaxAuthz, "duplicate projectId must not amplify authorization evaluations")
+				assert.Equal(t, tc.wantSlugLookups, slugCounter.slugLookups.Load(), "duplicate projectId must not amplify slug lookups")
+			})
+		}
 	})
 
 	t.Run("missing or invalid projectId and malformed JSON return clean 4xx with no side effects", func(t *testing.T) {
@@ -414,4 +513,36 @@ func TestCreateAgent_MaximalLegalPayloadSucceeds(t *testing.T) {
 			assertPassedBodyDecode(t, rec)
 		})
 	}
+
+	// Verify a 16 MiB-fitting manifest of 155,000 short-path FileInfo entries
+	// (with omitempty mode omitted) passes decode cleanly rather than hitting
+	// the workspaceFiles structural cap.
+	t.Run("155k short-path workspaceFiles fitting in 16 MiB passes decode", func(t *testing.T) {
+		const shortFileCount = 155_000
+		shortFiles := make([]transfer.FileInfo, shortFileCount)
+		for i := range shortFiles {
+			shortFiles[i] = transfer.FileInfo{
+				Path: strconv.FormatInt(int64(i), 36),
+				Size: 1,
+				Hash: hash,
+			}
+		}
+		shortReq := CreateAgentRequest{
+			Name:           "short-path-manifest-agent",
+			ProjectID:      project.ID,
+			Template:       "default",
+			WorkspaceFiles: shortFiles,
+		}
+		shortRaw, err := json.Marshal(shortReq)
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(shortRaw), maxAgentCreateBodySize, "155k short-path manifest must fit within 16 MiB")
+		require.Greater(t, len(shortRaw), 15<<20, "155k short-path manifest should sit near the 16 MiB boundary")
+
+		for _, rt := range routes {
+			t.Run(rt.name, func(t *testing.T) {
+				rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, rt.path, bytes.NewReader(shortRaw))
+				assertPassedBodyDecode(t, rec)
+			})
+		}
+	})
 }

@@ -423,6 +423,36 @@ func (s *Server) authorizeAgentCreateDecision(ctx context.Context, identity Iden
 	return nil
 }
 
+// preBodyAgentCreateProject inspects identity before reading a POST /api/v1/agents
+// request body (ptone/scion#9658). For callers whose target project is fixed by
+// their credential (agent) or whose identity kind can never create agents, it
+// returns (projectID, true) so the handler calls authorizeAgentCreate before
+// reading any body bytes. For user/dev callers whose target project comes from
+// the request body, it returns ("", false).
+//
+// Kept alongside authorizeAgentCreateDecision so the admitted identity-kind
+// switch lives in one place.
+func preBodyAgentCreateProject(identity Identity) (projectID string, authorizeNow bool) {
+	if identity == nil {
+		return "", true
+	}
+	switch identity.Type() {
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			return "", true
+		}
+		return agentIdent.ProjectID(), true
+	case "user", "dev":
+		if _, ok := identity.(UserIdentity); !ok {
+			return "", true
+		}
+		return "", false
+	default:
+		return "", true
+	}
+}
+
 // authorizeAgentCreate gates agent creation for every caller kind, fail
 // closed, with a terminating default for unknown kinds.
 //
