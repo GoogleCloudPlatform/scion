@@ -1175,6 +1175,7 @@ func (r *resolvingHarnessConfigStore) GetHarnessConfigBySlug(_ context.Context, 
 		Harness:     "claude",
 		ContentHash: "cafebabe",
 		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
 	}, nil
 }
 
