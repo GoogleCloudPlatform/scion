@@ -21,6 +21,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import { syncSingleSelectMenuChecked, type SlCheckboxMenuItem } from '../../utils/menu-checkbox.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Skill, SkillScope, Capabilities } from '../../shared/types.js';
@@ -587,16 +588,25 @@ export class ScionPageSkills extends LitElement {
                   Sort: ${this.sortField}
                 </sl-button>
                 <sl-menu
-                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
-                    this.toggleSort(e.detail.item.value as SkillSortField)}
+                  @sl-select=${(e: CustomEvent<{ item: SlCheckboxMenuItem }>) => {
+                    const value = e.detail.item.value as SkillSortField;
+                    this.toggleSort(value);
+                    syncSingleSelectMenuChecked(e.detail.item, this.sortField === value);
+                  }}
                 >
-                  <sl-menu-item value="name" ?checked=${this.sortField === 'name'}
+                  <sl-menu-item type="checkbox" value="name" ?checked=${this.sortField === 'name'}
                     >Name</sl-menu-item
                   >
-                  <sl-menu-item value="created" ?checked=${this.sortField === 'created'}
+                  <sl-menu-item
+                    type="checkbox"
+                    value="created"
+                    ?checked=${this.sortField === 'created'}
                     >Created</sl-menu-item
                   >
-                  <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}
+                  <sl-menu-item
+                    type="checkbox"
+                    value="updated"
+                    ?checked=${this.sortField === 'updated'}
                     >Updated</sl-menu-item
                   >
                 </sl-menu>
