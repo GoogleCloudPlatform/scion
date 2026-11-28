@@ -43,6 +43,11 @@ exposed (see Full apps: scion tunnel).
 - An agent can have at most 10 ports exposed at once. Unexpose ports you no
   longer need.
 - These commands work only inside an agent with a Hub connection.
+- The service runs in your agent's container, so it stops when the agent is
+  suspended (including Scion's idle auto-suspend) or stopped, and the link then
+  fails. While a person is using the link, signal
+  `sciontool status blocked "<reason>"` rather than idle; after a resume, start
+  the service again and check the link before pointing anyone back to it.
 
 ## What the proxy carries
 
