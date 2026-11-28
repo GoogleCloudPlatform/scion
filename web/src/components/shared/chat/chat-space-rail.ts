@@ -852,15 +852,9 @@ export class ScionChatSpaceRail extends LitElement {
       text-align: center;
     }
 
-    .space-header .mention-badge {
+    .space-header .unread-badge.mentions {
       background: var(--scion-danger-500, #ef4444);
       color: #fff;
-      font-size: var(--chat-fs-2xs);
-      font-weight: 700;
-      padding: 0.0625rem 0.3125rem;
-      border-radius: var(--scion-radius);
-      min-width: 1rem;
-      text-align: center;
     }
 
     .space-actions {
@@ -1271,19 +1265,17 @@ export class ScionChatSpaceRail extends LitElement {
       justify-content: center;
     }
 
+    /* No divider and minimal padding: the chevron sits against the icon so
+       the pair reads as one split control. */
     .filter-toggle .filter-split-caret {
       flex: 0 0 auto;
-      padding: 0 0.25rem;
-      border-right: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .filter-toggle .filter-split-caret.active {
-      border-right-color: color-mix(in srgb, currentColor 25%, transparent);
+      padding: 0 0.0625rem 0 0.25rem;
+      border-right: none;
     }
 
     .filter-toggle .filter-split-main {
       flex: 1 1 auto;
-      padding: 0 0.4375rem 0 0.3125rem;
+      padding: 0 0.4375rem 0 0.125rem;
     }
 
     @container (max-width: 259px) {
@@ -1298,11 +1290,11 @@ export class ScionChatSpaceRail extends LitElement {
       }
 
       .filter-toggle .filter-split-caret {
-        padding: 0 0.1875rem;
+        padding: 0 0.0625rem 0 0.1875rem;
       }
 
       .filter-toggle .filter-split-main {
-        padding: 0 0.25rem 0 0.1875rem;
+        padding: 0 0.25rem 0 0.0625rem;
       }
 
       .filter-toggle button sl-icon:not(.filter-caret) {
@@ -1473,8 +1465,7 @@ export class ScionChatSpaceRail extends LitElement {
         min-height: 44px;
       }
 
-      .space-header .unread-badge,
-      .space-header .mention-badge {
+      .space-header .unread-badge {
         font-size: 12px;
         min-width: 1.25rem;
         padding: 0.125rem 0.375rem;
@@ -1491,7 +1482,7 @@ export class ScionChatSpaceRail extends LitElement {
       }
 
       .filter-toggle .filter-split-caret {
-        min-width: 36px;
+        min-width: 32px;
       }
 
       .filter-dropdown sl-menu-item::part(base) {
@@ -5247,11 +5238,11 @@ export class ScionChatSpaceRail extends LitElement {
           ${space.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
           <span class="space-name">${space.projectName}</span>
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
-            ${this.spaceHasUnreadMention(space)
-              ? html`<span class="mention-badge">@</span>`
-              : space.unreadCount > 0
-                ? html`<span class="unread-badge">${space.unreadCount}</span>`
-                : nothing}
+            ${space.unreadCount > 0
+              ? html`<span class="unread-badge ${this.spaceFilter === 'mentions' ? 'mentions' : ''}"
+                  >${space.unreadCount}</span
+                >`
+              : nothing}
             <sl-dropdown>
               <sl-icon-button
                 slot="trigger"

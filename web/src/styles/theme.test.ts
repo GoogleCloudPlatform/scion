@@ -1479,12 +1479,6 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
         'border-radius',
         [8],
       ],
-      [
-        'components/shared/chat/chat-space-rail.ts',
-        '.space-header .mention-badge',
-        'border-radius',
-        [8],
-      ],
       ['components/shared/chat/chat-space-rail.ts', '.context-menu', 'border-radius', [8]],
       ['components/shared/chat/chat-space-rail.ts', '.filter-toggle', 'border-radius', [6]],
       ['components/shared/chat/chat-space-rail.ts', '.emoji-grid button', 'border-radius', [4]],
@@ -1622,7 +1616,7 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
     // mobile while scaling cleanly under square (0) and rounded (12px).
     const railSrc = fileCache.get('components/shared/chat/chat-space-rail.ts')!;
     const coarseMatch =
-      /@media\s*\(pointer:\s*coarse\)\s*\{[\s\S]*?\.space-header\s+\.unread-badge,\s*\.space-header\s+\.mention-badge\s*\{([^{}]*)\}/.exec(
+      /@media\s*\(pointer:\s*coarse\)\s*\{[\s\S]*?\.space-header\s+\.unread-badge\s*\{([^{}]*)\}/.exec(
         railSrc
       );
     expect(coarseMatch, 'chat-space-rail.ts missing coarse-pointer badge rule').not.toBeNull();
