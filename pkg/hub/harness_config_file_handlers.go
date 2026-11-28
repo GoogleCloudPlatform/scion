@@ -250,15 +250,15 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 			return
 		}
 	} else {
-		r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
-		data, err := io.ReadAll(io.LimitReader(r.Body, maxHarnessConfigFileSize+1))
+		r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize)
+		data, err := io.ReadAll(r.Body)
 		if err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					"File too large for inline upload.", nil)
+				return
+			}
 			BadRequest(w, "Failed to read request body")
-			return
-		}
-		if int64(len(data)) > maxHarnessConfigFileSize {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-				"File too large for inline upload.", nil)
 			return
 		}
 		req.Content = string(data)

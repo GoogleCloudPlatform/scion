@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -195,6 +196,63 @@ func TestJSONBodyLimits_HarnessConfigFileWrite(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 		assertPayloadTooLarge(t, rec)
+	})
+
+	t.Run("exact harness config raw cap (1 MiB) succeeds", func(t *testing.T) {
+		payload := bytes.Repeat([]byte("a"), maxHarnessConfigFileSize)
+		req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("oversized raw upload returns 413 payload_too_large and stops at cap", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			size int
+		}{
+			{name: "1 byte over raw cap", size: maxHarnessConfigFileSize + 1},
+			{name: "8 KiB over raw cap", size: maxHarnessConfigFileSize + 8192},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				body := newBodyLimitCountingReader(bytes.Repeat([]byte("a"), tc.size))
+				req := httptest.NewRequest(http.MethodPut, path, body)
+				req.Header.Set("Content-Type", "application/octet-stream")
+				req.Header.Set("Authorization", "Bearer "+testDevToken)
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, req)
+				assertPayloadTooLarge(t, rec)
+				assert.LessOrEqual(t, body.bytesRead.Load(), int64(maxHarnessConfigFileSize+1),
+					"raw upload must stop reading once MaxBytesReader limit is exceeded")
+			})
+		}
+	})
+
+	t.Run("oversized raw upload triggers MaxBytesReader requestTooLarge on direct net/http ResponseWriter", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv.handleHarnessConfigFileWrite(w, r, hc, "notes.txt")
+		}))
+		defer ts.Close()
+
+		req, err := http.NewRequest(http.MethodPut, ts.URL, bytes.NewReader(bytes.Repeat([]byte("a"), maxHarnessConfigFileSize+1)))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/octet-stream")
+
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode, string(body))
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(body, &errResp), string(body))
+		assert.Equal(t, "payload_too_large", errResp.Error.Code)
+		// http.MaxBytesReader marks the HTTP/1.1 connection as close on overflow
+		// so the server does not drain the rest of the oversized request body.
+		assert.True(t, resp.Close, "expected MaxBytesReader to trigger Connection: close")
 	})
 }
 
