@@ -103,6 +103,23 @@ export function reviewSubmittedTitle(message: string): string {
   return match ? `Review submitted on v${match[1]}` : 'Review submitted';
 }
 
+function reviewNotificationTitle(
+  status:
+    | typeof ARTIFACT_REVIEW_SUBMITTED_STATUS
+    | typeof ARTIFACT_REVIEW_REQUESTED_STATUS
+    | typeof ARTIFACT_REVIEW_DISMISSED_STATUS,
+  message: string
+): string {
+  switch (status) {
+    case ARTIFACT_REVIEW_SUBMITTED_STATUS:
+      return reviewSubmittedTitle(message);
+    case ARTIFACT_REVIEW_REQUESTED_STATUS:
+      return 'Review requested';
+    case ARTIFACT_REVIEW_DISMISSED_STATUS:
+      return 'Review request dismissed';
+  }
+}
+
 /**
  * Optional title line shown above the message in a notification tray item.
  * Returns null for statuses that render only their message body.
@@ -111,11 +128,9 @@ export function notificationItemTitle(n: Notification, isDecisions: boolean): st
   if (isDecisions) return 'Decisions waiting';
   switch (n.status) {
     case ARTIFACT_REVIEW_SUBMITTED_STATUS:
-      return reviewSubmittedTitle(n.message);
     case ARTIFACT_REVIEW_REQUESTED_STATUS:
-      return 'Review requested';
     case ARTIFACT_REVIEW_DISMISSED_STATUS:
-      return 'Review request dismissed';
+      return reviewNotificationTitle(n.status, n.message);
     default:
       return null;
   }
@@ -849,7 +864,7 @@ export class ScionNotificationTray extends LitElement {
       case ARTIFACT_REVIEW_SUBMITTED_STATUS:
       case ARTIFACT_REVIEW_REQUESTED_STATUS:
       case ARTIFACT_REVIEW_DISMISSED_STATUS:
-        return notificationItemTitle(n, false) ?? 'Notification';
+        return reviewNotificationTitle(n.status, n.message);
       case SECRET_PENDING_STATUS:
         return 'Secret Awaiting Approval';
       case DECISIONS_WAITING_STATUS:

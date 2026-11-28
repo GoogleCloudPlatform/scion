@@ -1213,4 +1213,52 @@ describe('share dialog, manage mode (Manage access, ptone/scion#7107)', () => {
     expect(rows2[2]!.querySelector('.grant-bounded')).toBeNull();
     expect(rows2[2]!.querySelector('.permission')?.textContent?.trim()).toBe('Can review');
   });
+
+  it('drops the owner slug on bounded grants created before a transfer and keeps it for grants created after', async () => {
+    const transferredAt = '2026-10-10T00:00:00Z';
+    const beforeTransfer: ArtifactGrant = {
+      id: 'g-bounded-old',
+      subjectKind: 'principal',
+      subjectRef: 'user:user-priya',
+      permission: 'review',
+      createdAt: '2026-10-08T12:00:00Z',
+      createdBy: 'system:review_request',
+    };
+    const afterTransfer: ArtifactGrant = {
+      id: 'g-bounded-new',
+      subjectKind: 'principal',
+      subjectRef: 'user:user-alex',
+      permission: 'review',
+      createdAt: '2026-10-12T12:00:00Z',
+      createdBy: 'system:review_request',
+    };
+    const transferredArt = agentOwned({
+      formerOwnerKind: 'agent',
+      formerOwnerRef: 'agent-old',
+      transferredAt,
+    });
+
+    // Only a pre-transfer bounded grant: slug-less label, and no owner-agent name prefetch.
+    const s1 = mockServer({ grants: [HOME, beforeTransfer] });
+    const el1 = await mountManage(MANAGER, transferredArt);
+    const rows1 = $$(el1, '.grant');
+    expect(rows1[1]!.querySelector('.grant-bounded')?.textContent?.trim()).toBe(
+      'Can review · requested by agent · while they have a project role'
+    );
+    expect(rows1[1]!.textContent).not.toContain('report-bot');
+    expect(rows1[1]!.textContent).not.toContain('agent-old');
+    expect(s1.calls.some((c) => c.url === '/api/v1/agents/agent-1')).toBe(false);
+    el1.remove();
+
+    // Post-transfer bounded grant: shows the current owner's slug.
+    mockServer({ grants: [HOME, beforeTransfer, afterTransfer] });
+    const el2 = await mountManage(MANAGER, transferredArt);
+    const rows2 = $$(el2, '.grant');
+    expect(rows2[1]!.querySelector('.grant-bounded')?.textContent?.trim()).toBe(
+      'Can review · requested by agent · while they have a project role'
+    );
+    expect(rows2[2]!.querySelector('.grant-bounded')?.textContent?.trim()).toBe(
+      'Can review · requested by agent report-bot · while they have a project role'
+    );
+  });
 });

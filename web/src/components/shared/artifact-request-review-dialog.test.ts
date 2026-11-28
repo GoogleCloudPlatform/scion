@@ -494,5 +494,28 @@ describe('scion-artifact-request-review-dialog', () => {
     expect(
       reviewerAccessHint('user:u-sponsor', ARTIFACT, [homeRead, sponsorReview], true, true)
     ).toBe('bounded');
+
+    // (N3) User owner and principal write/admin grants -> existing ("can already review").
+    const writeGrant: ArtifactGrant = {
+      id: 'g-write',
+      subjectKind: 'principal',
+      subjectRef: 'user:u-writer',
+      permission: 'write',
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    const adminGrant: ArtifactGrant = {
+      id: 'g-admin',
+      subjectKind: 'principal',
+      subjectRef: 'user:u-admin',
+      permission: 'admin',
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    expect(reviewerAccessHint('user:u-alice', ARTIFACT, [], false, false)).toBe('existing');
+    expect(reviewerAccessHint('user:u-writer', ARTIFACT, [homeRead, writeGrant], true, true)).toBe(
+      'existing'
+    );
+    expect(reviewerAccessHint('user:u-admin', ARTIFACT, [homeRead, adminGrant], true, true)).toBe(
+      'existing'
+    );
   });
 });

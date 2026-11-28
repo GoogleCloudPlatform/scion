@@ -482,7 +482,9 @@ export class ScionArtifactShareDialog extends LitElement {
     if (
       a?.ownerKind === 'agent' &&
       a.ownerRef &&
-      this.grants.some((g) => g.createdBy === BOUNDED_REVIEW_CREATOR)
+      this.grants.some(
+        (g) => g.createdBy === BOUNDED_REVIEW_CREATOR && !this.boundedGrantPredatesTransfer(g, a)
+      )
     ) {
       add(`agent:${a.ownerRef}`, () => principalName('agent', a.ownerRef));
     }
@@ -1072,16 +1074,32 @@ export class ScionArtifactShareDialog extends LitElement {
   }
 
   /**
+   * Whether a bounded grant was created earlier than the artifact's last
+   * ownership transfer (or has an unparseable timestamp while a transfer is
+   * recorded). In that case the current owner may not be the agent that wrote
+   * the grant, so its slug must not be attributed.
+   */
+  private boundedGrantPredatesTransfer(g: ArtifactGrant, a: Artifact | null): boolean {
+    if (!a?.transferredAt) return false;
+    const transferMs = Date.parse(a.transferredAt);
+    if (!Number.isFinite(transferMs)) return true;
+    const grantMs = Date.parse(g.createdAt);
+    if (!Number.isFinite(grantMs)) return true;
+    return grantMs < transferMs;
+  }
+
+  /**
    * Role-gated label for a bounded review grant written by an agent review
    * request (ptone/scion#5550, #9311). The hub writes bounded grants only for
-   * the owning agent, so the artifact owner's slug is the requester. Sponsor
+   * the owning agent, so the owner slug is only trusted for grants created
+   * after the last transfer; earlier grants use the slug-less form. Sponsor
    * grants (system:sponsor_review) keep the plain "Can review" label.
    */
   private boundedGrantLabel(g: ArtifactGrant): string | null {
     if (g.createdBy !== BOUNDED_REVIEW_CREATOR) return null;
     const a = this.artifact;
     const slug =
-      a?.ownerKind === 'agent' && a.ownerRef
+      a?.ownerKind === 'agent' && a.ownerRef && !this.boundedGrantPredatesTransfer(g, a)
         ? this.names.get(`agent:${a.ownerRef}`) || a.ownerRef
         : '';
     return slug
