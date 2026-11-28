@@ -84,15 +84,20 @@ type AgentStore struct {
 	// shared with transactional copies of this store (usage_ledger_store.go).
 	// Nil when tokenomics.usage_ledger is off.
 	runAttribution *runAttributionConfigSlot
-	entTx          *ent.Tx
+	// trajectoryCapture is the optional Hub state reader used to stamp
+	// capture_policy and notice_version on new run_attribution rows. Shared
+	// with UsageLedgerStore and transactional copies of this store.
+	trajectoryCapture *trajectoryCaptureStateSlot
+	entTx             *ent.Tx
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
 func NewAgentStore(client *ent.Client) *AgentStore {
 	return &AgentStore{
-		client:         client,
-		lifecycle:      newLifecycleObserverSlot(),
-		runAttribution: newRunAttributionConfigSlot(),
+		client:            client,
+		lifecycle:         newLifecycleObserverSlot(),
+		runAttribution:    newRunAttributionConfigSlot(),
+		trajectoryCapture: newTrajectoryCaptureStateSlot(),
 	}
 }
 
@@ -4324,7 +4329,7 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 					return n, mapError(err)
 				}
 				if runAttrCfg != nil {
-					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, priorRunID, runAttrCfg.HubID, "", s.beforeRunAttributionInsert); err != nil {
+					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, priorRunID, runAttrCfg.HubID, "", s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 						return 0, err
 					}
 				}
@@ -4381,7 +4386,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		if err != nil || n == 0 {
 			return n, mapError(err)
 		}
-		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, overrideLaunchID, s.beforeRunAttributionInsert); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, overrideLaunchID, s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 			return 0, err
 		}
 		return n, nil
@@ -4399,7 +4404,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		_ = tx.Rollback()
 		return 0, nil
 	}
-	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, overrideLaunchID, s.beforeRunAttributionInsert); err != nil {
+	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, overrideLaunchID, s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 		_ = tx.Rollback()
 		return 0, err
 	}
@@ -4429,7 +4434,7 @@ func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.Agen
 		return 0, nil
 	}
 	if runAttrCfg != nil {
-		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, "", s.beforeRunAttributionInsert); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, "", s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 			_ = tx.Rollback()
 			return 0, err
 		}
@@ -4607,7 +4612,7 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 				if err != nil || n == 0 || !needAttribution {
 					return n, err
 				}
-				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, launchID, s.beforeRunAttributionInsert); err != nil {
+				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, launchID, s.trajectoryCapture.load(), s.beforeRunAttributionInsert); err != nil {
 					return 0, err
 				}
 				return n, nil

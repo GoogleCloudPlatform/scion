@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -356,6 +357,10 @@ type CreateAgentResponse struct {
 	// EnvGather is populated when the Hub returns HTTP 202, indicating the
 	// broker needs additional env vars that only the CLI can provide.
 	EnvGather *EnvGatherResponse `json:"envGather,omitempty"`
+
+	// TrajectoryCapture reports the effective Track 2 trajectory capture policy
+	// for the agent's project when experiment tokenomics.trajectory_capture is on.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // EnvGatherResponse contains env requirements returned by the Hub when the

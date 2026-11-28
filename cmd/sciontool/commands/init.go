@@ -1394,6 +1394,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
 	removeStaleHarnessExitFiles()
+
+	// Best-effort tmux first-line capture notice: check injectable shape before
+	// contacting the Hub and before taking harnessLaunchedAt so Hub latency is
+	// not counted as harness launch time.
+	childArgs = maybeInjectTmuxTrajectoryNotice(ctx, hubClient, childArgs, trajectoryNoticeFetchTimeout)
+
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first

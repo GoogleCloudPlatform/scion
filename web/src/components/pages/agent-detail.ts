@@ -143,8 +143,13 @@ import {
   idleSuspendEnabled,
   isFeatureEnabled,
   neverSuspendEnabled,
+  trajectoryCaptureEnabled,
   usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
+import {
+  formatTrajectoryCaptureNotice,
+  isTrajectoryCaptureEffective,
+} from '../../shared/trajectory-capture-notice.js';
 import '../shared/secret-list.js';
 import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 import '../shared/hash-display.js';
@@ -382,6 +387,10 @@ export class ScionPageAgentDetail extends LitElement {
     return usageLedgerEnabled();
   }
 
+  private get trajectoryCaptureEnabled(): boolean {
+    return trajectoryCaptureEnabled();
+  }
+
   /** Whether an agent uses the built-in shell execution container harness. */
   private isShellAgent(agent: Agent | null | undefined): boolean {
     if (!agent) return false;
@@ -578,6 +587,26 @@ export class ScionPageAgentDetail extends LitElement {
         color: var(--scion-text-secondary, #475569);
         white-space: pre-wrap;
         word-break: break-word;
+      }
+      .trajectory-capture-banner {
+        display: flex;
+        align-items: center;
+        gap: 0.625rem;
+        padding: 0.625rem 1rem;
+        margin-bottom: 1rem;
+        background: var(--scion-bg-subtle);
+        border: 1px solid var(--scion-border);
+        border-radius: var(--scion-radius);
+        font-size: 0.8125rem;
+        color: var(--scion-text-secondary);
+      }
+      .trajectory-capture-banner sl-icon {
+        flex-shrink: 0;
+        font-size: 1rem;
+        color: var(--scion-text-muted);
+      }
+      .trajectory-capture-banner.effective sl-icon {
+        color: var(--scion-primary);
       }
 
       /* ---- Tabs ---- */
@@ -2154,6 +2183,34 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
+  /**
+   * Compact Track 2 trajectory capture notice banner, gated on the
+   * tokenomics.trajectory_capture presentation flag and Hub-provided policy.
+   */
+  private renderTrajectoryCaptureBanner(): TemplateResult | typeof nothing {
+    if (!this.trajectoryCaptureEnabled || !this.agent?.trajectory_capture) {
+      return nothing;
+    }
+    const status = this.agent.trajectory_capture;
+    const notice = formatTrajectoryCaptureNotice(status);
+    if (!notice) {
+      return nothing;
+    }
+    const effective = isTrajectoryCaptureEffective(status.policy);
+    return html`
+      <div
+        class="trajectory-capture-banner ${effective ? 'effective' : ''}"
+        role="status"
+        data-testid="trajectory-capture-banner"
+        data-policy=${status.policy}
+        data-enforced=${String(!!status.enforced_by_hub)}
+      >
+        <sl-icon name=${effective ? 'eye' : 'eye-slash'}></sl-icon>
+        <span>${notice}</span>
+      </div>
+    `;
+  }
+
   override render() {
     if (this.deleted) {
       return this.renderDeletedState();
@@ -2171,6 +2228,7 @@ export class ScionPageAgentDetail extends LitElement {
 
     return html`
       ${this.renderHeader()} ${this.renderDeletionBanner()} ${this.renderStateBanner()}
+      ${this.renderTrajectoryCaptureBanner()}
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
         <sl-tab slot="nav" panel="status">Status</sl-tab>

@@ -119,6 +119,8 @@ func (c *CompositeStore) newTxStore(tx *ent.Tx) *CompositeStore {
 	txStore := newTxCompositeStore(tx)
 	txStore.lifecycle = c.lifecycle
 	txStore.runAttribution = c.runAttribution
+	txStore.AgentStore.trajectoryCapture = c.AgentStore.trajectoryCapture
+	txStore.UsageLedgerStore.trajectoryCapture = c.AgentStore.trajectoryCapture
 	txStore.entTx = tx
 	return txStore
 }

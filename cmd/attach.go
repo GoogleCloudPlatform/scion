@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -197,10 +198,25 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	if agentID == "" {
 		agentID = agentName // Fall back to name if ID not set
 	}
+	printTrajectoryCaptureNotice(agent.TrajectoryCapture)
 	return attachHubSession(ctx, hubCtx, hubAttachTarget{
 		Name: agentName,
 		ID:   agentID,
 	})
+}
+
+// printTrajectoryCaptureNotice prints the canonical Track 2 trajectory capture
+// notice to stderr (via statusf) before an interactive session attaches.
+// Prints nothing when status is nil (experiment off) or unrecognized.
+func printTrajectoryCaptureNotice(status *telemetrycontract.TrajectoryCapturePolicyStatus) {
+	if status == nil {
+		return
+	}
+	notice := telemetrycontract.TrajectoryCaptureNotice(*status)
+	if notice == "" {
+		return
+	}
+	statusf("Notice: %s\n", notice)
 }
 
 // notRunningAttachHint returns the command that gets a non-running agent to

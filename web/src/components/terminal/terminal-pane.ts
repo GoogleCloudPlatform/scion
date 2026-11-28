@@ -21,7 +21,15 @@
  * via the session registry and Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from 'lit';
+import {
+  LitElement,
+  html,
+  css,
+  nothing,
+  unsafeCSS,
+  type PropertyValues,
+  type TemplateResult,
+} from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
@@ -72,7 +80,12 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   isFeatureEnabled,
   TERMINAL_KEY_BAR_FLAG,
+  trajectoryCaptureEnabled,
 } from '../../utils/feature-flags.js';
+import {
+  formatTrajectoryCaptureNotice,
+  isTrajectoryCaptureEffective,
+} from '../../shared/trajectory-capture-notice.js';
 import {
   TERMINAL_DRAG_MIME,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
@@ -1087,6 +1100,27 @@ export class ScionTerminalPane extends LitElement {
       font-size: 0.75rem;
     }
 
+    .trajectory-capture-banner {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 1rem;
+      background: var(--scion-bg-subtle);
+      border-bottom: 1px solid var(--scion-border);
+      color: var(--scion-text-secondary);
+      font-size: 0.75rem;
+    }
+
+    .trajectory-capture-banner sl-icon {
+      flex-shrink: 0;
+      font-size: 0.875rem;
+      color: var(--scion-text-muted);
+    }
+
+    .trajectory-capture-banner.effective sl-icon {
+      color: var(--scion-primary);
+    }
+
     /* Inline text-link action inside the themed banner; inherits its colour. */
     .metadata-retry {
       background: transparent;
@@ -1578,7 +1612,9 @@ export class ScionTerminalPane extends LitElement {
       if (this.measurable()) {
         this.fitAddon?.fit();
         this.sendResize();
-        if (this.shouldAutoFocusTerminal()) this.terminal?.focus();
+        if (this.shouldAutoFocusTerminal() && !this.isInputGatedForCaptureNotice()) {
+          this.terminal?.focus();
+        }
       }
     }
   }
@@ -1598,15 +1634,36 @@ export class ScionTerminalPane extends LitElement {
   /** Metadata is consumed independently of transport/resize snapshots. */
   private applyMetadata(value: TerminalAgentMetadata): void {
     if (this.disposed) return;
+    const wasInputGated = this.isInputGatedForCaptureNotice();
     this.metadataError = value.error;
     this.error = value.error ?? this.session?.state.error ?? null;
     this.agentStopping = value.availability !== 'deleted' && value.agent?.phase === 'stopping';
     const agent = value.agent;
-    if (!agent) return;
+    if (!agent) {
+      if (
+        wasInputGated &&
+        !this.isInputGatedForCaptureNotice() &&
+        this.connected &&
+        this.measurable() &&
+        this.shouldAutoFocusTerminal()
+      ) {
+        this.terminal?.focus();
+      }
+      return;
+    }
     const previousProject = this.projectId;
     const previousName = this.agentName;
     this.agent = agent;
     this.agentName = agent.name;
+    if (
+      wasInputGated &&
+      !this.isInputGatedForCaptureNotice() &&
+      this.connected &&
+      this.measurable() &&
+      this.shouldAutoFocusTerminal()
+    ) {
+      this.terminal?.focus();
+    }
     this.projectId = agent.projectId ?? '';
     this.agentPhase = agent.phase;
     this.agentActivity = agent.activity ?? '';
@@ -2115,7 +2172,22 @@ export class ScionTerminalPane extends LitElement {
     el.addEventListener('touchcancel', end, { passive: true, signal });
   }
 
+  /**
+   * When Track 2 trajectory capture is enabled, hold interactive terminal input
+   * (and initial auto-focus) until the agent metadata snapshot settles — so the
+   * user sees the effective capture notice banner before typing into the TTY.
+   * Unblocks once `this.agent` is loaded or `this.metadataError` is set (so a
+   * transient metadata outage does not permanently lock out the terminal).
+   */
+  private isInputGatedForCaptureNotice(): boolean {
+    if (!trajectoryCaptureEnabled()) return false;
+    return !this.agent && !this.metadataError;
+  }
+
   private sendData(data: string): void {
+    if (this.isInputGatedForCaptureNotice()) {
+      return;
+    }
     this.session?.sendData(data);
   }
 
@@ -3203,6 +3275,30 @@ export class ScionTerminalPane extends LitElement {
     >`;
   }
 
+  private renderTrajectoryCaptureBanner(): TemplateResult | typeof nothing {
+    if (!trajectoryCaptureEnabled() || !this.agent?.trajectory_capture) {
+      return nothing;
+    }
+    const status = this.agent.trajectory_capture;
+    const notice = formatTrajectoryCaptureNotice(status);
+    if (!notice) {
+      return nothing;
+    }
+    const effective = isTrajectoryCaptureEffective(status.policy);
+    return html`
+      <div
+        class="trajectory-capture-banner ${effective ? 'effective' : ''}"
+        role="status"
+        data-testid="terminal-trajectory-capture-banner"
+        data-policy=${status.policy}
+        data-enforced=${String(!!status.enforced_by_hub)}
+      >
+        <sl-icon name=${effective ? 'eye' : 'eye-slash'}></sl-icon>
+        <span>${notice}</span>
+      </div>
+    `;
+  }
+
   override render() {
     if (this.loading) {
       return html`
@@ -3435,6 +3531,7 @@ export class ScionTerminalPane extends LitElement {
             </div>
           `
         : ''}
+      ${this.renderTrajectoryCaptureBanner()}
       <div
         class="terminal-wrapper"
         @dragenter=${(e: DragEvent) => this._onDragEnter(e)}

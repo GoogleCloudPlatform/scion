@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // Agent represents an agent from the Hub API.
@@ -117,6 +118,12 @@ type Agent struct {
 	// on full-view listed agents when ListAgentsOptions.IncludeCapabilities
 	// is set.
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
+
+	// TrajectoryCapture reports the effective Track 2 trajectory capture policy
+	// for the agent's project and whether the Hub opt-out lock enforces it.
+	// Set on single-agent Get only when experiment tokenomics.trajectory_capture
+	// is enabled on the Hub.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.

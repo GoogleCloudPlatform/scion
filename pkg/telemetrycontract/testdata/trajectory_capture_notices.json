@@ -1,0 +1,53 @@
+{
+  "notice_version": "v1",
+  "cases": [
+    {
+      "policy": "full",
+      "enforced_by_hub": false,
+      "effective": true,
+      "notice": "Session transcripts for this agent are captured verbatim to the Hub audit trail (policy: full). Access is restricted and logged."
+    },
+    {
+      "policy": "full",
+      "enforced_by_hub": true,
+      "effective": true,
+      "notice": "Session transcripts for this agent are captured verbatim to the Hub audit trail (policy: full, enforced by Hub). Access is restricted and logged."
+    },
+    {
+      "policy": "metadata_only",
+      "enforced_by_hub": false,
+      "effective": true,
+      "notice": "Session metadata for this agent is recorded to the Hub audit trail without raw transcripts (policy: metadata_only)."
+    },
+    {
+      "policy": "metadata_only",
+      "enforced_by_hub": true,
+      "effective": true,
+      "notice": "Session metadata for this agent is recorded to the Hub audit trail without raw transcripts (policy: metadata_only, enforced by Hub)."
+    },
+    {
+      "policy": "off",
+      "enforced_by_hub": false,
+      "effective": false,
+      "notice": "Trajectory capture is off for this agent (policy: off)."
+    },
+    {
+      "policy": "off",
+      "enforced_by_hub": true,
+      "effective": false,
+      "notice": "Trajectory capture is off for this agent (policy: off, enforced by Hub)."
+    },
+    {
+      "policy": "",
+      "enforced_by_hub": false,
+      "effective": false,
+      "notice": ""
+    },
+    {
+      "policy": "unknown",
+      "enforced_by_hub": false,
+      "effective": false,
+      "notice": ""
+    }
+  ]
+}

@@ -3607,6 +3607,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}); ok {
 		setter.SetMessagePublisher(&feedNotifier{events: srv.getEventPublisher})
 	}
+	if setter, ok := s.(interface {
+		SetTrajectoryCaptureState(store.TrajectoryCaptureStateFunc)
+	}); ok {
+		setter.SetTrajectoryCaptureState(func() (bool, bool) {
+			return srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture), srv.trajectoryAllowProjectOptOut()
+		})
+	}
 
 	// A New that fails part-way must not leak what it already started: the
 	// link-service and preview cleanup loops, the OIDC key loops and the

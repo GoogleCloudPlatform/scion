@@ -155,24 +155,11 @@ func writeTrajectoryCaptureExperimentDisabled(w http.ResponseWriter, field strin
 //  3. Otherwise (unset or invalid), the effective policy defaults to "full"
 //     with EnforcedByHub = false.
 func (s *Server) resolveTrajectoryCapturePolicy(_ context.Context, project *store.Project) telemetrycontract.TrajectoryCapturePolicyStatus {
-	if !s.trajectoryAllowProjectOptOut() {
-		return telemetrycontract.TrajectoryCapturePolicyStatus{
-			Policy:        telemetrycontract.TrajectoryCapturePolicyFull,
-			EnforcedByHub: true,
-		}
-	}
+	var annotation string
 	if project != nil && project.Annotations != nil {
-		if val := strings.TrimSpace(project.Annotations[projectSettingTrajectoryCapture]); telemetrycontract.IsValidTrajectoryCapturePolicy(val) {
-			return telemetrycontract.TrajectoryCapturePolicyStatus{
-				Policy:        val,
-				EnforcedByHub: false,
-			}
-		}
+		annotation = project.Annotations[projectSettingTrajectoryCapture]
 	}
-	return telemetrycontract.TrajectoryCapturePolicyStatus{
-		Policy:        telemetrycontract.TrajectoryCapturePolicyFull,
-		EnforcedByHub: false,
-	}
+	return telemetrycontract.ResolveTrajectoryCapturePolicy(s.trajectoryAllowProjectOptOut(), annotation)
 }
 
 // effectiveTrajectoryCapturePolicy returns the effective Track 2 capture policy

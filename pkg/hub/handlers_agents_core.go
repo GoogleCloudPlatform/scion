@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	gouuid "github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -588,6 +589,17 @@ type CreateAgentResponse struct {
 	// EnvGather is populated when the broker returns 202, indicating env
 	// vars need to be gathered from the CLI before the agent can start.
 	EnvGather *EnvGatherResponse `json:"envGather,omitempty"`
+	// TrajectoryCapture reports the effective Track 2 capture policy for the
+	// agent's project when experiment tokenomics.trajectory_capture is on.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
+}
+
+func (s *Server) trajectoryCaptureStatusForProject(ctx context.Context, project *store.Project) *telemetrycontract.TrajectoryCapturePolicyStatus {
+	if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) || project == nil {
+		return nil
+	}
+	status := s.resolveTrajectoryCapturePolicy(ctx, project)
+	return &status
 }
 
 // EnvGatherResponse contains env requirements relayed from the broker.
@@ -3435,10 +3447,11 @@ func (s *Server) createAgentInProject(
 			}
 
 			writeJSON(w, http.StatusCreated, CreateAgentResponse{
-				Agent:      redactedAgentCopy(ctx, s, agent),
-				Warnings:   warnings,
-				UploadURLs: uploadURLs,
-				Expires:    &expires,
+				Agent:             redactedAgentCopy(ctx, s, agent),
+				Warnings:          warnings,
+				UploadURLs:        uploadURLs,
+				Expires:           &expires,
+				TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 			})
 			return
 		}
@@ -3560,8 +3573,9 @@ func (s *Server) createAgentInProject(
 		}
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
-			Agent:    redactedAgentCopy(ctx, s, agent),
-			Warnings: warnings,
+			Agent:             redactedAgentCopy(ctx, s, agent),
+			Warnings:          warnings,
+			TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 		})
 		return
 	}
@@ -3702,9 +3716,10 @@ func (s *Server) createAgentInProject(
 					}
 
 					writeJSON(w, http.StatusAccepted, CreateAgentResponse{
-						Agent:     redactedAgentCopy(ctx, s, agent),
-						Warnings:  append(warnings, dispatchWarns.Warnings()...),
-						EnvGather: hubEnvGather,
+						Agent:             redactedAgentCopy(ctx, s, agent),
+						Warnings:          append(warnings, dispatchWarns.Warnings()...),
+						EnvGather:         hubEnvGather,
+						TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 					})
 					return
 				} else {
@@ -3908,8 +3923,9 @@ func (s *Server) createAgentInProject(
 	}
 
 	writeJSON(w, http.StatusCreated, CreateAgentResponse{
-		Agent:    redactedAgentCopy(ctx, s, agent),
-		Warnings: append(warnings, dispatchWarns.Warnings()...),
+		Agent:             redactedAgentCopy(ctx, s, agent),
+		Warnings:          append(warnings, dispatchWarns.Warnings()...),
+		TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 	})
 }
 
@@ -4451,8 +4467,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		project, _ := s.store.GetProject(ctx, projectID)
 		s.enrichAgent(ctx, agent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent:    redactedAgentCopy(ctx, s, agent),
-			Warnings: []string{launchInFlightInputsWarning},
+			Agent:             redactedAgentCopy(ctx, s, agent),
+			Warnings:          []string{launchInFlightInputsWarning},
+			TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 		})
 		return
 	}
@@ -4599,8 +4616,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
-		Agent:    redactedAgentCopy(ctx, s, agent),
-		Warnings: append(dispatchWarns.Warnings(), warnings...),
+		Agent:             redactedAgentCopy(ctx, s, agent),
+		Warnings:          append(dispatchWarns.Warnings(), warnings...),
+		TrajectoryCapture: s.trajectoryCaptureStatusForProject(ctx, project),
 	})
 }
 

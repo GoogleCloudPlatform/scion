@@ -443,7 +443,7 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 				Select(runAttributionAgentColumns...).
 				Only(ctx)
 			if qerr == nil {
-				attr, berr := buildRunAttributionFromAgentRow(ctx, client, agRow, preferredRunID, "", hubID, "")
+				attr, berr := buildRunAttributionFromAgentRow(ctx, client, agRow, preferredRunID, "", hubID, "", nil)
 				if berr != nil {
 					return nil, berr
 				}
@@ -512,7 +512,7 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 						return existingAttr, nil
 					}
 				} else {
-					built, berr := buildRunAttributionFromAgentRow(ctx, client, agRow, agRow.RunID, "", hubID, "")
+					built, berr := buildRunAttributionFromAgentRow(ctx, client, agRow, agRow.RunID, "", hubID, "", nil)
 					if berr != nil {
 						return nil, berr
 					}
@@ -564,7 +564,7 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 			Select(runAttributionAgentColumns...).
 			Only(ctx)
 		if qerr == nil {
-			attr, err = buildRunAttributionFromAgentRow(ctx, client, agRow, syntheticRunID, "", hubID, "")
+			attr, err = buildRunAttributionFromAgentRow(ctx, client, agRow, syntheticRunID, "", hubID, "", nil)
 			if err != nil {
 				return nil, err
 			}

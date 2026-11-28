@@ -345,6 +345,13 @@ func (m *MeterHealth) RejectedRangesCoalesced() bool {
 	return span > m.RejectedCount
 }
 
+// TrajectoryCaptureStateFunc reports whether Track 2 trajectory capture is
+// currently enabled and whether projects are allowed to opt out below "full".
+// Called inside run_attribution creation transactions (must read in-memory Hub
+// state only — never issue DB queries — to avoid nested pool deadlocks on
+// single-writer SQLite).
+type TrajectoryCaptureStateFunc func() (enabled bool, allowProjectOptOut bool)
+
 // RunAttributionConfig configures atomic run_attribution writes on the store
 // (installed by the Hub when tokenomics.usage_ledger is enabled, cleared when
 // disabled).
