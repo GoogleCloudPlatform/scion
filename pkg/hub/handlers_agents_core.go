@@ -255,6 +255,228 @@ const maxAgentCreateBodySize = 16 << 20
 
 const agentCreateBodyTooLargeMsg = "request body exceeds the 16 MiB maximum size (for example, the workspace file manifest is too large)"
 
+// Structural decode limits for POST /api/v1/agents and
+// POST /api/v1/projects/{projectId}/agents (ptone/scion#9658).
+//
+// The 16 MiB outer byte bound (maxAgentCreateBodySize) accommodates large
+// legitimate non-git workspace manifests (~95k-100k transfer.FileInfo entries
+// on their own, or ~70k alongside worst-case create-time secrets), but an
+// unguarded json.Decoder can still amplify dense arrays of empty objects or
+// small strings into many times the raw body size in Go heap allocations.
+//
+// These streaming token-level bounds are enforced before decoding into
+// CreateAgentRequest so pathological structures fail fast with bounded
+// memory while keeping maximal legal 16 MiB payloads comfortably within budget:
+//   - maxAgentCreateJSONDepth (32): CreateAgentRequest nests at most ~6 levels
+//     (e.g. root -> config -> mcp_servers -> <name> -> env -> <key>).
+//   - maxAgentCreateWorkspaceFiles (175,000): strictly above the ~150k-164k
+//     minimal short-path FileInfo entries (mode omitted) that can fit in 16 MiB,
+//     so legitimate over-limit manifests hit the 16 MiB 413 payload_too_large
+//     bound rather than a 400 structural error.
+//   - maxAgentCreateArrayElements (4,096): comfortably above any legal
+//     secrets (50), volumes, command_args, services, skills, or plugin lists.
+//   - maxAgentCreateObjectKeys (4,096): comfortably above any legal labels,
+//     config.env, or mcp_servers map.
+//   - maxAgentCreateTotalValues (1,000,000): a 175k-file manifest uses ~700k-875k
+//     JSON values (1 object + 3-4 fields per FileInfo); this caps nested
+//     container fan-out across the whole document.
+const (
+	maxAgentCreateJSONDepth      = 32
+	maxAgentCreateWorkspaceFiles = 175_000
+	maxAgentCreateArrayElements  = 4_096
+	maxAgentCreateObjectKeys     = 4_096
+	maxAgentCreateTotalValues    = 1_000_000
+)
+
+// errCreateAgentScanAborted is an internal sentinel returned by onProjectID
+// when an HTTP response has already been written (e.g. 403/404) and scanning
+// must stop immediately.
+var errCreateAgentScanAborted = errors.New("create agent scan aborted")
+
+type createAgentJSONScanner struct {
+	dec              *json.Decoder
+	totalValues      int
+	onProjectID      func(projectID string) error
+	seenProjectIDKey bool
+	seenProjectID    bool
+}
+
+func (sc *createAgentJSONScanner) countValue() error {
+	sc.totalValues++
+	if sc.totalValues > maxAgentCreateTotalValues {
+		return fmt.Errorf("JSON payload exceeds maximum element count (%d)", maxAgentCreateTotalValues)
+	}
+	return nil
+}
+
+func (sc *createAgentJSONScanner) scanTopLevel() error {
+	if err := sc.countValue(); err != nil {
+		return err
+	}
+	tok, err := sc.dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok == nil {
+		return nil
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("expected JSON object")
+	}
+	return sc.scanValueAfterToken(tok, 0, maxAgentCreateArrayElements)
+}
+
+func (sc *createAgentJSONScanner) scanValue(depth int, arrayLimit int) error {
+	if err := sc.countValue(); err != nil {
+		return err
+	}
+	tok, err := sc.dec.Token()
+	if err != nil {
+		return err
+	}
+	return sc.scanValueAfterToken(tok, depth, arrayLimit)
+}
+
+func (sc *createAgentJSONScanner) scanValueAfterToken(tok json.Token, depth int, arrayLimit int) error {
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if depth+1 > maxAgentCreateJSONDepth {
+		return fmt.Errorf("JSON nesting depth exceeds maximum (%d)", maxAgentCreateJSONDepth)
+	}
+	switch delim {
+	case '{':
+		keys := 0
+		for sc.dec.More() {
+			keys++
+			if keys > maxAgentCreateObjectKeys {
+				return fmt.Errorf("JSON object exceeds maximum key count (%d)", maxAgentCreateObjectKeys)
+			}
+			keyTok, err := sc.dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return fmt.Errorf("expected JSON object key")
+			}
+			if depth == 0 && strings.EqualFold(key, "projectId") && sc.onProjectID != nil {
+				if sc.seenProjectIDKey {
+					return fmt.Errorf("duplicate projectId")
+				}
+				sc.seenProjectIDKey = true
+				if err := sc.countValue(); err != nil {
+					return err
+				}
+				valTok, err := sc.dec.Token()
+				if err != nil {
+					return err
+				}
+				switch v := valTok.(type) {
+				case string:
+					if v != "" {
+						sc.seenProjectID = true
+						if err := sc.onProjectID(v); err != nil {
+							return err
+						}
+					}
+				case nil:
+					// JSON null leaves string field empty in encoding/json.
+				default:
+					return fmt.Errorf("projectId must be a string")
+				}
+				continue
+			}
+			childArrayLimit := maxAgentCreateArrayElements
+			if depth == 0 && strings.EqualFold(key, "workspaceFiles") {
+				childArrayLimit = maxAgentCreateWorkspaceFiles
+			}
+			if err := sc.scanValue(depth+1, childArrayLimit); err != nil {
+				return err
+			}
+		}
+		endTok, err := sc.dec.Token()
+		if err != nil {
+			return err
+		}
+		if endDelim, ok := endTok.(json.Delim); !ok || endDelim != '}' {
+			return fmt.Errorf("expected closing '}'")
+		}
+		return nil
+
+	case '[':
+		elems := 0
+		for sc.dec.More() {
+			elems++
+			if elems > arrayLimit {
+				return fmt.Errorf("JSON array exceeds maximum element count (%d)", arrayLimit)
+			}
+			if err := sc.scanValue(depth+1, maxAgentCreateArrayElements); err != nil {
+				return err
+			}
+		}
+		endTok, err := sc.dec.Token()
+		if err != nil {
+			return err
+		}
+		if endDelim, ok := endTok.(json.Delim); !ok || endDelim != ']' {
+			return fmt.Errorf("expected closing ']'")
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+}
+
+// readBoundedCreateAgentRequest enforces both the 16 MiB byte bound and
+// structural element-count/depth bounds before decoding into dst. When
+// onProjectID is non-nil, it is called as soon as the top-level projectId
+// is encountered (rejecting duplicates) so callers can authorize before full
+// decode.
+func readBoundedCreateAgentRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	dst *CreateAgentRequest,
+	onProjectID func(projectID string) error,
+) bool {
+	if r.Body == nil {
+		BadRequest(w, "Invalid request body: empty request body")
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAgentCreateBodySize)
+
+	var buf bytes.Buffer
+	sc := &createAgentJSONScanner{
+		dec:         json.NewDecoder(io.TeeReader(r.Body, &buf)),
+		onProjectID: onProjectID,
+	}
+	if err := sc.scanTopLevel(); err != nil {
+		if errors.Is(err, errCreateAgentScanAborted) {
+			return false
+		}
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", agentCreateBodyTooLargeMsg, nil)
+			return false
+		}
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+
+	if onProjectID != nil && !sc.seenProjectID {
+		ValidationError(w, "projectId is required", nil)
+		return false
+	}
+
+	if err := json.NewDecoder(bytes.NewReader(buf.Bytes())).Decode(dst); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	return true
+}
+
 // readBoundedAgentJSON caps r.Body with http.MaxBytesReader and decodes JSON
 // into dst. On failure it writes 413 payload_too_large (for *http.MaxBytesError)
 // or 400 invalid_request and returns false.
@@ -893,33 +1115,83 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// Pre-body authorization for callers whose target project is fixed by their
+	// credential or whose identity kind can never create agents (ptone/scion#9658).
+	// Unauthenticated callers, unknown/broker identities, and unauthorized agent
+	// identities are rejected before reading any bytes from r.Body.
+	var preAuthProjectID string
+	if preProjectID, authorizeNow := preBodyAgentCreateProject(GetIdentityFromContext(ctx)); authorizeNow {
+		if !s.authorizeAgentCreate(w, r, preProjectID) {
+			return
+		}
+		preAuthProjectID = preProjectID
+	}
+
+	resolveProjectID := func(raw string) (string, bool) {
+		if gouuid.Validate(raw) == nil {
+			return raw, true
+		}
+		project, err := s.store.GetProjectBySlug(ctx, raw)
+		if err != nil {
+			if err == store.ErrNotFound {
+				NotFound(w, "Project")
+				return "", false
+			}
+			writeErrorFromErr(w, err, "")
+			return "", false
+		}
+		return project.ID, true
+	}
+
+	// Stream-scan the bounded request body to extract and authorize projectId
+	// before decoding the full CreateAgentRequest object graph. Duplicate
+	// top-level projectId keys are rejected by the scanner, so this callback
+	// executes at most once per request.
+	var authorizedRawProjectID string
+	var authorizedProjectID string
 	var req CreateAgentRequest
-	if !readBoundedAgentJSONWithMessage(w, r, maxAgentCreateBodySize, agentCreateBodyTooLargeMsg, &req) {
+	if !readBoundedCreateAgentRequest(w, r, &req, func(rawProjectID string) error {
+		resolvedID, ok := resolveProjectID(rawProjectID)
+		if !ok {
+			return errCreateAgentScanAborted
+		}
+		if resolvedID != preAuthProjectID {
+			if !s.authorizeAgentCreate(w, r, resolvedID) {
+				return errCreateAgentScanAborted
+			}
+		}
+		authorizedRawProjectID = rawProjectID
+		authorizedProjectID = resolvedID
+		return nil
+	}) {
 		return
+	}
+
+	if req.ProjectID == "" {
+		ValidationError(w, "projectId is required", nil)
+		return
+	}
+
+	// Defense in depth: verify the decoded projectId matches the scanned one.
+	if req.ProjectID != authorizedRawProjectID || authorizedProjectID == "" {
+		resolvedID, ok := resolveProjectID(req.ProjectID)
+		if !ok {
+			return
+		}
+		if resolvedID != authorizedProjectID && resolvedID != preAuthProjectID {
+			if !s.authorizeAgentCreate(w, r, resolvedID) {
+				return
+			}
+		}
+		req.ProjectID = resolvedID
+	} else {
+		req.ProjectID = authorizedProjectID
 	}
 
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
 		return
-	}
-	if req.ProjectID == "" {
-		ValidationError(w, "projectId is required", nil)
-		return
-	}
-
-	// Resolve project slug to UUID if needed (mirrors listAgents pattern).
-	if gouuid.Validate(req.ProjectID) != nil {
-		project, err := s.store.GetProjectBySlug(ctx, req.ProjectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				NotFound(w, "Project")
-				return
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		req.ProjectID = project.ID
 	}
 
 	if req.CleanupMode != "" && req.CleanupMode != "strict" && req.CleanupMode != "force" {
@@ -953,13 +1225,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	if err := labels.Validate(req.Labels); err != nil {
 		ValidationError(w, "Invalid labels: "+err.Error(), nil)
-		return
-	}
-
-	// Authorization for every caller kind. The branch this replaced had no else,
-	// so a caller that was neither agent nor user fell through ungated (#591).
-	// Do not wrap this in an identity-kind test.
-	if !s.authorizeAgentCreate(w, r, req.ProjectID) {
 		return
 	}
 
