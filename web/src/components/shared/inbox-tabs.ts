@@ -27,11 +27,12 @@ import { css, html, nothing, type TemplateResult } from 'lit';
 import { getLastKnownProfileDecisionAvailability } from '../../client/profile-decisions.js';
 import {
   agentSecretsEnabled,
+  commandRequestsEnabled,
   decisionsEnabled,
   isInboxDashboardEnabled,
 } from '../../utils/feature-flags.js';
 
-export type InboxTabId = 'overview' | 'decisions' | 'agent-secrets';
+export type InboxTabId = 'overview' | 'decisions' | 'agent-secrets' | 'agent-executions';
 
 export interface InboxTabStripOptions {
   /**
@@ -79,6 +80,13 @@ export const INBOX_TABS: readonly InboxTabConfig[] = [
     icon: 'shield-lock',
     href: '/profile/agent-secrets',
     isVisible: (): boolean => agentSecretsEnabled(),
+  },
+  {
+    id: 'agent-executions',
+    label: 'Agent Executions',
+    icon: 'terminal',
+    href: '/profile/agent-executions',
+    isVisible: (): boolean => commandRequestsEnabled(),
   },
 ];
 

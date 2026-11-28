@@ -29,12 +29,94 @@ import { repeat } from 'lit/directives/repeat.js';
 
 import type { PageData } from '../../shared/types.js';
 import type { ActionInboxSort, ActionInboxTab } from '../../client/action-inbox.js';
+import { chatConversationPath } from '../../client/chat-routes.js';
 import {
   ActionInboxPageController,
   type ActionInboxKindConfig,
 } from './action-inbox-controller.js';
 import { inboxTabStripStyles, renderInboxTabStrip } from './inbox-tabs.js';
 import '../pages/not-found.js';
+
+/**
+ * Shared styles for the right-aligned "Open in chat" link / purged-message note
+ * on action-inbox card context lines (design §5.4, matching `/profile/decisions`).
+ */
+export const actionCardContextStyles = css`
+  .card-context-right {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .card-context-right .linkish {
+    color: var(--scion-primary);
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .card-context-right .linkish:hover {
+    text-decoration: underline;
+  }
+
+  .card-context-right .purged-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--scion-text-muted);
+  }
+`;
+
+/**
+ * Builds the chat permalink (`/chat/...#msg-<messageId>`) for an action-inbox
+ * card, or returns `null` when the prompt message is no longer available or
+ * the conversation cannot be addressed.
+ */
+export function actionCardChatHref(
+  threadId: string | undefined,
+  projectId: string | undefined,
+  messageId: string | undefined,
+  promptAvailable: boolean | undefined
+): string | null {
+  if (!promptAvailable || !threadId || !messageId) return null;
+  const base = chatConversationPath({
+    conversationKey: threadId,
+    ...(projectId ? { projectId } : {}),
+  });
+  if (!base) return null;
+  return `${base}#msg-${encodeURIComponent(messageId)}`;
+}
+
+/**
+ * Renders the right-aligned "Open in chat" anchor (or "Original message no
+ * longer available" note when `promptAvailable === false`) on an action-inbox
+ * card context line (design §5.4).
+ */
+export function renderOpenInChat(
+  href: string | null,
+  promptAvailable: boolean | undefined
+): TemplateResult | typeof nothing {
+  if (href) {
+    return html`<span class="card-context-right"
+      ><a class="linkish" data-open-in-chat href=${href}
+        ><sl-icon name="chat-left-text" aria-hidden="true"></sl-icon> Open in chat</a
+      ></span
+    >`;
+  }
+  if (promptAvailable === false) {
+    return html`<span class="card-context-right"
+      ><span class="purged-note" data-purged-note
+        ><sl-icon name="archive" aria-hidden="true"></sl-icon>
+        <span>Original message no longer available</span></span
+      ></span
+    >`;
+  }
+  return nothing;
+}
 
 @customElement('scion-action-inbox-page')
 export class ScionActionInboxPage<TCard = unknown> extends LitElement {
