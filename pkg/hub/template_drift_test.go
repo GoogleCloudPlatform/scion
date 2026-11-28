@@ -1351,6 +1351,132 @@ func TestCreateAgent_TemplateDriftWarning(t *testing.T) {
 		assert.Equal(t, callsAfter1, fg.callCount(), "warm create within TTL must make 0 GitHub API calls")
 		assert.Equal(t, 1, strings.Count(resourceBuf.String(), "GitHub App token mint failed"), "warm create within TTL must not log additional mint-failure Warns")
 	})
+
+	t.Run("memo hit then cache miss re-resolves credential and re-scopes on PAT rotation", func(t *testing.T) {
+		const (
+			commitMid  = "3333333333333333333333333333333333333333"
+			commitMid2 = "4444444444444444444444444444444444444444"
+		)
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		var clockMu sync.Mutex
+		clock := func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		}
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+		fg.trees[commitMid+":.scion/templates/my-tmpl"] = "5555555555555555555555555555555555555555"
+		fg.trees[commitMid2+":.scion/templates/my-tmpl"] = "6666666666666666666666666666666666666666"
+		fg.override = func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return true
+			}
+			return false
+		}
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		f.srv.SetSecretBackend(&importCredSecretBackend{
+			scope:     secret.ScopeProject,
+			projectID: f.project.ID,
+			values:    map[string]string{"GITHUB_TOKEN": "ghp_pat_one"},
+		})
+		seedDriftTemplate(t, f, "tmpl-a", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitOld)
+		seedDriftTemplate(t, f, "tmpl-b", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitMid)
+		seedDriftTemplate(t, f, "tmpl-c", "https://github.com/o/r/tree/main/.scion/templates/my-tmpl", commitMid2)
+
+		rec := f.create(t, map[string]any{"name": "p-a", "task": "t", "template": "tmpl-a"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		// Memo hit, branch cache hit, commit-tree miss for commitMid: must re-resolve credential.
+		clockMu.Lock()
+		now = now.Add(10 * time.Second)
+		clockMu.Unlock()
+		before := fg.callCount()
+		rec = f.create(t, map[string]any{"name": "p-b", "task": "t", "template": "tmpl-b"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		reqs := fg.snapshotReqs()
+		require.Greater(t, len(reqs), before)
+		for _, r := range reqs[before:] {
+			assert.Equal(t, "Bearer ghp_pat_one", r.auth, "memo-hit cache miss must use the resolved credential")
+		}
+		assert.Len(t, resp.Warnings, 1, "memo-hit cache miss must still detect drift on a private repo")
+
+		// Rotate PAT within the memo TTL; cache miss for commitMid2 must re-scope to the new PAT.
+		f.srv.SetSecretBackend(&importCredSecretBackend{
+			scope:     secret.ScopeProject,
+			projectID: f.project.ID,
+			values:    map[string]string{"GITHUB_TOKEN": "ghp_pat_two"},
+		})
+		oldScope := f.srv.secretCredentialScope("ghp_pat_one")
+		newScope := f.srv.secretCredentialScope("ghp_pat_two")
+		require.NotEqual(t, oldScope, newScope)
+		clockMu.Lock()
+		now = now.Add(10 * time.Second)
+		clockMu.Unlock()
+		rec = f.create(t, map[string]any{"name": "p-c", "task": "t", "template": "tmpl-c"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		f.srv.templateDrift.mu.Lock()
+		var gotScopes []string
+		for k := range f.srv.templateDrift.commitItems {
+			if k.ref == commitMid2 {
+				gotScopes = append(gotScopes, k.scope)
+			}
+		}
+		f.srv.templateDrift.mu.Unlock()
+		assert.Equal(t, []string{newScope}, gotScopes, "rotated PAT results must be cached under the new PAT scope only")
+	})
+
+	t.Run("empty-tree branch entry with cached source tree after head moves still warns", func(t *testing.T) {
+		const commitH2 = "7777777777777777777777777777777777777777"
+		now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+		var clockMu sync.Mutex
+		clock := func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		}
+
+		fg := newHTTPTestDriftGitHub(t)
+		fg.branches["main"] = commitNew
+		fg.trees[commitOld+":.scion/templates/my-tmpl"] = treeOld
+		fg.trees[commitNew+":.scion/templates/my-tmpl"] = treeNew
+		fg.trees[commitH2+":.scion/templates/my-tmpl"] = "8888888888888888888888888888888888888888"
+
+		f := newFixture(t, true, "https://github.com/o/r.git", nil, fg, clock)
+		u := "https://github.com/o/r/tree/main/.scion/templates/my-tmpl"
+		seedDriftTemplate(t, f, "stale", u, commitOld)
+		seedDriftTemplate(t, f, "fresh2", u, commitH2)
+
+		rec := f.create(t, map[string]any{"name": "e1", "task": "t", "template": "stale"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		fg.mu.Lock()
+		fg.branches["main"] = commitH2
+		fg.mu.Unlock()
+		clockMu.Lock()
+		now = now.Add(61 * time.Second)
+		clockMu.Unlock()
+
+		rec = f.create(t, map[string]any{"name": "e2", "task": "t", "template": "fresh2"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		clockMu.Lock()
+		now = now.Add(5 * time.Second)
+		clockMu.Unlock()
+		rec = f.create(t, map[string]any{"name": "e3", "task": "t", "template": "stale"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Len(t, resp.Warnings, 1, "empty-tree branch entry must not suppress the stale template warning")
+	})
 }
 
 func TestTemplateDrift_HostedUsesNetworkVetted(t *testing.T) {
