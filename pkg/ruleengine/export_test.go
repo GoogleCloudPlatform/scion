@@ -14,21 +14,33 @@
 
 package ruleengine
 
-// Test-only hooks for deterministic state-machine interleaving tests (ptone/scion#9801).
+import "bytes"
 
-// ProbeLockRun locks r.mu and returns its unlock function.
-func ProbeLockRun(r *ChainRun) func() { r.mu.Lock(); return r.mu.Unlock }
+// Test-only hooks for deterministic state-machine interleaving tests (ptone/scion#9801, A-4)
+// and canonicalization unit tests (ptone/scion#9798, O-1).
 
-// ProbeStateLocked returns r.state while the caller holds r.mu (via ProbeLockRun).
-func ProbeStateLocked(r *ChainRun) int { return int(r.state) }
+// HookLockRun locks r.mu and returns its unlock function.
+func HookLockRun(r *ChainRun) func() { r.mu.Lock(); return r.mu.Unlock }
 
-// ProbeState returns r.state under r.mu.
-func ProbeState(r *ChainRun) int { r.mu.Lock(); defer r.mu.Unlock(); return int(r.state) }
+// HookStateLocked returns r.state while the caller holds r.mu (via HookLockRun).
+func HookStateLocked(r *ChainRun) int { return int(r.state) }
 
-// ProbeHasInflight reports whether r.inflight is non-nil under r.mu.
-func ProbeHasInflight(r *ChainRun) bool { r.mu.Lock(); defer r.mu.Unlock(); return r.inflight != nil }
+// HookState returns r.state under r.mu.
+func HookState(r *ChainRun) int { r.mu.Lock(); defer r.mu.Unlock(); return int(r.state) }
+
+// HookHasInflight reports whether r.inflight is non-nil under r.mu.
+func HookHasInflight(r *ChainRun) bool { r.mu.Lock(); defer r.mu.Unlock(); return r.inflight != nil }
+
+// HookCanonicalAdditions encodes v via encodeCanonicalAdditionValue for unit testing.
+func HookCanonicalAdditions(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := encodeCanonicalAdditionValue(&buf, v); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
 var (
-	ProbeStatePending    = int(chainStatePending)
-	ProbeStateDispatched = int(chainStateDispatched)
+	HookStatePending    = int(chainStatePending)
+	HookStateDispatched = int(chainStateDispatched)
 )
