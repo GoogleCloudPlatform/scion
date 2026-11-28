@@ -53,7 +53,7 @@ func TestBuildCreateTriggerRequest_MessageOfflineAndTemplateAllow(t *testing.T) 
 	}
 	t.Cleanup(reset)
 
-	t.Run("derives untrustedVars and sets offline queue + queue-ttl", func(t *testing.T) {
+	t.Run("omits untrustedVars for Hub derivation and sets offline queue + queue-ttl", func(t *testing.T) {
 		reset()
 		triggerOffline = "queue"
 		triggerQueueTTL = "30m"
@@ -63,8 +63,8 @@ func TestBuildCreateTriggerRequest_MessageOfflineAndTemplateAllow(t *testing.T) 
 		assert.Equal(t, "message", req.Action.Type)
 		assert.Equal(t, "queue", req.Action.Offline)
 		assert.Equal(t, 1800, req.Action.QueueTTLSeconds)
-		assert.Equal(t, []string{"event.attributes.env", "event.payload.sha"}, derived)
-		assert.Equal(t, []string{"event.attributes.env", "event.payload.sha"}, req.Action.UntrustedVars)
+		assert.Nil(t, derived)
+		assert.Nil(t, req.Action.UntrustedVars)
 	})
 
 	t.Run("explicit --allow overrides derivation", func(t *testing.T) {

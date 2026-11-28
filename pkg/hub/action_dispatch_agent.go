@@ -296,7 +296,10 @@ func (a *dispatchAgentAction) validateForAuthoring(
 		}
 	}
 
-	// Validate and deduplicate untrustedVars entries (§5.1, §5.2).
+	// Validate and deduplicate untrustedVars entries when supplied (§5.1, §5.2,
+	// untrusted_optin v1). When omitted (nil), the union of Template.Untrusted()
+	// across every slot is derived and stored on payload.UntrustedVars below.
+	untrustedSupplied := payload.UntrustedVars != nil
 	if len(payload.UntrustedVars) > 0 {
 		deduped, err := validateUntrustedVars(payload.UntrustedVars)
 		if err != nil {
@@ -319,6 +322,7 @@ func (a *dispatchAgentAction) validateForAuthoring(
 		labelKeys = append(labelKeys, k)
 	}
 	slices.Sort(labelKeys)
+	labelTmpls := make([]*triggertemplate.Template, 0, len(labelKeys))
 	for _, k := range labelKeys {
 		if reservedTriggerLabelKeys[k] {
 			return "", &dispatchAgentValidationError{
@@ -335,17 +339,21 @@ func (a *dispatchAgentAction) validateForAuthoring(
 				message: fmt.Sprintf("invalid label key %q: %v", k, err),
 			}
 		}
-		if _, err := validateTemplateSlot(payload.Labels[k], triggertemplate.SlotLabel, payload.UntrustedVars); err != nil {
+		lblTmpl, err := parseTemplateSlot(payload.Labels[k], triggertemplate.SlotLabel)
+		if err != nil {
 			return "", err
 		}
+		labelTmpls = append(labelTmpls, lblTmpl)
 	}
 
-	// Parse and check untrustedVars coverage for all template slots (§5.1, §5.2).
-	if _, err := validateTemplateSlot(payload.Task, triggertemplate.SlotTask, payload.UntrustedVars); err != nil {
+	// Parse all template slots (§5.1, §5.2).
+	taskTmpl, err := parseTemplateSlot(payload.Task, triggertemplate.SlotTask)
+	if err != nil {
 		return "", err
 	}
+	var nameTmpl *triggertemplate.Template
 	if payload.AgentName != "" {
-		nameTmpl, err := validateTemplateSlot(payload.AgentName, triggertemplate.SlotName, payload.UntrustedVars)
+		nameTmpl, err = parseTemplateSlot(payload.AgentName, triggertemplate.SlotName)
 		if err != nil {
 			return "", err
 		}
@@ -380,16 +388,21 @@ func (a *dispatchAgentAction) validateForAuthoring(
 			}
 		}
 	}
+	var branchTmpl *triggertemplate.Template
 	if payload.Branch != "" {
-		if _, err := validateTemplateSlot(payload.Branch, triggertemplate.SlotBranch, payload.UntrustedVars); err != nil {
+		branchTmpl, err = parseTemplateSlot(payload.Branch, triggertemplate.SlotBranch)
+		if err != nil {
 			return "", err
 		}
 	}
+	var reuseTmpl *triggertemplate.Template
 	if payload.ReuseMessage != "" {
-		if _, err := validateTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, payload.UntrustedVars); err != nil {
+		reuseTmpl, err = parseTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage)
+		if err != nil {
 			return "", err
 		}
 	}
+	var ackTmpl *triggertemplate.Template
 	if payload.AckComment != nil {
 		if opts.sourceKind != store.TriggerSourceKindGitHub {
 			return "", &dispatchAgentValidationError{
@@ -398,8 +411,55 @@ func (a *dispatchAgentAction) validateForAuthoring(
 				message: "ackComment is only supported on github triggers",
 			}
 		}
-		if err := validateGitHubAckCommentPayload(payload.AckComment, payload.UntrustedVars); err != nil {
+		ackTmpl, err = parseGitHubAckCommentPayload(payload.AckComment)
+		if err != nil {
 			return "", err
+		}
+	}
+
+	// Collect all parsed templates in canonical slot order (task, agentName,
+	// branch, sorted labels, reuseMessage, ackComment.body) for derivation
+	// and coverage checking.
+	slotTmpls := make([]*triggertemplate.Template, 0, 5+len(labelTmpls))
+	slotTmpls = append(slotTmpls, taskTmpl)
+	if nameTmpl != nil {
+		slotTmpls = append(slotTmpls, nameTmpl)
+	}
+	if branchTmpl != nil {
+		slotTmpls = append(slotTmpls, branchTmpl)
+	}
+	slotTmpls = append(slotTmpls, labelTmpls...)
+	if reuseTmpl != nil {
+		slotTmpls = append(slotTmpls, reuseTmpl)
+	}
+	if ackTmpl != nil {
+		slotTmpls = append(slotTmpls, ackTmpl)
+	}
+
+	if !untrustedSupplied {
+		derived := deriveUntrustedVarsUnion(slotTmpls...)
+		if len(derived) > triggertemplate.MaxPlaceholders {
+			return "", &dispatchAgentValidationError{
+				status: http.StatusBadRequest,
+				code:   "invalid_untrusted_var",
+				message: fmt.Sprintf(
+					"derived untrustedVars across action slots exceeds maximum of %d entries; supply an explicit untrustedVars list with trailing \".*\" prefixes (e.g. \"event.payload.*\")",
+					triggertemplate.MaxPlaceholders,
+				),
+			}
+		}
+		if len(derived) > 0 {
+			deduped, uErr := validateUntrustedVars(derived)
+			if uErr != nil {
+				return "", uErr
+			}
+			payload.UntrustedVars = deduped
+		}
+	} else {
+		for _, tmpl := range slotTmpls {
+			if err := checkTemplateSlotUntrusted(tmpl, payload.UntrustedVars); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -423,14 +483,58 @@ func (a *dispatchAgentAction) validateForAuthoring(
 	return string(normalized), nil
 }
 
+func parseTemplateSlot(raw, slot string) (*triggertemplate.Template, error) {
+	tmpl, err := triggertemplate.Parse(raw, slot)
+	if err == nil {
+		return tmpl, nil
+	}
+	return nil, mapTemplateSlotError(err)
+}
+
+func checkTemplateSlotUntrusted(tmpl *triggertemplate.Template, allowed []string) error {
+	if tmpl == nil {
+		return nil
+	}
+	if err := tmpl.CheckUntrustedAllowed(allowed); err != nil {
+		return mapTemplateSlotError(err)
+	}
+	return nil
+}
+
+func deriveUntrustedVarsUnion(tmpls ...*triggertemplate.Template) []string {
+	var (
+		out  []string
+		seen map[string]bool
+	)
+	for _, tmpl := range tmpls {
+		if tmpl == nil {
+			continue
+		}
+		for _, p := range tmpl.Untrusted() {
+			if seen == nil {
+				seen = make(map[string]bool)
+			}
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
 func validateTemplateSlot(raw, slot string, allowed []string) (*triggertemplate.Template, error) {
 	tmpl, err := triggertemplate.ValidateSlot(raw, slot, allowed)
 	if err == nil {
 		return tmpl, nil
 	}
+	return nil, mapTemplateSlotError(err)
+}
+
+func mapTemplateSlotError(err error) error {
 	var pe *triggertemplate.ParseError
 	if errors.As(err, &pe) {
-		return nil, &dispatchAgentValidationError{
+		return &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_template",
 			message: pe.Error(),
@@ -443,7 +547,7 @@ func validateTemplateSlot(raw, slot string, allowed []string) (*triggertemplate.
 	}
 	var ue *triggertemplate.UntrustedVarError
 	if errors.As(err, &ue) {
-		return nil, &dispatchAgentValidationError{
+		return &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "untrusted_var_not_allowed",
 			message: ue.Error(),
@@ -453,7 +557,7 @@ func validateTemplateSlot(raw, slot string, allowed []string) (*triggertemplate.
 			},
 		}
 	}
-	return nil, &dispatchAgentValidationError{
+	return &dispatchAgentValidationError{
 		status:  http.StatusBadRequest,
 		code:    ErrCodeValidationError,
 		message: err.Error(),

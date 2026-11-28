@@ -286,6 +286,210 @@ describe('scion-trigger-list', () => {
     expect(patchBodies[2]['source']).toBeUndefined();
   });
 
+  it('omits untrustedVars on create and edit so hub derives them (ptone/scion#9776)', async () => {
+    const existing: TriggerDefinition = {
+      id: 'tr-msg-untrusted',
+      projectId: 'proj-1',
+      name: 'ci-alert',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: { types: ['webhook.received'], rules: [] },
+      action: {
+        type: 'message',
+        agentId: 'ag-1',
+        message: 'Old ${event.payload.old}',
+        untrustedVars: ['event.payload.old'],
+      },
+      subject: { mode: 'new' },
+      status: 'active',
+      authorizationRevision: 1,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T05:00:00Z',
+      updatedAt: '2026-11-28T05:00:00Z',
+    };
+
+    const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST' || init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          requests.push({
+            method: init.method,
+            body: JSON.parse(rawBody) as Record<string, unknown>,
+          });
+          return Promise.resolve(jsonResponse(existing, init.method === 'POST' ? 201 : 200));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [existing], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Create multi-action trigger with message (${event.payload.commit}) + dispatch_agent:
+    //    must send actions[] (not scalar action) and omit untrustedVars on every action.
+    el.openCreateDialog('webhook');
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'web-msg-commit';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const srcInput = el.shadowRoot?.querySelector('[data-trigger-source-id]') as HTMLInputElement;
+    srcInput.value = 'ep-1';
+    srcInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    const actionEditor = el.shadowRoot?.querySelector('scion-trigger-action-editor');
+    actionEditor?.dispatchEvent(
+      new CustomEvent('actions-changed', {
+        detail: {
+          actions: [
+            {
+              type: 'message',
+              agentId: 'ag-1',
+              message: 'CI at ${event.payload.commit}',
+              offline: 'skip',
+            },
+            {
+              type: 'dispatch_agent',
+              template: 'developer',
+              task: 'Investigate ${event.attributes.repo}',
+            },
+          ],
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[0]?.method).toBe('POST');
+    expect(requests[0]?.body['action']).toBeUndefined();
+    const createdActions = requests[0]?.body['actions'] as Array<Record<string, unknown>>;
+    expect(createdActions).toHaveLength(2);
+    expect(createdActions[0]['message']).toBe('CI at ${event.payload.commit}');
+    expect('untrustedVars' in createdActions[0]).toBe(false);
+    expect(createdActions[1]['task']).toBe('Investigate ${event.attributes.repo}');
+    expect('untrustedVars' in createdActions[1]).toBe(false);
+
+    // 2. Edit legacy single-action message trigger with new placeholder:
+    //    round-trips via actions[] and omits stored untrustedVars so hub re-derives.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-msg-untrusted"]') as HTMLElement).click();
+    await el.updateComplete;
+    const editActionEditor = el.shadowRoot?.querySelector('scion-trigger-action-editor');
+    editActionEditor?.dispatchEvent(
+      new CustomEvent('actions-changed', {
+        detail: {
+          actions: [
+            {
+              type: 'message',
+              agentId: 'ag-1',
+              message: 'CI at ${event.payload.commit}',
+              untrustedVars: ['event.payload.old'],
+            },
+          ],
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(requests[1]?.method).toBe('PATCH');
+    expect(requests[1]?.body['action']).toBeUndefined();
+    const patchedActions = requests[1]?.body['actions'] as Array<Record<string, unknown>>;
+    expect(patchedActions).toHaveLength(1);
+    expect(patchedActions[0]['message']).toBe('CI at ${event.payload.commit}');
+    expect('untrustedVars' in patchedActions[0]).toBe(false);
+  });
+
+  it('locks the action list read-only when actions[] contains a read-only row while allowing non-action edits (R1)', async () => {
+    const mixed: TriggerDefinition = {
+      id: 'tr-mixed',
+      projectId: 'proj-1',
+      name: 'mixed-rule',
+      description: 'orig',
+      source: { kind: 'github', id: '' },
+      match: { types: ['github.issue_comment.created'], rules: [] },
+      actions: [
+        { type: 'message', agentId: 'ag-1', message: 'Notify ${event.attributes.repo}' },
+        { type: 'github.comment', target: 'event', body: 'Acked' },
+      ],
+      subject: { mode: 'new' },
+      status: 'active',
+      authorizationRevision: 3,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-28T05:00:00Z',
+      updatedAt: '2026-11-28T05:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse({ ...mixed, name: 'mixed-rule-renamed' }));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [mixed], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-mixed"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    // Visible notice explains CLI/API editing requirement.
+    const notice = el.shadowRoot?.querySelector('[data-readonly-actions-notice]');
+    expect(notice).toBeTruthy();
+    expect(notice?.textContent?.replace(/\s+/g, ' ')).toContain(
+      'these actions can only be edited with the CLI or API'
+    );
+
+    // Action editor is locked read-only: no Add/Remove/Move controls and message input is readonly.
+    const editor = el.shadowRoot?.querySelector('scion-trigger-action-editor') as HTMLElement & {
+      readonly: boolean;
+      updateComplete: Promise<boolean>;
+    };
+    expect(editor).toBeTruthy();
+    expect(editor.readonly).toBe(true);
+    await editor.updateComplete;
+    expect(editor.shadowRoot?.querySelector('[data-add-action-row]')).toBeNull();
+    expect(editor.shadowRoot?.querySelector('[data-remove-action="0"]')).toBeNull();
+    expect(editor.shadowRoot?.querySelector('[data-move-action-up="1"]')).toBeNull();
+    const msgTextarea = editor.shadowRoot?.querySelector('[data-action-message="0"]');
+    expect(msgTextarea?.hasAttribute('readonly')).toBe(true);
+
+    // Non-action fields (name) remain editable and save cleanly without sending or dropping actions.
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'mixed-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).toEqual({
+      name: 'mixed-rule-renamed',
+      expectedRevision: 3,
+    });
+    expect(patchBodies[0]['action']).toBeUndefined();
+    expect(patchBodies[0]['actions']).toBeUndefined();
+  });
+
   it('uses canonical deep equality for actions, rules, form, durations, and untrimmed descriptions on rename (O-A, Nit)', async () => {
     const existing: TriggerDefinition = {
       id: 'tr-canon',

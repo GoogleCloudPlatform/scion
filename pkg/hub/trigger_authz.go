@@ -67,8 +67,18 @@ const (
 // (returns nil). Agent identities lacking agentAuthoringFloorScope return an
 // error so HTTP handlers write 403 and fire-time authorization refuses the fire.
 func requireAgentAuthoringFloor(identity Identity) error {
+	// Untyped nil means no agent identity (e.g. non-agent HTTP caller via
+	// GetAgentIdentityFromContext); floor does not apply.
+	if identity == nil {
+		return nil
+	}
+	// Fail closed on a typed-nil concrete identity (e.g. (*agentIdentityWrapper)(nil))
+	// so it never passes the floor or panics in HasScope (security Low-1).
+	if isNilIdentity(identity) {
+		return fmt.Errorf("%w: agent lacks baseline authoring floor (%s)", errScheduledAuthorityDenied, agentAuthoringFloorScope)
+	}
 	agentIdent, ok := identity.(AgentIdentity)
-	if !ok || agentIdent == nil {
+	if !ok {
 		return nil
 	}
 	if !agentIdent.HasScope(agentAuthoringFloorScope) {
@@ -657,11 +667,12 @@ func (s *Server) authorizeTriggerNotifyAuthoring(
 	agentName := strings.TrimSpace(spec.AgentName)
 	if agentID != "" || agentName != "" {
 		_, resolved, ok := s.resolveTriggerMessageTarget(w, r, identity, projectID, sourceKind, MessageEventPayload{
-			AgentID:   agentID,
-			AgentName: agentName,
-			Message:   "Trigger failure notification",
-			Wake:      false,
-			Plain:     false,
+			AgentID:       agentID,
+			AgentName:     agentName,
+			Message:       "Trigger failure notification",
+			Wake:          false,
+			Plain:         false,
+			UntrustedVars: []string{},
 		}, "github trigger notify authoring")
 		if !ok {
 			return nil, false
@@ -701,7 +712,7 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		return "", false
 	}
 
-	raw, err := json.Marshal(DispatchAgentEventPayload{
+	dispatchPayload := DispatchAgentEventPayload{
 		AgentName:     spec.AgentName,
 		NameConflict:  spec.NameConflict,
 		Template:      spec.Template,
@@ -715,7 +726,24 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		AckComment:    spec.AckComment,
 		UntrustedVars: spec.UntrustedVars,
 		NoAuth:        spec.NoAuth,
-	})
+	}
+	var (
+		raw []byte
+		err error
+	)
+	if spec.UntrustedVars != nil {
+		// Preserve an explicit empty slice ("untrustedVars": []) across the
+		// JSON boundary so Validate distinguishes omitted from supplied-empty.
+		raw, err = json.Marshal(struct {
+			DispatchAgentEventPayload
+			UntrustedVars []string `json:"untrustedVars"`
+		}{
+			DispatchAgentEventPayload: dispatchPayload,
+			UntrustedVars:             spec.UntrustedVars,
+		})
+	} else {
+		raw, err = json.Marshal(dispatchPayload)
+	}
 	if err != nil {
 		InternalError(w)
 		return "", false

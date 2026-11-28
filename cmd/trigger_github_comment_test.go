@@ -176,8 +176,8 @@ func TestTriggerCreate_DispatchAckComment(t *testing.T) {
 		assert.Equal(t, "dispatch_agent", req.Action.Type)
 		require.NotNil(t, req.Action.AckComment)
 		assert.Equal(t, triggerDispatch.ackComment, req.Action.AckComment.Body)
-		assert.Equal(t, []string{"event.attributes.number", "event.attributes.sender"}, req.Action.UntrustedVars)
-		assert.Equal(t, req.Action.UntrustedVars, derived)
+		assert.Nil(t, req.Action.UntrustedVars)
+		assert.Nil(t, derived)
 	})
 
 	t.Run("ack-comment rejected on non-github webhook source", func(t *testing.T) {
@@ -458,7 +458,7 @@ func TestTriggerPresetCLI_ApplyGitHubCommentAndAckComment(t *testing.T) {
 		assert.Equal(t, "dispatch_agent", seenCreate.Action.Type)
 		require.NotNil(t, seenCreate.Action.AckComment)
 		assert.Equal(t, triggerPresetApplyDispatchFlags.ackComment, seenCreate.Action.AckComment.Body)
-		assert.Equal(t, []string{"event.attributes.sender"}, seenCreate.Action.UntrustedVars)
+		assert.Nil(t, seenCreate.Action.UntrustedVars)
 		assert.Contains(t, out, "Trigger created: tr-preset-ack")
 		assert.Contains(t, out, "Ack:     Started **${result.agent_name}**")
 	})
@@ -693,7 +693,7 @@ func TestTriggerUpdate_DispatchAckCommentPreserveClearAndRederive(t *testing.T) 
 		assert.Equal(t, "Fix PR #${event.attributes.number}", gotPatch.Action.Task)
 		require.NotNil(t, gotPatch.Action.AckComment)
 		assert.Equal(t, initialAckBody, gotPatch.Action.AckComment.Body)
-		assert.Equal(t, []string{"event.attributes.number"}, gotPatch.Action.UntrustedVars)
+		assert.Nil(t, gotPatch.Action.UntrustedVars)
 	})
 
 	t.Run("update --ack-comment empty clears ackComment", func(t *testing.T) {
@@ -708,7 +708,7 @@ func TestTriggerUpdate_DispatchAckCommentPreserveClearAndRederive(t *testing.T) 
 		assert.False(t, hasAckKey, "cleared ackComment must be omitted from PATCH JSON")
 	})
 
-	t.Run("update --ack-comment Y updates body and re-derives untrustedVars", func(t *testing.T) {
+	t.Run("update --ack-comment Y updates body and omits untrustedVars for Hub re-derivation", func(t *testing.T) {
 		const updatedAckBody = "Started **${result.agent_name}** ([open](${result.agent_url})) for @${event.attributes.sender} on ${event.subject}"
 		gotPatch, _ := runUpdateCase(t, func(t *testing.T) {
 			require.NoError(t, triggerUpdateCmd.Flags().Set("ack-comment", updatedAckBody))
@@ -716,6 +716,6 @@ func TestTriggerUpdate_DispatchAckCommentPreserveClearAndRederive(t *testing.T) 
 		require.NotNil(t, gotPatch.Action)
 		require.NotNil(t, gotPatch.Action.AckComment)
 		assert.Equal(t, updatedAckBody, gotPatch.Action.AckComment.Body)
-		assert.Equal(t, []string{"event.attributes.sender", "event.subject"}, gotPatch.Action.UntrustedVars)
+		assert.Nil(t, gotPatch.Action.UntrustedVars)
 	})
 }

@@ -75,18 +75,78 @@ describe('scion-trigger-action-editor', () => {
     expect(el.shadowRoot?.querySelector('[data-action-template="0"]')).toBeTruthy();
   });
 
-  it('supports multiple ordered action rows when multiActionEnabled (P9 hook) is enabled', async () => {
+  it('supports adding, reordering, and removing up to 8 ordered action rows by default (ptone/scion#9785)', async () => {
     const el = document.createElement('scion-trigger-action-editor') as ScionTriggerActionEditor;
-    el.multiActionEnabled = true;
+    let latest: TriggerActionSpec[] = [];
+    el.addEventListener('actions-changed', (e: Event) => {
+      latest = (e as CustomEvent<{ actions: TriggerActionSpec[] }>).detail.actions;
+    });
+    el.actions = [{ type: 'message', agentId: 'ag-1', message: 'first' }];
     document.body.appendChild(el);
     await el.updateComplete;
 
-    const addBtn = el.shadowRoot?.querySelector('[data-add-action-row]') as HTMLElement;
-    expect(addBtn).toBeTruthy();
-    addBtn.click();
+    // multiActionEnabled defaults to true: add up to 8 rows.
+    for (let i = 1; i < 8; i++) {
+      const addBtn = el.shadowRoot?.querySelector('[data-add-action-row]') as HTMLElement;
+      expect(addBtn).toBeTruthy();
+      addBtn.click();
+      await el.updateComplete;
+    }
+    expect(el.shadowRoot?.querySelectorAll('[data-action-row]')).toHaveLength(8);
+    expect(el.shadowRoot?.querySelector('[data-add-action-row]')).toBeNull();
+
+    // Update second row message so we can verify reordering.
+    el.actions = el.actions.map((a, idx) => (idx === 1 ? { ...a, message: 'second' } : a));
     await el.updateComplete;
 
-    expect(el.shadowRoot?.querySelectorAll('[data-action-row]')).toHaveLength(2);
+    // Move row 1 ("second") up to index 0.
+    const moveUp = el.shadowRoot?.querySelector('[data-move-action-up="1"]') as HTMLElement;
+    expect(moveUp).toBeTruthy();
+    moveUp.click();
+    await el.updateComplete;
+    expect(latest[0].message).toBe('second');
+    expect(latest[1].message).toBe('first');
+
+    // Remove row 0 ("second"): count drops to 7 and Add button reappears.
+    const removeBtn = el.shadowRoot?.querySelector('[data-remove-action="0"]') as HTMLElement;
+    expect(removeBtn).toBeTruthy();
+    removeBtn.click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('[data-action-row]')).toHaveLength(7);
+    expect(latest[0].message).toBe('first');
+    expect(el.shadowRoot?.querySelector('[data-add-action-row]')).toBeTruthy();
+  });
+
+  it('renders N actions read-only without mutation controls when readonly is true (ptone/scion#9785)', async () => {
+    const el = document.createElement('scion-trigger-action-editor') as ScionTriggerActionEditor;
+    el.readonly = true;
+    el.actions = [
+      {
+        type: 'message',
+        agentId: 'ag-1',
+        message: 'Notify ${event.attributes.repo}',
+        untrustedVars: ['event.attributes.repo'],
+      },
+      {
+        type: 'dispatch_agent',
+        template: 'developer',
+        task: 'Fix ${event.payload.commit}',
+        untrustedVars: ['event.payload.commit'],
+      },
+      {
+        type: 'github.comment',
+        target: 'event',
+        body: 'Acked',
+      },
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelectorAll('[data-action-row]')).toHaveLength(3);
+    expect(el.shadowRoot?.querySelector('[data-add-action-row]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-remove-action="0"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-move-action-up="1"]')).toBeNull();
+    expect(el.shadowRoot?.querySelectorAll('scion-trigger-untrusted-vars')).toHaveLength(2);
   });
 
   it('renders github.comment and unknown action types read-only instead of message fields (O7)', async () => {
@@ -107,5 +167,69 @@ describe('scion-trigger-action-editor', () => {
     expect(ro?.getAttribute('data-action-readonly-type')).toBe('github.comment');
     expect(ro?.textContent).toContain('Automated review started');
     expect(el.shadowRoot?.querySelector('[data-action-message="0"]')).toBeNull();
+  });
+
+  it('displays hub-derived untrustedVars read-only via shared component on message and dispatch_agent (ptone/scion#9776)', async () => {
+    const el = document.createElement('scion-trigger-action-editor') as ScionTriggerActionEditor;
+    el.actions = [
+      {
+        type: 'message',
+        agentId: 'ag-1',
+        message: 'CI at ${event.payload.commit}',
+        untrustedVars: ['event.payload.commit'],
+      },
+      {
+        type: 'dispatch_agent',
+        template: 'developer',
+        task: 'Review ${event.attributes.title}',
+        untrustedVars: ['event.attributes.title', 'event.payload.sha'],
+      },
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Editable untrustedVars input must not be rendered on either action type.
+    expect(el.shadowRoot?.querySelector('[data-action-untrusted="0"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-action-untrusted="1"]')).toBeNull();
+
+    // Shared read-only display component renders on both message and dispatch_agent.
+    const displays = el.shadowRoot?.querySelectorAll('scion-trigger-untrusted-vars');
+    expect(displays).toHaveLength(2);
+
+    const msgDisplay = displays![0] as HTMLElement & { updateComplete: Promise<boolean> };
+    const dispDisplay = displays![1] as HTMLElement & { updateComplete: Promise<boolean> };
+    await msgDisplay.updateComplete;
+    await dispDisplay.updateComplete;
+
+    expect(msgDisplay.shadowRoot?.textContent).toContain(
+      'Event values inserted as data, not instructions:'
+    );
+    expect(msgDisplay.shadowRoot?.textContent).toContain('Recomputed on save.');
+    expect(msgDisplay.shadowRoot?.textContent).toContain('event.payload.commit');
+
+    expect(dispDisplay.shadowRoot?.textContent).toContain(
+      'Event values inserted as data, not instructions:'
+    );
+    expect(dispDisplay.shadowRoot?.textContent).toContain('Recomputed on save.');
+    expect(dispDisplay.shadowRoot?.textContent).toContain('event.attributes.title');
+    expect(dispDisplay.shadowRoot?.textContent).toContain('event.payload.sha');
+  });
+
+  it('omits untrustedVars from default dispatch_agent action', async () => {
+    const el = document.createElement('scion-trigger-action-editor') as ScionTriggerActionEditor;
+    let latest: TriggerActionSpec[] = [];
+    el.addEventListener('actions-changed', (e: Event) => {
+      latest = (e as CustomEvent<{ actions: TriggerActionSpec[] }>).detail.actions;
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const typeGroup = el.shadowRoot?.querySelector('[data-action-type="0"]') as HTMLInputElement;
+    typeGroup.value = 'dispatch_agent';
+    typeGroup.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await el.updateComplete;
+
+    expect(latest[0].type).toBe('dispatch_agent');
+    expect(latest[0].untrustedVars).toBeUndefined();
   });
 });
