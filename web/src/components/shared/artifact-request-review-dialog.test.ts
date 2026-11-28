@@ -17,8 +17,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './artifact-request-review-dialog.js';
+import { reviewerAccessHint } from './artifact-request-review-dialog.js';
 import type { ScionArtifactRequestReviewDialog } from './artifact-request-review-dialog.js';
-import type { Artifact, CreateReviewRequestsResponse } from '../../client/artifacts.js';
+import type {
+  Artifact,
+  ArtifactGrant,
+  CreateReviewRequestsResponse,
+} from '../../client/artifacts.js';
 
 const ARTIFACT: Artifact = {
   id: '22222222-2222-2222-2222-222222222222',
@@ -442,5 +447,52 @@ describe('scion-artifact-request-review-dialog', () => {
         return u.endsWith('/grants');
       })
     ).toBe(false);
+  });
+
+  it('omits raised hint when a home or cross-project scope grant is write/admin, keeps raised for read-only home grant, and maps sponsor review grants to bounded', () => {
+    const homeRead: ArtifactGrant = {
+      id: 'g-home-read',
+      subjectKind: 'scope',
+      subjectRef: ARTIFACT.scopeRef,
+      permission: 'read',
+      home: true,
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    const homeWrite: ArtifactGrant = {
+      ...homeRead,
+      id: 'g-home-write',
+      permission: 'write',
+    };
+    const crossProjectWrite: ArtifactGrant = {
+      id: 'g-other-write',
+      subjectKind: 'scope',
+      subjectRef: '33333333-3333-3333-3333-333333333333',
+      permission: 'write',
+      createdAt: '2026-11-25T00:00:00Z',
+    };
+    const sponsorReview: ArtifactGrant = {
+      id: 'g-sponsor',
+      subjectKind: 'principal',
+      subjectRef: 'user:u-sponsor',
+      permission: 'review',
+      createdAt: '2026-11-25T00:00:00Z',
+      createdBy: 'system:sponsor_review',
+    };
+
+    // (a) Home grant is write and picked user has no principal grant -> no hint.
+    expect(reviewerAccessHint('user:u-member', ARTIFACT, [homeWrite], true, true)).toBeNull();
+
+    // (b) Cross-project scope grant at write -> no hint.
+    expect(
+      reviewerAccessHint('user:u-member', ARTIFACT, [homeRead, crossProjectWrite], true, true)
+    ).toBeNull();
+
+    // (c) Home grant is read only -> still raised for admin caller.
+    expect(reviewerAccessHint('user:u-dana', ARTIFACT, [homeRead], true, true)).toBe('raised');
+
+    // (R2) Sponsor review grant is role-gated -> maps to bounded hint ("can review while they have a project role").
+    expect(
+      reviewerAccessHint('user:u-sponsor', ARTIFACT, [homeRead, sponsorReview], true, true)
+    ).toBe('bounded');
   });
 });

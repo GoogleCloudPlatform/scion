@@ -847,11 +847,9 @@ export class ScionNotificationTray extends LitElement {
       case SCHEDULE_BLOCKED_STATUS:
         return 'Schedule Blocked';
       case ARTIFACT_REVIEW_SUBMITTED_STATUS:
-        return reviewSubmittedTitle(n.message);
       case ARTIFACT_REVIEW_REQUESTED_STATUS:
-        return 'Review requested';
       case ARTIFACT_REVIEW_DISMISSED_STATUS:
-        return 'Review request dismissed';
+        return notificationItemTitle(n, false) ?? 'Notification';
       case SECRET_PENDING_STATUS:
         return 'Secret Awaiting Approval';
       case DECISIONS_WAITING_STATUS:

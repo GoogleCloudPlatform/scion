@@ -1571,6 +1571,15 @@ export const BOUNDED_REVIEW_CREATOR = 'system:review_request';
 /** CreatedBy marker for an automatic role-gated sponsor review grant (ptone/scion#7134). */
 export const SPONSOR_REVIEW_CREATOR = 'system:sponsor_review';
 
+/**
+ * Whether a grant's createdBy marker denotes a role-gated review grant that
+ * counts only while the subject holds a read role in the home project
+ * (mirrors pkg/artifacts/read.go isRoleGatedCreator).
+ */
+export function isRoleGatedCreator(createdBy?: string): boolean {
+  return createdBy === BOUNDED_REVIEW_CREATOR || createdBy === SPONSOR_REVIEW_CREATOR;
+}
+
 /** A grant to a user or agent ("principal") or a project ("scope"). */
 export interface ArtifactGrant {
   id: string;

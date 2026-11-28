@@ -27,9 +27,9 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import {
-  BOUNDED_REVIEW_CREATOR,
   countRunes,
   createReviewRequests,
+  isRoleGatedCreator,
   listGrants,
   MAX_REVIEW_REQUEST_NOTE_RUNES,
   MAX_REVIEW_REQUEST_REVIEWERS,
@@ -79,7 +79,7 @@ export function reviewerAccessHint(
   if (!grantsLoaded) return null;
   const grant = grants.find((g) => g.subjectKind === 'principal' && g.subjectRef === subjectRef);
   if (grant) {
-    if (grant.permission === 'review' && grant.createdBy === BOUNDED_REVIEW_CREATOR) {
+    if (grant.permission === 'review' && isRoleGatedCreator(grant.createdBy)) {
       return 'bounded';
     }
     if (
@@ -89,6 +89,16 @@ export function reviewerAccessHint(
     ) {
       return 'existing';
     }
+  }
+  // Scope grants at write/admin also confer review access to project members
+  // (pkg/artifacts/versions.go canWriteWith). The client cannot see project
+  // membership, so return no hint instead of guessing "will be given".
+  if (
+    grants.some(
+      (g) => g.subjectKind === 'scope' && (g.permission === 'write' || g.permission === 'admin')
+    )
+  ) {
+    return null;
   }
   if (canAdminister) {
     return 'raised';

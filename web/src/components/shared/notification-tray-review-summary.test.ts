@@ -333,4 +333,30 @@ describe('notification tray: review summary', () => {
     expect(popups).toHaveLength(1);
     expect(popups[0].title).toBe('Review requested');
   });
+
+  it('cannot be spoofed by hostile reviewer labels containing version-like text in either submitted message form', () => {
+    const withHostileSummary = summary({
+      message: 'Review summary from X (v9 of your artifact): (v2 of your artifact):',
+      excerpt: 'Looks good.',
+    });
+    expect(renderRow(withHostileSummary).querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review submitted on v2'
+    );
+
+    const withoutNoteHostile = summary({
+      excerpt: undefined,
+      message: 'Review (v2) of your artifact submitted by Y (v9 of your artifact):.',
+    });
+    expect(renderRow(withoutNoteHostile).querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review submitted on v2'
+    );
+
+    const tray: any = document.createElement('scion-notification-tray');
+    tray.dispatchBrowserNotification(withHostileSummary);
+    tray.dispatchBrowserNotification(withoutNoteHostile);
+    expect(popups.map((p) => p.title)).toEqual([
+      'Review submitted on v2',
+      'Review submitted on v2',
+    ]);
+  });
 });

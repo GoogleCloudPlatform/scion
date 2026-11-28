@@ -479,7 +479,11 @@ export class ScionArtifactShareDialog extends LitElement {
       }
     }
     const a = this.artifact;
-    if (a?.ownerKind === 'agent' && a.ownerRef) {
+    if (
+      a?.ownerKind === 'agent' &&
+      a.ownerRef &&
+      this.grants.some((g) => g.createdBy === BOUNDED_REVIEW_CREATOR)
+    ) {
       add(`agent:${a.ownerRef}`, () => principalName('agent', a.ownerRef));
     }
     for (const [key, p] of want) {
@@ -1069,8 +1073,9 @@ export class ScionArtifactShareDialog extends LitElement {
 
   /**
    * Role-gated label for a bounded review grant written by an agent review
-   * request (ptone/scion#5550, #9311). Sponsor grants (system:sponsor_review)
-   * keep the plain "Can review" label.
+   * request (ptone/scion#5550, #9311). The hub writes bounded grants only for
+   * the owning agent, so the artifact owner's slug is the requester. Sponsor
+   * grants (system:sponsor_review) keep the plain "Can review" label.
    */
   private boundedGrantLabel(g: ArtifactGrant): string | null {
     if (g.createdBy !== BOUNDED_REVIEW_CREATOR) return null;
