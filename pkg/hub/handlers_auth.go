@@ -772,8 +772,9 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maxAuthLogoutBodyBytes bounds POST /api/v1/auth/logout, a public route that
-// accepts at most an optional refreshToken JSON object.
+// maxAuthLogoutBodyBytes bounds POST /api/v1/auth/logout, an authenticated
+// route (RouteAuthenticated) that accepts at most an optional refreshToken
+// JSON object.
 const maxAuthLogoutBodyBytes int64 = 4 << 10
 
 // handleAuthLogout handles POST /api/v1/auth/logout.

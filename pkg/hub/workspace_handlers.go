@@ -204,10 +204,11 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 }
 
 // maxFileManifestBodySize bounds JSON request bodies carrying file lists or
-// manifests (workspace sync-to/finalize, template/harness-config/skill
+// manifests (workspace sync-to/finalize, template/harness-config
 // create/upload/finalize) at 16 MiB (same class as maxAgentCreateBodySize).
-// Derived from importMaxTreeFiles (20,000 files): a 20,000-entry manifest
-// (~170-500 B/entry) fits with headroom.
+// Templates and harness-configs cap file counts at importMaxTreeFiles (20,000);
+// workspace sync-to/finalize cap file counts at maxAgentCreateWorkspaceFiles
+// (175,000) to match agent create.
 const maxFileManifestBodySize = 16 << 20
 
 const fileManifestTooLargeMsg = "request body exceeds the 16 MiB maximum size"
@@ -356,8 +357,8 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	if len(req.Files) > importMaxTreeFiles {
-		tooManyErr := &tooManyFilesError{field: "files", count: len(req.Files), limit: importMaxTreeFiles}
+	if len(req.Files) > maxAgentCreateWorkspaceFiles {
+		tooManyErr := &tooManyFilesError{field: "files", count: len(req.Files), limit: maxAgentCreateWorkspaceFiles}
 		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
 			"field": tooManyErr.field,
 			"max":   tooManyErr.limit,
@@ -450,8 +451,8 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if len(req.Manifest.Files) > importMaxTreeFiles {
-		tooManyErr := &tooManyFilesError{field: "manifest.files", count: len(req.Manifest.Files), limit: importMaxTreeFiles}
+	if len(req.Manifest.Files) > maxAgentCreateWorkspaceFiles {
+		tooManyErr := &tooManyFilesError{field: "manifest.files", count: len(req.Manifest.Files), limit: maxAgentCreateWorkspaceFiles}
 		ValidationError(w, tooManyErr.Error(), map[string]interface{}{
 			"field": tooManyErr.field,
 			"max":   tooManyErr.limit,

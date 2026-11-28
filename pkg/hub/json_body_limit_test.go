@@ -877,18 +877,20 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 	for i := range overManifestFiles {
 		overManifestFiles[i] = store.TemplateFile{Path: fmt.Sprintf("f%d", i), Size: 1, Hash: sampleHash, Mode: "0644"}
 	}
-	overTransferFiles := make([]transfer.FileInfo, overLimit)
-	for i := range overTransferFiles {
-		overTransferFiles[i] = transfer.FileInfo{Path: fmt.Sprintf("f%d", i), Size: 1, Hash: sampleHash}
-	}
 
-	assertTooManyFiles := func(t *testing.T, rec *httptest.ResponseRecorder) {
+	assertTooManyFiles := func(t *testing.T, rec *httptest.ResponseRecorder, wantField string, wantMax int) {
 		t.Helper()
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "expected 400 validation_error, got %d: %s", rec.Code, rec.Body.String())
 		var errResp ErrorResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), "body: %s", rec.Body.String())
 		assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
 		assert.Contains(t, strings.ToLower(errResp.Error.Message), "too many files")
+		if wantField != "" {
+			assert.Equal(t, wantField, errResp.Error.Details["field"])
+		}
+		if wantMax > 0 {
+			assert.Equal(t, float64(wantMax), errResp.Error.Details["max"])
+		}
 	}
 
 	doDevRequest := func(t *testing.T, srv *Server, method, path string, payload []byte) *httptest.ResponseRecorder {
@@ -931,14 +933,14 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 			require.NoError(t, err)
 			require.Less(t, len(body), maxFileManifestBodySize)
 			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
 		})
 
 		t.Run("handleTemplateUpload", func(t *testing.T) {
 			body, err := json.Marshal(UploadRequest{Files: overUploadFiles})
 			require.NoError(t, err)
 			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/upload", body)
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
 		})
 
 		t.Run("handleTemplateFinalize", func(t *testing.T) {
@@ -947,7 +949,7 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 			})
 			require.NoError(t, err)
 			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/finalize", body)
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "manifest.files", importMaxTreeFiles)
 		})
 	})
 
@@ -963,7 +965,7 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 		})
 		require.NoError(t, err)
 		rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/users/me/templates", bytes.NewReader(body))
-		assertTooManyFiles(t, rec)
+		assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
 		assert.Zero(t, stor.signCalls)
 	})
 
@@ -980,14 +982,14 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 			})
 			require.NoError(t, err)
 			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", body)
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
 		})
 
 		t.Run("handleHarnessConfigUpload", func(t *testing.T) {
 			body, err := json.Marshal(UploadRequest{Files: overUploadFiles})
 			require.NoError(t, err)
 			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/upload", body)
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
 		})
 
 		t.Run("handleHarnessConfigFinalize", func(t *testing.T) {
@@ -996,7 +998,51 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 			})
 			require.NoError(t, err)
 			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "manifest.files", importMaxTreeFiles)
+		})
+	})
+
+	t.Run("skills", func(t *testing.T) {
+		srv, s, _ := testTemplateFileServer(t)
+		stor := &panicOnSignStorage{contentMockStorage: newContentMockStorage("test-bucket")}
+		srv.SetStorage(stor)
+		skill := &store.Skill{
+			ID:          api.NewUUID(),
+			Name:        "over-limit-skill",
+			Slug:        "over-limit-skill",
+			Scope:       store.SkillScopeGlobal,
+			Status:      "active",
+			StoragePath: "skills/global/over-limit-skill",
+			Created:     time.Now(),
+			Updated:     time.Now(),
+		}
+		require.NoError(t, s.CreateSkill(context.Background(), skill))
+
+		// Use compact JSON objects so 20,001 entries fit well under the 1 MiB
+		// skill body cap and exercise the importMaxTreeFiles (20,000) check.
+		compactArray := "[" + strings.Repeat("{},", overLimit-1) + "{}]"
+
+		t.Run("publishSkillVersion", func(t *testing.T) {
+			body := []byte(`{"version":"1.0.0","files":` + compactArray + `}`)
+			require.Less(t, len(body), int(apierr.DefaultMaxJSONBodyBytes))
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/skills/"+skill.ID+"/versions", body)
+			assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
+			assert.Zero(t, stor.signCalls)
+		})
+
+		t.Run("handleSkillUpload", func(t *testing.T) {
+			body := []byte(`{"version":"1.0.0","files":` + compactArray + `}`)
+			require.Less(t, len(body), int(apierr.DefaultMaxJSONBodyBytes))
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/skills/"+skill.ID+"/upload", body)
+			assertTooManyFiles(t, rec, "files", importMaxTreeFiles)
+			assert.Zero(t, stor.signCalls)
+		})
+
+		t.Run("handleSkillFinalize", func(t *testing.T) {
+			body := []byte(`{"version":"1.0.0","manifest":{"files":` + compactArray + `}}`)
+			require.Less(t, len(body), int(apierr.DefaultMaxJSONBodyBytes))
+			rec := doDevRequest(t, srv, http.MethodPost, "/api/v1/skills/"+skill.ID+"/finalize", body)
+			assertTooManyFiles(t, rec, "manifest.files", importMaxTreeFiles)
 		})
 	})
 
@@ -1005,13 +1051,56 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 		stor := &panicOnSignStorage{contentMockStorage: newContentMockStorage("test-bucket")}
 		srv.SetStorage(stor)
 
-		syncToBody, err := json.Marshal(SyncToRequest{Files: overTransferFiles})
-		require.NoError(t, err)
+		// Regression: a ~25,000-entry realistic workspace manifest (above
+		// importMaxTreeFiles=20,000, below 16 MiB and maxAgentCreateWorkspaceFiles=175,000)
+		// must pass the file-count check on both sync-to and sync-to/finalize.
+		const mediumWorkspaceCount = 25_000
+		mediumWorkspaceFiles := make([]transfer.FileInfo, mediumWorkspaceCount)
+		for i := range mediumWorkspaceFiles {
+			mediumWorkspaceFiles[i] = transfer.FileInfo{
+				Path: fmt.Sprintf("node_modules/pkg-%03d/file-%05d.js", i/100, i),
+				Size: 128,
+				Hash: sampleHash,
+			}
+		}
+
+		t.Run("sync-to accepts 25k-entry realistic workspace manifest", func(t *testing.T) {
+			body, err := json.Marshal(SyncToRequest{Files: mediumWorkspaceFiles})
+			require.NoError(t, err)
+			require.Greater(t, len(body), int(apierr.DefaultMaxJSONBodyBytes))
+			require.Less(t, len(body), maxWorkspaceSyncManifestBodySize)
+
+			stor.signCalls = 0
+			rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to", bytes.NewReader(body))
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, mediumWorkspaceCount, stor.signCalls)
+		})
+
+		t.Run("sync-to finalize accepts 25k-entry realistic workspace manifest past file-count check", func(t *testing.T) {
+			body, err := json.Marshal(SyncToFinalizeRequest{
+				Manifest: &transfer.Manifest{Version: "1.0", Files: mediumWorkspaceFiles},
+			})
+			require.NoError(t, err)
+			require.Greater(t, len(body), int(apierr.DefaultMaxJSONBodyBytes))
+			require.Less(t, len(body), maxWorkspaceSyncManifestBodySize)
+
+			rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to/finalize", bytes.NewReader(body))
+			assert.NotContains(t, strings.ToLower(rec.Body.String()), "too many files", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "File not found in storage:", "25k manifest should pass file-count check and reach storage verification")
+		})
+
+		// Over-limit: maxAgentCreateWorkspaceFiles + 1 (175,001) entries must be
+		// rejected with the typed tooManyFilesError before any signing. Use compact
+		// entries so the JSON body fits under the 16 MiB body cap.
+		const overWorkspaceLimit = maxAgentCreateWorkspaceFiles + 1
+		overWorkspaceArray := "[" + strings.Repeat(`{"path":"a"},`, overWorkspaceLimit-1) + `{"path":"a"}]`
+		syncToBody := []byte(`{"files":` + overWorkspaceArray + `}`)
 		require.Less(t, len(syncToBody), maxWorkspaceSyncManifestBodySize)
 
-		t.Run("sync-to rejects over limit for authorized owner", func(t *testing.T) {
+		t.Run("sync-to rejects over 175k limit for authorized owner", func(t *testing.T) {
+			stor.signCalls = 0
 			rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to", bytes.NewReader(syncToBody))
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "files", maxAgentCreateWorkspaceFiles)
 			assert.Zero(t, stor.signCalls)
 		})
 
@@ -1020,15 +1109,12 @@ func TestJSONBodyLimits_UploadAndManifestFileCountCap(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		})
 
-		finalizeBody, err := json.Marshal(SyncToFinalizeRequest{
-			Manifest: &transfer.Manifest{Files: overTransferFiles},
-		})
-		require.NoError(t, err)
+		finalizeBody := []byte(`{"manifest":{"version":"1.0","files":` + overWorkspaceArray + `}}`)
 		require.Less(t, len(finalizeBody), maxWorkspaceSyncManifestBodySize)
 
-		t.Run("sync-to finalize rejects over limit for authorized owner", func(t *testing.T) {
+		t.Run("sync-to finalize rejects over 175k limit for authorized owner", func(t *testing.T) {
 			rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+runningAgent.ID+"/workspace/sync-to/finalize", bytes.NewReader(finalizeBody))
-			assertTooManyFiles(t, rec)
+			assertTooManyFiles(t, rec, "manifest.files", maxAgentCreateWorkspaceFiles)
 		})
 
 		t.Run("sync-to finalize authorizes outsider before file-count check", func(t *testing.T) {
