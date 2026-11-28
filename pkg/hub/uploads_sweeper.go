@@ -153,9 +153,34 @@ func (s *Server) cleanupUploadSessionStaging(ctx context.Context, sess *store.Up
 		defer func() { _ = root.Close() }()
 		return newFileUploadSink(root).Cleanup(ctx, sess)
 
+	case store.UploadTargetSharedDir:
+		project, err := s.store.GetProject(ctx, sess.ScopeProjectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		resolution, err := s.resolveSharedDirPath(ctx, project, sess.ScopeSharedDir)
+		if err != nil {
+			var nfsErr *sharedDirStorageResolveError
+			if errors.As(err, &nfsErr) {
+				return err
+			}
+			return nil
+		}
+		root, err := s.openSharedDirRoot(resolution, false)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		defer func() { _ = root.Close() }()
+		return newFileUploadSink(root).Cleanup(ctx, sess)
+
 	default:
-		// Phase 2 (UploadTargetChatAttachment / ObjectSink) and Phase 3
-		// (UploadTargetSharedDir / FileSink) plug in here.
+		// Phase 2 (UploadTargetChatAttachment / ObjectSink) plugs in here.
 		return nil
 	}
 }

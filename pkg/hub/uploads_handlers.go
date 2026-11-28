@@ -254,6 +254,129 @@ func (s *Server) handleProjectWorkspaceUploads(w http.ResponseWriter, r *http.Re
 	}
 }
 
+// handleProjectSharedDirUploads dispatches resumable chunked upload requests
+// under /api/v1/projects/{pid}/shared-dirs/{name}/uploads (ptone/scion#8654 §3.3).
+//
+// Route authorization (handleProjectSharedDirRoutes) has already run before
+// this function is called.
+func (s *Server) handleProjectSharedDirUploads(w http.ResponseWriter, r *http.Request, project *store.Project, dirName, subPath string) {
+	ctx := r.Context()
+
+	// Experiment gate (§3.5, §3.12): 404 experiment_disabled when off.
+	if !s.experimentEnabled(experiments.LargeUploads) {
+		writeError(w, http.StatusNotFound, ErrCodeExperimentDisabled,
+			"experiment_disabled: "+experiments.LargeUploads+" is off; resumable large uploads are not enabled on this hub", nil)
+		return
+	}
+
+	// User principals only in v1 (§6 OQ-5).
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil || GetAgentIdentityFromContext(ctx) != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Resumable uploads require a user principal", nil)
+		return
+	}
+
+	// Parse subpath:
+	//   ""                 → POST start
+	//   "{sid}"            → PUT chunk, GET status, DELETE abort
+	//   "{sid}/complete"   → POST complete
+	var sid string
+	var action string
+	if subPath != "" {
+		parts := strings.Split(subPath, "/")
+		switch len(parts) {
+		case 1:
+			sid = parts[0]
+		case 2:
+			if parts[1] != "complete" {
+				NotFound(w, "Upload resource")
+				return
+			}
+			sid = parts[0]
+			action = "complete"
+		default:
+			NotFound(w, "Upload resource")
+			return
+		}
+		if sid == "" {
+			NotFound(w, "Upload session")
+			return
+		}
+	}
+
+	// Verify the shared dir is declared on this project.
+	found := false
+	for _, d := range project.SharedDirs {
+		if d.Name == dirName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		NotFound(w, "Shared directory")
+		return
+	}
+
+	// Resolve shared dir and run write gate on every call (§3.5, §7 P3).
+	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, dirName)
+	if resolveErr != nil {
+		var nfsErr *sharedDirStorageResolveError
+		if errors.As(resolveErr, &nfsErr) {
+			slog.ErrorContext(ctx, "failed to resolve shared directory path for upload",
+				"project_id", project.ID, "dir", dirName, "error", resolveErr)
+			Conflict(w, sharedDirStorageUnavailableMessage)
+			return
+		}
+		Conflict(w, resolveErr.Error())
+		return
+	}
+	gate := s.sharedDirWriteGate(resolution)
+	isWrite := r.Method != http.MethodGet
+	if isWrite && gate.refuse(w) {
+		return
+	}
+
+	createIfMissing := sid == "" && r.Method == http.MethodPost
+	root, err := s.openSharedDirRoot(resolution, createIfMissing)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			NotFound(w, "Upload session")
+			return
+		}
+		slog.ErrorContext(ctx, "failed to open shared directory for upload",
+			"project_id", project.ID, "dir", dirName, "error", err)
+		InternalError(w)
+		return
+	}
+	defer func() { _ = root.Close() }()
+
+	scope := uploadTargetScope{
+		kind:      store.UploadTargetSharedDir,
+		projectID: project.ID,
+		sharedDir: dirName,
+	}
+	sink := newFileUploadSink(root)
+
+	switch {
+	case sid == "" && r.Method == http.MethodPost:
+		s.handleWorkspaceUploadStart(w, r, userIdent, scope, sink)
+	case sid == "":
+		MethodNotAllowed(w, http.MethodPost)
+	case action == "complete" && r.Method == http.MethodPost:
+		s.handleUploadComplete(w, r, userIdent, scope, sink, sid)
+	case action == "complete":
+		MethodNotAllowed(w, http.MethodPost)
+	case r.Method == http.MethodPut:
+		s.handleUploadChunk(w, r, userIdent, scope, sink, sid)
+	case r.Method == http.MethodGet:
+		s.handleUploadStatus(w, r, userIdent, scope, sid)
+	case r.Method == http.MethodDelete:
+		s.handleUploadAbort(w, r, userIdent, scope, sink, sid)
+	default:
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+	}
+}
+
 func (s *Server) handleWorkspaceUploadStart(
 	w http.ResponseWriter,
 	r *http.Request,

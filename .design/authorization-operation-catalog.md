@@ -5295,6 +5295,7 @@
 | http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/archive` |
 | http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/files` |
 | http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
+| http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
@@ -5331,6 +5332,10 @@
 | http_route | PUT | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}` |
+| http_route | POST | `/api/v1/projects/{id}/shared-dirs/{name}/uploads` |
+| http_route | PUT | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}` |
+| http_route | POST | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}/complete` |
+| http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}/uploads/{sid}` |
 
 **Principals:** `user`, `agent`
 
