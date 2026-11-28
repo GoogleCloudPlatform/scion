@@ -34,11 +34,12 @@ import (
 // latency, call counting, request metadata capture, and typed provenance for
 // chain guarantee tests (§3.7).
 type countingFakeIODialect struct {
-	name        string
-	performsIO  bool
-	maxEvalTime time.Duration
-	traceFields []ruleengine.TraceField
-	reasons     []string
+	name         string
+	performsIO   bool
+	maxEvalTime  time.Duration
+	traceFields  []ruleengine.TraceField
+	reasons      []string
+	copyDetailFn func(any) any
 
 	mu       sync.Mutex
 	calls    atomic.Int64
@@ -91,13 +92,17 @@ func copyFakeDetail(v any) any {
 }
 
 func (d *countingFakeIODialect) Declares() ruleengine.Capabilities {
+	cd := d.copyDetailFn
+	if cd == nil {
+		cd = copyFakeDetail
+	}
 	return ruleengine.Capabilities{
 		PerformsIO:   d.performsIO,
 		MaxEvalTime:  d.maxEvalTime,
 		ResultKinds:  []ruleengine.Kind{ruleengine.KindFilter, ruleengine.KindJudgment},
 		TraceReasons: d.reasons,
 		TraceFields:  d.traceFields,
-		CopyDetail:   copyFakeDetail,
+		CopyDetail:   cd,
 	}
 }
 

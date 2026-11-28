@@ -73,12 +73,28 @@ type EnvironmentRef struct {
 	ResultType   celengine.Type
 }
 
-// Input supplies evaluation data to a Dialect. Activation carries variable
-// bindings for expression dialects such as CEL; Payload carries optional typed
-// dialect input alongside Activation (ignored by CELDialect). AdmittedInputKey
-// optionally supplies a consumer-computed fingerprint of the admitted input
-// fields (excluding per-member provenance such as RuleID/Revision) for grouped
-// evaluation safety-floor validation.
+// Input supplies evaluation data to a Dialect.
+//
+// Activation carries JSON-shaped variable bindings for expression dialects such
+// as CEL and is defensively deep-copied by NewChainRun.
+//
+// Payload carries optional typed dialect input alongside Activation (ignored by
+// CELDialect). Consumers MUST treat Payload as immutable after NewChainRun
+// (NewChainRun deep-copies JSON-shaped Payload values, but consumer struct
+// pointers/values are held as supplied). When AdmittedInputKey is empty, the
+// grouped-evaluation safety floor hashes Payload via encoding/json, so Payload
+// MUST be JSON-complete (no unexported or json:"-" fields that affect
+// evaluation or authorization).
+//
+// AdmittedInputKey optionally supplies a consumer-computed fingerprint of the
+// admitted input fields (excluding per-member provenance such as RuleID or
+// Revision) for grouped-evaluation safety-floor validation. The consumer key
+// MUST cover every authorization-relevant field the IO dialect reads (for
+// example ProjectID, which selects project allowlists and project-scoped
+// secrets). When an Enricher supplies non-empty additions (chain.* or reserved
+// names) for a step, the engine automatically mixes a canonical hash of those
+// additions into the keyed admitted-input hash and fails closed
+// (incompatible_group) if the additions cannot be canonically hashed.
 type Input struct {
 	Activation       map[string]any
 	Payload          any

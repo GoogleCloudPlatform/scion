@@ -154,8 +154,15 @@ type StepOutcome struct {
 	GroupID      string          // "" when evaluated alone; identical for all members of one group execution
 	Domain       ChainDomainName // "inline" | "io"
 	Provenance   map[string]any  // validated typed operational metadata
-	RawTrace     string          // optional legacy Decision.Trace (not serialized by ChainTrace)
-	Err          error           // underlying error for non-pass/fail steps (not serialized by ChainTrace)
+	// Judgment carries an independent deep copy (via Capabilities.CopyDetail) of
+	// the current step's judgment when Kind == KindJudgment && Class == StepClassPass,
+	// and is nil otherwise. It is populated on the outcome passed to StepPolicy,
+	// returned by Next, and present in Result().Steps / Result().Deciding so
+	// StepPolicy can inspect the current step's judgment without re-entering the
+	// ChainRun. Judgment is never serialized by EncodeChainTrace.
+	Judgment *Judgment
+	RawTrace string // optional legacy Decision.Trace (not serialized by ChainTrace)
+	Err      error  // underlying error for non-pass/fail steps (not serialized by ChainTrace)
 }
 
 // Control is the consumer's routing decision returned by StepPolicy.
@@ -167,6 +174,10 @@ type Control struct {
 
 // StepPolicy decides whether a ChainRun stops or continues after a StepOutcome.
 // A nil StepPolicy defaults to DefaultANDPolicy.
+//
+// For a passing KindJudgment step, out.Judgment carries an independent deep
+// copy of the current step's judgment so StepPolicy can inspect it without
+// calling back into the run.
 //
 // StepPolicy runs while the ChainRun's mutex is held: it MUST NOT call back
 // into the same ChainRun (which would self-deadlock), and it must be pure and
@@ -199,6 +210,10 @@ type JudgmentView interface {
 // Enricher supplies per-step additions under the "chain" namespace (and any
 // consumer-declared reserved judgment-carry names, A1 §5). It cannot touch,
 // shadow, or replace base input bindings.
+//
+// Enricher.Additions runs while the ChainRun's mutex is held: it MUST NOT call
+// back into the same ChainRun (which would self-deadlock), and it must be pure
+// and fast.
 type Enricher interface {
 	Additions(step int, j JudgmentView) (map[string]any, error)
 }
@@ -525,9 +540,16 @@ func (e *Engine) NewChainRun(
 	if err != nil {
 		return nil, fmt.Errorf("ruleengine: base activation must be JSON-shaped: %w", err)
 	}
+	// SEC-S1-L1: cheaply deep-copy JSON-shaped Payload values so post-construction
+	// caller mutations cannot alias into the run; consumer struct payloads are
+	// kept as supplied (documented immutable and JSON-complete on Input.Payload).
+	payloadCopy := base.Payload
+	if cp, cpErr := deepCopyActivationValue(base.Payload); cpErr == nil {
+		payloadCopy = cp
+	}
 	baseCopy := Input{
 		Activation:       actCopy,
-		Payload:          base.Payload,
+		Payload:          payloadCopy,
 		AdmittedInputKey: base.AdmittedInputKey,
 	}
 	domainsCopy := ChainDomains{
@@ -631,7 +653,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	caps := dial.Declares()
 
 	// Build step input = immutable base ⊎ validated Enricher.Additions(step, view).
-	stepInput, enrichErr := r.resolveStepInputLocked(spec.elem.Index)
+	stepInput, stepAdditions, enrichErr := r.resolveStepInputLocked(spec.elem.Index)
 	if enrichErr != nil {
 		out := StepOutcome{
 			Index:   spec.elem.Index,
@@ -657,7 +679,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	// I/O element: park and yield PendingStep with single-use token and NO deadline.
 	if caps.PerformsIO {
 		r.tokenSeq++
-		inHash, hashErr := computeAdmittedInputHash(stepInput)
+		inHash, hashErr := computeAdmittedInputHash(stepInput, stepAdditions)
 		p := &PendingStep{
 			run:                r,
 			elemPos:            r.nextPos,
@@ -686,7 +708,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	out, detail := r.engine.evaluateInlineElement(inlineDomain, spec, caps, stepInput)
 
 	r.mu.Lock()
-	ctrl := r.policy(cloneStepOutcome(out))
+	ctrl := r.policy(cloneStepOutcomeWithJudgment(out, detail, caps.CopyDetail))
 	// Engine-owned terminality (§3.2): budget and canceled always end the run.
 	if out.Class == StepClassBudget || out.Class == StepClassCanceled {
 		ctrl.Stop = true
@@ -701,7 +723,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	}
 	r.mu.Unlock()
 
-	cp := cloneStepOutcome(out)
+	cp := cloneStepOutcomeWithJudgment(out, detail, caps.CopyDetail)
 	return &cp, nil, done, nil
 }
 
@@ -1311,7 +1333,7 @@ func (r *ChainRun) Resume() (Control, error) {
 	r.pendingDetail = nil
 	r.pendingCopier = nil
 
-	ctrl := r.policy(cloneStepOutcome(out))
+	ctrl := r.policy(cloneStepOutcomeWithJudgment(out, detail, copier))
 	if out.Class == StepClassBudget || out.Class == StepClassCanceled || out.Reason == ReasonInvalidCompletion {
 		ctrl.Stop = true
 	}
@@ -1358,7 +1380,7 @@ func (r *ChainRun) Result() (ChainResult, ChainTrace) {
 
 	stepsCopy := make([]StepOutcome, len(r.steps))
 	for i, s := range r.steps {
-		stepsCopy[i] = cloneStepOutcome(s)
+		stepsCopy[i] = r.cloneStepOutcomeLocked(s)
 	}
 	traceElems := make([]ChainTraceElement, len(r.trace))
 	for i, te := range r.trace {
@@ -1378,7 +1400,7 @@ func (r *ChainRun) Result() (ChainResult, ChainTrace) {
 		Through:    len(r.steps),
 		Stopped:    r.stopped,
 		Verdict:    r.verdict,
-		Deciding:   cloneStepOutcome(r.deciding),
+		Deciding:   r.cloneStepOutcomeLocked(r.deciding),
 		Steps:      stepsCopy,
 		Unexecuted: append([]int(nil), unexec...),
 	}
@@ -1493,7 +1515,8 @@ func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any, c
 			copier: copier,
 		}
 	}
-	r.steps = append(r.steps, cloneStepOutcome(out))
+	storedOut := cloneStepOutcomeWithJudgment(out, detail, copier)
+	r.steps = append(r.steps, storedOut)
 	r.trace = append(r.trace, ChainTraceElement{
 		Index:      out.Index,
 		Dialect:    out.Dialect,
@@ -1506,7 +1529,7 @@ func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any, c
 		Domain:     out.Domain,
 		Provenance: cloneProvenanceMap(out.Provenance),
 	})
-	r.deciding = cloneStepOutcome(out)
+	r.deciding = cloneStepOutcomeWithJudgment(out, detail, copier)
 	if ctrl.Stop {
 		r.stopped = true
 		r.verdict = ctrl.Verdict
@@ -1565,7 +1588,7 @@ func copyJudgmentDetail(detail any, copier func(any) any) any {
 	return copier(detail)
 }
 
-func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
+func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, map[string]any, error) {
 	// O-5: base Activation was defensively copied once at construction and is
 	// shared read-only across steps; only allocate a fresh top-level map when
 	// the Enricher supplies additions.
@@ -1574,34 +1597,35 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
 			Activation:       r.base.Activation,
 			Payload:          r.base.Payload,
 			AdmittedInputKey: r.base.AdmittedInputKey,
-		}, nil
+		}, nil, nil
 	}
 
 	view := r.buildJudgmentViewLocked(stepIndex)
 	additions, err := r.enricher.Additions(stepIndex, view)
 	if err != nil {
-		return Input{}, fmt.Errorf("ruleengine: enricher error: %w", err)
+		return Input{}, nil, fmt.Errorf("ruleengine: enricher error: %w", err)
 	}
 	if len(additions) == 0 {
 		return Input{
 			Activation:       r.base.Activation,
 			Payload:          r.base.Payload,
 			AdmittedInputKey: r.base.AdmittedInputKey,
-		}, nil
+		}, nil, nil
 	}
 
 	act := make(map[string]any, len(r.base.Activation)+len(additions))
 	maps.Copy(act, r.base.Activation)
+	resolvedAdditions := make(map[string]any, len(additions))
 
 	var chainNS map[string]any
 	for k, v := range additions {
 		if k == "chain" {
 			if _, exists := r.base.Activation["chain"]; exists {
-				return Input{}, errors.New("ruleengine: enricher collides with base key \"chain\"")
+				return Input{}, nil, errors.New("ruleengine: enricher collides with base key \"chain\"")
 			}
 			m, ok := v.(map[string]any)
 			if !ok {
-				return Input{}, fmt.Errorf("ruleengine: enricher \"chain\" value must be map[string]any, got %T", v)
+				return Input{}, nil, fmt.Errorf("ruleengine: enricher \"chain\" value must be map[string]any, got %T", v)
 			}
 			if chainNS == nil {
 				chainNS = make(map[string]any, len(m))
@@ -1613,10 +1637,10 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
 		}
 		if sub, isChainPrefixed := strings.CutPrefix(k, "chain."); isChainPrefixed {
 			if sub == "" {
-				return Input{}, errors.New("ruleengine: empty key under chain namespace")
+				return Input{}, nil, errors.New("ruleengine: empty key under chain namespace")
 			}
 			if _, exists := r.base.Activation["chain"]; exists {
-				return Input{}, errors.New("ruleengine: enricher collides with base key \"chain\"")
+				return Input{}, nil, errors.New("ruleengine: enricher collides with base key \"chain\"")
 			}
 			if chainNS == nil {
 				chainNS = make(map[string]any)
@@ -1626,24 +1650,27 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {
 		}
 		if _, isReserved := r.reserved[k]; isReserved {
 			if _, exists := r.base.Activation[k]; exists {
-				return Input{}, fmt.Errorf("ruleengine: enricher collides with base key %q", k)
+				return Input{}, nil, fmt.Errorf("ruleengine: enricher collides with base key %q", k)
 			}
 			if err := validateReservedAdditionType(k, v); err != nil {
-				return Input{}, err
+				return Input{}, nil, err
 			}
-			act[k] = deepCopyValue(v)
+			copied := deepCopyValue(v)
+			act[k] = copied
+			resolvedAdditions[k] = copied
 			continue
 		}
-		return Input{}, fmt.Errorf("ruleengine: enricher key %q is outside chain.* and not a declared reserved name", k)
+		return Input{}, nil, fmt.Errorf("ruleengine: enricher key %q is outside chain.* and not a declared reserved name", k)
 	}
 	if chainNS != nil {
 		act["chain"] = chainNS
+		resolvedAdditions["chain"] = chainNS
 	}
 	return Input{
 		Activation:       act,
 		Payload:          r.base.Payload,
 		AdmittedInputKey: r.base.AdmittedInputKey,
-	}, nil
+	}, resolvedAdditions, nil
 }
 
 // validateReservedAdditionType enforces Amendment A1 §5 D4 type conformance on
@@ -1818,6 +1845,36 @@ func cloneStepOutcome(out StepOutcome) StepOutcome {
 	return out
 }
 
+func cloneStepOutcomeWithJudgment(out StepOutcome, detail any, copier func(any) any) StepOutcome {
+	out.Provenance = cloneProvenanceMap(out.Provenance)
+	if out.Kind == KindJudgment && out.Class == StepClassPass {
+		out.Judgment = &Judgment{
+			Step:    out.Index,
+			Dialect: out.Dialect,
+			Detail:  copyJudgmentDetail(detail, copier),
+		}
+	} else {
+		out.Judgment = nil
+	}
+	return out
+}
+
+func (r *ChainRun) cloneStepOutcomeLocked(out StepOutcome) StepOutcome {
+	out.Provenance = cloneProvenanceMap(out.Provenance)
+	if out.Judgment != nil {
+		var copier func(any) any
+		if sj, ok := r.judgments[out.Index]; ok {
+			copier = sj.copier
+		}
+		out.Judgment = &Judgment{
+			Step:    out.Judgment.Step,
+			Dialect: out.Judgment.Dialect,
+			Detail:  copyJudgmentDetail(out.Judgment.Detail, copier),
+		}
+	}
+	return out
+}
+
 // sameCompiledSemanticIdentity implements the R-1 fail-closed safety floor for
 // grouped evaluations: consumer, dialect, and kind must match, and either both
 // handles declare the same non-empty ProgramID or (with no declared ProgramID)
@@ -1838,12 +1895,23 @@ func sameCompiledSemanticIdentity(a, b Compiled) bool {
 }
 
 // computeAdmittedInputHash implements the R-1 fail-closed admitted-input hash
-// (O-3: uses Input.AdmittedInputKey when present; otherwise JSON-marshals
+// (O-3: uses Input.AdmittedInputKey when present, mixing in a canonical hash of
+// any non-empty Enricher additions per SEC-S1-M1; otherwise JSON-marshals
 // Activation and Payload and fails closed on any marshal error).
-func computeAdmittedInputHash(in Input) (string, error) {
+func computeAdmittedInputHash(in Input, additions map[string]any) (string, error) {
 	if in.AdmittedInputKey != "" {
-		h := sha256.Sum256([]byte("key:" + in.AdmittedInputKey))
-		return hex.EncodeToString(h[:]), nil
+		if len(additions) == 0 {
+			h := sha256.Sum256([]byte("key:" + in.AdmittedInputKey))
+			return hex.EncodeToString(h[:]), nil
+		}
+		rawAdd, err := json.Marshal(additions)
+		if err != nil {
+			return "", fmt.Errorf("ruleengine: failed to marshal enricher additions for admitted-input hash: %w", err)
+		}
+		h := sha256.New()
+		_, _ = fmt.Fprintf(h, "key-add:%d:%s|add:", len(in.AdmittedInputKey), in.AdmittedInputKey)
+		h.Write(rawAdd)
+		return hex.EncodeToString(h.Sum(nil)), nil
 	}
 	h := sha256.New()
 	if in.Activation != nil {
