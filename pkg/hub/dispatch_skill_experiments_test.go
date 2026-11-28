@@ -78,6 +78,8 @@ func TestDispatchExperimentNames_CoverPlatformSkillGates(t *testing.T) {
 		experiments.Artifacts:       "the scion-artifacts skill",
 		experiments.MessagePolicies: "the scion-messaging message policy guidance",
 		experiments.AgentSecrets:    "the scion-messaging and scion-cli-operations agent secrets guidance",
+		experiments.Triggers:        "the scion-triggers skill",
+		experiments.GitHubTriggers:  "the scion-triggers GitHub App triggers section",
 	} {
 		if _, ok := refs[id]; !ok {
 			t.Errorf("no platform skill gates on %s; %s is expected to", id, owner)
@@ -85,13 +87,20 @@ func TestDispatchExperimentNames_CoverPlatformSkillGates(t *testing.T) {
 	}
 }
 
-// web.decisions, hub.artifacts, hub.message_policies and hub.agent_secrets are
-// dispatched (for the scion-messaging, scion-cli-operations and scion-artifacts
-// skill gates). hub.artifacts is on by default (ptone/scion#9486); the other
-// three remain off by default so a fresh hub only dispatches approved
-// default-on experiments.
+// web.decisions, hub.artifacts, hub.message_policies, hub.agent_secrets,
+// hub.triggers and hub.github_triggers are dispatched (for the scion-messaging,
+// scion-cli-operations, scion-artifacts and scion-triggers skill gates).
+// hub.artifacts is on by default (ptone/scion#9486); the others remain off by
+// default so a fresh hub only dispatches approved default-on experiments.
 func TestSkillGateExperiments_Dispatched(t *testing.T) {
-	for _, id := range []string{experiments.Decisions, experiments.Artifacts, experiments.MessagePolicies, experiments.AgentSecrets} {
+	for _, id := range []string{
+		experiments.Decisions,
+		experiments.Artifacts,
+		experiments.MessagePolicies,
+		experiments.AgentSecrets,
+		experiments.Triggers,
+		experiments.GitHubTriggers,
+	} {
 		exp, ok := experiments.Default().Lookup(id)
 		if !ok {
 			t.Fatalf("%s is not registered", id)
