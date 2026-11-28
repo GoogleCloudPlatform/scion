@@ -234,6 +234,12 @@ type ResolvedSkill struct {
 	// the resolver used, so a private repo read with a named credential is
 	// downloaded with that credential rather than the default one.
 	githubCredentialRef string
+
+	// downloadToken is the short-lived credential the Hub used to resolve a
+	// gh:// skill (ptone/scion#5028). Unexported so it is never marshaled by
+	// encoding/json into any on-disk cache or resolution record, and sent only
+	// to GitHub hosts by downloadSkillFile.
+	downloadToken string
 }
 
 // DestName returns the directory name to use when installing this skill.
@@ -332,16 +338,15 @@ func ResolveUserIDFromContext(ctx context.Context) string {
 
 type gitHubTokenKey struct{}
 
-// ContextWithGitHubToken returns a context carrying a GitHub token for the
-// install phase.
+// ContextWithGitHubToken returns a context carrying a fallback GitHub token
+// for the install phase.
 //
-// When the Hub resolves a gh:// skill it returns raw.githubusercontent.com
-// URLs but, deliberately, not the credential behind them — a Hub-minted App
-// token must not travel in an API response body or be persisted to the
-// broker's on-disk resolution cache. The broker therefore supplies its own
-// GITHUB_TOKEN here, which downloadSkillFile presents when fetching from
-// GitHub. Public repos need no token; private repos require one that can read
-// the repo in question.
+// When the Hub resolves a gh:// skill with a project credential, it returns
+// that credential on ResolvedSkill.DownloadToken so downloadSkillFile uses it
+// directly (ptone/scion#5028). When no resolving credential is present on the
+// skill (for example, an older Hub or an anonymous resolution), the broker's
+// default GITHUB_TOKEN carried here is used as a fallback when fetching from
+// GitHub hosts.
 func ContextWithGitHubToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, gitHubTokenKey{}, token)
 }
@@ -369,6 +374,7 @@ func ContextWithGitHubCredentialLookup(ctx context.Context, lookup GitHubCredent
 // has none.
 const (
 	gitHubCredSourceDefault  = "the GITHUB_TOKEN credential"
+	gitHubCredSourceHub      = "the credential that resolved the skill on the Hub"
 	gitHubCredSourceResolver = "the credential the GitHub skill resolver uses for this skill"
 )
 
@@ -417,11 +423,19 @@ func (c gitHubCredential) GoString() string { return c.String() }
 func (c gitHubCredential) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
 // gitHubDownloadToken returns the credential installOneSkill presents for
-// skill's raw downloads: the credential the GitHub resolver uses for the
-// skill's ref, when the skill came from that resolver without content and a
-// lookup is available, and otherwise the context's default GitHub token.
-// downloadSkillFile only ever sends either to GitHub hosts.
+// skill's raw downloads:
+//  1. The resolving credential carried from the Hub (skill.downloadToken),
+//     when the Hub resolved a gh:// skill with a project credential
+//     (ptone/scion#5028).
+//  2. The credential the local GitHub resolver uses for skill.githubCredentialRef,
+//     when the skill came from that resolver's on-disk cache without content.
+//  3. Otherwise the context's default GitHub token.
+//
+// downloadSkillFile only ever sends any of these to GitHub hosts.
 func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) gitHubCredential {
+	if skill.downloadToken != "" {
+		return gitHubCredential{token: skill.downloadToken, source: gitHubCredSourceHub}
+	}
 	if skill.githubCredentialRef != "" {
 		if tok := credentialLookupFromContext(ctx)(skill.githubCredentialRef); tok != "" {
 			return gitHubCredential{token: tok, source: credentialSourceLabel(ctx, skill.githubCredentialRef)}

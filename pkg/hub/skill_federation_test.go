@@ -387,3 +387,39 @@ func TestFederateResolve_CustomResolvePath(t *testing.T) {
 		t.Errorf("expected /custom/resolve, got %s", receivedPath)
 	}
 }
+
+func TestFederateResolve_StripsDownloadToken(t *testing.T) {
+	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
+		resp := ResolveSkillsResponse{
+			Resolved: []ResolvedSkillResponse{{
+				URI:             "skill://fed-reg/global/test@1.0",
+				Name:            "test",
+				ResolvedVersion: "1.0.0",
+				ContentHash:     "sha256:abc",
+				DownloadToken:   "ghs_untrusted_federated_token",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	srv, s := newFederationTestServer(t, mock)
+	registry := &store.SkillRegistry{
+		Name:       "fed-reg",
+		Endpoint:   mock.URL,
+		Type:       "hub",
+		TrustLevel: "trusted",
+		Status:     "active",
+	}
+	if err := s.CreateSkillRegistry(t.Context(), registry); err != nil {
+		t.Fatalf("failed to create registry: %v", err)
+	}
+
+	got, resolveErr := srv.federateResolve(t.Context(), "fed-reg", ResolveSkillRef{URI: "skill://fed-reg/global/test@1.0"})
+	if resolveErr != nil {
+		t.Fatalf("unexpected error: %s", resolveErr.Message)
+	}
+	if got.DownloadToken != "" {
+		t.Errorf("federated response must strip DownloadToken, got %q", got.DownloadToken)
+	}
+}
