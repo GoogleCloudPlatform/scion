@@ -1140,7 +1140,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	var req PublishVersionRequest
-	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1480,7 +1480,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		Version string              `json:"version"`
 		Files   []FileUploadRequest `json:"files"`
 	}
-	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1560,7 +1560,7 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	var req FinalizeSkillVersionRequest
-	if !decodeJSONWithLimit(w, r, maxFileManifestBodySize, fileManifestTooLargeMsg, &req) {
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 

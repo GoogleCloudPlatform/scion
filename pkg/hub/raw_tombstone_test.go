@@ -640,10 +640,10 @@ func TestBrokerInbound_RetiredRawLogsAreContentFree(t *testing.T) {
 	assert.NotContains(t, buf.String(), rawTombstoneSecret)
 }
 
-// TestRetiredRawIngress_BodyCap pins the 2 MiB bound on the buffered body
-// read of project broadcast and both plugin inbound routes: an oversized
-// body is refused with a generic 413 (no operation ID, not a keys outcome)
-// before any decode, sender synthesis or dispatch.
+// TestRetiredRawIngress_BodyCap pins the buffered body-read cap on project
+// broadcast (1 MiB default) and both plugin inbound routes (2 MiB): an
+// oversized body is refused with a generic 413 (no operation ID, not a keys
+// outcome) before any decode, sender synthesis or dispatch.
 func TestRetiredRawIngress_BodyCap(t *testing.T) {
 	oversizedMsg := strings.Repeat("x", rawTombstonePreAuthMaxBodyBytes)
 	cases := []struct {

@@ -64,14 +64,14 @@ import (
 // (pkg/runtimebroker), so a hub that never sends raw is not the only
 // defence on the broker side.
 
-// rawTombstonePreAuthMaxBodyBytes bounds the buffered body read of every
-// message ingress the tombstone probes: the two public /message routes,
-// project broadcast, and broker inbound/routed. The removed raw bridge
-// introduced this 2 MiB bound on the /message routes (contract §6.1/§6.4,
-// AK-52) because it buffered the body before authorization ran; the
-// tombstone buffers at the same point on every ingress, so every ingress
-// keeps a bound. A larger body gets a generic 413 that is not a keys
-// outcome.
+// rawTombstonePreAuthMaxBodyBytes bounds the buffered body read of the
+// message ingresses that keep a 2 MiB pre-decode cap: the two public /message
+// routes and broker inbound/routed. Project broadcast uses the 1 MiB default
+// (apierr.DefaultMaxJSONBodyBytes) instead. The removed raw bridge introduced
+// this 2 MiB bound on the /message routes (contract §6.1/§6.4, AK-52) because
+// it buffered the body before authorization ran; the tombstone buffers at the
+// same point on every ingress, so every ingress keeps a bound. A larger body
+// gets a generic 413 that is not a keys outcome.
 const rawTombstonePreAuthMaxBodyBytes = 2 * 1024 * 1024
 
 // rawIngress names the ingress a raw_input_removed rejection came from, for

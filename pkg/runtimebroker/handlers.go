@@ -5972,12 +5972,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 }
 
 // maxBrokerSendMessageBodyBytes bounds POST /api/v1/agents/{id}/message at
-// 8 MiB. The Hub accepts message bodies up to 2 MiB on its public ingress and
-// forwards a rebuilt JSON request in which the message text can appear three
-// times (structured_message.msg, nested structured_message.delivery_text, and
-// top-level delivery_text), producing ~6 MiB plus JSON framing for a near-limit
-// message. 8 MiB admits the largest valid Hub-forwarded message while still
-// bounding local/unauthenticated requests against unbounded reads.
+// 8 MiB. The Hub decodes user messages up to 1 MiB (which can expand after 3x
+// repetition and JSON HTML escaping); signed Hub-to-broker HTTP requests are
+// capped earlier at apiclient.MaxSignedRequestBodyBytes (2 MiB) by the HMAC
+// middleware, and control-channel frames are capped by the WebSocket frame
+// limit. This handler cap bounds unsigned/local requests against unbounded
+// reads while accommodating near-limit local/test deliveries.
 const maxBrokerSendMessageBodyBytes int64 = 8 << 20
 
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
