@@ -640,7 +640,7 @@ func (s *Server) evalPlannedSystemOnePolicies(
 	candidates := make([]messagepolicy.GroupCandidate, 0, limit)
 	for i := 0; i < limit; i++ {
 		pol := &policies[i]
-		if strings.TrimSpace(pol.SystemOneRule) == "" {
+		if pol.HasChain() || strings.TrimSpace(pol.SystemOneRule) == "" {
 			continue
 		}
 		if unmentionedUnavailable && policyUsesUnmentionedAgentSlugs(pol) {

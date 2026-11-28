@@ -179,6 +179,26 @@ func BuildChainEnricherMap(steps []ChainStepInput, j ruleengine.JudgmentView) ma
 	return chainMap
 }
 
+// NewPreRunChainProvenance constructs a minimal content-free
+// ChainDecisionProvenance for chain policy evaluations that terminate before
+// or without completing a ChainRun (e.g. chain_disabled, chain_unsupported,
+// body_truncated, facts_unavailable, pre-run budget_exhausted, compile_error).
+func NewPreRunChainProvenance(engineClass, reason string) *ChainDecisionProvenance {
+	handling := HandlingOutcomeFailed + reason
+	if reason == "" {
+		handling = HandlingOutcomeFailed + celengine.ReasonRuntime
+	}
+	return &ChainDecisionProvenance{
+		Version:          ChainVersion,
+		Source:           ChainSourceAuthored,
+		Through:          0,
+		EngineClass:      engineClass,
+		ConsumerHandling: handling,
+		Verdict:          ChainVerdictError,
+		Steps:            []ChainDecisionStepTrace{},
+	}
+}
+
 // EvaluateChain evaluates a P1 CEL-only ordered rule chain through
 // ruleengine.ChainRun using pre-compiled CEL elements (never ChainElementSource
 // in P1) and Amendment A1 domains (Inline = request ctx + send CEL tracker).
@@ -200,17 +220,22 @@ func (e *Evaluator) EvaluateChain(
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return ClassifyError(&ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err})
+		cls := ClassifyError(&ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err})
+		cls.ChainProvenance = NewPreRunChainProvenance(string(ruleengine.StepClassCanceled), cls.Reason)
+		return cls
 	}
 	if !IsP1ChainSupported(steps) {
 		return Classification{
-			Class:  ClassFailed,
-			Reason: ReasonChainUnsupported,
+			Class:           ClassFailed,
+			Reason:          ReasonChainUnsupported,
+			ChainProvenance: NewPreRunChainProvenance("", ReasonChainUnsupported),
 		}
 	}
 	cfg := applyEvalOpts(opts)
 	if cfg.tracker != nil && cfg.tracker.Exhausted() {
-		return ClassifyError(ruleengine.ErrBudgetExhausted)
+		cls := ClassifyError(ruleengine.ErrBudgetExhausted)
+		cls.ChainProvenance = NewPreRunChainProvenance(string(ruleengine.StepClassBudget), cls.Reason)
+		return cls
 	}
 
 	// Pre-compile every CEL step via CachedCompile before NewChainRun (brief P1
@@ -232,7 +257,9 @@ func (e *Evaluator) EvaluateChain(
 			cfg.tracker.Charge(time.Since(compileStart))
 		}
 		if err != nil {
-			return ClassifyError(err)
+			cls := ClassifyError(err)
+			cls.ChainProvenance = NewPreRunChainProvenance(string(ruleengine.StepClassFailed), cls.Reason)
+			return cls
 		}
 		elements[i] = ruleengine.ChainElement{
 			Index:    i,
@@ -298,17 +325,34 @@ func (e *Evaluator) EvaluateChain(
 		nil,
 	)
 	if err != nil {
-		return ClassifyError(err)
+		cls := ClassifyError(err)
+		cls.ChainProvenance = NewPreRunChainProvenance(string(ruleengine.StepClassFailed), cls.Reason)
+		return cls
 	}
 
+	return driveChainRun(run, steps, chainRejectReason, chainRejectRemediation)
+}
+
+// driveChainRun advances a P1 inline-only ChainRun to completion and fails
+// closed if any PendingStep is ever issued.
+func driveChainRun(
+	run *ruleengine.ChainRun,
+	steps []ChainStepInput,
+	chainRejectReason string,
+	chainRejectRemediation string,
+) Classification {
 	for {
 		_, pending, done, nextErr := run.Next()
 		if nextErr != nil {
-			return ClassifyError(nextErr)
+			cls := ClassifyError(nextErr)
+			cls.ChainProvenance = NewPreRunChainProvenance(string(ruleengine.StepClassFailed), cls.Reason)
+			return cls
 		}
 		if pending != nil {
 			// P1 invariant: CEL-only chains never issue a PendingStep.
-			return ClassifyError(errors.New("messagepolicy: unexpected pending step on P1 CEL-only chain"))
+			cls := ClassifyError(errors.New("messagepolicy: unexpected pending step on P1 CEL-only chain"))
+			cls.ChainProvenance = NewPreRunChainProvenance(string(ruleengine.StepClassFailed), cls.Reason)
+			return cls
 		}
 		if done {
 			break

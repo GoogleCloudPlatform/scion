@@ -359,7 +359,7 @@ type MessagePolicy struct {
 	Enabled           bool                `json:"enabled"`
 	Mode              string              `json:"mode"`
 	Scope             MessagePolicyScope  `json:"scope"`
-	ViolationRule     string              `json:"violation_rule"`
+	ViolationRule     string              `json:"violation_rule,omitempty"`
 	SystemOneRule     string              `json:"system_one_rule,omitempty"`
 	SystemOneRefs     []string            `json:"system_one_refs,omitempty"`
 	Chain             *MessagePolicyChain `json:"chain,omitempty"`

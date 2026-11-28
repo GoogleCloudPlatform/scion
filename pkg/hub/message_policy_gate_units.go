@@ -848,52 +848,60 @@ func (s *Server) evaluateChainPolicyOnUnit(
 	// D3: hub.message_policy_chains off -> failed/chain_disabled via on_failed*.
 	if !s.experimentEnabled(experiments.MessagePolicyChains) {
 		return messagepolicy.Classification{
-			Class:  messagepolicy.ClassFailed,
-			Reason: messagepolicy.ReasonChainDisabled,
+			Class:           messagepolicy.ClassFailed,
+			Reason:          messagepolicy.ReasonChainDisabled,
+			ChainProvenance: messagepolicy.NewPreRunChainProvenance("", messagepolicy.ReasonChainDisabled),
 		}, 0
 	}
 
-	// D4: P1 supports E1/E2 origin enforce CEL-only chains only. Any other path
-	// (shadow, copy unit, agent_dm, mention_delivery) or non-CEL chain shape
-	// returns failed/chain_unsupported via on_failed* without running the chain
-	// or the legacy sentinel.
+	// D4: P1 supports E1/E2 origin enforce CEL-only chains of version 1 only.
+	// Any other version, path (shadow, copy unit, agent_dm, mention_delivery),
+	// or non-CEL chain shape returns failed/chain_unsupported via on_failed*
+	// without running the chain or the legacy sentinel.
 	if pol == nil || pol.Chain == nil ||
+		pol.Chain.Version != store.MessagePolicyChainVersion ||
 		mode != store.MessagePolicyModeEnforce ||
 		unitIdx != 0 ||
 		!messagepolicy.IsP1ChainSurface(snap.surface) {
 		return messagepolicy.Classification{
-			Class:  messagepolicy.ClassFailed,
-			Reason: messagepolicy.ReasonChainUnsupported,
+			Class:           messagepolicy.ClassFailed,
+			Reason:          messagepolicy.ReasonChainUnsupported,
+			ChainProvenance: messagepolicy.NewPreRunChainProvenance("", messagepolicy.ReasonChainUnsupported),
 		}, 0
 	}
 	steps := chainStepInputsFromStore(pol.Chain.Steps)
 	if !messagepolicy.IsP1ChainSupported(steps) {
 		return messagepolicy.Classification{
-			Class:  messagepolicy.ClassFailed,
-			Reason: messagepolicy.ReasonChainUnsupported,
+			Class:           messagepolicy.ClassFailed,
+			Reason:          messagepolicy.ReasonChainUnsupported,
+			ChainProvenance: messagepolicy.NewPreRunChainProvenance("", messagepolicy.ReasonChainUnsupported),
 		}, 0
 	}
 
 	if len(snap.msgBody) > messagepolicy.MaxBodyBytes {
 		return messagepolicy.Classification{
-			Class:  messagepolicy.ClassFailed,
-			Reason: messagepolicy.ReasonBodyTruncated,
+			Class:           messagepolicy.ClassFailed,
+			Reason:          messagepolicy.ReasonBodyTruncated,
+			ChainProvenance: messagepolicy.NewPreRunChainProvenance("", messagepolicy.ReasonBodyTruncated),
 		}, 0
 	}
 	if u == nil || u.factsUnavailable || !u.hasFacts {
 		return messagepolicy.Classification{
-			Class:  messagepolicy.ClassFailed,
-			Reason: messagepolicy.ReasonFactsUnavailable,
+			Class:           messagepolicy.ClassFailed,
+			Reason:          messagepolicy.ReasonFactsUnavailable,
+			ChainProvenance: messagepolicy.NewPreRunChainProvenance("", messagepolicy.ReasonFactsUnavailable),
 		}, 0
 	}
 
 	ev := s.messagePolicyGate.evaluator
 	if ev == nil {
-		return messagepolicy.ClassifyError(&ruleengine.UnsupportedDialectError{
+		cls := messagepolicy.ClassifyError(&ruleengine.UnsupportedDialectError{
 			Dialect:  ruleengine.DialectCEL,
 			Consumer: messagepolicy.ConsumerName,
 			Reason:   ruleengine.ReasonConsumerNotRegistered,
-		}), 0
+		})
+		cls.ChainProvenance = messagepolicy.NewPreRunChainProvenance("", cls.Reason)
+		return cls, 0
 	}
 
 	start := time.Now()

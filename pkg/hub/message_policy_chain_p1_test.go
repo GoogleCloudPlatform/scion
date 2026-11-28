@@ -220,6 +220,11 @@ func TestMessagePolicyChainsP1_AuthoringFlagOffAndValidatorMatrix(t *testing.T) 
 	assert.Equal(t, store.MessagePolicyChainSourceAuthored, created.ChainSource)
 	require.Len(t, created.Steps, 2)
 	assert.Equal(t, "Chain default reject.", created.RejectReason)
+	// Review O3: response must not expose legacy sentinel violation_rule or duplicate chain.steps.
+	assert.Empty(t, created.ViolationRule)
+	assert.Nil(t, created.Chain)
+	assert.NotContains(t, rr.Body.String(), `"violation_rule"`)
+	assert.NotContains(t, rr.Body.String(), `"chain":`)
 
 	// Verify DB row holds fail-closed legacy sentinel (D6).
 	stored, err := f.s.GetMessagePolicy(context.Background(), created.ID)
@@ -248,7 +253,8 @@ func TestMessagePolicyChainsP1_AuthoringFlagOffAndValidatorMatrix(t *testing.T) 
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), messagepolicy.ErrCodeNotYetSupported)
 
-	// 5. Legacy policy GET returns read-time legacy_mapped projection, and PATCH conversion is 400 in P1.
+	// 5. Legacy policy GET returns read-time legacy_mapped projection when flag ON,
+	// omits it when flag OFF (Review O2), and PATCH conversion is 400 in P1.
 	legacyReq := CreateMessagePolicyRequest{
 		Name:          "legacy-cel",
 		Mode:          store.MessagePolicyModeEnforce,
@@ -269,8 +275,54 @@ func TestMessagePolicyChainsP1_AuthoringFlagOffAndValidatorMatrix(t *testing.T) 
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), messagepolicy.ErrCodeNotYetSupported)
 
-	// 6. Flag OFF again: editing chain policy fails 400 experiment_disabled,
-	// but disable-only PATCH and DELETE remain allowed (D3).
+	// 6. Flag OFF again:
+	// - legacy GET and LIST omit steps and chain_source (Review O2);
+	// - editing chain policy fails 400 experiment_disabled;
+	// - disable-only PATCH and DELETE remain allowed (D3).
+	setServerExperimentDefault(t, f.srv, experiments.MessagePolicyChains, false)
+	rr = f.ownerReq(t, http.MethodGet, base+"/"+legacyResp.ID, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var legacyOffResp MessagePolicyResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &legacyOffResp))
+	assert.Empty(t, legacyOffResp.ChainSource)
+	assert.Empty(t, legacyOffResp.Steps)
+
+	rr = f.ownerReq(t, http.MethodGet, base, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var listOffResp ListMessagePoliciesResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &listOffResp))
+	for _, p := range listOffResp.Policies {
+		if p.ID == legacyResp.ID {
+			assert.Empty(t, p.ChainSource)
+			assert.Empty(t, p.Steps)
+		}
+	}
+
+	// Verify list response omits system_one payloads from legacy_mapped steps when flag ON (Review O2).
+	seedLegacyS1 := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "legacy-s1-list-check",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `false`,
+		SystemOneRule: `{"version":1,"inputs":["message.body"],"questions":[]}`,
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(context.Background(), seedLegacyS1))
+	setServerExperimentDefault(t, f.srv, experiments.MessagePolicyChains, true)
+	rr = f.ownerReq(t, http.MethodGet, base, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var listOnResp ListMessagePoliciesResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &listOnResp))
+	for _, p := range listOnResp.Policies {
+		if p.ID == seedLegacyS1.ID {
+			assert.Equal(t, store.MessagePolicyChainSourceLegacyMapped, p.ChainSource)
+			require.Len(t, p.Steps, 2)
+			assert.Empty(t, p.Steps[0].SystemOne, "list response must omit system_one from legacy_mapped steps")
+		}
+	}
 	setServerExperimentDefault(t, f.srv, experiments.MessagePolicyChains, false)
 	desc := "blocked edit"
 	rr = f.ownerReq(t, http.MethodPatch, base+"/"+created.ID, PatchMessagePolicyRequest{Description: &desc})
@@ -393,6 +445,12 @@ func TestMessagePolicyChainsP1_E1E2Gate_SkipRejectDisabledAndUnsupported(t *test
 	assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
 	assert.Equal(t, messagepolicy.ReasonChainDisabled, decs.Items[0].CELErrorReason)
 	assert.Equal(t, store.MessagePolicyActionRejected, decs.Items[0].Action)
+	// Review O1: chain_disabled decision row carries non-empty, content-free chain provenance.
+	require.NotEmpty(t, decs.Items[0].Chain)
+	require.NoError(t, json.Unmarshal(decs.Items[0].Chain, &prov))
+	assert.Equal(t, 0, prov.Through)
+	assert.Equal(t, messagepolicy.HandlingOutcomeFailed+messagepolicy.ReasonChainDisabled, prov.ConsumerHandling)
+	assert.Equal(t, messagepolicy.ChainVerdictError, prov.Verdict)
 
 	// Re-enable flag and disable e1e2-chain so we can test non-P1 unsupported paths cleanly.
 	setServerExperimentDefault(t, f.srv, experiments.MessagePolicyChains, true)
@@ -442,6 +500,12 @@ func TestMessagePolicyChainsP1_E1E2Gate_SkipRejectDisabledAndUnsupported(t *test
 	require.Len(t, out.admittedDecisions, 1)
 	assert.Equal(t, store.MessagePolicyClassFailed, out.admittedDecisions[0].Class)
 	assert.Equal(t, messagepolicy.ReasonChainUnsupported, out.admittedDecisions[0].CELErrorReason)
+	// Review O1: chain_unsupported decision row carries non-empty, content-free chain provenance.
+	require.NotEmpty(t, out.admittedDecisions[0].Chain)
+	require.NoError(t, json.Unmarshal(out.admittedDecisions[0].Chain, &prov))
+	assert.Equal(t, 0, prov.Through)
+	assert.Equal(t, messagepolicy.HandlingOutcomeFailed+messagepolicy.ReasonChainUnsupported, prov.ConsumerHandling)
+	assert.Equal(t, messagepolicy.ChainVerdictError, prov.Verdict)
 
 	// Also verify shadow mode on a seeded chain policy -> failed/chain_unsupported, never sentinel.
 	seedShadow := &store.MessagePolicy{
@@ -483,6 +547,83 @@ func TestMessagePolicyChainsP1_E1E2Gate_SkipRejectDisabledAndUnsupported(t *test
 	assert.Equal(t, messagepolicy.ClassFailed, rows[0].classification.Class)
 	assert.Equal(t, messagepolicy.ReasonChainUnsupported, rows[0].classification.Reason)
 	assert.Equal(t, messagepolicy.OutcomeAdmit, rows[0].outcome)
+	// Review O1: shadow chain_unsupported row carries non-empty provenance.
+	require.NotNil(t, rows[0].classification.ChainProvenance)
+	assert.Equal(t, messagepolicy.HandlingOutcomeFailed+messagepolicy.ReasonChainUnsupported, rows[0].classification.ChainProvenance.ConsumerHandling)
+
+	// Review O4: unknown chain document version (v:2) -> failed/chain_unsupported via on_failed*.
+	v2Chain := &store.MessagePolicy{
+		ID:            tid("mp-chain-v2-pol"),
+		ProjectID:     f.project.ID,
+		Name:          "future-v2-chain",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: messagepolicy.ChainLegacySentinelViolationRule,
+		Chain: &store.MessagePolicyChain{
+			Version: 2,
+			Steps: []store.MessagePolicyStep{
+				{ID: "v1", Role: store.MessagePolicyStepRoleViolation, Dialect: store.MessagePolicyStepDialectCEL, Expr: "true"},
+			},
+		},
+		OnFailed: store.MessagePolicyOutcomeAdmit,
+	}
+	v2Rows := f.srv.evaluateMatchedPoliciesAcrossUnits(
+		ctx,
+		[]matchedPolicyUnits{{policy: *v2Chain, unitIdxs: []int{0}}},
+		[]policyEvalUnit{{
+			isOrigin: true,
+			hasFacts: true,
+			snap: h2FactSnapshot{
+				surface:   store.MessagePolicySurfaceAgentToUser,
+				projectID: f.project.ID,
+				msgBody:   "hello",
+			},
+		}},
+		f.project.ID,
+		messagepolicy.NewSendBudget(),
+		messagepolicy.DefaultSystemOneSendBudget,
+		store.MessagePolicyModeEnforce,
+	)
+	require.Len(t, v2Rows, 1)
+	assert.Equal(t, messagepolicy.ClassFailed, v2Rows[0].classification.Class)
+	assert.Equal(t, messagepolicy.ReasonChainUnsupported, v2Rows[0].classification.Reason)
+	assert.Equal(t, messagepolicy.OutcomeAdmit, v2Rows[0].outcome)
+	require.NotNil(t, v2Rows[0].classification.ChainProvenance)
+
+	// Security L2: evalPlannedSystemOnePolicies skips chain policies even if a
+	// legacy system_one_rule column is populated.
+	chainWithLegacyS1 := store.MessagePolicy{
+		ID:            tid("mp-chain-l2-pol"),
+		ProjectID:     f.project.ID,
+		Name:          "chain-with-legacy-s1",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: messagepolicy.ChainLegacySentinelViolationRule,
+		SystemOneRule: `{"version":1,"inputs":["message.body"],"questions":[]}`,
+		Chain: &store.MessagePolicyChain{
+			Version: store.MessagePolicyChainVersion,
+			Steps: []store.MessagePolicyStep{
+				{ID: "v1", Role: store.MessagePolicyStepRoleViolation, Dialect: store.MessagePolicyStepDialectCEL, Expr: "false"},
+			},
+		},
+		OnFailed: store.MessagePolicyOutcomeAdmit,
+	}
+	s1Results := make([]policyEvalResult, 1)
+	f.srv.evalPlannedSystemOnePolicies(
+		ctx,
+		[]store.MessagePolicy{chainWithLegacyS1},
+		1,
+		f.project.ID,
+		messagepolicy.Facts{Surface: messagepolicy.SurfaceAgentToUser},
+		messagepolicy.NewActivation(messagepolicy.Facts{Surface: messagepolicy.SurfaceAgentToUser}),
+		messagepolicy.NewSendBudget(),
+		messagepolicy.DefaultSystemOneSendBudget,
+		false,
+		s1Results,
+	)
+	assert.Nil(t, s1Results[0].policy, "evalPlannedSystemOnePolicies must skip chain-native policies")
 
 	// 5. Legacy policy continues evaluating on today's path unchanged.
 	legacyPol := &store.MessagePolicy{

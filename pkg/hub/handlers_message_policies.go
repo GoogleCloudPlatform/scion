@@ -238,7 +238,7 @@ func chainStepSpecsFromStore(in []store.MessagePolicyStep) []messagepolicy.Chain
 	return out
 }
 
-func toMessagePolicyResponse(pol store.MessagePolicy) MessagePolicyResponse {
+func toMessagePolicyResponse(pol store.MessagePolicy, chainsEnabled, isList bool) MessagePolicyResponse {
 	cp := pol.Clone()
 	if cp.Scope.Surfaces == nil {
 		cp.Scope.Surfaces = []string{}
@@ -248,19 +248,31 @@ func toMessagePolicyResponse(pol store.MessagePolicy) MessagePolicyResponse {
 	if cp.HasChain() {
 		steps = cloneStoreSteps(cp.Chain.Steps)
 		chainSource = store.MessagePolicyChainSourceAuthored
-		// Present authored chain reason/remediation rather than the downgrade sentinel.
+		// O3: do not expose the legacy downgrade sentinel (violation_rule: "true")
+		// as the user's rule on API responses, and avoid duplicating steps under
+		// both `chain` and top-level `steps`. Storage is unchanged.
+		cp.ViolationRule = ""
+		cp.SystemOneRule = ""
 		cp.RejectReason = cp.Chain.RejectReason
 		cp.RejectRemediation = cp.Chain.RejectRemediation
-	} else {
+		cp.Chain = nil
+	} else if chainsEnabled {
+		// O2: gate the legacy_mapped steps projection on hub.message_policy_chains
+		// so legacy responses remain byte-identical while the flag is off, and
+		// omit system_one payloads from list projections to keep list responses bounded.
 		mapped := messagepolicy.MapLegacyToSteps(cp.ViolationRule, cp.SystemOneRule)
 		steps = make([]store.MessagePolicyStep, len(mapped))
 		for i, ms := range mapped {
+			sysOne := ms.SystemOne
+			if isList {
+				sysOne = nil
+			}
 			steps[i] = store.MessagePolicyStep{
 				ID:        ms.ID,
 				Role:      ms.Role,
 				Dialect:   ms.Dialect,
 				Expr:      ms.Expr,
-				SystemOne: ms.SystemOne,
+				SystemOne: sysOne,
 			}
 		}
 		chainSource = store.MessagePolicyChainSourceLegacyMapped
@@ -939,9 +951,10 @@ func (s *Server) handleListMessagePolicies(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	chainsOn := s.experimentEnabled(experiments.MessagePolicyChains)
 	out := make([]MessagePolicyResponse, 0, len(res.Items))
 	for i := range res.Items {
-		out = append(out, toMessagePolicyResponse(res.Items[i]))
+		out = append(out, toMessagePolicyResponse(res.Items[i], chainsOn, true))
 	}
 	writeJSON(w, http.StatusOK, ListMessagePoliciesResponse{
 		Policies:   out,
@@ -957,7 +970,7 @@ func (s *Server) handleGetMessagePolicy(w http.ResponseWriter, r *http.Request, 
 		writeErrorFromErr(w, err, "Message policy")
 		return
 	}
-	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*pol))
+	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*pol, s.experimentEnabled(experiments.MessagePolicyChains), false))
 }
 
 func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, actorID string) {
@@ -1067,7 +1080,7 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		AfterSummary: string(afterSummary),
 	})
 
-	writeJSON(w, http.StatusCreated, toMessagePolicyResponse(*policy))
+	writeJSON(w, http.StatusCreated, toMessagePolicyResponse(*policy, s.experimentEnabled(experiments.MessagePolicyChains), false))
 }
 
 func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, policyRef, actorID string) {
@@ -1317,7 +1330,7 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 		AfterSummary:  string(afterSummary),
 	})
 
-	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*candidate))
+	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*candidate, s.experimentEnabled(experiments.MessagePolicyChains), false))
 }
 
 func (s *Server) handleDeleteMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, policyRef string) {

@@ -451,22 +451,52 @@ func TestEvaluateChain_GuardSkipViolationRejectAndContentFreeTrace(t *testing.T)
 		assert.Empty(t, cls.ChainProvenance.Unexecuted)
 	})
 
-	t.Run("budget exhausted -> failed/budget_exhausted", func(t *testing.T) {
+	t.Run("budget exhausted -> failed/budget_exhausted with pre-run provenance", func(t *testing.T) {
 		tracker := ruleengine.NewBudgetTracker(time.Nanosecond)
 		tracker.Charge(time.Millisecond)
 		facts := messagepolicy.Facts{Surface: messagepolicy.SurfaceAgentToUser}
 		cls := ev.EvaluateChain(ctx, "pol-1", 1, steps, "chain default", "", facts, messagepolicy.WithBudget(tracker))
 		assert.Equal(t, messagepolicy.ClassFailed, cls.Class)
 		assert.Equal(t, messagepolicy.ReasonBudgetExhausted, cls.Reason)
+		require.NotNil(t, cls.ChainProvenance)
+		assert.Equal(t, 0, cls.ChainProvenance.Through)
+		assert.Equal(t, "budget", cls.ChainProvenance.EngineClass)
+		assert.Equal(t, messagepolicy.HandlingOutcomeFailed+messagepolicy.ReasonBudgetExhausted, cls.ChainProvenance.ConsumerHandling)
+		assert.Equal(t, messagepolicy.ChainVerdictError, cls.ChainProvenance.Verdict)
 	})
 
-	t.Run("non-CEL step rejected fail-closed with no PendingStep", func(t *testing.T) {
+	t.Run("compile error -> failed/compile_error with pre-run provenance and charges send tracker", func(t *testing.T) {
+		// Review O1 + O6: on a compile-error step, Evaluate never runs, so any
+		// reduction in tracker.Remaining() comes strictly from charging compile
+		// time to cfg.tracker. This kills the no-op compile-charge mutant.
+		coldEv := newTestChainEvaluator(t)
+		const initialBudget = 10 * time.Second
+		tracker := ruleengine.NewBudgetTracker(initialBudget)
+		badCompileSteps := []messagepolicy.ChainStepInput{
+			{ID: "broken", Role: messagepolicy.StepRoleViolation, Dialect: messagepolicy.StepDialectCEL, Expr: "??? invalid syntax"},
+		}
+		cls := coldEv.EvaluateChain(ctx, "pol-compile-err", 1, badCompileSteps, "", "", messagepolicy.Facts{}, messagepolicy.WithBudget(tracker))
+		assert.Equal(t, messagepolicy.ClassFailed, cls.Class)
+		assert.Equal(t, messagepolicy.ReasonCompileError, cls.Reason)
+		assert.Less(t, tracker.Remaining(), initialBudget, "compile time must be charged to the send tracker")
+		require.NotNil(t, cls.ChainProvenance)
+		assert.Equal(t, 0, cls.ChainProvenance.Through)
+		assert.Equal(t, "failed", cls.ChainProvenance.EngineClass)
+		assert.Equal(t, messagepolicy.HandlingOutcomeFailed+messagepolicy.ReasonCompileError, cls.ChainProvenance.ConsumerHandling)
+		assert.Equal(t, messagepolicy.ChainVerdictError, cls.ChainProvenance.Verdict)
+	})
+
+	t.Run("non-CEL step rejected fail-closed with pre-run provenance", func(t *testing.T) {
 		badSteps := []messagepolicy.ChainStepInput{
 			{ID: "j1", Role: messagepolicy.StepRoleJudgment, Dialect: messagepolicy.StepDialectSystemOne},
 		}
 		cls := ev.EvaluateChain(ctx, "pol-1", 1, badSteps, "", "", messagepolicy.Facts{})
 		assert.Equal(t, messagepolicy.ClassFailed, cls.Class)
 		assert.Equal(t, messagepolicy.ReasonChainUnsupported, cls.Reason)
+		require.NotNil(t, cls.ChainProvenance)
+		assert.Equal(t, 0, cls.ChainProvenance.Through)
+		assert.Equal(t, messagepolicy.HandlingOutcomeFailed+messagepolicy.ReasonChainUnsupported, cls.ChainProvenance.ConsumerHandling)
+		assert.Equal(t, messagepolicy.ChainVerdictError, cls.ChainProvenance.Verdict)
 	})
 }
 
