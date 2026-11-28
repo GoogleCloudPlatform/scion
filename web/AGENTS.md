@@ -317,7 +317,7 @@ The client `SSEClient` listens for `event: update` and the `StateManager` parses
 - Console logging via `page.on('console', ...)` is essential for debugging SSE connection state — the `[SSE] Connected` log confirms the EventSource opened.
 - To validate real-time updates: take a screenshot, make an API call, wait 2-3 seconds, take another screenshot. Compare visually.
 - Mocked Playwright suites (`web/e2e/chat-mobile/`) intercept `/auth/me` and skip server-side `pageData.user` hydration; cover boot-time user preferences or feature flags with a real-hub Playwright spec.
-- jsdom/HappyDOM cannot catch CSS animation cascade (`getComputedStyle`), browser input sanitization, native undo stacks, or accessibility-tree exposure (`Accessibility.getFullAXTree`); cover masking/exact-bytes inputs and CSS-cascade contracts with real-Chromium Playwright assertions.
+- jsdom/HappyDOM cannot catch CSS animation cascade (`getComputedStyle`), browser input sanitization, native undo stacks, accessibility-tree exposure (`Accessibility.getFullAXTree`), or how trusted pointer, wheel and pinch input reaches passive listeners and `preventDefault`; cover masking/exact-bytes inputs, CSS-cascade contracts and input-handling changes with real-Chromium Playwright assertions that drive trusted input (`page.mouse`, or CDP `Input.dispatchMouseEvent`; ctrl+wheel emulates pinch), not synthetic `dispatchEvent` calls.
 
 ### Common failure modes
 

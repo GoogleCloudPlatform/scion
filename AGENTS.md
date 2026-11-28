@@ -47,7 +47,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 ## Workflow
 
 1. Finish the task with tests.
-2. Before committing run `make ci`, or `make ci-full` for the full GitHub Actions mirror. In an agent container, run the agent-safe split in `docs-repo/agents/sandbox-go-toolchain.md` instead and report which gates ran.
+2. Before committing run `make ci`, or `make ci-full` for the full GitHub Actions mirror. In an agent container, run the agent-safe split in `docs-repo/agents/sandbox-go-toolchain.md` instead, and report each gate as run (with its result), substituted (what ran instead) or omitted as not needed (why).
 3. Commit as you go. At the end, rebase on `main` (favor main), re-test after conflicts, notify the user. Upstream squash-merges PRs, so move a stacked branch with `git rebase --onto` (`docs-repo/agents/stacked-branches.md`).
 4. Raise adjacent cleanup you notice, with file/function, payoff and blast radius. Don't implement it unprompted.
 
