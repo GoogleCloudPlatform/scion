@@ -1565,6 +1565,12 @@ export interface CreateLinkResponse {
  */
 export type GrantPermission = 'read' | 'review' | 'write' | 'admin';
 
+/** CreatedBy marker for a role-gated bounded review grant (agent review request, ptone/scion#5548). */
+export const BOUNDED_REVIEW_CREATOR = 'system:review_request';
+
+/** CreatedBy marker for an automatic role-gated sponsor review grant (ptone/scion#7134). */
+export const SPONSOR_REVIEW_CREATOR = 'system:sponsor_review';
+
 /** A grant to a user or agent ("principal") or a project ("scope"). */
 export interface ArtifactGrant {
   id: string;

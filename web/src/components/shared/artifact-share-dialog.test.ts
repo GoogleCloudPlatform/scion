@@ -1160,4 +1160,57 @@ describe('share dialog, manage mode (Manage access, ptone/scion#7107)', () => {
     expect($(el, '.picker')).toBeNull();
     expect(s.calls.filter((c) => c.url.startsWith(BASE))).toEqual([]);
   });
+
+  it('labels bounded review grants with requesting agent slug and keeps sponsor grants plain Can review, both removable (ptone/scion#5550)', async () => {
+    const bounded: ArtifactGrant = {
+      id: 'g-bounded',
+      subjectKind: 'principal',
+      subjectRef: 'user:user-priya',
+      permission: 'review',
+      createdAt: '2026-10-08T12:00:00Z',
+      createdBy: 'system:review_request',
+    };
+    const sponsor: ArtifactGrant = {
+      id: 'g-sponsor',
+      subjectKind: 'principal',
+      subjectRef: 'user:user-alex',
+      permission: 'review',
+      createdAt: '2026-10-08T12:00:00Z',
+      createdBy: 'system:sponsor_review',
+    };
+
+    // Manager (edit) mode
+    const s1 = mockServer({ grants: [HOME, bounded, sponsor] });
+    const el1 = await mountManage(MANAGER, agentOwned());
+    const rows1 = $$(el1, '.grant');
+    expect(rows1).toHaveLength(3);
+    expect(rows1[1]!.querySelector('.grant-bounded')?.textContent?.trim()).toBe(
+      'Can review · requested by agent report-bot · while they have a project role'
+    );
+    expect(rows1[1]!.querySelector('sl-button')?.textContent?.trim()).toBe('Remove');
+    expect(rows1[2]!.querySelector('.grant-bounded')).toBeNull();
+    expect(rows1[2]!.textContent).toContain('Can review');
+    expect(rows1[2]!.querySelector('sl-button')?.textContent?.trim()).toBe('Remove');
+
+    // Removing the bounded grant hits the existing DELETE /grants/{id} endpoint.
+    (rows1[1]!.querySelector('sl-button') as HTMLElement).click();
+    await settle(el1);
+    expect(
+      s1.calls.some((c) => c.method === 'DELETE' && c.url === `${BASE}/grants/g-bounded`)
+    ).toBe(true);
+    expect($$(el1, '.grant')).toHaveLength(2);
+    el1.remove();
+
+    // Steward (read-only grant rows) mode
+    mockServer({ grants: [HOME, bounded, sponsor] });
+    const el2 = await mountManage(STEWARD_OWNER, agentOwned());
+    const rows2 = $$(el2, '.grant');
+    expect(rows2).toHaveLength(3);
+    expect(rows2[1]!.querySelector('.grant-bounded')?.textContent?.trim()).toBe(
+      'Can review · requested by agent report-bot · while they have a project role'
+    );
+    expect(rows2[1]!.querySelector('sl-button')?.textContent?.trim()).toBe('Remove');
+    expect(rows2[2]!.querySelector('.grant-bounded')).toBeNull();
+    expect(rows2[2]!.querySelector('.permission')?.textContent?.trim()).toBe('Can review');
+  });
 });

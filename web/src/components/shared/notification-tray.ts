@@ -91,6 +91,36 @@ const PROFILE_SECRETS_PATH = '/profile/secrets';
 /** Dispatched on `window` when another surface (e.g. Inbox) acks a notification. */
 export const NOTIFICATION_ACKED_EVENT = 'scion:notification-acked';
 
+/**
+ * Title for an ARTIFACT_REVIEW_SUBMITTED notification, parsed from the hub's
+ * fixed message wording ("Review (v<N>) of your artifact ..." or
+ * "... (v<N> of your artifact):"). Shared by the in-tray row and browser popup.
+ */
+export function reviewSubmittedTitle(message: string): string {
+  const match =
+    /^Review \(v(\d+)\) of your artifact /.exec(message) ??
+    /\(v(\d+) of your artifact\):$/.exec(message);
+  return match ? `Review submitted on v${match[1]}` : 'Review submitted';
+}
+
+/**
+ * Optional title line shown above the message in a notification tray item.
+ * Returns null for statuses that render only their message body.
+ */
+export function notificationItemTitle(n: Notification, isDecisions: boolean): string | null {
+  if (isDecisions) return 'Decisions waiting';
+  switch (n.status) {
+    case ARTIFACT_REVIEW_SUBMITTED_STATUS:
+      return reviewSubmittedTitle(n.message);
+    case ARTIFACT_REVIEW_REQUESTED_STATUS:
+      return 'Review requested';
+    case ARTIFACT_REVIEW_DISMISSED_STATUS:
+      return 'Review request dismissed';
+    default:
+      return null;
+  }
+}
+
 /** The Profile > Secrets path for a pending secret row, or null for any other row. */
 export function pendingSecretLink(n: Notification): string | null {
   return n.kind === SECRET_PENDING_KIND || n.status === SECRET_PENDING_STATUS
@@ -816,12 +846,8 @@ export class ScionNotificationTray extends LitElement {
         return 'Agent Limits Exceeded';
       case SCHEDULE_BLOCKED_STATUS:
         return 'Schedule Blocked';
-      case ARTIFACT_REVIEW_SUBMITTED_STATUS: {
-        const match =
-          /^Review \(v(\d+)\) of your artifact /.exec(n.message) ??
-          /\(v(\d+) of your artifact\):$/.exec(n.message);
-        return match ? `Review submitted on v${match[1]}` : 'Review submitted';
-      }
+      case ARTIFACT_REVIEW_SUBMITTED_STATUS:
+        return reviewSubmittedTitle(n.message);
       case ARTIFACT_REVIEW_REQUESTED_STATUS:
         return 'Review requested';
       case ARTIFACT_REVIEW_DISMISSED_STATUS:
@@ -1479,6 +1505,7 @@ export class ScionNotificationTray extends LitElement {
     const secretsLink = pendingSecretLink(n);
     const decisionsLink = decisionsWaitingLink(n);
     const isDecisions = decisionsLink !== null;
+    const itemTitle = notificationItemTitle(n, isDecisions);
     const iconStatus = isDecisions ? DECISIONS_WAITING_STATUS : n.status;
     return html`
       <div class="notif-item ${isDecisions ? 'pinned' : ''}">
@@ -1486,11 +1513,7 @@ export class ScionNotificationTray extends LitElement {
           <sl-icon name=${this.statusIcon(iconStatus)}></sl-icon>
         </div>
         <div class="notif-body">
-          ${isDecisions
-            ? html`<div class="notif-title">Decisions waiting</div>`
-            : n.status === ARTIFACT_REVIEW_DISMISSED_STATUS
-              ? html`<div class="notif-title">Review request dismissed</div>`
-              : nothing}
+          ${itemTitle ? html`<div class="notif-title">${itemTitle}</div>` : nothing}
           <div class="notif-message">${n.message}</div>
           <sl-tooltip content=${n.message} hoist>
             <span class="truncation-badge" style="display:none">...</span>

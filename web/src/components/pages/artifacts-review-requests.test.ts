@@ -23,6 +23,7 @@ import type { ScionArtifactList } from '../shared/artifact-list.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import type { ArtifactListItem } from '../../client/artifacts.js';
 import {
+  ARTIFACTS_REVIEW_DRAFTS_FLAG,
   ARTIFACTS_REVIEW_REQUESTS_FLAG,
   resetServerFlagStateForTests,
 } from '../../utils/feature-flags.js';
@@ -187,5 +188,62 @@ describe('artifacts list & project artifact-list: review requests (P1)', () => {
     expect(chip).toBeDefined();
     expect(chip.getAttribute('aria-pressed')).toBe('true');
     expect(urls[0].searchParams.get('q')).toBe('is:requested');
+  });
+
+  it('shows all three state chips (Review on latest, Requested of me, My drafts) when gates are on and hides gated ones when off across global and project lists', async () => {
+    mockList([makeItem('a1')]);
+    // Both gates on -> global list shows all three state chips.
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACTS_REVIEW_REQUESTS_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+    };
+    const globalEl = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
+    globalEl.pageData = {
+      path: '/artifacts',
+      title: 'Artifacts',
+      user: { id: ME, email: 'me@example.com', name: 'Me' },
+    } as ScionPageArtifacts['pageData'];
+    document.body.appendChild(globalEl);
+    await settle(globalEl);
+    const globalLabels = [...globalEl.shadowRoot!.querySelectorAll('.filter-chip')].map((c) =>
+      c.textContent?.trim()
+    );
+    expect(globalLabels).toContain('Review on latest');
+    expect(globalLabels).toContain('Requested of me');
+    expect(globalLabels).toContain('My drafts');
+    globalEl.remove();
+
+    // Both gates on -> project list shows all three state chips.
+    const projOn = document.createElement('scion-artifact-list') as ScionArtifactList;
+    projOn.projectId = PROJECT_ID;
+    projOn.currentUserId = ME;
+    document.body.appendChild(projOn);
+    await settle(projOn);
+    const projOnLabels = [...projOn.shadowRoot!.querySelectorAll('.filter-chip')].map((c) =>
+      c.textContent?.trim()
+    );
+    expect(projOnLabels).toContain('Review on latest');
+    expect(projOnLabels).toContain('Requested of me');
+    expect(projOnLabels).toContain('My drafts');
+    projOn.remove();
+
+    // Both gates off -> project list keeps Review on latest and hides Requested of me and My drafts.
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACTS_REVIEW_REQUESTS_FLAG]: false,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: false,
+    };
+    const projOff = document.createElement('scion-artifact-list') as ScionArtifactList;
+    projOff.projectId = PROJECT_ID;
+    projOff.currentUserId = ME;
+    document.body.appendChild(projOff);
+    await settle(projOff);
+    const projOffLabels = [...projOff.shadowRoot!.querySelectorAll('.filter-chip')].map((c) =>
+      c.textContent?.trim()
+    );
+    expect(projOffLabels).toContain('Review on latest');
+    expect(projOffLabels).not.toContain('Requested of me');
+    expect(projOffLabels).not.toContain('My drafts');
   });
 });

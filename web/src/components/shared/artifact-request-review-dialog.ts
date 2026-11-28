@@ -27,14 +27,17 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import {
+  BOUNDED_REVIEW_CREATOR,
   countRunes,
   createReviewRequests,
+  listGrants,
   MAX_REVIEW_REQUEST_NOTE_RUNES,
   MAX_REVIEW_REQUEST_REVIEWERS,
   reviewRequestRefusalText,
 } from '../../client/artifacts.js';
 import type {
   Artifact,
+  ArtifactGrant,
   CreateReviewRequestsResponse,
   ReviewRequestOutcome,
   ReviewRequestResult,
@@ -47,6 +50,51 @@ const SEARCH_DELAY_MS = 250;
 
 /** Fewest characters the user search runs for. */
 const MIN_SEARCH_LENGTH = 2;
+
+/** Per-user access hint shown for each picked reviewer (design §4.12, ptone/scion#9311). */
+export type ReviewerAccessHint = 'existing' | 'raised' | 'bounded';
+
+export const REVIEWER_ACCESS_HINT_LABELS: Record<ReviewerAccessHint, string> = {
+  existing: 'can already review',
+  raised: 'will be given Can review',
+  bounded: 'can review while they have a project role',
+};
+
+/**
+ * Computes the picker access hint for a selected user reviewer from the
+ * artifact metadata and (when the caller may administer the artifact) its
+ * loaded grant list. Returns null when access cannot be determined.
+ */
+export function reviewerAccessHint(
+  subjectRef: string,
+  artifact: Artifact | null,
+  grants: readonly ArtifactGrant[],
+  grantsLoaded: boolean,
+  canAdminister: boolean
+): ReviewerAccessHint | null {
+  if (!artifact) return null;
+  if (artifact.ownerKind === 'user' && `user:${artifact.ownerRef}` === subjectRef) {
+    return 'existing';
+  }
+  if (!grantsLoaded) return null;
+  const grant = grants.find((g) => g.subjectKind === 'principal' && g.subjectRef === subjectRef);
+  if (grant) {
+    if (grant.permission === 'review' && grant.createdBy === BOUNDED_REVIEW_CREATOR) {
+      return 'bounded';
+    }
+    if (
+      grant.permission === 'review' ||
+      grant.permission === 'write' ||
+      grant.permission === 'admin'
+    ) {
+      return 'existing';
+    }
+  }
+  if (canAdminister) {
+    return 'raised';
+  }
+  return null;
+}
 
 const OUTCOME_BADGES: Record<
   ReviewRequestOutcome,
@@ -64,10 +112,14 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   /** The signed-in user id, excluded from picker suggestions. */
   @property({ type: String }) currentUserId = '';
+  /** Whether the caller may administer grants (canManage or canShare). */
+  @property({ type: Boolean }) canAdminister = false;
 
   @state() private query = '';
   @state() private suggestions: ShareSubject[] = [];
   @state() private selected: ShareSubject[] = [];
+  @state() private grants: ArtifactGrant[] = [];
+  @state() private grantsLoaded = false;
   @state() private note = '';
   @state() private submitting = false;
   @state() private error: string | null = null;
@@ -75,6 +127,7 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
 
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private searchGen = 0;
+  private grantsGen = 0;
 
   static override styles = css`
     sl-dialog::part(panel) {
@@ -129,10 +182,43 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
       color: var(--scion-text-muted);
     }
     .selected-list {
+      list-style: none;
+      margin: 0.5rem 0 0;
+      padding: 0;
+      border: 1px solid var(--scion-border);
+      border-radius: calc(var(--scion-radius) * 0.75);
+      overflow: hidden;
+    }
+    .selected-row {
       display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.45rem 0.65rem;
+      border-bottom: 1px solid var(--scion-border);
+      font-size: 0.8125rem;
+    }
+    .selected-row:last-child {
+      border-bottom: none;
+    }
+    .selected-row > sl-icon {
+      color: var(--sl-color-neutral-500);
+      flex-shrink: 0;
+    }
+    .selected-who {
+      flex: 1;
+      min-width: 0;
+    }
+    .selected-name {
+      display: flex;
+      align-items: baseline;
+      gap: 0.4rem;
       flex-wrap: wrap;
-      gap: 0.375rem;
-      margin-top: 0.5rem;
+    }
+    .selected-hint {
+      display: block;
+      margin-top: 0.1rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted);
     }
     .note-meta {
       display: flex;
@@ -198,6 +284,9 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('open') && this.open) {
       this.reset();
+      if (this.canAdminister && this.artifact) {
+        void this.loadGrants(this.artifact.id);
+      }
     }
   }
 
@@ -205,14 +294,31 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
     this.query = '';
     this.suggestions = [];
     this.selected = [];
+    this.grants = [];
+    this.grantsLoaded = false;
     this.note = '';
     this.submitting = false;
     this.error = null;
     this.results = null;
     this.searchGen++;
+    this.grantsGen++;
     if (this.searchTimer) {
       clearTimeout(this.searchTimer);
       this.searchTimer = null;
+    }
+  }
+
+  private async loadGrants(artifactId: string): Promise<void> {
+    const gen = ++this.grantsGen;
+    try {
+      const res = await listGrants(artifactId);
+      if (gen !== this.grantsGen || !this.open) return;
+      this.grants = res.grants;
+      this.grantsLoaded = true;
+    } catch {
+      if (gen !== this.grantsGen) return;
+      this.grants = [];
+      this.grantsLoaded = false;
     }
   }
 
@@ -331,6 +437,8 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
       }
       if (r.access === 'raised') {
         parts.push('Gave Can review');
+      } else if (r.access === 'bounded') {
+        parts.push('Can review while they have a project role');
       }
       if (parts.length > 0) {
         detail = html`<span class="result-detail">${parts.join(' · ')}</span>`;
@@ -386,18 +494,36 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
             : nothing}
         </div>
         ${this.selected.length > 0
-          ? html`<div class="selected-list" aria-label="Selected reviewers">
-              ${this.selected.map(
-                (s) =>
-                  html`<sl-tag
-                    size="small"
-                    removable
-                    @sl-remove=${(): void => this.removeSelected(s.subjectRef)}
-                  >
-                    ${s.label}
-                  </sl-tag>`
-              )}
-            </div>`
+          ? html`<ul class="selected-list" aria-label="Selected reviewers">
+              ${this.selected.map((s) => {
+                const hint = reviewerAccessHint(
+                  s.subjectRef,
+                  this.artifact,
+                  this.grants,
+                  this.grantsLoaded,
+                  this.canAdminister
+                );
+                return html`<li class="selected-row" data-reviewer=${s.subjectRef}>
+                  <sl-icon name="person"></sl-icon>
+                  <div class="selected-who">
+                    <span class="selected-name">
+                      <strong>${s.label}</strong>
+                      ${s.detail ? html`<span class="muted">${s.detail}</span>` : nothing}
+                    </span>
+                    ${hint
+                      ? html`<span class="selected-hint" data-access-hint=${hint}
+                          >${REVIEWER_ACCESS_HINT_LABELS[hint]}</span
+                        >`
+                      : nothing}
+                  </div>
+                  <sl-icon-button
+                    name="x-lg"
+                    label=${`Remove ${s.label}`}
+                    @click=${(): void => this.removeSelected(s.subjectRef)}
+                  ></sl-icon-button>
+                </li>`;
+              })}
+            </ul>`
           : nothing}
       </div>
       <div class="field">
