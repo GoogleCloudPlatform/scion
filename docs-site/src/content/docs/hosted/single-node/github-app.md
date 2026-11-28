@@ -252,6 +252,7 @@ GitHub accepts only one webhook secret per App, so deliveries fail with `401` be
 
 ## See also
 
+- [Event Triggers & Webhooks](/scion/hosted/user/triggers/): authoring GitHub App event triggers, presets, and primary-project routing with `scion trigger`.
 - [Auth & Tenancy: GitHub App Integration](/scion/hosted/single-node/auth/#github-app-integration): association rules, token-source projects, trigger permissions and repository routing.
 - [Projects (Hub-managed vs Linked)](/scion/workstation/git-projects/): creating git projects and the personal access token alternative.
 - [Agent Credentials](/scion/local/agent-credentials/): how agents receive GitHub credentials.

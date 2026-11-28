@@ -356,3 +356,8 @@ scion schedule resume <id-or-name>
 
 Recreate a one-shot event instead.
 :::
+
+## See also
+
+- [Event Triggers & Webhooks](/scion/hosted/user/triggers/): event-driven automation from signed webhooks and GitHub App deliveries (experimental).
+- [Scheduled Chat Messages](/scion/hosted/user/scheduled-send/): scheduling messages directly inside chat conversations.
