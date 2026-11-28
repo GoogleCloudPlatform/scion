@@ -121,6 +121,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegroupbudgetseed"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
@@ -4637,6 +4638,38 @@ func init() {
 	usageeventDescID := usageeventFields[0].Descriptor()
 	// usageevent.DefaultID holds the default value on creation for the id field.
 	usageevent.DefaultID = usageeventDescID.Default.(func() uuid.UUID)
+	usagegroupbudgetseedFields := schema.UsageGroupBudgetSeed{}.Fields()
+	_ = usagegroupbudgetseedFields
+	// usagegroupbudgetseedDescGroupID is the schema descriptor for group_id field.
+	usagegroupbudgetseedDescGroupID := usagegroupbudgetseedFields[1].Descriptor()
+	// usagegroupbudgetseed.GroupIDValidator is a validator for the "group_id" field. It is called by the builders before save.
+	usagegroupbudgetseed.GroupIDValidator = usagegroupbudgetseedDescGroupID.Validators[0].(func(string) error)
+	// usagegroupbudgetseedDescMemberSnapshotSet is the schema descriptor for member_snapshot_set field.
+	usagegroupbudgetseedDescMemberSnapshotSet := usagegroupbudgetseedFields[7].Descriptor()
+	// usagegroupbudgetseed.DefaultMemberSnapshotSet holds the default value on creation for the member_snapshot_set field.
+	usagegroupbudgetseed.DefaultMemberSnapshotSet = usagegroupbudgetseedDescMemberSnapshotSet.Default.(bool)
+	// usagegroupbudgetseedDescFinalized is the schema descriptor for finalized field.
+	usagegroupbudgetseedDescFinalized := usagegroupbudgetseedFields[8].Descriptor()
+	// usagegroupbudgetseed.DefaultFinalized holds the default value on creation for the finalized field.
+	usagegroupbudgetseed.DefaultFinalized = usagegroupbudgetseedDescFinalized.Default.(bool)
+	// usagegroupbudgetseedDescStateVersion is the schema descriptor for state_version field.
+	usagegroupbudgetseedDescStateVersion := usagegroupbudgetseedFields[9].Descriptor()
+	// usagegroupbudgetseed.DefaultStateVersion holds the default value on creation for the state_version field.
+	usagegroupbudgetseed.DefaultStateVersion = usagegroupbudgetseedDescStateVersion.Default.(int64)
+	// usagegroupbudgetseedDescCreatedAt is the schema descriptor for created_at field.
+	usagegroupbudgetseedDescCreatedAt := usagegroupbudgetseedFields[10].Descriptor()
+	// usagegroupbudgetseed.DefaultCreatedAt holds the default value on creation for the created_at field.
+	usagegroupbudgetseed.DefaultCreatedAt = usagegroupbudgetseedDescCreatedAt.Default.(func() time.Time)
+	// usagegroupbudgetseedDescUpdatedAt is the schema descriptor for updated_at field.
+	usagegroupbudgetseedDescUpdatedAt := usagegroupbudgetseedFields[11].Descriptor()
+	// usagegroupbudgetseed.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	usagegroupbudgetseed.DefaultUpdatedAt = usagegroupbudgetseedDescUpdatedAt.Default.(func() time.Time)
+	// usagegroupbudgetseed.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	usagegroupbudgetseed.UpdateDefaultUpdatedAt = usagegroupbudgetseedDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// usagegroupbudgetseedDescID is the schema descriptor for id field.
+	usagegroupbudgetseedDescID := usagegroupbudgetseedFields[0].Descriptor()
+	// usagegroupbudgetseed.DefaultID holds the default value on creation for the id field.
+	usagegroupbudgetseed.DefaultID = usagegroupbudgetseedDescID.Default.(func() uuid.UUID)
 	usagegrouprollupdailyFields := schema.UsageGroupRollupDaily{}.Fields()
 	_ = usagegrouprollupdailyFields
 	// usagegrouprollupdailyDescGroupID is the schema descriptor for group_id field.

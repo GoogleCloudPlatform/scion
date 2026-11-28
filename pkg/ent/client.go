@@ -131,6 +131,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegroupbudgetseed"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
@@ -380,6 +381,8 @@ type Client struct {
 	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
+	// UsageGroupBudgetSeed is the client for interacting with the UsageGroupBudgetSeed builders.
+	UsageGroupBudgetSeed *UsageGroupBudgetSeedClient
 	// UsageGroupRollupDaily is the client for interacting with the UsageGroupRollupDaily builders.
 	UsageGroupRollupDaily *UsageGroupRollupDailyClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
@@ -530,6 +533,7 @@ func (c *Client) init() {
 	c.UploadSession = NewUploadSessionClient(c.config)
 	c.UsageBudgetState = NewUsageBudgetStateClient(c.config)
 	c.UsageEvent = NewUsageEventClient(c.config)
+	c.UsageGroupBudgetSeed = NewUsageGroupBudgetSeedClient(c.config)
 	c.UsageGroupRollupDaily = NewUsageGroupRollupDailyClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.UsageRollupDaily = NewUsageRollupDailyClient(c.config)
@@ -749,6 +753,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UploadSession:                 NewUploadSessionClient(cfg),
 		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
+		UsageGroupBudgetSeed:          NewUsageGroupBudgetSeedClient(cfg),
 		UsageGroupRollupDaily:         NewUsageGroupRollupDailyClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
@@ -895,6 +900,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UploadSession:                 NewUploadSessionClient(cfg),
 		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
+		UsageGroupBudgetSeed:          NewUsageGroupBudgetSeedClient(cfg),
 		UsageGroupRollupDaily:         NewUsageGroupRollupDailyClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
@@ -966,11 +972,11 @@ func (c *Client) Use(hooks ...Hook) {
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
 		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupRollupDaily,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
-		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
+		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
+		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -1010,11 +1016,11 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
 		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupRollupDaily,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
-		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
+		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
+		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1253,6 +1259,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UsageBudgetState.mutate(ctx, m)
 	case *UsageEventMutation:
 		return c.UsageEvent.mutate(ctx, m)
+	case *UsageGroupBudgetSeedMutation:
+		return c.UsageGroupBudgetSeed.mutate(ctx, m)
 	case *UsageGroupRollupDailyMutation:
 		return c.UsageGroupRollupDaily.mutate(ctx, m)
 	case *UsageReservationMutation:
@@ -17217,6 +17225,139 @@ func (c *UsageEventClient) mutate(ctx context.Context, m *UsageEventMutation) (V
 	}
 }
 
+// UsageGroupBudgetSeedClient is a client for the UsageGroupBudgetSeed schema.
+type UsageGroupBudgetSeedClient struct {
+	config
+}
+
+// NewUsageGroupBudgetSeedClient returns a client for the UsageGroupBudgetSeed from the given config.
+func NewUsageGroupBudgetSeedClient(c config) *UsageGroupBudgetSeedClient {
+	return &UsageGroupBudgetSeedClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usagegroupbudgetseed.Hooks(f(g(h())))`.
+func (c *UsageGroupBudgetSeedClient) Use(hooks ...Hook) {
+	c.hooks.UsageGroupBudgetSeed = append(c.hooks.UsageGroupBudgetSeed, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usagegroupbudgetseed.Intercept(f(g(h())))`.
+func (c *UsageGroupBudgetSeedClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageGroupBudgetSeed = append(c.inters.UsageGroupBudgetSeed, interceptors...)
+}
+
+// Create returns a builder for creating a UsageGroupBudgetSeed entity.
+func (c *UsageGroupBudgetSeedClient) Create() *UsageGroupBudgetSeedCreate {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpCreate)
+	return &UsageGroupBudgetSeedCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageGroupBudgetSeed entities.
+func (c *UsageGroupBudgetSeedClient) CreateBulk(builders ...*UsageGroupBudgetSeedCreate) *UsageGroupBudgetSeedCreateBulk {
+	return &UsageGroupBudgetSeedCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageGroupBudgetSeedClient) MapCreateBulk(slice any, setFunc func(*UsageGroupBudgetSeedCreate, int)) *UsageGroupBudgetSeedCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageGroupBudgetSeedCreateBulk{err: fmt.Errorf("calling to UsageGroupBudgetSeedClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageGroupBudgetSeedCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageGroupBudgetSeedCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageGroupBudgetSeed.
+func (c *UsageGroupBudgetSeedClient) Update() *UsageGroupBudgetSeedUpdate {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpUpdate)
+	return &UsageGroupBudgetSeedUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageGroupBudgetSeedClient) UpdateOne(_m *UsageGroupBudgetSeed) *UsageGroupBudgetSeedUpdateOne {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpUpdateOne, withUsageGroupBudgetSeed(_m))
+	return &UsageGroupBudgetSeedUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageGroupBudgetSeedClient) UpdateOneID(id uuid.UUID) *UsageGroupBudgetSeedUpdateOne {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpUpdateOne, withUsageGroupBudgetSeedID(id))
+	return &UsageGroupBudgetSeedUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageGroupBudgetSeed.
+func (c *UsageGroupBudgetSeedClient) Delete() *UsageGroupBudgetSeedDelete {
+	mutation := newUsageGroupBudgetSeedMutation(c.config, OpDelete)
+	return &UsageGroupBudgetSeedDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageGroupBudgetSeedClient) DeleteOne(_m *UsageGroupBudgetSeed) *UsageGroupBudgetSeedDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageGroupBudgetSeedClient) DeleteOneID(id uuid.UUID) *UsageGroupBudgetSeedDeleteOne {
+	builder := c.Delete().Where(usagegroupbudgetseed.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageGroupBudgetSeedDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageGroupBudgetSeed.
+func (c *UsageGroupBudgetSeedClient) Query() *UsageGroupBudgetSeedQuery {
+	return &UsageGroupBudgetSeedQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageGroupBudgetSeed},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageGroupBudgetSeed entity by its id.
+func (c *UsageGroupBudgetSeedClient) Get(ctx context.Context, id uuid.UUID) (*UsageGroupBudgetSeed, error) {
+	return c.Query().Where(usagegroupbudgetseed.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageGroupBudgetSeedClient) GetX(ctx context.Context, id uuid.UUID) *UsageGroupBudgetSeed {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageGroupBudgetSeedClient) Hooks() []Hook {
+	return c.hooks.UsageGroupBudgetSeed
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageGroupBudgetSeedClient) Interceptors() []Interceptor {
+	return c.inters.UsageGroupBudgetSeed
+}
+
+func (c *UsageGroupBudgetSeedClient) mutate(ctx context.Context, m *UsageGroupBudgetSeedMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageGroupBudgetSeedCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageGroupBudgetSeedUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageGroupBudgetSeedUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageGroupBudgetSeedDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageGroupBudgetSeed mutation op: %q", m.Op())
+	}
+}
+
 // UsageGroupRollupDailyClient is a client for the UsageGroupRollupDaily schema.
 type UsageGroupRollupDailyClient struct {
 	config
@@ -19034,10 +19175,10 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UploadSession, UsageBudgetState, UsageEvent, UsageGroupRollupDaily,
-		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
-		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
-		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
+		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
+		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -19066,9 +19207,9 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UploadSession, UsageBudgetState, UsageEvent, UsageGroupRollupDaily,
-		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
-		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
-		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
+		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
+		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )

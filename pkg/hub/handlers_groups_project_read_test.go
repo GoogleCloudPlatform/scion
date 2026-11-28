@@ -1100,6 +1100,7 @@ func TestProjectMembersGroupRead_RouteCompleteness(t *testing.T) {
 		"DELETE /api/v1/groups/{id}":                                           "group-delete",
 		"POST /api/v1/groups/{id}/members":                                     "group-member-add",
 		"DELETE /api/v1/groups/{id}/members/{memberType}/{memberId}":           "group-member-remove",
+		"GET /api/v1/groups/{id}/usage/budgets":                                "group-usage-budgets-read",
 		"GET /api/v1/users/me/groups":                                          "user-self-groups",
 		"GET /api/v1/projects/{id}/members":                                    "project-members-list",
 		"POST /api/v1/projects/{id}/members":                                   "project-member-add",

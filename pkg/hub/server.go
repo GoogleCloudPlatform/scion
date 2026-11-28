@@ -3387,6 +3387,13 @@ type Server struct {
 	// billing user on this replica (token_budget_groups.go).
 	pooledGroupResolver *PooledGroupResolver
 
+	// groupBudgetSeeder manages D6 mid-window seeding for pooled group budgets
+	// via durablequeue (token_budget_group_seeder.go).
+	groupBudgetSeeder      *GroupBudgetSeeder
+	groupBudgetSeedDrainer *durablequeue.Drainer
+	groupBudgetSeedCancel  context.CancelFunc
+	groupBudgetSeedDone    chan struct{}
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime
@@ -7785,6 +7792,15 @@ func (s *Server) registerSchedulerHandlers() {
 		store.LockUsageRetention,
 		s.usageRetentionHandler(),
 	)
+	// Pooled user-group budget seed reconciliation (tokenomics.token_budgets,
+	// ptone/scion#9243, D6): runs nightly (24h) as a singleton to enqueue any
+	// missing or incomplete pre-activation seeds; never re-SETs finalized seeds.
+	s.scheduler.RegisterRecurringSingleton(
+		usageGroupSeedReconcileJobName,
+		24*60,
+		store.LockUsageGroupSeedReconcile,
+		s.usageGroupSeedReconcileHandler(),
+	)
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
@@ -8365,6 +8381,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		}
 		s.stopUserDeletionWork(ctx)
 		s.stopTriggerDrainer(ctx)
+		s.stopGroupBudgetSeedDrainer(ctx)
 		s.stopScheduledDetachedFires(ctx)
 		s.stopScheduledExecRuns(ctx)
 		s.stopCommandRuns(ctx)

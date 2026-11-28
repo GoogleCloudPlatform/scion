@@ -63,8 +63,58 @@ type UsageBudgetState struct {
 	UpdatedAt           time.Time  `json:"updatedAt"`
 }
 
+// UsageGroupSeedEpisode tracks one group charging episode in
+// usage_group_budget_seeds (Tokenomics P3.3, D6a).
+//
+// An episode starts when a group's first active pooled binding (any scope, any
+// window kind) activates, and ends (EndedAt set) when its last active pooled
+// binding deactivates. Seed rows written for this episode are tagged with
+// origin="seed:<ID>" in usage_group_rollups_daily so episodes never overwrite
+// each other.
+type UsageGroupSeedEpisode struct {
+	ID                string     `json:"id"`
+	GroupID           string     `json:"group_id"`
+	ActivatedAt       time.Time  `json:"activated_at"`
+	SeedFromUTC       time.Time  `json:"seed_from_utc"`
+	CutoffAt          time.Time  `json:"cutoff_at"`
+	EndedAt           *time.Time `json:"ended_at,omitempty"`
+	FrozenMemberIDs   []string   `json:"frozen_member_ids,omitempty"`
+	MemberSnapshotSet bool       `json:"member_snapshot_set"`
+	Finalized         bool       `json:"finalized"`
+	StateVersion      int64      `json:"state_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+// UsageGroupEpisodeSeedPassInput carries parameters for
+// ExecuteUsageGroupEpisodeSeedPass.
+type UsageGroupEpisodeSeedPassInput struct {
+	EpisodeID             string
+	GroupID               string
+	LedgerRetentionCutoff time.Time // zero means no retention clamp
+	Now                   time.Time
+	IsFinalPass           bool
+}
+
+// UsageGroupEpisodeSeedPassResult reports the outcome of one atomic episode
+// seed pass.
+type UsageGroupEpisodeSeedPassResult struct {
+	Episode             *UsageGroupSeedEpisode
+	DidMutate           bool
+	TouchedProjectScope []string
+}
+
+// UsageGroupMemberBreakdown holds one user's attributed consumption within a
+// pooled group budget window.
+type UsageGroupMemberBreakdown struct {
+	UserID         string `json:"userId"`
+	TokensSummable int64  `json:"tokensSummable"`
+	Calls          int64  `json:"calls"`
+	Events         int64  `json:"events"`
+}
+
 // UsageBudgetStore defines persistence operations for raw-token budget state
-// and scope-counter window sums (Tokenomics P3.1).
+// and scope-counter window sums (Tokenomics P3.1, P3.3).
 type UsageBudgetStore interface {
 	// SumUsageScopeCounterTokens returns the saturating SUM(tokens_summable)
 	// from usage_scope_counters_daily for (scopeKind, counterScopeID) over the
@@ -73,10 +123,57 @@ type UsageBudgetStore interface {
 	SumUsageScopeCounterTokens(ctx context.Context, scopeKind, counterScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error)
 
 	// SumUsageGroupRollupTokens returns the saturating SUM(tokens_summable)
-	// from usage_group_rollups_daily across BOTH origins ("ingest" and "seed")
-	// for (groupID, projectScopeID) over the half-open UTC day range
-	// [fromDayUTC, toDayUTC). projectScopeID == "" selects the system-wide pool.
+	// from usage_group_rollups_daily across ALL origins ("ingest" and every
+	// "seed:<episode_id>") for (groupID, projectScopeID) over the half-open UTC
+	// day range [fromDayUTC, toDayUTC). projectScopeID == "" selects the
+	// system-wide pool.
 	SumUsageGroupRollupTokens(ctx context.Context, groupID, projectScopeID string, fromDayUTC, toDayUTC time.Time) (int64, error)
+
+	// OpenUsageGroupChargingEpisode ensures an open charging episode exists for
+	// groupID under a single per-group advisory lock. If an open episode
+	// (ended_at IS NULL) already exists, returns (existing, opened=false, nil)
+	// and triggers no seed (D6a). Otherwise creates a new episode with
+	// seed_from_utc = max(utcMonthStart(activatedAt), prev.ended_at) and
+	// cutoff_at = activatedAt + 2m, returning (created, opened=true, nil).
+	OpenUsageGroupChargingEpisode(ctx context.Context, groupID string, activatedAt time.Time) (*UsageGroupSeedEpisode, bool, error)
+
+	// CloseUsageGroupChargingEpisodeIfInactive checks inside the per-group
+	// locked transaction whether groupID still has any active pooled binding
+	// (value > 0 on day or month, any scope). If none remain and an open
+	// episode exists, sets ended_at = endedAt and returns (closedEp, true, nil).
+	CloseUsageGroupChargingEpisodeIfInactive(ctx context.Context, groupID string, endedAt time.Time) (*UsageGroupSeedEpisode, bool, error)
+
+	// ExecuteUsageGroupEpisodeSeedPass atomically executes one D6a episode seed
+	// pass under the per-group advisory lock: load episode -> snapshot
+	// effective members if unset -> compute uncharged events in
+	// [max(seed_from_utc, retentionCutoff), cutoff_at) grouped by (day, project)
+	// -> replace ONLY origin="seed:<episode_id>" rows for both (day, G, "") and
+	// (day, G, <project>) -> finalize if IsFinalPass || now >= cutoff_at -> CAS
+	// save episode.
+	ExecuteUsageGroupEpisodeSeedPass(ctx context.Context, in UsageGroupEpisodeSeedPassInput) (*UsageGroupEpisodeSeedPassResult, error)
+
+	// GetUsageGroupSeedEpisode returns an episode by ID or ErrNotFound.
+	GetUsageGroupSeedEpisode(ctx context.Context, episodeID string) (*UsageGroupSeedEpisode, error)
+
+	// GetOpenUsageGroupChargingEpisode returns the currently open episode
+	// (ended_at IS NULL) for groupID, or ErrNotFound.
+	GetOpenUsageGroupChargingEpisode(ctx context.Context, groupID string) (*UsageGroupSeedEpisode, error)
+
+	// ListIncompleteUsageGroupSeedEpisodes returns all non-finalized episodes
+	// (finalized = false).
+	ListIncompleteUsageGroupSeedEpisodes(ctx context.Context) ([]*UsageGroupSeedEpisode, error)
+
+	// ListUsageGroupSeedEpisodesOverlapping returns all episodes for groupID
+	// whose [seed_from_utc, cutoff_at) overlaps [windowStartUTC, windowEndUTC)
+	// and whose member snapshot has been recorded.
+	ListUsageGroupSeedEpisodesOverlapping(ctx context.Context, groupID string, windowStartUTC, windowEndUTC time.Time) ([]*UsageGroupSeedEpisode, error)
+
+	// QueryGroupMemberUsageBreakdown aggregates per-member consumption in SQL
+	// (GROUP BY billing_user_id) from usage_events over [windowStartUTC,
+	// windowEndUTC) for (groupID, projectScopeID), covering both ingest-charged
+	// events (groupID in charged_group_ids) and pre-activation seeded events
+	// from the overlapping episodes (each event counted at most once).
+	QueryGroupMemberUsageBreakdown(ctx context.Context, groupID, projectScopeID string, episodes []*UsageGroupSeedEpisode, windowStartUTC, windowEndUTC time.Time) ([]UsageGroupMemberBreakdown, error)
 
 	// GetUsageBudgetState returns the usage_budget_state row for key, or
 	// ErrNotFound if no row exists yet.

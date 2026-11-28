@@ -481,6 +481,12 @@ func (s *Server) handleGroupRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /usage/budgets path (Tokenomics P3.3)
+	if subPath == "usage/budgets" {
+		s.handleGroupUsageBudgets(w, r, groupID)
+		return
+	}
+
 	// Otherwise handle as group resource
 	if subPath != "" {
 		NotFound(w, "Group resource")

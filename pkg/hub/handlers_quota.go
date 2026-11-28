@@ -619,6 +619,15 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		"binding_id", created.ID, "limit_id", limitID, "actor", user.Email())
 	if pooledGroupLimit(limitDef.Name) {
 		s.InvalidatePooledGroupCacheAll()
+		if created.Value > 0 {
+			_ = s.TokenBudgetEvaluator()
+			if seeder := s.GroupBudgetSeeder(); seeder != nil {
+				if seedErr := seeder.OnGroupBindingActivated(r.Context(), created.SubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to open pooled group charging episode on binding create",
+						"binding_id", created.ID, "group_id", created.SubjectID, "error", seedErr)
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, created)
@@ -721,6 +730,9 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	prevValue := existing.Value
+	prevSubjectID := existing.SubjectID
+
 	existing.SubjectType = req.SubjectType
 	existing.SubjectID = req.SubjectID
 	existing.ScopeType = req.ScopeType
@@ -743,12 +755,46 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		"binding_id", updated.ID, "actor", user.Email())
 	if pooledGroupLimit(limitDef.Name) {
 		s.InvalidatePooledGroupCacheAll()
+		_ = s.TokenBudgetEvaluator()
+		if seeder := s.GroupBudgetSeeder(); seeder != nil {
+			// D6a: If the binding deactivated for prevSubjectID (value -> 0 or
+			// subject moved), close prevSubjectID's episode if no active pooled
+			// bindings remain.
+			if prevValue > 0 && (updated.Value <= 0 || prevSubjectID != updated.SubjectID) {
+				if seedErr := seeder.OnGroupBindingDeactivated(r.Context(), prevSubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to close pooled group charging episode on binding update",
+						"binding_id", updated.ID, "group_id", prevSubjectID, "error", seedErr)
+				}
+			}
+			// D6a: If the binding is active on updated.SubjectID and just
+			// activated (0 -> >0 or subject moved), open an episode if none is
+			// open. Ordinary cap/action/scope edits inside an open episode are
+			// a no-op.
+			if updated.Value > 0 && (prevValue <= 0 || prevSubjectID != updated.SubjectID) {
+				if seedErr := seeder.OnGroupBindingActivated(r.Context(), updated.SubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to open pooled group charging episode on binding update",
+						"binding_id", updated.ID, "group_id", updated.SubjectID, "error", seedErr)
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id string, user UserIdentity) {
+	// Fetch binding before delete so we can close a pooled group's charging
+	// episode if this was its last active pooled binding (D6a).
+	existing, getErr := s.store.GetEntitlementBinding(r.Context(), id)
+	if getErr != nil {
+		if errors.Is(getErr, store.ErrNotFound) {
+			NotFound(w, "Entitlement Binding")
+			return
+		}
+		writeErrorFromErr(w, getErr, "")
+		return
+	}
+
 	if err := s.store.DeleteEntitlementBinding(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Entitlement Binding")
@@ -761,6 +807,16 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 	slog.Info("entitlement binding deleted",
 		"binding_id", id, "actor", user.Email())
 	s.InvalidatePooledGroupCacheAll()
+	if existing != nil && existing.SubjectType == store.EntitlementSubjectGroup && existing.Value > 0 {
+		if limitDef, defErr := s.store.GetLimitDefinition(r.Context(), existing.LimitDefinitionID); defErr == nil && limitDef != nil && pooledGroupLimit(limitDef.Name) {
+			if seeder := s.GroupBudgetSeeder(); seeder != nil {
+				if seedErr := seeder.OnGroupBindingDeactivated(r.Context(), existing.SubjectID, time.Time{}); seedErr != nil {
+					slog.Warn("failed to close pooled group charging episode on binding delete",
+						"binding_id", id, "group_id", existing.SubjectID, "error", seedErr)
+				}
+			}
+		}
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

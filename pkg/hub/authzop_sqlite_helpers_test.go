@@ -851,6 +851,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			e.Name == experiments.ArtifactsTransfer || e.Name == experiments.ArtifactsReviewRequests ||
 			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
 			e.Name == experiments.Triggers || e.Name == experiments.TokenomicsUsageLedger ||
+			e.Name == experiments.TokenomicsTokenBudgets ||
 			e.Name == experiments.TokenomicsTrajectoryCapture ||
 			e.Name == experiments.AccessConstraints {
 			e.Default = true
@@ -875,6 +876,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.RuntimeOrphanReconcile))
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsUsageLedger))
+	require.True(t, srv.experimentEnabled(experiments.TokenomicsTokenBudgets))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture))
 	require.True(t, srv.experimentEnabled(experiments.AccessConstraints))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
@@ -1320,6 +1322,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- group family ---
 		"/api/v1/groups/{id}":                                 {"id": f.group},
+		"/api/v1/groups/{id}/usage/budgets":                   {"id": f.group},
 		"/api/v1/groups/{id}/members":                         {"id": f.group},
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
