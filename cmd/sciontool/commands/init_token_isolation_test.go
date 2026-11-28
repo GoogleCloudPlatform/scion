@@ -1490,6 +1490,71 @@ func TestStartCredentialFileWatch_IsolatedTakesPreExistingTransportHandoff(t *te
 	}
 }
 
+func TestStartCredentialFileWatch_IsolatedNoHubTransportDiscardsHandoffOnce(t *testing.T) {
+	h, _ := newIsolatedResetHarness(t, hub.TokenStoreRuntimeFile)
+	// Client has NO hub-provided transport configured.
+	if h.client.HasHubProvidedTransport() {
+		t.Fatal("expected test client to have no hub-provided transport")
+	}
+
+	handoffTransport := hub.HandoffTransportTokenFilePath()
+	if err := os.MkdirAll(filepath.Dir(handoffTransport), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handoffTransport, []byte("unneeded-transport-handoff"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fc := clock.NewFake(h.now)
+	notify := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := startCredentialFileWatch(ctx, h.client, hub.TokenWatchConfig{
+		Interval:    time.Second,
+		StableDelay: 100 * time.Millisecond,
+		Notify:      notify,
+		Clock:       fc,
+	})
+	w.RecheckAgent()
+	w.RecheckTransport()
+	h.r.watcher = w
+
+	// First interval reports the pre-existing transport handoff.
+	deadline := time.Now().Add(2 * time.Second)
+	notified := false
+	for !notified && time.Now().Before(deadline) {
+		fc.Advance(time.Second)
+		select {
+		case <-notify:
+			notified = true
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+	if !notified {
+		t.Fatal("watcher did not report pre-existing transport handoff on first interval")
+	}
+
+	// reset() takes and discards the transport handoff.
+	h.r.reset(authResetFileChange)
+	if _, err := os.Lstat(handoffTransport); !os.IsNotExist(err) {
+		t.Fatalf("transport handoff still exists after discard: err=%v", err)
+	}
+
+	// Subsequent intervals must NOT re-report anything.
+	for i := 0; i < 4; i++ {
+		fc.Advance(time.Second)
+		time.Sleep(15 * time.Millisecond)
+		fc.Advance(200 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
+	}
+	select {
+	case <-notify:
+		t.Fatal("watcher re-reported after transport handoff was taken and discarded")
+	default:
+	}
+}
+
 func TestRunInit_ShellIsolation_TransportStagingFailureFailsClosed(t *testing.T) {
 	home := t.TempDir()
 	t.Cleanup(hub.SetTokenHome(home))

@@ -3013,6 +3013,17 @@ func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
 	if !r.isolated && !r.hubClient.TransportTokenFileChanged() {
 		return
 	}
+	if r.isolated && !r.hubClient.HasHubProvidedTransport() {
+		// No hub-provided transport configured: take and discard any transport
+		// handoff so RecheckTransport does not re-report it every interval.
+		if _, err := hub.TakeHandoffTransportToken(); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Warn("AUTH_RESET: Ignored and removed transport handoff (%s): %v", source, err)
+		}
+		if r.watcher != nil {
+			r.watcher.RecheckTransport()
+		}
+		return
+	}
 	chownUID, chownGID := r.tokenChownOwner()
 	adopted, err := r.hubClient.AdoptTransportTokenFile(chownUID, chownGID)
 	if r.isolated && r.watcher != nil {
