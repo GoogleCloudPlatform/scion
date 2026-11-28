@@ -37,9 +37,10 @@ const (
 )
 
 var (
-	// errUploadIntegrityMismatch is returned by FileSink.Finalize when
-	// takeovers > 0 and re-hashing the partial file does not match the
-	// committed SHA-256 digest (§3.6).
+	// errUploadIntegrityMismatch is returned by FileSink.Finalize when the
+	// partial file size does not match DeclaredSize or when takeovers > 0 and
+	// re-hashing the partial file does not match the committed SHA-256 digest
+	// (§3.6).
 	errUploadIntegrityMismatch = errors.New("upload integrity mismatch")
 
 	// errUploadTargetExists is returned by FileSink.Finalize when the target
@@ -153,13 +154,15 @@ func (s *fileUploadSink) WriteChunk(ctx context.Context, sess *store.UploadSessi
 	)
 
 	if offset == 0 {
-		// Create exclusively at offset 0 so a pre-planted symlink or file is
-		// refused. On a lease takeover after an earlier crash mid-chunk-0,
-		// allow opening an existing regular partial file and truncating to 0.
+		// Create exclusively at offset 0 so a pre-planted symlink or non-regular
+		// entry is refused. If the partial already exists (e.g. a retry after an
+		// earlier offset-0 commit failure or lease takeover), accept it only if
+		// it is a regular file under the same SameFile checks as offset > 0,
+		// then truncate to 0.
 		f, err = openWorkspaceFileForWrite(dir, partialBase, false)
 		if err == nil {
 			createdFresh = true
-		} else if sess.Takeovers > 0 {
+		} else {
 			linfo, lerr := dir.Lstat(partialBase)
 			if lerr != nil {
 				return "", err
@@ -172,8 +175,6 @@ func (s *fileUploadSink) WriteChunk(ctx context.Context, sess *store.UploadSessi
 			if err != nil {
 				return "", err
 			}
-		} else {
-			return "", err
 		}
 	} else {
 		before, err = dir.Lstat(partialBase)
@@ -331,6 +332,9 @@ func (s *fileUploadSink) Finalize(ctx context.Context, sess *store.UploadSession
 	}
 	if notRegular(pInfo) {
 		return nil, fmt.Errorf("%w: partial is not a regular file", errWorkspaceWriteRefused)
+	}
+	if pInfo.Size() != sess.DeclaredSize {
+		return nil, fmt.Errorf("%w: partial size %d does not match declared size %d", errUploadIntegrityMismatch, pInfo.Size(), sess.DeclaredSize)
 	}
 
 	// Fencing backstop (§3.6): if a lease takeover occurred, re-hash the
