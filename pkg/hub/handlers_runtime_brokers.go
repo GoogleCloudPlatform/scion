@@ -1418,8 +1418,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	}
 
 	var heartbeat brokerHeartbeatRequest
-	if err := readJSON(r, &heartbeat); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &heartbeat) {
 		return
 	}
 	// This Hub reads the report hashes and asks for the full report when

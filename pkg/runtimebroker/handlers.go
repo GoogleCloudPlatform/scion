@@ -997,8 +997,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	defer s.finishOwnedCreate(r.Context(), w, ownedAbandon)
 
 	var req CreateAgentRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Every error answer to a home-resetting request says whether the home
@@ -4103,7 +4102,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		InitFirewall           *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
+		if err := readJSONWithLimit(w, r, defaultMaxJSONBodyBytes, &startReq); err != nil {
+			if isMaxBytesError(err) {
+				span.SetStatus(codes.Error, "start request body too large")
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+				return
+			}
 			// A flat instance must not read an undecodable body as "no
 			// expectedRuntimeTargetId". Unknown keys still decode.
 			if s.isFlat() {
@@ -5546,7 +5550,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		InitFirewall *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
+		if err := readJSONWithLimit(w, r, defaultMaxJSONBodyBytes, &restartReq); err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+				return
+			}
 			if s.isFlat() {
 				BadRequest(w, "Invalid request body: "+err.Error())
 				return
@@ -5961,6 +5969,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	})
 }
 
+// maxBrokerSendMessageBodyBytes bounds POST /api/v1/agents/{id}/message at
+// 8 MiB. The Hub accepts message bodies up to 2 MiB on its public ingress and
+// forwards a rebuilt JSON request in which the message text can appear three
+// times (structured_message.msg, nested structured_message.delivery_text, and
+// top-level delivery_text), producing ~6 MiB plus JSON framing for a near-limit
+// message. 8 MiB admits the largest valid Hub-forwarded message while still
+// bounding local/unauthenticated requests against unbounded reads.
+const maxBrokerSendMessageBodyBytes int64 = 8 << 20
+
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -5972,13 +5989,13 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		BadRequest(w, "Invalid request body: empty request body")
 		return
 	}
-	// No byte cap here, matching the previous behaviour: this route is
-	// Hub-only and HMAC-authenticated, and the Hub forwards a rebuilt
-	// request in which the message text can appear several times (msg plus
-	// the rendered delivery_text, nested and top level), so a cap tied to
-	// the Hub's public ingress limit would refuse ordinary messages.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBrokerSendMessageBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+			return
+		}
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
@@ -6437,8 +6454,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	ctx := r.Context()
 
 	var req ExecRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -6635,8 +6651,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	ctx := r.Context()
 
 	var req ResetAuthRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 

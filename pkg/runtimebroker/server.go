@@ -40,6 +40,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
@@ -3789,12 +3790,44 @@ func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-// readJSON reads JSON from request body.
+// defaultMaxJSONBodyBytes bounds Runtime Broker JSON request bodies at
+// apiclient.MaxSignedRequestBodyBytes (2 MiB), matching the HMAC middleware
+// ceiling so unauthenticated/local requests cannot trigger unbounded reads.
+const defaultMaxJSONBodyBytes int64 = apiclient.MaxSignedRequestBodyBytes
+
+const defaultBodyTooLargeMsg = "request body exceeds maximum size"
+
+func isMaxBytesError(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
+// readJSON reads JSON from request body with defaultMaxJSONBodyBytes enforced.
 func readJSON(r *http.Request, v interface{}) error {
+	return readJSONWithLimit(nil, r, defaultMaxJSONBodyBytes, v)
+}
+
+func readJSONWithLimit(w http.ResponseWriter, r *http.Request, maxBytes int64, v interface{}) error {
 	if r.Body == nil {
 		return fmt.Errorf("empty request body")
 	}
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxJSONBodyBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	if err := readJSONWithLimit(w, r, defaultMaxJSONBodyBytes, v); err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", defaultBodyTooLargeMsg, nil)
+			return false
+		}
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	return true
 }
 
 // extractID extracts the ID from a URL path like "/api/v1/agents/{id}".

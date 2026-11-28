@@ -243,24 +243,22 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Limit request body size for both JSON and raw content paths.
-	r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
-
+	// Decode JSON or read raw content within the harness config file size cap.
 	var req HarnessConfigFileWriteRequest
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
+		if !decodeJSONWithLimit(w, r, maxHarnessConfigFileSize+4096, "File too large for inline upload.", &req) {
 			return
 		}
 	} else {
-		data, err := io.ReadAll(io.LimitReader(r.Body, maxHarnessConfigFileSize+1))
+		r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize)
+		data, err := io.ReadAll(r.Body)
 		if err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					"File too large for inline upload.", nil)
+				return
+			}
 			BadRequest(w, "Failed to read request body")
-			return
-		}
-		if int64(len(data)) > maxHarnessConfigFileSize {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-				"File too large for inline upload.", nil)
 			return
 		}
 		req.Content = string(data)

@@ -189,8 +189,7 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req messageDeliveryFailuresRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &req) {
 		return
 	}
 	if len(req.Failures) > maxMessageFailuresPerReport {

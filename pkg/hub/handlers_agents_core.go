@@ -485,18 +485,7 @@ func readBoundedAgentJSON(w http.ResponseWriter, r *http.Request, maxBytes int64
 }
 
 func readBoundedAgentJSONWithMessage(w http.ResponseWriter, r *http.Request, maxBytes int64, tooLargeMsg string, dst interface{}) bool {
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	}
-	if err := readJSON(r, dst); err != nil {
-		if isMaxBytesError(err) {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", tooLargeMsg, nil)
-			return false
-		}
-		BadRequest(w, "Invalid request body: "+err.Error())
-		return false
-	}
-	return true
+	return decodeJSONWithLimit(w, r, maxBytes, tooLargeMsg, dst)
 }
 
 type CreateAgentRequest struct {

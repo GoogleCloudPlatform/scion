@@ -231,8 +231,7 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var req brokerAttachmentRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &req) {
 		return
 	}
 	if req.tooManyTargets() {

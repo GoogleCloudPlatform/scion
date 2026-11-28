@@ -98,8 +98,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req inboundMessageRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxBrokerSignedJSONBodySize, brokerSignedBodyTooLargeMsg, &req) {
 		return
 	}
 

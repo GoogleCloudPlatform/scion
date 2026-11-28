@@ -203,6 +203,19 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 	})
 }
 
+// maxFileManifestBodySize bounds JSON request bodies carrying file lists or
+// manifests (workspace sync-to/finalize, template/harness-config/skill
+// create/upload/finalize) at 16 MiB (same class as maxAgentCreateBodySize).
+// Derived from importMaxTreeFiles (20,000 files): a 20,000-entry manifest
+// (~170-500 B/entry) fits with headroom.
+const maxFileManifestBodySize = 16 << 20
+
+const fileManifestTooLargeMsg = "request body exceeds the 16 MiB maximum size"
+
+const maxWorkspaceSyncManifestBodySize = maxFileManifestBodySize
+
+const workspaceSyncManifestTooLargeMsg = fileManifestTooLargeMsg
+
 // handleWorkspaceSyncFrom initiates a workspace sync from an agent.
 // POST /api/v1/agents/{id}/workspace/sync-from
 //
@@ -216,8 +229,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 	// Parse optional request body
 	var req SyncFromRequest
 	if r.ContentLength > 0 {
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
+		if !decodeJSON(w, r, &req) {
 			return
 		}
 	}
@@ -329,8 +341,7 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 
 	// Parse request body
 	var req SyncToRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxWorkspaceSyncManifestBodySize, workspaceSyncManifestTooLargeMsg, &req) {
 		return
 	}
 
@@ -415,8 +426,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	// Parse request body
 	var req SyncToFinalizeRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !decodeJSONWithLimit(w, r, maxWorkspaceSyncManifestBodySize, workspaceSyncManifestTooLargeMsg, &req) {
 		return
 	}
 
