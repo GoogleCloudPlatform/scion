@@ -470,13 +470,23 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       input1.dispatchEvent(new Event('input'));
       await agentsEl.updateComplete;
 
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(350);
       await agentsEl.updateComplete;
 
       const box1After = agentsEl.shadowRoot?.querySelector('scion-filter-box');
       expect(box1After?.value).toBe('phase:running label:');
       expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
-      expect(fetchUrls.some((u) => u.includes('q=phase%3Arunning'))).toBe(true);
+      // No debounced commit fires while editing.
+      expect(fetchUrls.some((u) => u.includes('q=phase%3Arunning'))).toBe(false);
+
+      // Committing a valid query on Enter keeps <scion-filter-box> mounted and focused during reload.
+      input1.focus();
+      input1.value = 'phase:running';
+      input1.dispatchEvent(new Event('input'));
+      input1.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await agentsEl.updateComplete;
+      expect(agentsEl.shadowRoot?.querySelector('scion-filter-box')).toBe(box1);
+      expect(box1?.shadowRoot?.activeElement).toBe(input1);
       agentsEl.remove();
 
       // 2) Project detail page
@@ -537,17 +547,18 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       input2.dispatchEvent(new Event('input'));
       await projEl.updateComplete;
 
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(350);
       await projEl.updateComplete;
 
       const box2After = projEl.shadowRoot?.querySelector('scion-filter-box');
       expect(box2After?.value).toBe('phase:running label:');
       expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
+      // No debounced commit fires while editing.
       expect(
         fetchUrls.some(
           (u) => u.includes('/api/v1/projects/proj-123/agents') && u.includes('q=phase%3Arunning')
         )
-      ).toBe(true);
+      ).toBe(false);
       projEl.remove();
     } finally {
       vi.useRealTimers();

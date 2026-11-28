@@ -2894,8 +2894,10 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
 
       expect(internals(el).agentWindow.pageIndex).toBe(1); // unchanged
-      // The preview filter IS applied to the page.
-      expect(internals(el).agentWindow.items.map((a) => a.id)).toEqual(expectedFiltered);
+      // Typing alone does not re-filter the page before Enter/blur commit.
+      expect(internals(el).agentWindow.items.map((a) => a.id)).toEqual(
+        itemsBefore.map((a) => a.id)
+      );
       expect(requests.length).toBe(before); // still zero
       const pagerEl = el.shadowRoot?.querySelector('scion-agent-pager') as unknown as {
         pageIndex: number;
@@ -4618,7 +4620,8 @@ describe('project-detail — agent list window', () => {
       }
       await el.updateComplete;
       expect(requests.length).toBe(n);
-      expect(internals(el).agentWindow.items.every((a) => a.labels?.env === 'prod')).toBe(true);
+      // Typing alone does not re-filter the list before commit.
+      expect(internals(el).agentWindow.items.some((a) => a.labels?.env !== 'prod')).toBe(true);
     });
   });
 

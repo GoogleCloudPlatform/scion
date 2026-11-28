@@ -2793,24 +2793,13 @@ export class ScionPageProjectDetail extends LitElement {
   private handleFilterInput(e: CustomEvent<FilterInputDetail>): void {
     this.filterNotice = '';
     this.filterQueryText = e.detail.value;
-    this.filterQuery = e.detail.query;
-    const fq = e.detail.query;
-    const ctx = this.filterContext;
-    this.agentWindow.setViewState({
-      filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
-      previewDiffersFromCommitted: true,
-    });
   }
 
   private handleFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
     this.filterNotice = '';
-    // Do not overwrite `this.filterQueryText` or the URL when a deferred commit
-    // fires after the user has moved on to a newer (e.g. in-progress invalid) edit.
-    const isCurrentText = e.detail.value === this.filterQueryText;
+    this.filterQueryText = e.detail.value;
     this.filterQuery = e.detail.query;
-    if (isCurrentText) {
-      this.syncQueryToUrl(e.detail.value);
-    }
+    this.syncQueryToUrl(e.detail.value);
     const fq = e.detail.query;
     const nextQ = e.detail.serverQ;
     const nextHasClientOnly = hasClientOnlyKeys(fq, PROJECT_AGENTS_FILTER_SCHEMA);
@@ -2826,7 +2815,7 @@ export class ScionPageProjectDetail extends LitElement {
     const pred = (a: Agent) => matchAgentQuery(fq, a, ctx);
     this.agentWindow.setViewState({
       filterPredicate: pred,
-      previewDiffersFromCommitted: !isCurrentText,
+      previewDiffersFromCommitted: false,
       committedFilterPredicate: pred,
       committedNonPhasePredicate: nonPhasePredicateForQuery(fq, ctx),
       committedPhasePredicate: phasePredicateForQuery(fq),

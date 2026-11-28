@@ -578,7 +578,8 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
     const narrowedQuery = parseGraph('phase:running');
 
-    // Narrowing filter-input updates filterKey in the same render as agents -> compacted layout.
+    // Uncommitted filter-input leaves filterKey and layout untouched while editing.
+    const initialPositions = nodePositions(tree);
     box.dispatchEvent(
       new CustomEvent('filter-input', {
         detail: { value: 'phase:running', query: narrowedQuery, valid: true },
@@ -588,9 +589,9 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     );
     await page.updateComplete;
     await tree.updateComplete;
-    expect(nodePositions(tree)).toEqual(expectedCompacted);
+    expect(nodePositions(tree)).toEqual(initialPositions);
 
-    // Subsequent debounced filter-commit keeps the same compacted layout.
+    // Committing via filter-commit updates filterKey and compacts the layout.
     box.dispatchEvent(
       new CustomEvent('filter-commit', {
         detail: { value: 'phase:running', query: narrowedQuery, serverQ: '' },
