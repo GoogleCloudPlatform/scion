@@ -28,6 +28,7 @@ import { classMap } from 'lit/directives/class-map.js';
 
 import { apiFetch } from '../../client/api.js';
 import type { ConstraintScope } from '../../shared/access-boundaries.js';
+import { syncSlInputComboboxAria } from '../../utils/sl-input-combobox-aria.js';
 
 export interface ScopeChangeDetail {
   scope: ConstraintScope | null;
@@ -66,6 +67,23 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
     super.disconnectedCallback();
     if (this.searchDebounceTimer) clearTimeout(this.searchDebounceTimer);
     if (this.blurTimeoutId) clearTimeout(this.blurTimeoutId);
+  }
+
+  override updated(): void {
+    if (this.scopeType === 'project') {
+      const listbox = this.projectSearchOpen
+        ? this.shadowRoot?.getElementById('project-search-listbox')
+        : null;
+      const activeOption =
+        this.projectSearchOpen && this.activeDescendantIndex >= 0
+          ? this.shadowRoot?.getElementById(`project-option-${this.activeDescendantIndex}`)
+          : null;
+      syncSlInputComboboxAria(this.shadowRoot?.querySelector('sl-input'), {
+        expanded: this.projectSearchOpen,
+        controls: listbox,
+        activeDescendant: activeOption,
+      });
+    }
   }
 
   static override styles = [
@@ -455,15 +473,6 @@ export class ScionAccessBoundaryScopeSelector extends LitElement {
                   value=${this.projectSearchQuery}
                   type="text"
                   autocomplete="off"
-                  role="combobox"
-                  aria-expanded=${
-                    // scion-a11y-ignore: pre-existing sl-input combobox; tracked in ptone/scion#9870
-                    this.projectSearchOpen ? 'true' : 'false'
-                  }
-                  aria-controls="project-search-listbox"
-                  aria-activedescendant=${this.activeDescendantIndex >= 0
-                    ? `project-option-${this.activeDescendantIndex}`
-                    : ''}
                   @sl-input=${(e: Event) => this.handleProjectSearchInput(e)}
                   @keydown=${(e: KeyboardEvent) => this.handleProjectSearchKeydown(e)}
                   @sl-focus=${() => {

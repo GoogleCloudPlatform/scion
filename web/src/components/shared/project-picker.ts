@@ -39,6 +39,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Capabilities } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
+import { syncSlInputComboboxAria } from '../../utils/sl-input-combobox-aria.js';
 
 /** Project item returned by /api/v1/projects and exposed to filter predicates / events. */
 export interface ProjectOption {
@@ -289,6 +290,19 @@ export class ScionProjectPicker extends LitElement {
         void this.resolveMultipleProjects(missing);
       }
     }
+
+    const listbox = this.searchOpen
+      ? this.shadowRoot?.getElementById('project-picker-listbox')
+      : null;
+    const activeOption =
+      this.searchOpen && this.activeDescendantIndex >= 0
+        ? this.shadowRoot?.getElementById(`project-picker-option-${this.activeDescendantIndex}`)
+        : null;
+    syncSlInputComboboxAria(this.shadowRoot?.querySelector('sl-input'), {
+      expanded: this.searchOpen,
+      controls: listbox,
+      activeDescendant: activeOption,
+    });
   }
 
   private clearDisallowedSelection(): void {
@@ -606,15 +620,6 @@ export class ScionProjectPicker extends LitElement {
         type="text"
         autocomplete="off"
         ?clearable=${clearable}
-        role="combobox"
-        aria-expanded=${
-          // scion-a11y-ignore: pre-existing sl-input combobox; tracked in ptone/scion#9870
-          this.searchOpen ? 'true' : 'false'
-        }
-        aria-controls="project-picker-listbox"
-        aria-activedescendant=${this.activeDescendantIndex >= 0
-          ? `project-picker-option-${this.activeDescendantIndex}`
-          : ''}
         ?disabled=${this.disabled}
         @sl-input=${(e: Event) => this.handleSearchInput(e)}
         @sl-clear=${() => this.handleClear()}

@@ -37,6 +37,7 @@ import type { PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { isValidTimeZone, listTimeZones } from '../../utils/time.js';
+import { syncSlInputComboboxAria } from '../../utils/sl-input-combobox-aria.js';
 
 /** Event detail emitted when a zone is selected or typed. */
 export interface TimezoneChangeDetail {
@@ -100,6 +101,21 @@ export class ScionTimezonePicker extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.blurTimeoutId) clearTimeout(this.blurTimeoutId);
+  }
+
+  override updated(): void {
+    const listbox = this.searchOpen
+      ? this.shadowRoot?.getElementById('timezone-picker-listbox')
+      : null;
+    const activeOption =
+      this.searchOpen && this.activeDescendantIndex >= 0
+        ? this.shadowRoot?.getElementById(`timezone-picker-option-${this.activeDescendantIndex}`)
+        : null;
+    syncSlInputComboboxAria(this.shadowRoot?.querySelector('sl-input'), {
+      expanded: this.searchOpen,
+      controls: listbox,
+      activeDescendant: activeOption,
+    });
   }
 
   override willUpdate(changed: PropertyValues<this>): void {
@@ -333,15 +349,6 @@ export class ScionTimezonePicker extends LitElement {
           value=${this.searchQuery}
           type="text"
           autocomplete="off"
-          role="combobox"
-          aria-expanded=${
-            // scion-a11y-ignore: pre-existing sl-input combobox; tracked in ptone/scion#9870
-            this.searchOpen ? 'true' : 'false'
-          }
-          aria-controls="timezone-picker-listbox"
-          aria-activedescendant=${this.activeDescendantIndex >= 0
-            ? `timezone-picker-option-${this.activeDescendantIndex}`
-            : ''}
           clearable
           ?disabled=${this.disabled}
           @sl-input=${(e: Event) => this.handleSearchInput(e)}
