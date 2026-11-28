@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -150,14 +149,13 @@ func (f *mpChainP1Fixture) ownerReq(t *testing.T, method, path string, body any)
 	if body != nil {
 		require.NoError(t, json.NewEncoder(&buf).Encode(body))
 	}
-	req := httptest.NewRequest(method, path, &buf)
+	ident := NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, f.owner.Role, string(ClientTypeAPI))
+	ctx := contextWithIdentity(context.Background(), ident)
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "mp-chain-p1-sess"})
+	req := httptest.NewRequest(method, path, &buf).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
-	ident := NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, f.owner.Role, "session")
-	req = req.WithContext(contextWithIdentity(req.Context(), ident))
 	rr := httptest.NewRecorder()
-	prefix := "/api/v1/projects/" + f.project.ID + "/message-policies"
-	rest := strings.TrimPrefix(path, prefix)
-	f.srv.handleProjectMessagePolicies(rr, req, f.project.ID, rest)
+	f.srv.mux.ServeHTTP(rr, req)
 	return rr
 }
 
