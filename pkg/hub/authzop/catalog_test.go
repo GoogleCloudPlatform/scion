@@ -864,34 +864,73 @@ func collectTestRefs(catalog []OperationSpec) map[string][]OperationID {
 // nonexistent packages or functions. Used by TestCatalogTestRefsExist and
 // TestProofNonexistentTestRefDetected.
 func findMissingTestRefs(repoRoot string, refs map[string][]OperationID) []string {
-	var missing []string
-	for ref, ops := range refs {
-		parts := strings.SplitN(ref, ":", 2)
-		pkg, fn := parts[0], parts[1]
+	type pkgIndex struct {
+		exists bool
+		funcs  map[string]bool
+	}
+	cache := make(map[string]pkgIndex)
 
+	loadPkg := func(pkg string) pkgIndex {
+		if idx, ok := cache[pkg]; ok {
+			return idx
+		}
 		pkgDir := filepath.Join(repoRoot, pkg)
 		if _, err := os.Stat(pkgDir); os.IsNotExist(err) {
-			missing = append(missing, "test ref package "+pkg+" does not exist (referenced by "+opIDsStr(ops)+")")
-			continue
+			idx := pkgIndex{exists: false}
+			cache[pkg] = idx
+			return idx
 		}
-
-		found := false
+		funcs := make(map[string]bool)
 		testFiles, _ := filepath.Glob(filepath.Join(pkgDir, "*_test.go"))
 		for _, tf := range testFiles {
 			content, err := os.ReadFile(tf)
 			if err != nil {
 				continue
 			}
-			if strings.Contains(string(content), "func "+fn+"(") {
-				found = true
-				break
-			}
+			indexDeclaredFuncs(string(content), funcs)
 		}
-		if !found {
+		idx := pkgIndex{exists: true, funcs: funcs}
+		cache[pkg] = idx
+		return idx
+	}
+
+	var missing []string
+	for ref, ops := range refs {
+		parts := strings.SplitN(ref, ":", 2)
+		pkg, fn := parts[0], parts[1]
+
+		idx := loadPkg(pkg)
+		if !idx.exists {
+			missing = append(missing, "test ref package "+pkg+" does not exist (referenced by "+opIDsStr(ops)+")")
+			continue
+		}
+		if !idx.funcs[fn] {
 			missing = append(missing, "test function "+fn+" not found in package "+pkg+" (referenced by "+opIDsStr(ops)+")")
 		}
 	}
 	return missing
+}
+
+// indexDeclaredFuncs scans src for "func <name>(" occurrences and records each
+// <name> in out. Scanning each test file once per package avoids O(refs * files)
+// disk reads in findMissingTestRefs.
+func indexDeclaredFuncs(src string, out map[string]bool) {
+	const prefix = "func "
+	for {
+		i := strings.Index(src, prefix)
+		if i < 0 {
+			return
+		}
+		src = src[i+len(prefix):]
+		paren := strings.IndexByte(src, '(')
+		if paren <= 0 {
+			continue
+		}
+		name := src[:paren]
+		if !strings.ContainsAny(name, " \t\r\n") {
+			out[name] = true
+		}
+	}
 }
 
 func opIDsStr(ops []OperationID) string {

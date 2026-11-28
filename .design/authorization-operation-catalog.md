@@ -266,6 +266,11 @@
 - [chat.userdecisions.suggestions](#chatuserdecisionssuggestions) — Search uncapped decision filter value suggestions (agent, conversation, or by) across every project the caller is a member of and can read (capped at 200 readable member projects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty values), then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
 - [chat.conversation.decisions.topic](#chatconversationdecisionstopic) — List open decision prompts in one chat thread with per-viewer prompt counts (oldest first, capped at 100). Needs project:read on the thread's project (a caller without it gets the missing-thread 404); a token also needs inbox:read for the project. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
 - [chat.conversation.decisions.dm](#chatconversationdecisionsdm) — List open decision prompts in one of the caller's DMs with per-viewer prompt counts (oldest first, capped at 100; user-to-user DMs return an empty list). Needs DM participation; a token also needs inbox:read and agent:read on the peer agent under the DM rule. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
+- [chat.scheduled.list](#chatscheduledlist) — List the caller's own pending, sending and failed scheduled messages in a chat topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), plus read access to the topic or DM participation
+- [chat.scheduled.create](#chatscheduledcreate) — Schedule a chat message to be sent later as the caller in a topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), the same conversation send access as a live send (authorizeChatSend), and counts against the sender's chat send allowance and active scheduled-message cap
+- [chat.scheduled.cancel](#chatscheduledcancel) — Cancel one of the caller's own pending scheduled chat messages in a conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own pending row can be cancelled (409 if already claimed or sent)
+- [chat.scheduled.sendnow](#chatscheduledsendnow) — Requeue one of the caller's own missed, interrupted or wake-failed scheduled chat messages for immediate delivery. Requires an interactive, unscoped user session (scheduledSendCaller), conversation send access (authorizeChatSend), and the sender's chat send allowance
+- [chat.scheduled.dismiss](#chatscheduleddismiss) — Dismiss one of the caller's own failed scheduled chat messages from the conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own row can be dismissed
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -10214,6 +10219,180 @@
 ### Tests
 
 - `pkg/hub:TestConversationDecisions_Authz`
+
+---
+
+## chat.scheduled.list
+
+**Domain:** chat
+
+**Description:** List the caller's own pending, sending and failed scheduled messages in a chat topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), plus read access to the topic or DM participation
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/scheduled` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_PendingVisibleOnlyToSender`
+- `pkg/hub:TestScheduledSend_OutsiderRefused`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.create
+
+**Domain:** chat
+
+**Description:** Schedule a chat message to be sent later as the caller in a topic or DM. Requires an interactive, unscoped user session (scheduledSendCaller refuses tokens, federated identities, broker-delegated users and agents with 403), the same conversation send access as a live send (authorizeChatSend), and counts against the sender's chat send allowance and active scheduled-message cap
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/scheduled` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_OutsiderRefused`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.cancel
+
+**Domain:** chat
+
+**Description:** Cancel one of the caller's own pending scheduled chat messages in a conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own pending row can be cancelled (409 if already claimed or sent)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/chat/conversations/{id}/scheduled/{scheduledId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `chat.scheduled.cancel`
+- **Context Fields:** principal_id, scheduled_message_id, conversation_key, status
+- **Before Fields:** scheduled_message_id, status
+- **Atomic:** No
+- **Non-Atomic Justification:** CancelScheduledMessage commits the status transition before auditScheduledMessage emits the structured audit event
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_CancelBeforeFire_NeverSent`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.sendnow
+
+**Domain:** chat
+
+**Description:** Requeue one of the caller's own missed, interrupted or wake-failed scheduled chat messages for immediate delivery. Requires an interactive, unscoped user session (scheduledSendCaller), conversation send access (authorizeChatSend), and the sender's chat send allowance
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/send-now` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_SendNowChecks`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
+
+---
+
+## chat.scheduled.dismiss
+
+**Domain:** chat
+
+**Description:** Dismiss one of the caller's own failed scheduled chat messages from the conversation. Requires an interactive, unscoped user session (scheduledSendCaller); only the sender's own row can be dismissed
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/scheduled/{scheduledId}/dismiss` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduledSend_Dismiss`
+- `pkg/hub:TestScheduledSend_ScopedTokenRefused`
 
 ---
 

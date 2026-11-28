@@ -323,16 +323,17 @@ func TestInteractiveUserSessionMatchesScheduledSendCaller(t *testing.T) {
 	}
 }
 
-// TestScheduledSendCallerUnchanged: scheduledSendCaller's refusals are byte
-// for byte what they were before it used the shared check: the plain 403
-// without a user, and the scheduled-messages 403 for every other refusal.
+// TestScheduledSendCallerUnchanged checks scheduledSendCaller's refusal
+// bodies: a plain 403 (without session-only details) when no user is present,
+// and the session-only denial 403 (with details.credential=session_required
+// and details.reason=INTERACTIVE_STATE) for non-session callers.
 func TestScheduledSendCallerUnchanged(t *testing.T) {
 	user := NewAuthenticatedUser(tid("f6u-user"), "f6u@test.com", "F6U", "member", string(ClientTypeWeb))
 	scoped := NewScopedUserIdentity(user, tid("f6u-project"), []string{"project:read"})
 	plain := httptest.NewRecorder()
 	Forbidden(plain)
 	signedIn := httptest.NewRecorder()
-	writeError(signedIn, http.StatusForbidden, ErrCodeForbidden, "scheduled messages require a signed-in session", nil)
+	writeSessionOnlyDenial(signedIn, ErrCodeForbidden, "scheduled messages require a signed-in session", authzop.ReasonInteractiveState)
 	for _, tc := range []struct {
 		name     string
 		identity Identity
