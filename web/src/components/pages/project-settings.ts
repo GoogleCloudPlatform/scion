@@ -2833,9 +2833,9 @@ export class ScionPageProjectSettings extends LitElement {
               `
             : html`
                 <span
-                  >GitHub: not connected —
+                  >GitHub: Not connected —
                   <a href=${href} data-testid="project-settings-github-connect-link"
-                    >Connect →</a
+                    >Set up →</a
                   ></span
                 >
               `}

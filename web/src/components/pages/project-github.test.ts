@@ -17,18 +17,22 @@
 /**
  * Tests for Project GitHub page shell (M1.5):
  * - Route renders `/projects/{id}/github` and page title
- * - Shared status header (connected repo, App handle, readiness/routing placeholders)
+ * - Shared status header (connected repo, App handle, status/auth mapping, readiness/routing placeholders)
  * - Tabs (Agent access, Connection) and clean tab extension point
  * - Disconnected projects land on Connection with other tabs disabled ("connect first")
  * - Gate: hidden when remote is not on App host or App is not configured (ungated by hub.github_triggers)
- * - Sidebar nav entry and Project Detail header button
- * - Project Settings one-line link (connected / not connected / hidden)
+ * - Transient read-model failures (5xx / network error) show retryable error state, not 404
+ * - Sidebar nav entry (both fetch and visibility-event paths) and Project Detail header button
+ * - Project Settings one-line link (connected / Not connected — Set up → / hidden)
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { html } from 'lit';
 import type { ProjectGitHubInfo } from '../../shared/types.js';
-import { resetProjectGitHubRequestsForTests } from '../../client/project-github.js';
+import {
+  resetProjectGitHubRequestsForTests,
+  setProjectGitHubVisibility,
+} from '../../client/project-github.js';
 import { resetServerFlagStateForTests, setServerFlags } from '../../utils/feature-flags.js';
 import {
   clearProjectGitHubTabsForTests,
@@ -104,29 +108,37 @@ const GITHUB_PROJECT = {
   _capabilities: { actions: ['read', 'update', 'manage'] },
 };
 
-function stubProjectFetch(githubInfo: ProjectGitHubInfo | null, project = GITHUB_PROJECT): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn().mockImplementation((url: string | URL | Request) => {
-      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-      if (path.endsWith(`/api/v1/projects/${project.id}/github`)) {
-        if (!githubInfo) {
-          return Promise.resolve(jsonResponse({ message: 'not found' }, 404));
-        }
-        return Promise.resolve(jsonResponse(githubInfo));
+function stubProjectFetch(
+  githubInfo: ProjectGitHubInfo | null,
+  project = GITHUB_PROJECT
+): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn().mockImplementation((url: string | URL | Request) => {
+    const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+    if (path.endsWith(`/api/v1/projects/${project.id}/github`)) {
+      if (!githubInfo) {
+        return Promise.resolve(jsonResponse({ message: 'not found' }, 404));
       }
-      if (path.includes('/settings/resolved')) {
-        return Promise.resolve(jsonResponse({ project: {}, settings: {} }));
-      }
-      if (path.includes('/agents')) {
-        return Promise.resolve(jsonResponse({ agents: [] }));
-      }
-      if (path.match(/\/api\/v1\/projects\/[^/]+(\?.*)?$/)) {
-        return Promise.resolve(jsonResponse(project));
-      }
-      return Promise.resolve(jsonResponse({}));
-    })
-  );
+      return Promise.resolve(jsonResponse(githubInfo));
+    }
+    if (path.includes('/settings/resolved')) {
+      return Promise.resolve(jsonResponse({ project: {}, settings: {} }));
+    }
+    if (path.includes('/agents')) {
+      return Promise.resolve(jsonResponse({ agents: [] }));
+    }
+    if (path.match(/\/api\/v1\/projects\/[^/]+(\?.*)?$/)) {
+      return Promise.resolve(jsonResponse(project));
+    }
+    return Promise.resolve(jsonResponse({}));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 6; i++) {
+    await Promise.resolve();
+  }
 }
 
 describe('Project GitHub page shell (M1.5)', () => {
@@ -172,6 +184,7 @@ describe('Project GitHub page shell (M1.5)', () => {
     // Shared status header contents
     const header = root.querySelector('[data-testid="github-status-header"]')!;
     expect(header.textContent).toContain('Connected');
+    expect(header.querySelector('.status-dot.ok')).not.toBeNull();
     expect(root.querySelector('[data-testid="github-header-repo"]')?.textContent).toContain(
       'Acme/api'
     );
@@ -200,6 +213,102 @@ describe('Project GitHub page shell (M1.5)', () => {
     );
     expect(agentCard?.getAttribute('section')).toBe('permissions');
     expect(connCard?.getAttribute('section')).toBe('connection');
+  });
+
+  it('maps header status consistently for unchecked, missing status, unverified, not authorized, degraded, and error states', async () => {
+    const cases: Array<{
+      name: string;
+      overrides: Partial<ProjectGitHubInfo>;
+      wantText: string;
+      wantDotClass: string;
+    }> = [
+      {
+        name: 'unchecked status',
+        overrides: {
+          status: { state: 'unchecked', last_checked: '' },
+        },
+        wantText: 'Unchecked',
+        wantDotClass: 'disconnected',
+      },
+      {
+        name: 'missing status',
+        overrides: {
+          status: null,
+        },
+        wantText: 'Unchecked',
+        wantDotClass: 'disconnected',
+      },
+      {
+        name: 'unverified association',
+        overrides: {
+          association: {
+            installation_id: 4412,
+            account_login: 'acme',
+            basis: null,
+            write_allowed: false,
+            authorized: false,
+            verified: false,
+            error_code: 'association_unverified',
+            reason: 'Could not verify',
+          },
+        },
+        wantText: 'Unverified',
+        wantDotClass: 'disconnected',
+      },
+      {
+        name: 'unauthorized association',
+        overrides: {
+          association: {
+            installation_id: 4412,
+            account_login: 'acme',
+            basis: null,
+            write_allowed: false,
+            authorized: false,
+            verified: true,
+            error_code: 'association_unauthorized',
+            reason: 'Creator lacks access',
+          },
+        },
+        wantText: 'Not authorized',
+        wantDotClass: 'error',
+      },
+      {
+        name: 'degraded status',
+        overrides: {
+          status: { state: 'degraded', last_checked: '2026-11-25T10:00:00Z' },
+        },
+        wantText: 'Degraded',
+        wantDotClass: 'degraded',
+      },
+      {
+        name: 'error status',
+        overrides: {
+          status: { state: 'error', last_checked: '2026-11-25T10:00:00Z' },
+        },
+        wantText: 'Error',
+        wantDotClass: 'error',
+      },
+    ];
+
+    for (const tc of cases) {
+      resetProjectGitHubRequestsForTests();
+      stubProjectFetch(makeProjectGitHub(tc.overrides));
+
+      const el = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+      document.body.appendChild(el);
+      await vi.waitFor(() => {
+        expect(
+          el.shadowRoot?.querySelector('[data-testid="github-header-connection"]')
+        ).not.toBeNull();
+      });
+      await el.updateComplete;
+
+      const connEl = el.shadowRoot!.querySelector('[data-testid="github-header-connection"]')!;
+      expect(connEl.textContent?.trim(), tc.name).toBe(tc.wantText);
+      expect(connEl.querySelector(`.status-dot.${tc.wantDotClass}`), tc.name).not.toBeNull();
+      expect(connEl.querySelector('.status-dot.ok'), tc.name).toBeNull();
+      el.remove();
+    }
   });
 
   it('lands disconnected projects on Connection with other tabs disabled ("connect first")', async () => {
@@ -309,6 +418,69 @@ describe('Project GitHub page shell (M1.5)', () => {
     expect(el.shadowRoot?.querySelector('[data-testid="github-tabs"]')).toBeNull();
   });
 
+  it('shows a retryable error state (not 404) on 5xx or network failures from the read model', async () => {
+    // 500 error -> error state with Retry -> Retry recovers on 200
+    let githubAttempts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/projects/proj-gh-1/github')) {
+          githubAttempts++;
+          if (githubAttempts === 1) {
+            return Promise.resolve(jsonResponse({ message: 'upstream unavailable' }, 503));
+          }
+          return Promise.resolve(jsonResponse(makeProjectGitHub()));
+        }
+        return Promise.resolve(jsonResponse(GITHUB_PROJECT));
+      })
+    );
+
+    const el503 = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+    document.body.appendChild(el503);
+    await vi.waitFor(() => {
+      expect(el503.shadowRoot?.querySelector('.error-state')).not.toBeNull();
+    });
+    expect(el503.shadowRoot?.querySelector('scion-page-404')).toBeNull();
+    expect(el503.shadowRoot?.querySelector('.error-details')?.textContent).toContain(
+      'upstream unavailable'
+    );
+
+    const retryBtn = el503.shadowRoot!.querySelector('.error-state sl-button') as HTMLElement;
+    expect(retryBtn).not.toBeNull();
+    retryBtn.click();
+    await vi.waitFor(() => {
+      expect(
+        el503.shadowRoot?.querySelector('[data-testid="github-status-header"]')
+      ).not.toBeNull();
+    });
+    expect(el503.shadowRoot?.querySelector('.error-state')).toBeNull();
+    el503.remove();
+
+    // Network rejection -> error state (not 404)
+    resetProjectGitHubRequestsForTests();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/projects/proj-gh-1/github')) {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return Promise.resolve(jsonResponse(GITHUB_PROJECT));
+      })
+    );
+
+    const elNet = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+    document.body.appendChild(elNet);
+    await vi.waitFor(() => {
+      expect(elNet.shadowRoot?.querySelector('.error-state')).not.toBeNull();
+    });
+    expect(elNet.shadowRoot?.querySelector('scion-page-404')).toBeNull();
+    expect(elNet.shadowRoot?.querySelector('.error-details')?.textContent).toContain(
+      'Failed to fetch'
+    );
+  });
+
   it('registers GitHub page title in scion-app for /projects/:id/github', async () => {
     stubProjectFetch(makeProjectGitHub());
     const app = document.createElement('scion-app') as ScionApp;
@@ -342,20 +514,54 @@ describe('Project GitHub page shell (M1.5)', () => {
     expect(nav.shadowRoot?.querySelector('[data-testid="nav-project-section"]')).toBeNull();
     nav.remove();
 
-    // Unconfigured App hides the nav entry
+    // Negative fetch path: mount on /projects/proj-gh-1/github so nav actually fetches the read model
     resetProjectGitHubRequestsForTests();
-    stubProjectFetch(
+    const fetchMockHidden = stubProjectFetch(
       makeProjectGitHub({
         app: { configured: false, slug: '', web_host: 'github.com' },
       })
     );
-    const navHidden = document.createElement('scion-nav') as ScionNav;
-    navHidden.currentPath = '/projects/proj-gh-1';
-    document.body.appendChild(navHidden);
-    await navHidden.updateComplete;
-    await new Promise((r) => setTimeout(r, 30));
-    await navHidden.updateComplete;
-    expect(navHidden.shadowRoot?.querySelector('a[href="/projects/proj-gh-1/github"]')).toBeNull();
+    const navHiddenFetch = document.createElement('scion-nav') as ScionNav;
+    navHiddenFetch.currentPath = '/projects/proj-gh-1/github';
+    document.body.appendChild(navHiddenFetch);
+    await vi.waitFor(() => {
+      expect(fetchMockHidden).toHaveBeenCalledWith(
+        expect.stringContaining('/projects/proj-gh-1/github'),
+        expect.anything()
+      );
+    });
+    await flushMicrotasks();
+    await navHiddenFetch.updateComplete;
+    expect(
+      navHiddenFetch.shadowRoot?.querySelector('a[href="/projects/proj-gh-1/github"]')
+    ).toBeNull();
+    navHiddenFetch.remove();
+
+    // Negative visibility-event path: mount on /projects/proj-gh-1 and broadcast visible=false
+    resetProjectGitHubRequestsForTests();
+    const navHiddenEvent = document.createElement('scion-nav') as ScionNav;
+    navHiddenEvent.currentPath = '/projects/proj-gh-1';
+    document.body.appendChild(navHiddenEvent);
+    await navHiddenEvent.updateComplete;
+
+    setProjectGitHubVisibility('proj-gh-1', false);
+    await navHiddenEvent.updateComplete;
+    expect(
+      navHiddenEvent.shadowRoot?.querySelector('a[href="/projects/proj-gh-1/github"]')
+    ).toBeNull();
+
+    // Positive then negative toggle via event
+    setProjectGitHubVisibility('proj-gh-1', true);
+    await navHiddenEvent.updateComplete;
+    expect(
+      navHiddenEvent.shadowRoot?.querySelector('a[href="/projects/proj-gh-1/github"]')
+    ).not.toBeNull();
+
+    setProjectGitHubVisibility('proj-gh-1', false);
+    await navHiddenEvent.updateComplete;
+    expect(
+      navHiddenEvent.shadowRoot?.querySelector('a[href="/projects/proj-gh-1/github"]')
+    ).toBeNull();
   });
 
   it('shows the GitHub header button on project-detail only when App is configured and remote is on App host', async () => {
@@ -383,9 +589,9 @@ describe('Project GitHub page shell (M1.5)', () => {
     );
     detail.remove();
 
-    // Hidden case (remote not on App host)
+    // Hidden case (remote not on App host): wait deterministically on the /github fetch
     resetProjectGitHubRequestsForTests();
-    stubProjectFetch(
+    const fetchMockHidden = stubProjectFetch(
       makeProjectGitHub({
         remote: { owner: 'Acme', repo: 'api', on_app_host: false },
       })
@@ -395,8 +601,13 @@ describe('Project GitHub page shell (M1.5)', () => {
     ) as ScionPageProjectDetail;
     detailHidden.projectId = 'proj-gh-1';
     document.body.appendChild(detailHidden);
-    await detailHidden.updateComplete;
-    await new Promise((r) => setTimeout(r, 50));
+    await vi.waitFor(() => {
+      expect(fetchMockHidden).toHaveBeenCalledWith(
+        expect.stringContaining('/projects/proj-gh-1/github'),
+        expect.anything()
+      );
+    });
+    await flushMicrotasks();
     await detailHidden.updateComplete;
     expect(detailHidden.shadowRoot?.querySelector('[data-github-link]')).toBeNull();
   });
@@ -461,13 +672,13 @@ describe('Project GitHub page shell (M1.5)', () => {
       '[data-testid="project-settings-github-link"]'
     )!;
     expect(disconnBlock.textContent?.replace(/\s+/g, ' ')).toContain(
-      'GitHub: not connected — Connect →'
+      'GitHub: Not connected — Set up →'
     );
     settingsDisconn.remove();
 
-    // Hidden when App not configured
+    // Hidden when App not configured: wait deterministically on the /github fetch
     resetProjectGitHubRequestsForTests();
-    stubProjectFetch(
+    const fetchMockHidden = stubProjectFetch(
       makeProjectGitHub({
         app: { configured: false, slug: '', web_host: 'github.com' },
       })
@@ -477,8 +688,13 @@ describe('Project GitHub page shell (M1.5)', () => {
     ) as ScionPageProjectSettings;
     settingsHidden.projectId = 'proj-gh-1';
     document.body.appendChild(settingsHidden);
-    await settingsHidden.updateComplete;
-    await new Promise((r) => setTimeout(r, 80));
+    await vi.waitFor(() => {
+      expect(fetchMockHidden).toHaveBeenCalledWith(
+        expect.stringContaining('/projects/proj-gh-1/github'),
+        expect.anything()
+      );
+    });
+    await flushMicrotasks();
     await settingsHidden.updateComplete;
     expect(
       settingsHidden.shadowRoot?.querySelector('[data-testid="project-settings-github-link"]')

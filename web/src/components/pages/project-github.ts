@@ -30,7 +30,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, ProjectGitHubInfo } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
-  fetchProjectGitHub,
+  fetchProjectGitHubResult,
   isProjectGitHubConnected,
   isProjectGitHubVisible,
 } from '../../client/project-github.js';
@@ -330,9 +330,9 @@ export class ScionPageProjectGithub extends LitElement {
     this.notFound = false;
 
     try {
-      const [projRes, ghInfo] = await Promise.all([
+      const [projRes, ghRes] = await Promise.all([
         apiFetch(`/api/v1/projects/${encodeURIComponent(this.projectId)}`),
-        fetchProjectGitHub(this.projectId),
+        fetchProjectGitHubResult(this.projectId),
       ]);
 
       if (!this.isConnected) return;
@@ -347,13 +347,21 @@ export class ScionPageProjectGithub extends LitElement {
 
       this.project = (await projRes.json()) as ProjectSummary;
 
-      if (!isProjectGitHubVisible(ghInfo)) {
+      if (!ghRes.ok) {
+        if (ghRes.status === 404) {
+          this.notFound = true;
+          return;
+        }
+        throw new Error(ghRes.error || 'Failed to load GitHub integration');
+      }
+
+      if (!isProjectGitHubVisible(ghRes.info)) {
         this.notFound = true;
         return;
       }
 
-      this.githubInfo = ghInfo;
-      this.activeTab = this.resolveActiveTab(ghInfo!, this.requestedTabParam);
+      this.githubInfo = ghRes.info;
+      this.activeTab = this.resolveActiveTab(ghRes.info, this.requestedTabParam);
       dispatchPageTitle(this, 'GitHub', this.project.name || this.projectId);
     } catch (err) {
       if (!this.isConnected) return;
@@ -400,23 +408,34 @@ export class ScionPageProjectGithub extends LitElement {
     let dotClass = 'disconnected';
     let statusText = 'Not connected';
     if (connected) {
-      switch (statusState) {
-        case 'ok':
-          dotClass = 'ok';
-          statusText = 'Connected';
-          break;
-        case 'degraded':
-          dotClass = 'degraded';
-          statusText = 'Degraded';
-          break;
-        case 'error':
+      if (!info.association.authorized) {
+        if (info.association.verified === false) {
+          dotClass = 'disconnected';
+          statusText = 'Unverified';
+        } else {
           dotClass = 'error';
-          statusText = 'Error';
-          break;
-        default:
-          dotClass = 'ok';
-          statusText = 'Connected';
-          break;
+          statusText = 'Not authorized';
+        }
+      } else {
+        switch (statusState) {
+          case 'ok':
+            dotClass = 'ok';
+            statusText = 'Connected';
+            break;
+          case 'degraded':
+            dotClass = 'degraded';
+            statusText = 'Degraded';
+            break;
+          case 'error':
+            dotClass = 'error';
+            statusText = 'Error';
+            break;
+          case 'unchecked':
+          default:
+            dotClass = 'disconnected';
+            statusText = 'Unchecked';
+            break;
+        }
       }
     }
 

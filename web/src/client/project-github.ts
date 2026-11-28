@@ -20,7 +20,7 @@
  */
 
 import type { ProjectGitHubInfo } from '../shared/types.js';
-import { apiFetch } from './api.js';
+import { apiFetch, extractApiError } from './api.js';
 
 /**
  * Dispatched on `window` whenever a project's GitHub visibility is resolved
@@ -33,11 +33,15 @@ export interface ProjectGitHubVisibilityDetail {
   visible: boolean;
 }
 
+export type ProjectGitHubFetchResult =
+  | { ok: true; info: ProjectGitHubInfo }
+  | { ok: false; status: number; error: string };
+
 /**
  * In-flight single-flight map keyed by projectId so concurrent shell/page
  * readers share one request. Cleared on settlement.
  */
-const inflightRequests = new Map<string, Promise<ProjectGitHubInfo | null>>();
+const inflightRequests = new Map<string, Promise<ProjectGitHubFetchResult>>();
 
 /** Last resolved visibility per projectId for cross-component sync (e.g. scion-nav). */
 const resolvedVisibility = new Map<string, boolean>();
@@ -82,31 +86,40 @@ export function getProjectGitHubVisibility(projectId: string): boolean | undefin
 }
 
 /**
- * Fetch `GET /api/v1/projects/{id}/github`, deduplicating concurrent in-flight
- * calls for the same projectId. Returns null on non-OK responses or network
- * errors so callers can fail closed (hide entry points) without throwing.
+ * Fetch `GET /api/v1/projects/{id}/github`, distinguishing a resolved payload
+ * from HTTP/network failures so the page can render a retryable error state
+ * instead of 404 on transient failures. Concurrent calls for the same
+ * projectId share one in-flight request.
  */
-export function fetchProjectGitHub(projectId: string): Promise<ProjectGitHubInfo | null> {
-  if (!projectId) return Promise.resolve(null);
+export function fetchProjectGitHubResult(projectId: string): Promise<ProjectGitHubFetchResult> {
+  if (!projectId) {
+    return Promise.resolve({ ok: false, status: 400, error: 'Missing project ID' });
+  }
 
   const existing = inflightRequests.get(projectId);
   if (existing) return existing;
 
-  const req = (async (): Promise<ProjectGitHubInfo | null> => {
+  const req = (async (): Promise<ProjectGitHubFetchResult> => {
     try {
       const res = await apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/github`, {
         suppressAccessDeniedToast: true,
       });
       if (!res.ok) {
-        setProjectGitHubVisibility(projectId, false);
-        return null;
+        if (res.status === 404) {
+          setProjectGitHubVisibility(projectId, false);
+        }
+        const message = await extractApiError(res, `HTTP ${res.status}`);
+        return { ok: false, status: res.status, error: message };
       }
       const info = (await res.json()) as ProjectGitHubInfo;
       setProjectGitHubVisibility(projectId, isProjectGitHubVisible(info));
-      return info;
-    } catch {
-      setProjectGitHubVisibility(projectId, false);
-      return null;
+      return { ok: true, info };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        error: err instanceof Error ? err.message : 'Network error',
+      };
     } finally {
       inflightRequests.delete(projectId);
     }
@@ -114,6 +127,16 @@ export function fetchProjectGitHub(projectId: string): Promise<ProjectGitHubInfo
 
   inflightRequests.set(projectId, req);
   return req;
+}
+
+/**
+ * Fetch `GET /api/v1/projects/{id}/github`, deduplicating concurrent in-flight
+ * calls for the same projectId. Returns null on non-OK responses or network
+ * errors so callers can fail closed (hide entry points) without throwing.
+ */
+export async function fetchProjectGitHub(projectId: string): Promise<ProjectGitHubInfo | null> {
+  const result = await fetchProjectGitHubResult(projectId);
+  return result.ok ? result.info : null;
 }
 
 /**
