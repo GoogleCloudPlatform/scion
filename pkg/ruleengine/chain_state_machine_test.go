@@ -547,9 +547,12 @@ func TestC1_StateTransitionTable(t *testing.T) {
 // cancel the shared group evalCtx, because the dispatcher holds an interest
 // across the claim loop and r2 (a distinct, live run) is about to join.
 func TestProbe9801_GroupEarlyWithdrawBeforeSecondClaimMustNotCancelSurvivor(t *testing.T) {
-	const iters = 5
+	const (
+		targetHits  = 2
+		maxAttempts = 40
+	)
 	hits, defects := 0, 0
-	for range iters {
+	for i := 0; i < maxAttempts && hits < targetHits; i++ {
 		io := newCountingFakeIODialect("io_pr_r1", 5*time.Second)
 		eng, _ := newChainTestEngine(t, "pr_r1", io)
 		c1 := mustCompile(t, eng, "pr_r1", "io_pr_r1", "a", ruleengine.KindFilter)
@@ -593,12 +596,17 @@ func TestProbe9801_GroupEarlyWithdrawBeforeSecondClaimMustNotCancelSurvivor(t *t
 		hit := false
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			unlock := ruleengine.ProbeLockRun(r2)
-			if ruleengine.ProbeState(r1) == ruleengine.ProbeStateDispatched {
-				if ruleengine.ProbeStateLocked(r2) == ruleengine.ProbeStatePending {
+			unlock := ruleengine.HookLockRun(r2)
+			s1 := ruleengine.HookState(r1)
+			if s1 == ruleengine.HookStateDispatched {
+				if ruleengine.HookStateLocked(r2) == ruleengine.HookStatePending {
 					hit = true
 					_ = eng.EvaluatePending(r1p1) // stale replay terminates r1 (locks r1 only)
 				}
+				unlock()
+				break
+			}
+			if s1 != ruleengine.HookStatePending {
 				unlock()
 				break
 			}
@@ -640,7 +648,7 @@ func TestProbe9801_GroupEarlyWithdrawBeforeSecondClaimMustNotCancelSurvivor(t *t
 		cancel2()
 	}
 	if hits == 0 {
-		t.Skip("interleaving never forced")
+		t.Fatalf("failed to force early-withdraw-before-second-claim interleaving in %d attempts (A-3: must not skip)", maxAttempts)
 	}
 	if defects > 0 {
 		t.Fatalf("cross-run cancellation: %d/%d forced interleavings canceled live run r2's evaluation after r1 alone withdrew", defects, hits)
@@ -670,18 +678,13 @@ func (c *customDoneCtx) Err() error {
 // releasing the claim-phase guard drops remaining to 0, evalCtx cancels, and
 // 0 dialect calls are made.
 func TestC1_R1_AllMembersTerminateDuringClaimCancelsGroupCtx(t *testing.T) {
-	const maxAttempts = 40
+	const maxAttempts = 500
 	for range maxAttempts {
 		io := newCountingFakeIODialect("io_r1_all", 5*time.Second)
 		var dialectStarted atomic.Bool
 		io.setHandler("b", func(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
 			dialectStarted.Store(true)
-			select {
-			case <-ctx.Done():
-				return ruleengine.Decision{}, ctx.Err()
-			case <-time.After(300 * time.Millisecond):
-				return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
-			}
+			return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
 		})
 		eng, _ := newChainTestEngine(t, "r1_all", io)
 		c1 := mustCompile(t, eng, "r1_all", "io_r1_all", "a", ruleengine.KindFilter)
@@ -712,23 +715,32 @@ func TestC1_R1_AllMembersTerminateDuringClaimCancelsGroupCtx(t *testing.T) {
 		hit := false
 		deadline := time.Now().Add(200 * time.Millisecond)
 		for time.Now().Before(deadline) {
-			unlockR2 := ruleengine.ProbeLockRun(r2)
-			if ruleengine.ProbeState(r1) == ruleengine.ProbeStateDispatched && ruleengine.ProbeStateLocked(r2) == ruleengine.ProbeStatePending {
+			unlockR2 := ruleengine.HookLockRun(r2)
+			s1 := ruleengine.HookState(r1)
+			if s1 == ruleengine.HookStateDispatched && ruleengine.HookStateLocked(r2) == ruleengine.HookStatePending {
 				// r1 is claimed, r2 not yet claimed: terminate r1 first.
 				_ = eng.EvaluatePending(r1p1)
 				// Now hold r1.mu so EvaluateGroup pauses in Step 1b right after
 				// claiming r2 (before releaseDispatcher).
-				unlockR1 := ruleengine.ProbeLockRun(r1)
+				unlockR1 := ruleengine.HookLockRun(r1)
 				unlockR2()
 				for time.Now().Before(deadline) {
-					if ruleengine.ProbeState(r2) == ruleengine.ProbeStateDispatched {
+					s2 := ruleengine.HookState(r2)
+					if s2 == ruleengine.HookStateDispatched {
 						_ = eng.EvaluatePending(r2p1)
 						hit = true
+						break
+					}
+					if s2 != ruleengine.HookStatePending {
 						break
 					}
 					runtime.Gosched()
 				}
 				unlockR1()
+				break
+			}
+			if s1 != ruleengine.HookStatePending {
+				unlockR2()
 				break
 			}
 			unlockR2()
@@ -745,7 +757,7 @@ func TestC1_R1_AllMembersTerminateDuringClaimCancelsGroupCtx(t *testing.T) {
 				dialectStarted.Load(), io.callCount()-calls0)
 		}
 		for name, r := range map[string]*ruleengine.ChainRun{"r1": r1, "r2": r2} {
-			if ruleengine.ProbeHasInflight(r) {
+			if ruleengine.HookHasInflight(r) {
 				t.Fatalf("%s still has inflight after terminal", name)
 			}
 			res, _ := r.Result()
@@ -794,7 +806,7 @@ func TestC1_R1_DispatcherInterestReleasedOnAllPaths(t *testing.T) {
 		if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
 			t.Fatalf("success EvaluateGroup: %v", err)
 		}
-		if ruleengine.ProbeHasInflight(r1) || ruleengine.ProbeHasInflight(r2) {
+		if ruleengine.HookHasInflight(r1) || ruleengine.HookHasInflight(r2) {
 			t.Fatal("inflight leaked on success path")
 		}
 
@@ -804,7 +816,7 @@ func TestC1_R1_DispatcherInterestReleasedOnAllPaths(t *testing.T) {
 		if _, err := eng.EvaluateGroup(p3, []*ruleengine.PendingStep{p4}); err == nil {
 			t.Fatal("expected incompatible_group")
 		}
-		if ruleengine.ProbeHasInflight(r3) || ruleengine.ProbeHasInflight(r4) {
+		if ruleengine.HookHasInflight(r3) || ruleengine.HookHasInflight(r4) {
 			t.Fatal("inflight leaked on incompatible_group path")
 		}
 
@@ -815,7 +827,7 @@ func TestC1_R1_DispatcherInterestReleasedOnAllPaths(t *testing.T) {
 		if _, err := eng.EvaluateGroup(p6, []*ruleengine.PendingStep{p5}); err == nil {
 			t.Fatal("expected invalid_completion")
 		}
-		if ruleengine.ProbeHasInflight(r5) || ruleengine.ProbeHasInflight(r6) {
+		if ruleengine.HookHasInflight(r5) || ruleengine.HookHasInflight(r6) {
 			t.Fatal("inflight leaked on claim-failure path")
 		}
 	}
@@ -855,7 +867,7 @@ func TestC1_O1_DialectPanicCompletesAsFailedNeverStuckDispatched(t *testing.T) {
 		if err := eng.EvaluatePending(p); err != nil {
 			t.Fatalf("EvaluatePending should recover panic into outcome, got err=%v", err)
 		}
-		if ruleengine.ProbeHasInflight(r) {
+		if ruleengine.HookHasInflight(r) {
 			t.Fatal("inflight not cleared after dialect panic")
 		}
 		ctrl, err := r.Resume()
@@ -892,7 +904,7 @@ func TestC1_O1_DialectPanicCompletesAsFailedNeverStuckDispatched(t *testing.T) {
 			t.Fatalf("EvaluateGroup should recover panic into outcome, got err=%v", err)
 		}
 		for name, r := range map[string]*ruleengine.ChainRun{"r1": r1, "r2": r2} {
-			if ruleengine.ProbeHasInflight(r) {
+			if ruleengine.HookHasInflight(r) {
 				t.Fatalf("%s inflight not cleared after group panic", name)
 			}
 			ctrl, err := r.Resume()

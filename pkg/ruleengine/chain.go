@@ -15,16 +15,21 @@
 package ruleengine
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"math"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -209,7 +214,9 @@ type JudgmentView interface {
 
 // Enricher supplies per-step additions under the "chain" namespace (and any
 // consumer-declared reserved judgment-carry names, A1 §5). It cannot touch,
-// shadow, or replace base input bindings.
+// shadow, or replace base input bindings. Values under "chain" / "chain.*"
+// must be JSON-shaped (matching NewChainRun's base.Activation allow-list);
+// non-JSON-shaped values fail the step with failed/invalid_enrichment.
 //
 // Enricher.Additions runs while the ChainRun's mutex is held: it MUST NOT call
 // back into the same ChainRun (which would self-deadlock), and it must be pure
@@ -228,6 +235,9 @@ func (NoopEnricher) Additions(int, JudgmentView) (map[string]any, error) {
 
 // ChainResult summarizes the outcome of a ChainRun.
 type ChainResult struct {
+	// Through counts recorded outcomes of reached chain elements and may be
+	// less than len(Steps) when an out-of-band stale-token invalid_completion
+	// audit row is recorded (O3-1).
 	Through    int
 	Stopped    bool
 	Verdict    string
@@ -816,16 +826,7 @@ func (e *Engine) evaluateInlineElement(
 		}, nil
 	}
 
-	var (
-		dec     Decision
-		elapsed time.Duration
-		evalErr error
-	)
-	if spec.elem.Source != nil {
-		dec, elapsed, evalErr = e.compileAndEvaluateSource(dom, spec, caps, input)
-	} else {
-		dec, elapsed, evalErr = e.evaluateCoreSafe(dom.Ctx, spec.elem.Compiled, input, dom.Budget)
-	}
+	dec, elapsed, evalErr := e.evaluateInlineSafe(dom, spec, caps, input)
 
 	out := classifyDecisionToOutcome(spec.elem.Index, spec.dialect, spec.elem.Kind, DomainInline, "", caps, dec, elapsed, evalErr)
 	var detail any
@@ -833,6 +834,43 @@ func (e *Engine) evaluateInlineElement(
 		detail = copyJudgmentDetail(dec.Detail, caps.CopyDetail)
 	}
 	return out, detail
+}
+
+// evaluateInlineSafe wraps the entire inline dispatch (Source-form
+// compile-on-reach + evaluate, or Compiled-form evaluate) in panic recovery
+// (A-1, A-2) so a dialect panic never escapes Next or leaves ChainRun stuck in
+// Evaluating. Elapsed time before the panic is charged to dom.Budget.Tracker
+// and the panic stack is logged server-side at error level (never serialized
+// into ChainTrace or StepOutcome.Reason).
+func (e *Engine) evaluateInlineSafe(
+	dom Domain,
+	spec chainElemSpec,
+	caps Capabilities,
+	input Input,
+) (dec Decision, elapsed time.Duration, err error) {
+	start := time.Now()
+	defer func() {
+		if rec := recover(); rec != nil {
+			elapsed = max(time.Since(start), time.Duration(0))
+			if dom.Budget.Tracker != nil {
+				dom.Budget.Tracker.Charge(elapsed)
+			}
+			slog.Error("ruleengine: inline dialect panic recovered",
+				"dialect", spec.dialect,
+				"panic", fmt.Sprint(rec),
+				"stack", string(debug.Stack()),
+			)
+			dec = Decision{}
+			err = &FailedError{
+				Reason: ReasonEvalFailed,
+				Cause:  fmt.Errorf("dialect panic: %v", rec),
+			}
+		}
+	}()
+	if spec.elem.Source != nil {
+		return e.compileAndEvaluateSource(dom, spec, caps, input)
+	}
+	return e.evaluateCore(dom.Ctx, spec.elem.Compiled, input, dom.Budget)
 }
 
 // compileAndEvaluateSource compiles a Source-form Inline element on reach via
@@ -996,12 +1034,24 @@ type sourceCompileError struct {
 func (e *sourceCompileError) Error() string { return "rule compile error: " + e.cause.Error() }
 func (e *sourceCompileError) Unwrap() error { return e.cause }
 
-// evaluateCoreSafe wraps evaluateCore with panic recovery (O-1) so a panicking
-// dialect never leaves a ChainRun stuck in Dispatched or Evaluating; the panic
-// is converted into a closed FailedError{Reason: ReasonEvalFailed}.
+// evaluateCoreSafe wraps evaluateCore with panic recovery (O-1, A-2) for
+// EvaluatePending and EvaluateGroup so a panicking dialect never leaves a
+// ChainRun stuck in Dispatched. Elapsed time before the panic is charged to
+// budget.Tracker and the stack is logged server-side at error level (never
+// serialized into ChainTrace or StepOutcome.Reason).
 func (e *Engine) evaluateCoreSafe(ctx context.Context, c Compiled, input Input, budget Budget) (dec Decision, elapsed time.Duration, err error) {
+	start := time.Now()
 	defer func() {
 		if rec := recover(); rec != nil {
+			elapsed = max(time.Since(start), time.Duration(0))
+			if budget.Tracker != nil {
+				budget.Tracker.Charge(elapsed)
+			}
+			slog.Error("ruleengine: dialect panic recovered",
+				"dialect", c.Dialect(),
+				"panic", fmt.Sprint(rec),
+				"stack", string(debug.Stack()),
+			)
 			dec = Decision{}
 			err = &FailedError{
 				Reason: ReasonEvalFailed,
@@ -1844,7 +1894,11 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, map[string]any,
 				chainNS = make(map[string]any, len(m))
 			}
 			for ck, cv := range m {
-				chainNS[ck] = deepCopyValue(cv)
+				cp, err := deepCopyActivationValue(cv)
+				if err != nil {
+					return Input{}, nil, fmt.Errorf("ruleengine: enricher \"chain.%s\" must be JSON-shaped: %w", ck, err)
+				}
+				chainNS[ck] = cp
 			}
 			continue
 		}
@@ -1858,7 +1912,11 @@ func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, map[string]any,
 			if chainNS == nil {
 				chainNS = make(map[string]any)
 			}
-			chainNS[sub] = deepCopyValue(v)
+			cp, err := deepCopyActivationValue(v)
+			if err != nil {
+				return Input{}, nil, fmt.Errorf("ruleengine: enricher %q must be JSON-shaped: %w", k, err)
+			}
+			chainNS[sub] = cp
 			continue
 		}
 		if _, isReserved := r.reserved[k]; isReserved {
@@ -2108,22 +2166,23 @@ func sameCompiledSemanticIdentity(a, b Compiled) bool {
 }
 
 // computeAdmittedInputHash implements the R-1 fail-closed admitted-input hash
-// (O-3: uses Input.AdmittedInputKey when present, mixing in a canonical hash of
-// any non-empty Enricher additions per SEC-S1-M1; otherwise JSON-marshals
-// Activation and Payload and fails closed on any marshal error).
+// (O-3: uses Input.AdmittedInputKey when present, mixing in a type-tagged
+// canonical hash of any non-empty Enricher additions per SEC-S1-M1 & SEC-S2-L1;
+// otherwise JSON-marshals Activation and Payload and fails closed on any
+// marshal error).
 func computeAdmittedInputHash(in Input, additions map[string]any) (string, error) {
 	if in.AdmittedInputKey != "" {
 		if len(additions) == 0 {
 			h := sha256.Sum256([]byte("key:" + in.AdmittedInputKey))
 			return hex.EncodeToString(h[:]), nil
 		}
-		rawAdd, err := json.Marshal(additions)
-		if err != nil {
-			return "", fmt.Errorf("ruleengine: failed to marshal enricher additions for admitted-input hash: %w", err)
+		var buf bytes.Buffer
+		if err := encodeCanonicalAdditionValue(&buf, additions); err != nil {
+			return "", fmt.Errorf("ruleengine: failed to canonically hash enricher additions: %w", err)
 		}
 		h := sha256.New()
 		_, _ = fmt.Fprintf(h, "key-add:%d:%s|add:", len(in.AdmittedInputKey), in.AdmittedInputKey)
-		h.Write(rawAdd)
+		h.Write(buf.Bytes())
 		return hex.EncodeToString(h.Sum(nil)), nil
 	}
 	h := sha256.New()
@@ -2144,6 +2203,256 @@ func computeAdmittedInputHash(in Input, additions map[string]any) (string, error
 		h.Write(raw)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// encodeCanonicalAdditionValue writes a type-tagged, key-sorted, length-delimited
+// canonical byte representation of JSON-shaped Enricher additions so distinct Go
+// types (such as []byte vs base64 string) never collide and non-finite floats or
+// unknown types fail closed (SEC-S2-L1).
+func encodeCanonicalAdditionValue(buf *bytes.Buffer, v any) error {
+	if v == nil {
+		buf.WriteString("nil;")
+		return nil
+	}
+	switch x := v.(type) {
+	case bool:
+		if x {
+			buf.WriteString("b:1;")
+		} else {
+			buf.WriteString("b:0;")
+		}
+	case int:
+		buf.WriteString("i:")
+		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		buf.WriteByte(';')
+	case int8:
+		buf.WriteString("i8:")
+		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		buf.WriteByte(';')
+	case int16:
+		buf.WriteString("i16:")
+		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		buf.WriteByte(';')
+	case int32:
+		buf.WriteString("i32:")
+		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		buf.WriteByte(';')
+	case int64:
+		buf.WriteString("i64:")
+		buf.WriteString(strconv.FormatInt(x, 10))
+		buf.WriteByte(';')
+	case uint:
+		buf.WriteString("u:")
+		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		buf.WriteByte(';')
+	case uint8:
+		buf.WriteString("u8:")
+		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		buf.WriteByte(';')
+	case uint16:
+		buf.WriteString("u16:")
+		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		buf.WriteByte(';')
+	case uint32:
+		buf.WriteString("u32:")
+		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		buf.WriteByte(';')
+	case uint64:
+		buf.WriteString("u64:")
+		buf.WriteString(strconv.FormatUint(x, 10))
+		buf.WriteByte(';')
+	case float32:
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return fmt.Errorf("non-finite float32 %v", x)
+		}
+		buf.WriteString("f32:")
+		buf.WriteString(strconv.FormatUint(uint64(math.Float32bits(x)), 16))
+		buf.WriteByte(';')
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return fmt.Errorf("non-finite float64 %v", x)
+		}
+		buf.WriteString("f64:")
+		buf.WriteString(strconv.FormatUint(math.Float64bits(x), 16))
+		buf.WriteByte(';')
+	case string:
+		buf.WriteString("s:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte(':')
+		buf.WriteString(x)
+		buf.WriteByte(';')
+	case []byte:
+		buf.WriteString("bytes:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte(':')
+		buf.Write(x)
+		buf.WriteByte(';')
+	case time.Time:
+		buf.WriteString("time:")
+		buf.WriteString(x.UTC().Format(time.RFC3339Nano))
+		buf.WriteByte(';')
+	case time.Duration:
+		buf.WriteString("dur:")
+		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		buf.WriteByte(';')
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteString("ma:")
+		buf.WriteString(strconv.Itoa(len(keys)))
+		buf.WriteByte('{')
+		for _, k := range keys {
+			buf.WriteString(strconv.Itoa(len(k)))
+			buf.WriteByte(':')
+			buf.WriteString(k)
+			buf.WriteByte('=')
+			if err := encodeCanonicalAdditionValue(buf, x[k]); err != nil {
+				return err
+			}
+		}
+		buf.WriteString("};")
+	case map[string]bool:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteString("mb:")
+		buf.WriteString(strconv.Itoa(len(keys)))
+		buf.WriteByte('{')
+		for _, k := range keys {
+			buf.WriteString(strconv.Itoa(len(k)))
+			buf.WriteByte(':')
+			buf.WriteString(k)
+			buf.WriteByte('=')
+			if x[k] {
+				buf.WriteString("1;")
+			} else {
+				buf.WriteString("0;")
+			}
+		}
+		buf.WriteString("};")
+	case map[string]string:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteString("ms:")
+		buf.WriteString(strconv.Itoa(len(keys)))
+		buf.WriteByte('{')
+		for _, k := range keys {
+			buf.WriteString(strconv.Itoa(len(k)))
+			buf.WriteByte(':')
+			buf.WriteString(k)
+			buf.WriteByte('=')
+			buf.WriteString(strconv.Itoa(len(x[k])))
+			buf.WriteByte(':')
+			buf.WriteString(x[k])
+			buf.WriteByte(';')
+		}
+		buf.WriteString("};")
+	case map[string]float64:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteString("mf:")
+		buf.WriteString(strconv.Itoa(len(keys)))
+		buf.WriteByte('{')
+		for _, k := range keys {
+			if math.IsNaN(x[k]) || math.IsInf(x[k], 0) {
+				return fmt.Errorf("non-finite float64 in map key %q", k)
+			}
+			buf.WriteString(strconv.Itoa(len(k)))
+			buf.WriteByte(':')
+			buf.WriteString(k)
+			buf.WriteByte('=')
+			buf.WriteString(strconv.FormatUint(math.Float64bits(x[k]), 16))
+			buf.WriteByte(';')
+		}
+		buf.WriteString("};")
+	case map[string][]string:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteString("mss:")
+		buf.WriteString(strconv.Itoa(len(keys)))
+		buf.WriteByte('{')
+		for _, k := range keys {
+			buf.WriteString(strconv.Itoa(len(k)))
+			buf.WriteByte(':')
+			buf.WriteString(k)
+			buf.WriteByte('=')
+			if err := encodeCanonicalAdditionValue(buf, x[k]); err != nil {
+				return err
+			}
+		}
+		buf.WriteString("};")
+	case []any:
+		buf.WriteString("la:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte('[')
+		for _, elem := range x {
+			if err := encodeCanonicalAdditionValue(buf, elem); err != nil {
+				return err
+			}
+		}
+		buf.WriteString("];")
+	case []string:
+		buf.WriteString("ls:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte('[')
+		for _, elem := range x {
+			buf.WriteString(strconv.Itoa(len(elem)))
+			buf.WriteByte(':')
+			buf.WriteString(elem)
+			buf.WriteByte(';')
+		}
+		buf.WriteString("];")
+	case []int:
+		buf.WriteString("li:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte('[')
+		for _, elem := range x {
+			buf.WriteString(strconv.Itoa(elem))
+			buf.WriteByte(';')
+		}
+		buf.WriteString("];")
+	case []bool:
+		buf.WriteString("lb:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte('[')
+		for _, elem := range x {
+			if elem {
+				buf.WriteString("1;")
+			} else {
+				buf.WriteString("0;")
+			}
+		}
+		buf.WriteString("];")
+	case []float64:
+		buf.WriteString("lf:")
+		buf.WriteString(strconv.Itoa(len(x)))
+		buf.WriteByte('[')
+		for _, elem := range x {
+			if math.IsNaN(elem) || math.IsInf(elem, 0) {
+				return fmt.Errorf("non-finite float64 %v", elem)
+			}
+			buf.WriteString(strconv.FormatUint(math.Float64bits(elem), 16))
+			buf.WriteByte(';')
+		}
+		buf.WriteString("];")
+	default:
+		return fmt.Errorf("unsupported non-canonical addition type %T", v)
+	}
+	return nil
 }
 
 func sameContextIdentity(a, b context.Context) bool {

@@ -14,21 +14,21 @@
 
 package ruleengine
 
-// Test-only hooks for deterministic state-machine interleaving tests (ptone/scion#9801).
+// Test-only hooks for deterministic state-machine interleaving tests (ptone/scion#9801, A-4).
 
-// ProbeLockRun locks r.mu and returns its unlock function.
-func ProbeLockRun(r *ChainRun) func() { r.mu.Lock(); return r.mu.Unlock }
+// HookLockRun locks r.mu and returns its unlock function.
+func HookLockRun(r *ChainRun) func() { r.mu.Lock(); return r.mu.Unlock }
 
-// ProbeStateLocked returns r.state while the caller holds r.mu (via ProbeLockRun).
-func ProbeStateLocked(r *ChainRun) int { return int(r.state) }
+// HookStateLocked returns r.state while the caller holds r.mu (via HookLockRun).
+func HookStateLocked(r *ChainRun) int { return int(r.state) }
 
-// ProbeState returns r.state under r.mu.
-func ProbeState(r *ChainRun) int { r.mu.Lock(); defer r.mu.Unlock(); return int(r.state) }
+// HookState returns r.state under r.mu.
+func HookState(r *ChainRun) int { r.mu.Lock(); defer r.mu.Unlock(); return int(r.state) }
 
-// ProbeHasInflight reports whether r.inflight is non-nil under r.mu.
-func ProbeHasInflight(r *ChainRun) bool { r.mu.Lock(); defer r.mu.Unlock(); return r.inflight != nil }
+// HookHasInflight reports whether r.inflight is non-nil under r.mu.
+func HookHasInflight(r *ChainRun) bool { r.mu.Lock(); defer r.mu.Unlock(); return r.inflight != nil }
 
 var (
-	ProbeStatePending    = int(chainStatePending)
-	ProbeStateDispatched = int(chainStateDispatched)
+	HookStatePending    = int(chainStatePending)
+	HookStateDispatched = int(chainStateDispatched)
 )

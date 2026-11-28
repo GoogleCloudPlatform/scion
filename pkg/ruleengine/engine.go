@@ -91,10 +91,12 @@ type EnvironmentRef struct {
 // Revision) for grouped-evaluation safety-floor validation. The consumer key
 // MUST cover every authorization-relevant field the IO dialect reads (for
 // example ProjectID, which selects project allowlists and project-scoped
-// secrets). When an Enricher supplies non-empty additions (chain.* or reserved
-// names) for a step, the engine automatically mixes a canonical hash of those
-// additions into the keyed admitted-input hash and fails closed
-// (incompatible_group) if the additions cannot be canonically hashed.
+// secrets). When an Enricher supplies non-empty JSON-shaped additions (chain.*
+// or reserved names) for a step, the engine automatically mixes a type-tagged
+// canonical hash of those additions into the keyed admitted-input hash and
+// fails closed (incompatible_group) if the additions differ or contain
+// unhashable values (such as NaN or Inf); non-JSON-shaped chain.* values are
+// rejected earlier at enrichment time as failed/invalid_enrichment.
 type Input struct {
 	Activation       map[string]any
 	Payload          any
