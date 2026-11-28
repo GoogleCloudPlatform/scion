@@ -3039,6 +3039,9 @@ authDone:
 		}(),
 		CommandArgs: func() []string {
 			_, baseArgs := resolveBaseCommandInputs(finalScionCfg, resolvedHarnessArgs, task)
+			if !harness.SupportsModelFlag(h) {
+				return baseArgs
+			}
 			// The model flag comes before user args, from the same
 			// effective model as SCION_MODEL.
 			return modelCommandArgs(effectiveModel, baseArgs)

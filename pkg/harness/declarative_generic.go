@@ -113,6 +113,13 @@ func (d *DeclarativeGenericHarness) AdvancedCapabilities() api.HarnessAdvancedCa
 	return caps
 }
 
+func (d *DeclarativeGenericHarness) supportsModelFlag() bool {
+	if d.entry.Harness == "generic" || d.entry.Command == nil || len(d.entry.Command.Base) == 0 {
+		return false
+	}
+	return !isShellCommandBase(d.entry.Command.Base)
+}
+
 func (d *DeclarativeGenericHarness) GetCommand(task string, resume bool, baseArgs []string) []string {
 	if d.entry.Command == nil {
 		args := append([]string{}, baseArgs...)

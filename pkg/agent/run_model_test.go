@@ -251,7 +251,9 @@ func argvModel(argv []string) (string, bool) {
 
 // modelTestHC is a project harness-config whose own model (the broker's
 // harness-config default) differs from every hub-resolved model below.
-const modelTestHC = policyTestDecl + "model: broker-default-model\nmodel_aliases:\n  large: hc-large-model\n"
+// It uses a non-generic declarative CLI with command.base so --model is passed
+// on argv (generic/shell harnesses do not take --model).
+const modelTestHC = "harness: custom-cli\nimage: scion-base:test\nuser: scion\ncommand:\n  base: [\"custom-cli\"]\nmodel: broker-default-model\nmodel_aliases:\n  large: hc-large-model\n"
 
 // TestStart_ArgvModelAndSCIONModelAgree runs Start and captures the
 // runtime.RunConfig it launches: the harness argv --model (CommandArgs) and
