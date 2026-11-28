@@ -20,9 +20,9 @@ type ChatLinkCode struct {
 	ID uuid.UUID `json:"id,omitempty"`
 	// SHA-256 hash of the plaintext link code
 	CodeHash string `json:"-"`
-	// Platform-specific user ID (Telegram user ID, Discord user ID, Teams AAD object ID)
+	// Platform-specific user ID (Telegram user ID, Discord user ID, Teams AAD object ID, Slack user ID)
 	UserIdentifier string `json:"user_identifier,omitempty"`
-	// Chat provider: telegram, discord, or teams
+	// Chat provider: telegram, discord, teams, or slack
 	Provider chatlinkcode.Provider `json:"provider,omitempty"`
 	// Link status: pending or confirmed
 	Status chatlinkcode.Status `json:"status,omitempty"`

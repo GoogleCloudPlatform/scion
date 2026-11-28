@@ -580,10 +580,12 @@ func TestChatLinkVerify_SessionOnly(t *testing.T) {
 		telegramLinkService: NewTelegramLinkService(),
 		discordLinkService:  NewDiscordLinkService(),
 		teamsLinkService:    NewTeamsLinkService(),
+		slackLinkService:    NewSlackLinkService(),
 	}
 	t.Cleanup(srv.telegramLinkService.Close)
 	t.Cleanup(srv.discordLinkService.Close)
 	t.Cleanup(srv.teamsLinkService.Close)
+	t.Cleanup(srv.slackLinkService.Close)
 
 	member := NewAuthenticatedUser("ig-link-user", "link@example.com", "Link", "member", "web")
 	token := NewScopedUserIdentity(member, "", []string{"user:read"})
@@ -595,6 +597,7 @@ func TestChatLinkVerify_SessionOnly(t *testing.T) {
 		{"telegram", srv.telegramLinkService.chatLinkService, srv.handleTelegramLinkVerify},
 		{"discord", srv.discordLinkService.chatLinkService, srv.handleDiscordLinkVerify},
 		{"teams", srv.teamsLinkService.chatLinkService, srv.handleTeamsLinkVerify},
+		{"slack", srv.slackLinkService.chatLinkService, srv.handleSlackLinkVerify},
 	} {
 		t.Run(p.name, func(t *testing.T) {
 			for _, refused := range []struct {

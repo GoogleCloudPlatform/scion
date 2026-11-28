@@ -2676,6 +2676,9 @@ type Server struct {
 	// Teams link service for code-based account linking (nil = disabled)
 	teamsLinkService *TeamsLinkService
 
+	// Slack link service for code-based account linking (nil = disabled)
+	slackLinkService *SlackLinkService
+
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
 	// healthIntegrationFlights holds the running health summary query of
@@ -3755,6 +3758,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize Teams link service
 	srv.teamsLinkService = NewTeamsLinkService()
+
+	// Initialize Slack link service
+	srv.slackLinkService = NewSlackLinkService()
 
 	// Validate OIDC login configuration at startup (fail fast).
 	if cfg.OIDCLogin.Enabled {
@@ -5507,6 +5513,9 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 		}
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.SetStore(s.chatLinkStore)
+		}
+		if s.slackLinkService != nil {
+			s.slackLinkService.SetStore(s.chatLinkStore)
 		}
 	}
 
@@ -8350,6 +8359,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.Close()
 		}
+		if s.slackLinkService != nil {
+			s.slackLinkService.Close()
+		}
 		// Stop the B3 preview engine's nonce cleanup goroutine.
 		if s.previewService != nil {
 			s.previewService.Close()
@@ -8958,6 +8970,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/teams/link", s.guarded("/api/v1/teams/link", s.handleTeamsLink))
 	s.mux.HandleFunc("/api/v1/teams/link/verify", s.guarded("/api/v1/teams/link/verify", s.handleTeamsLinkVerify))
 	s.mux.HandleFunc("/api/v1/teams/link/status", s.guarded("/api/v1/teams/link/status", s.handleTeamsLinkStatus))
+
+	// Slack account linking endpoints
+	s.mux.HandleFunc("/api/v1/slack/link", s.guarded("/api/v1/slack/link", s.handleSlackLink))
+	s.mux.HandleFunc("/api/v1/slack/link/verify", s.guarded("/api/v1/slack/link/verify", s.handleSlackLinkVerify))
+	s.mux.HandleFunc("/api/v1/slack/link/status", s.guarded("/api/v1/slack/link/status", s.handleSlackLinkStatus))
 
 	// Unified resource import endpoint (templates + harness-configs, global + project)
 	s.mux.HandleFunc("/api/v1/resources/import", s.guarded("/api/v1/resources/import", s.handleResourcesImport))

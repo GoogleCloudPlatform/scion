@@ -45,10 +45,10 @@ func (ChatLinkCode) Fields() []ent.Field {
 			Comment("SHA-256 hash of the plaintext link code"),
 		field.String("user_identifier").
 			NotEmpty().
-			Comment("Platform-specific user ID (Telegram user ID, Discord user ID, Teams AAD object ID)"),
+			Comment("Platform-specific user ID (Telegram user ID, Discord user ID, Teams AAD object ID, Slack user ID)"),
 		field.Enum("provider").
-			Values("telegram", "discord", "teams").
-			Comment("Chat provider: telegram, discord, or teams"),
+			Values("telegram", "discord", "teams", "slack").
+			Comment("Chat provider: telegram, discord, teams, or slack"),
 		field.Enum("status").
 			Default("pending").
 			Values("pending", "confirmed").

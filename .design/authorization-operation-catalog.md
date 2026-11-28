@@ -12240,6 +12240,7 @@
 | http_route | POST | `/api/v1/telegram/link/verify` |
 | http_route | POST | `/api/v1/discord/link/verify` |
 | http_route | POST | `/api/v1/teams/link/verify` |
+| http_route | POST | `/api/v1/slack/link/verify` |
 
 **Principals:** `user`
 

@@ -68,6 +68,19 @@ var (
 			return s.teamsLinkService.chatLinkService
 		},
 	}
+	slackLinkProvider = chatLinkProvider{
+		name:             "Slack",
+		userIDField:      "slackUserId",
+		userIDLogKey:     "slack_user_id",
+		userIDQueryParam: "slack_user_id",
+		decode:           decodeSlackLinkRegistration,
+		service: func(s *Server) *chatLinkService {
+			if s.slackLinkService == nil {
+				return nil
+			}
+			return s.slackLinkService.chatLinkService
+		},
+	}
 )
 
 func (p chatLinkProvider) handleRegistration(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -133,6 +146,11 @@ func (s *Server) handleTeamsLink(w http.ResponseWriter, r *http.Request) {
 	teamsLinkProvider.handleRegistration(s, w, r)
 }
 
+// handleSlackLink handles POST /api/v1/slack/link.
+func (s *Server) handleSlackLink(w http.ResponseWriter, r *http.Request) {
+	slackLinkProvider.handleRegistration(s, w, r)
+}
+
 // handleTelegramLinkVerify handles POST /api/v1/telegram/link/verify.
 func (s *Server) handleTelegramLinkVerify(w http.ResponseWriter, r *http.Request) {
 	telegramLinkProvider.handleVerification(s, w, r)
@@ -148,6 +166,11 @@ func (s *Server) handleTeamsLinkVerify(w http.ResponseWriter, r *http.Request) {
 	teamsLinkProvider.handleVerification(s, w, r)
 }
 
+// handleSlackLinkVerify handles POST /api/v1/slack/link/verify.
+func (s *Server) handleSlackLinkVerify(w http.ResponseWriter, r *http.Request) {
+	slackLinkProvider.handleVerification(s, w, r)
+}
+
 // handleTelegramLinkStatus handles GET /api/v1/telegram/link/status.
 func (s *Server) handleTelegramLinkStatus(w http.ResponseWriter, r *http.Request) {
 	telegramLinkProvider.handleStatus(s, w, r)
@@ -161,6 +184,11 @@ func (s *Server) handleDiscordLinkStatus(w http.ResponseWriter, r *http.Request)
 // handleTeamsLinkStatus handles GET /api/v1/teams/link/status.
 func (s *Server) handleTeamsLinkStatus(w http.ResponseWriter, r *http.Request) {
 	teamsLinkProvider.handleStatus(s, w, r)
+}
+
+// handleSlackLinkStatus handles GET /api/v1/slack/link/status.
+func (s *Server) handleSlackLinkStatus(w http.ResponseWriter, r *http.Request) {
+	slackLinkProvider.handleStatus(s, w, r)
 }
 
 type chatLinkRegistrationOptions struct {
@@ -234,6 +262,15 @@ func decodeTeamsLinkRegistration(r *http.Request) (string, string, error) {
 	}
 	err := readJSON(r, &req)
 	return req.Code, req.TeamsUserID, err
+}
+
+func decodeSlackLinkRegistration(r *http.Request) (string, string, error) {
+	var req struct {
+		Code        string `json:"code"`
+		SlackUserID string `json:"slackUserId"`
+	}
+	err := readJSON(r, &req)
+	return req.Code, req.SlackUserID, err
 }
 
 type chatLinkVerificationOptions struct {
