@@ -300,7 +300,7 @@ var ownerOnlyTrailingSlashPrefixes = map[string]string{
 	"/api/v1/artifacts/shared/":       "exempt (ExemptionPublicEndpoint: public share link)",
 	"/api/v1/artifacts/view/":         "exempt (ExemptionPublicEndpoint: signed view capability)",
 	"/api/v1/brokers/":                "exempt (ExemptionInternalOnly: broker-HMAC internal)",
-	"/api/v1/metrics/session/":        "exempt (ExemptionAuthenticationOnly: self-service session metrics)",
+	"/api/v1/metrics/session/":        "owner-scoped prefix (session metrics by ID)",
 	"/api/v1/portview/":               "exempt (ExemptionPublicEndpoint: signed port view link)",
 	"/api/v1/pre-start-hooks/":        "exempt (ExemptionHubAdmin: hub pre-start hooks by ID)",
 	"/api/v1/principals/":             "exempt (ExemptionAuthenticationOnly: self-service principal lookup)",

@@ -555,9 +555,10 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.metrics.read",
 		Domain:      "agent",
-		Description: "Read an agent's aggregate session metrics",
+		Description: "Read an agent's aggregate or individual session metrics",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/metrics/summary", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/metrics/session/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},

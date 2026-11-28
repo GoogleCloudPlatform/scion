@@ -300,6 +300,10 @@ func (s *Server) handleSessionMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	id := extractID(r, "/api/v1/metrics/session")
 	if id == "" {
 		NotFound(w, "Session metrics")

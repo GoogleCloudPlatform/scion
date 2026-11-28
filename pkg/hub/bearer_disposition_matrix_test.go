@@ -1835,6 +1835,19 @@ func TestProjectEnvAndGCPSARoutes_AgentProjectReadScope(t *testing.T) {
 		CreatedAt: now,
 	}))
 
+	sessMetrics := &store.AgentSessionMetrics{
+		AgentID:      m.ids.agent,
+		ProjectID:    m.ids.project,
+		SessionID:    "scope-test-session",
+		StartedAt:    now.Add(-time.Minute),
+		Status:       "completed",
+		TurnCount:    1,
+		Model:        "test-model",
+		TokensInput:  100,
+		TokensOutput: 50,
+	}
+	require.NoError(t, m.store.CreateAgentSessionMetrics(ctx, sessMetrics))
+
 	withoutScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate})
 	withScope := m.mintAgentTokenWithScopes(t, m.ids.agent, m.ids.project, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
 	otherProjectAgent := m.mintAgentTokenWithScopes(t, tid("other-proj-agent-env-sa"), m.otherProject, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead})
@@ -1863,6 +1876,11 @@ func TestProjectEnvAndGCPSARoutes_AgentProjectReadScope(t *testing.T) {
 			name:              "project gcp sa status",
 			path:              "/api/v1/projects/" + m.ids.project + "/gcp-service-accounts/" + projSAID + "/status",
 			crossProjectCodes: []int{http.StatusForbidden, http.StatusNotFound},
+		},
+		{
+			name:              "session metrics get",
+			path:              "/api/v1/metrics/session/" + sessMetrics.ID,
+			crossProjectCodes: []int{http.StatusForbidden},
 		},
 	}
 

@@ -126,6 +126,7 @@ type idFixtures struct {
 	agentRestore            string
 	agentRestoreProject     string
 	agentProvisioning       string
+	agentSessionMetrics     string
 	artifact                string
 	projectEnvKey           string
 	projectSecretKey        string
@@ -529,6 +530,20 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		require.NoError(t, sErr)
 		require.NoError(t, s.CreateSecret(ctx, secretRow))
 	}
+	liSessMetrics := &store.AgentSessionMetrics{
+		AgentID:      f.agent,
+		ProjectID:    f.project,
+		SessionID:    "li-session-metrics",
+		StartedAt:    now.Add(-time.Minute),
+		Status:       "completed",
+		TurnCount:    1,
+		Model:        "li-model",
+		TokensInput:  100,
+		TokensOutput: 50,
+	}
+	require.NoError(t, s.CreateAgentSessionMetrics(ctx, liSessMetrics))
+	f.agentSessionMetrics = liSessMetrics.ID
+
 	liTriggerPayload := `{"agentId":"` + f.agent + `","agentName":"li-agent","message":"li-trigger-msg","wake":true}`
 	for _, trSeed := range []struct {
 		id     string
@@ -1433,7 +1448,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/allow-list/{email}":  {"email": f.allowListEmail},
 
 		// --- env var family ---
-		"/api/v1/env/{key}": {"key": f.envVarKey},
+		"/api/v1/env/{key}":            {"key": f.envVarKey},
+		"/api/v1/metrics/session/{id}": {"id": f.agentSessionMetrics},
 
 		// --- runtime broker family ---
 		"/api/v1/runtime-brokers/{id}":                                                  {"id": f.runtimeBroker},
