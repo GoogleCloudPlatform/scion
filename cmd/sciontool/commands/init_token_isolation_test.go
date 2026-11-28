@@ -19,15 +19,21 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/user"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -865,47 +871,275 @@ func TestAuthResetter_IsolatedMode_PendingCandidateSurvivesUncheckedAndRefused(t
 }
 
 func TestRunInit_ShellIsolation_PreSupervisorVerifyRefusesLatePlantedHandoff(t *testing.T) {
+	t.Run("late regular-file handoff is taken and start proceeds with handoff absent at Run", func(t *testing.T) {
+		home := t.TempDir()
+		t.Cleanup(hub.SetTokenHome(home))
+		t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+		origSetup := runSetupHostUser
+		origBeforeVerify := beforeVerifyHandoffAbsentForTest
+		origBeforeSup := beforeSupervisorRunForTest
+		runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+		t.Cleanup(func() {
+			runSetupHostUser = origSetup
+			beforeVerifyHandoffAbsentForTest = origBeforeVerify
+			beforeSupervisorRunForTest = origBeforeSup
+		})
+
+		lateTok := testCredential(t, "late-reset", time.Now())
+		var latePath string
+		beforeVerifyHandoffAbsentForTest = func() {
+			latePath = writeHandoffTokenForTest(t, lateTok)
+		}
+
+		supReached := false
+		handoffExistsAtRun := true
+		beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+			supReached = true
+			_, err := os.Lstat(latePath)
+			handoffExistsAtRun = !os.IsNotExist(err)
+		}
+
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_HARNESS", "shell")
+		t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+		t.Setenv("SCION_HUB_ENDPOINT", "")
+		t.Setenv("SCION_HUB_URL", "")
+		t.Setenv("SCION_AGENT_ID", "")
+
+		code := RunInit([]string{"true"}, InitRunOptions{
+			DisableReExec:               true,
+			DisableTermSignalForwarding: true,
+			DisablePortForwarding:       true,
+		})
+		if code != 0 {
+			t.Fatalf("RunInit exited %d, want 0 when late regular-file handoff can be taken", code)
+		}
+		if !supReached {
+			t.Fatal("sup.Run was not reached")
+		}
+		if handoffExistsAtRun {
+			t.Fatal("late-planted handoff file still existed at sup.Run")
+		}
+	})
+
+	t.Run("late unremovable directory at handoff path fails closed", func(t *testing.T) {
+		home := t.TempDir()
+		t.Cleanup(hub.SetTokenHome(home))
+		t.Cleanup(hub.SetRuntimeTokenStoreForTest())
+
+		origSetup := runSetupHostUser
+		origBeforeVerify := beforeVerifyHandoffAbsentForTest
+		origBeforeSup := beforeSupervisorRunForTest
+		runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+		t.Cleanup(func() {
+			runSetupHostUser = origSetup
+			beforeVerifyHandoffAbsentForTest = origBeforeVerify
+			beforeSupervisorRunForTest = origBeforeSup
+		})
+
+		// Plant an unremovable directory AFTER setupShellIsolatedTokenStore has
+		// already run, right before reconcileShellHandoffBeforeSupervisorRun.
+		beforeVerifyHandoffAbsentForTest = func() {
+			if err := os.MkdirAll(hub.HandoffTokenFilePath(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		supReached := false
+		beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+			supReached = true
+		}
+
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_HARNESS", "shell")
+		t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+		t.Setenv("SCION_HUB_ENDPOINT", "")
+		t.Setenv("SCION_HUB_URL", "")
+		t.Setenv("SCION_AGENT_ID", "")
+
+		code := RunInit([]string{"true"}, InitRunOptions{
+			DisableReExec:               true,
+			DisableTermSignalForwarding: true,
+			DisablePortForwarding:       true,
+		})
+		if code == 0 {
+			t.Fatal("RunInit exited 0, expected non-zero fail-closed exit on unremovable late handoff")
+		}
+		if supReached {
+			t.Fatal("sup.Run was reached despite unremovable late handoff path")
+		}
+	})
+}
+
+func TestRunInit_ShellIsolation_TakeBeforeNewClientUsesHandedOffToken(t *testing.T) {
 	home := t.TempDir()
 	t.Cleanup(hub.SetTokenHome(home))
 	t.Cleanup(hub.SetRuntimeTokenStoreForTest())
 
 	origSetup := runSetupHostUser
-	origBeforeVerify := beforeVerifyHandoffAbsentForTest
 	origBeforeSup := beforeSupervisorRunForTest
+	origWindow := childStartupCheckWindow
 	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	childStartupCheckWindow = 20 * time.Millisecond
 	t.Cleanup(func() {
 		runSetupHostUser = origSetup
-		beforeVerifyHandoffAbsentForTest = origBeforeVerify
 		beforeSupervisorRunForTest = origBeforeSup
+		childStartupCheckWindow = origWindow
 	})
 
-	// Plant a handoff token AFTER setupShellIsolatedTokenStore has already run,
-	// right before verifyShellHandoffTokenAbsent.
-	beforeVerifyHandoffAbsentForTest = func() {
-		writeHandoffTokenForTest(t, "late-planted-tok")
+	handoffTok := testCredential(t, "initial-handoff", time.Now())
+	handoffPath := writeHandoffTokenForTest(t, handoffTok)
+
+	var mu sync.Mutex
+	var firstBearer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if firstBearer == "" {
+			firstBearer = r.Header.Get("X-Scion-Agent-Token")
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"agent-1"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "shell")
+	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+
+	var handoffExistsAtRun bool
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		_, err := os.Lstat(handoffPath)
+		handoffExistsAtRun = !os.IsNotExist(err)
 	}
 
-	supReached := false
-	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
-		supReached = true
+	code := RunInit([]string{"sh", "-c", "sleep 0.15"}, InitRunOptions{
+		DisableReExec:               true,
+		DisableTermSignalForwarding: true,
+		DisablePortForwarding:       true,
+	})
+	if code != 0 {
+		t.Fatalf("RunInit exited %d, want 0", code)
+	}
+	if handoffExistsAtRun {
+		t.Fatal("handoff token still existed at sup.Run")
+	}
+	mu.Lock()
+	gotBearer := firstBearer
+	mu.Unlock()
+	if gotBearer != handoffTok {
+		t.Fatalf("first Hub request bearer = %q, want handed-off token %q", gotBearer, handoffTok)
+	}
+}
+
+func TestRunInit_ShellIsolation_RuntimeFileModeAndStagingUIDZeroAndSidecarIsolation(t *testing.T) {
+	home := t.TempDir()
+	base := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	t.Cleanup(hub.SetRuntimeTokenStoreForTest(base))
+
+	runtimePath := filepath.Join(base, "sciontool", "auth", hub.TokenFile)
+	origRuntimePath := runtimeTokenPathForInit
+	origEUID := initEffectiveUID
+	origSetup := runSetupHostUser
+	origBeforeSup := beforeSupervisorRunForTest
+	origWrite := runWriteTokenFile
+	origServicesStart := runServicesStart
+	origReExec := reExecWithCleanEnv
+
+	withLookupUserByID(t, func(string) (*user.User, error) {
+		return &user.User{Username: "scion", HomeDir: home}, nil
+	})
+	runtimeTokenPathForInit = runtimePath
+	initEffectiveUID = func() int { return 0 }
+	runSetupHostUser = func(bool) (int, int, bool) { return 1000, 1000, false }
+	reExecWithCleanEnv = func() error { return nil }
+	t.Cleanup(func() {
+		runtimeTokenPathForInit = origRuntimePath
+		initEffectiveUID = origEUID
+		runSetupHostUser = origSetup
+		beforeSupervisorRunForTest = origBeforeSup
+		runWriteTokenFile = origWrite
+		runServicesStart = origServicesStart
+		reExecWithCleanEnv = origReExec
+	})
+
+	// Pre-plant a far-future iat hub token to also verify O2 (shell staging
+	// overwrites rather than keeping the pre-existing handoff).
+	farFutureTok := testCredential(t, "planted-future", time.Now().Add(24*time.Hour))
+	writeHandoffTokenForTest(t, farFutureTok)
+
+	freshStagedTok := testCredential(t, "fresh-staged", time.Now())
+	encoded := stagedBlob(t, freshStagedTok)
+
+	// Add a valid scion-services.yaml to verify svcManager.SetWorkloadIsolation(true).
+	svcYAML := "- name: testsvc\n  command: [\"true\"]\n"
+	if err := os.WriteFile(filepath.Join(home, ".scion", "scion-services.yaml"), []byte(svcYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stagedUIDs []int
+	runWriteTokenFile = func(token string, uid, gid int) error {
+		stagedUIDs = append(stagedUIDs, uid)
+		return hub.WriteTokenFile(token, uid, gid)
+	}
+
+	var svcManagerIsolated bool
+	var svcStartCalled bool
+	runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
+		svcStartCalled = true
+		svcManagerIsolated = m.WorkloadIsolation()
+		return nil
 	}
 
 	t.Setenv("HOME", home)
 	t.Setenv("SCION_HARNESS", "shell")
 	t.Setenv(state.HarnessReadyEnv, `{"strategy":"idle"}`)
+	t.Setenv(stagedsecrets.EnvVar, encoded)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
 	t.Setenv("SCION_AGENT_ID", "")
 
-	code := RunInit([]string{"true"}, InitRunOptions{
-		DisableReExec:               true,
+	var observed bool
+	var modeAtRun hub.TokenStoreMode
+	var tokAtRun string
+	var handoffExistsAtRun bool
+	beforeSupervisorRunForTest = func(cfg supervisor.Config) {
+		observed = true
+		modeAtRun = hub.CurrentTokenStoreMode()
+		tokAtRun = hub.ReadTokenFile()
+		_, err := os.Lstat(hub.HandoffTokenFilePath())
+		handoffExistsAtRun = !os.IsNotExist(err)
+	}
+
+	// Note: when running unprivileged, sup.Run will fail setuid(1000) after
+	// beforeSupervisorRunForTest; that's expected and we assert all pre-Run
+	// invariants observed at the exact boundary.
+	_ = RunInit([]string{"true"}, InitRunOptions{
 		DisableTermSignalForwarding: true,
 		DisablePortForwarding:       true,
 	})
-	if code == 0 {
-		t.Fatal("RunInit exited 0, expected non-zero fail-closed exit on late-planted handoff")
+
+	if !observed {
+		t.Fatal("beforeSupervisorRunForTest was not called")
 	}
-	if supReached {
-		t.Fatal("sup.Run was reached despite late-planted handoff token")
+	if modeAtRun != hub.TokenStoreRuntimeFile {
+		t.Fatalf("mode at sup.Run = %v, want TokenStoreRuntimeFile", modeAtRun)
+	}
+	if tokAtRun != freshStagedTok {
+		t.Fatalf("runtime token at sup.Run = %q, want fresh staged token (not far-future planted token)", tokAtRun)
+	}
+	if handoffExistsAtRun {
+		t.Fatal("handoff token still existed at sup.Run")
+	}
+	if len(stagedUIDs) == 0 || stagedUIDs[0] != 0 {
+		t.Fatalf("stageHubTokenForShell wrote with uids=%v, want [0]", stagedUIDs)
+	}
+	if !svcStartCalled || !svcManagerIsolated {
+		t.Fatalf("expected runServicesStart called with WorkloadIsolation=true (called=%v, isolated=%v)", svcStartCalled, svcManagerIsolated)
 	}
 }

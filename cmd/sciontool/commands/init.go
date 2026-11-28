@@ -605,12 +605,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// unconfigured client. Running stageHubToken only on failure here
 			// keeps normal staging below so a FileSecret can never overwrite
 			// the hub credential file.
-			stageHubUID, stageHubGID := targetUID, targetGID
-			if shellIsolation {
-				stageHubUID, stageHubGID = 0, 0
-			}
 			if staged.HubToken != "" {
-				if _, tokErr := stageHubToken(staged.HubToken, stageHubUID, stageHubGID); tokErr != nil {
+				var tokErr error
+				if shellIsolation {
+					tokErr = stageHubTokenForShell(staged.HubToken)
+				} else {
+					_, tokErr = stageHubToken(staged.HubToken, targetUID, targetGID)
+				}
+				if tokErr != nil {
 					log.Warn("Could not stage hub credential before reporting secret-staging failure: %v", tokErr)
 				}
 				staged.HubToken = ""
@@ -622,16 +624,18 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// A runtime whose instance cannot see the broker-written token file
 		// (Cloud Run) stages the hub-issued credential instead. It is
 		// written to the canonical token file (handoff path under shell
-		// isolation, owned by 0:0, before the environ-purge re-exec; after
-		// re-exec setupShellIsolatedTokenStore takes and unlinks it), and a
-		// marker (not the credential) survives the re-exec below so this init
+		// isolation, unlinking any pre-existing handoff first and owned by
+		// 0:0, before the environ-purge re-exec; after re-exec
+		// setupShellIsolatedTokenStore takes and unlinks it), and a marker
+		// (not the credential) survives the re-exec below so this init
 		// removes the file again at exit. The errors name the step and path only.
 		if staged.HubToken != "" {
-			stageHubUID, stageHubGID := targetUID, targetGID
+			var kept bool
 			if shellIsolation {
-				stageHubUID, stageHubGID = 0, 0
+				err = stageHubTokenForShell(staged.HubToken)
+			} else {
+				kept, err = stageHubToken(staged.HubToken, targetUID, targetGID)
 			}
-			kept, err := stageHubToken(staged.HubToken, stageHubUID, stageHubGID)
 			staged.HubToken = ""
 			if err != nil {
 				log.Error("Failed to write the staged hub credential: %v", err)
@@ -1445,7 +1449,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		if beforeVerifyHandoffAbsentForTest != nil {
 			beforeVerifyHandoffAbsentForTest()
 		}
-		if err := verifyShellHandoffTokenAbsent(); err != nil {
+		if err := reconcileShellHandoffBeforeSupervisorRun(hubClient); err != nil {
 			log.Error("Refusing to start workload: %v", err)
 			reportInitFailure(agentHome, err)
 			return 1

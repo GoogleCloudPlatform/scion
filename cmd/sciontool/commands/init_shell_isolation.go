@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/clicontextseed"
@@ -201,6 +202,44 @@ func setupShellIsolatedTokenStore(targetUID int, rootless bool) error {
 		return fmt.Errorf("cannot remove stale handoff transport token temp file: %w", err)
 	}
 	return nil
+}
+
+// reconcileShellHandoffBeforeSupervisorRun re-runs the handoff take step
+// immediately before sup.Run and then verifies that both handoff paths are
+// absent. A legitimate broker reset-auth write that landed between
+// setupShellIsolatedTokenStore and sup.Run is taken, validated under signal
+// rules (and adopted if valid, or discarded if not), and unlinked so start
+// proceeds cleanly. Init fails closed only if an unlink or absence check fails.
+func reconcileShellHandoffBeforeSupervisorRun(hubClient *hub.Client) error {
+	tok, err := hub.TakeHandoffToken()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Normal case: no late handoff arrived.
+		} else if errors.Is(err, hub.ErrHandoffUnlinkFailed) {
+			return fmt.Errorf("cannot remove late handoff token: %w", err)
+		} else {
+			log.Warn("Ignored and removed invalid late handoff token entry: %v", err)
+		}
+	} else if tok != "" {
+		if hubClient != nil && hubClient.AgentID() != "" {
+			if info, verr := hub.ValidateCandidateToken(tok, hubClient.AgentID(), time.Now()); verr == nil {
+				hubClient.SetToken(tok)
+				if werr := hub.WriteTokenFile(tok, 0, 0); werr != nil {
+					log.Error("Failed to persist late handoff credential %s to runtime store: %v", info.LogID(), werr)
+				} else {
+					log.Info("Adopted late handoff credential %s before workload start", info.LogID())
+				}
+			} else {
+				log.Warn("Discarded invalid late handoff credential before workload start: %v", verr)
+			}
+		} else {
+			log.Warn("Discarded late handoff credential before workload start (hub client not configured)")
+		}
+	}
+	if err := hub.RemoveStaleHandoffTmpFile(); err != nil {
+		return fmt.Errorf("cannot remove late stale handoff token temp file: %w", err)
+	}
+	return verifyShellHandoffTokenAbsent()
 }
 
 // verifyShellHandoffTokenAbsent asserts that neither the agent token nor the

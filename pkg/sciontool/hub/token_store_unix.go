@@ -31,11 +31,67 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
-// ensureRuntimeTokenDir creates (if absent) and verifies the parent directory
-// of runtimePath through dirfd no-follow, verifying that every ancestor along
-// the chain is root-owned (or owned by this process) and free of group/other
-// write bits, and enforcing mode 0700 and ownership by the current effective
-// UID (root:root when euid==0) on the leaf directory. Never follows symlinks.
+// openRuntimeTokenParent opens the parent directory of dir with strict
+// no-follow and root/self-owned non-group/world-writable chain checks.
+// When the immediate parent (e.g. /run/sciontool for /run/sciontool/auth) does
+// not yet exist, it creates that single missing parent with mode 0755 (so
+// sibling files like /run/sciontool/credential-state.json remain reachable by
+// sciontool doctor) after verifying its own ancestor chain, and never
+// chmods/chowns an already-existing parent directory.
+func openRuntimeTokenParent(dir, base string, overridden bool, euid int) (int, string, error) {
+	openParent := func(target string) (int, string, error) {
+		switch {
+		case base == "/":
+			return dirfd.OpenParentNoFollowRootOwned(target)
+		case base != "":
+			return dirfd.OpenParentNoFollowOwnedBy(base, target, uint32(euid)) //nolint:gosec // euid is non-negative
+		case overridden:
+			return dirfd.OpenParentNoFollowOwnedBy(filepath.Dir(target), target, uint32(euid)) //nolint:gosec // euid is non-negative
+		default:
+			return dirfd.OpenParentNoFollowRootOwned(target)
+		}
+	}
+
+	parentFd, leaf, err := openParent(dir)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return parentFd, leaf, err
+	}
+
+	// One-level parent creation (e.g. create /run/sciontool at 0755 when
+	// creating /run/sciontool/auth on a fresh container). Never touch an
+	// already-existing directory.
+	parentDir := filepath.Dir(dir)
+	grandFd, parentName, gerr := openParent(parentDir)
+	if gerr != nil {
+		return -1, "", gerr
+	}
+	mkErr := unix.Mkdirat(grandFd, parentName, 0o755)
+	if mkErr == nil {
+		if pd, perr := dirfd.OpenAt(grandFd, parentName, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0); perr == nil {
+			if euid == 0 {
+				_ = pd.Chown(0, 0)
+			}
+			_ = pd.Chmod(0o755)
+			_ = pd.Close()
+		}
+	}
+	_ = dirfd.Close(grandFd)
+	if mkErr != nil && !errors.Is(mkErr, syscall.EEXIST) {
+		return -1, "", fmt.Errorf("mkdir %s: %w", parentDir, mkErr)
+	}
+	return openParent(dir)
+}
+
+// ensureRuntimeTokenDir creates (if absent) and verifies the leaf directory of
+// runtimePath (e.g. /run/sciontool/auth) through dirfd no-follow, verifying
+// that every ancestor along the chain is root-owned (or owned by this process)
+// and free of group/other write bits.
+//
+// If the leaf directory is freshly created by Mkdirat, it is set to 0700
+// root:root (when euid==0). If it already exists, it is NEVER chmodded or
+// chowned: it must already be owned by this process (root:root when euid==0)
+// with exact mode 0700, otherwise an error is returned so the caller falls
+// back to in-memory storage.
 func ensureRuntimeTokenDir(runtimePath string) error {
 	dir := filepath.Dir(runtimePath)
 	euid := os.Geteuid()
@@ -45,30 +101,15 @@ func ensureRuntimeTokenDir(runtimePath string) error {
 	overridden := runtimeStoreOverridden
 	tokenStoreMu.RUnlock()
 
-	var (
-		parentFd int
-		leaf     string
-		err      error
-	)
-	switch {
-	case base == "/":
-		parentFd, leaf, err = dirfd.OpenParentNoFollowRootOwned(dir)
-	case base != "":
-		parentFd, leaf, err = dirfd.OpenParentNoFollowOwnedBy(base, dir, uint32(euid)) //nolint:gosec // euid is non-negative
-	case overridden:
-		// In tests that called SetRuntimeTokenStoreForTest() without an
-		// explicit base, anchor the owner/mode check at the parent of dir
-		// (typically t.TempDir()) so /tmp's 01777 does not reject the test.
-		parentFd, leaf, err = dirfd.OpenParentNoFollowOwnedBy(filepath.Dir(dir), dir, uint32(euid)) //nolint:gosec // euid is non-negative
-	default:
-		parentFd, leaf, err = dirfd.OpenParentNoFollowRootOwned(dir)
-	}
+	parentFd, leaf, err := openRuntimeTokenParent(dir, base, overridden, euid)
 	if err != nil {
 		return fmt.Errorf("verify runtime token parent for %s: %w", dir, err)
 	}
 	defer func() { _ = dirfd.Close(parentFd) }()
 
-	if mkErr := unix.Mkdirat(parentFd, leaf, 0o700); mkErr != nil && !errors.Is(mkErr, syscall.EEXIST) {
+	mkErr := unix.Mkdirat(parentFd, leaf, 0o700)
+	created := mkErr == nil
+	if mkErr != nil && !errors.Is(mkErr, syscall.EEXIST) {
 		return fmt.Errorf("mkdir runtime token dir %s: %w", dir, mkErr)
 	}
 
@@ -85,13 +126,24 @@ func ensureRuntimeTokenDir(runtimePath string) error {
 	if int(st.Uid) != euid {
 		return fmt.Errorf("runtime token dir %s owned by uid %d, expected %d", dir, st.Uid, euid)
 	}
-	if euid == 0 {
-		if err := d.Chown(0, 0); err != nil {
-			return fmt.Errorf("chown runtime token dir %s to 0:0: %w", dir, err)
+	if created {
+		if euid == 0 {
+			if err := d.Chown(0, 0); err != nil {
+				return fmt.Errorf("chown runtime token dir %s to 0:0: %w", dir, err)
+			}
 		}
+		if err := d.Chmod(0o700); err != nil {
+			return fmt.Errorf("chmod runtime token dir %s to 0700: %w", dir, err)
+		}
+		return nil
 	}
-	if err := d.Chmod(0o700); err != nil {
-		return fmt.Errorf("chmod runtime token dir %s to 0700: %w", dir, err)
+
+	// Pre-existing directory: require exact owner and 0700 mode; never mutate it.
+	if euid == 0 && st.Gid != 0 {
+		return fmt.Errorf("pre-existing runtime token dir %s has gid %d, expected 0", dir, st.Gid)
+	}
+	if perm := st.Mode & 0o777; perm != 0o700 {
+		return fmt.Errorf("pre-existing runtime token dir %s has mode %04o, expected 0700", dir, perm)
 	}
 	return nil
 }

@@ -43,12 +43,13 @@ const (
 )
 
 const (
-	// DefaultRuntimeTokenDir is the root-only runtime directory for isolated
-	// PID 1 credentials.
-	DefaultRuntimeTokenDir = "/run/scion"
+	// DefaultRuntimeTokenDir is the init-only runtime directory for isolated
+	// PID 1 credentials (0700 root:root, under init-only /run/sciontool so
+	// shared /run/scion mounts remain untouched).
+	DefaultRuntimeTokenDir = "/run/sciontool/auth"
 	// DefaultRuntimeTokenPath is the root-only runtime path for the isolated
 	// agent token.
-	DefaultRuntimeTokenPath = "/run/scion/" + TokenFile
+	DefaultRuntimeTokenPath = DefaultRuntimeTokenDir + "/" + TokenFile
 	// DefaultRuntimeTransportTokenPath is the root-only runtime path for the
 	// isolated transport token.
 	DefaultRuntimeTransportTokenPath = "/run/scion/" + transportauth.TransportTokenFileName

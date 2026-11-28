@@ -550,31 +550,118 @@ func TestRuntimeStoreGuard_PanicsOnDefaultPathWithoutOverride(t *testing.T) {
 	_ = ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, DefaultRuntimeTokenPath)
 }
 
-func TestConfigureIsolatedTokenStore_TightensPreExistingDirAndRefusesUnsafeChain(t *testing.T) {
-	t.Run("tightens pre-existing 0755 runtime dir to 0700", func(t *testing.T) {
+func TestConfigureIsolatedTokenStore_PreservesSharedParentAndRefusesUnsafeDir(t *testing.T) {
+	t.Run("preserves pre-existing 0755 parent and sibling reachability while auth leaf is 0700 and file 0600", func(t *testing.T) {
 		home := t.TempDir()
 		base := t.TempDir()
 		t.Cleanup(SetTokenHome(home))
 		t.Cleanup(SetRuntimeTokenStoreForTest(base))
 
-		runtimeDir := filepath.Join(base, "run-scion")
-		if err := os.Mkdir(runtimeDir, 0o755); err != nil {
+		// Simulate a shared pre-existing 0755 parent (like /run/sciontool with
+		// credential-state.json, or /run/scion with /run/scion/mem/x).
+		sharedParent := filepath.Join(base, "run-parent")
+		siblingDir := filepath.Join(sharedParent, "mem")
+		if err := os.MkdirAll(siblingDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(runtimeDir, 0o755); err != nil {
+		if err := os.Chmod(sharedParent, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(siblingDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		siblingFile := filepath.Join(siblingDir, "x")
+		if err := os.WriteFile(siblingFile, []byte("workload-readable"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		runtimePath := filepath.Join(runtimeDir, TokenFile)
+		authDir := filepath.Join(sharedParent, "auth")
+		runtimePath := filepath.Join(authDir, TokenFile)
 		if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err != nil {
 			t.Fatalf("ConfigureIsolatedTokenStore: %v", err)
 		}
-		info, err := os.Stat(runtimeDir)
+		if err := WriteTokenFile("isolated-tok", 0, 0); err != nil {
+			t.Fatalf("WriteTokenFile: %v", err)
+		}
+
+		parentInfo, err := os.Stat(sharedParent)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if perm := info.Mode().Perm(); perm != 0o700 {
-			t.Fatalf("pre-existing runtime dir mode = %04o, want 0700", perm)
+		if perm := parentInfo.Mode().Perm(); perm != 0o755 {
+			t.Fatalf("shared parent mode mutated to %04o, want 0755 preserved", perm)
+		}
+		if got, err := os.ReadFile(siblingFile); err != nil || string(got) != "workload-readable" {
+			t.Fatalf("sibling file unreachable: data=%q err=%v", got, err)
+		}
+		authInfo, err := os.Stat(authDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := authInfo.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("auth leaf dir mode = %04o, want 0700", perm)
+		}
+		fileInfo, err := os.Stat(runtimePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fileInfo.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("runtime token file mode = %04o, want 0600", perm)
+		}
+	})
+
+	t.Run("creates missing one-level parent at 0755 and auth leaf at 0700", func(t *testing.T) {
+		home := t.TempDir()
+		base := t.TempDir()
+		t.Cleanup(SetTokenHome(home))
+		t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+		parentDir := filepath.Join(base, "sciontool")
+		authDir := filepath.Join(parentDir, "auth")
+		runtimePath := filepath.Join(authDir, TokenFile)
+		if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err != nil {
+			t.Fatalf("ConfigureIsolatedTokenStore: %v", err)
+		}
+		parentInfo, err := os.Stat(parentDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := parentInfo.Mode().Perm(); perm != 0o755 {
+			t.Fatalf("created parent dir mode = %04o, want 0755", perm)
+		}
+		authInfo, err := os.Stat(authDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := authInfo.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("created auth leaf dir mode = %04o, want 0700", perm)
+		}
+	})
+
+	t.Run("refuses pre-existing leaf dir with non-0700 mode without chmodding it", func(t *testing.T) {
+		home := t.TempDir()
+		base := t.TempDir()
+		t.Cleanup(SetTokenHome(home))
+		t.Cleanup(SetRuntimeTokenStoreForTest(base))
+
+		existingLeaf := filepath.Join(base, "auth")
+		if err := os.Mkdir(existingLeaf, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(existingLeaf, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		runtimePath := filepath.Join(existingLeaf, TokenFile)
+		if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err == nil {
+			t.Fatal("expected error when pre-existing leaf dir has mode 0755 instead of 0700")
+		}
+		info, err := os.Stat(existingLeaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o755 {
+			t.Fatalf("pre-existing leaf dir mode mutated to %04o, must stay 0755", perm)
 		}
 	})
 
@@ -593,7 +680,7 @@ func TestConfigureIsolatedTokenStore_TightensPreExistingDirAndRefusesUnsafeChain
 		}
 		t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
 
-		runtimePath := filepath.Join(runDir, "scion", TokenFile)
+		runtimePath := filepath.Join(runDir, "auth", TokenFile)
 		if err := ConfigureIsolatedTokenStore(TokenStoreRuntimeFile, runtimePath); err == nil {
 			t.Fatal("expected error when ancestor directory is world-writable")
 		}
