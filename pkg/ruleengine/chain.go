@@ -824,7 +824,7 @@ func (e *Engine) evaluateInlineElement(
 	if spec.elem.Source != nil {
 		dec, elapsed, evalErr = e.compileAndEvaluateSource(dom, spec, caps, input)
 	} else {
-		dec, elapsed, evalErr = e.evaluateCore(dom.Ctx, spec.elem.Compiled, input, dom.Budget)
+		dec, elapsed, evalErr = e.evaluateCoreSafe(dom.Ctx, spec.elem.Compiled, input, dom.Budget)
 	}
 
 	out := classifyDecisionToOutcome(spec.elem.Index, spec.dialect, spec.elem.Kind, DomainInline, "", caps, dec, elapsed, evalErr)
@@ -996,6 +996,22 @@ type sourceCompileError struct {
 func (e *sourceCompileError) Error() string { return "rule compile error: " + e.cause.Error() }
 func (e *sourceCompileError) Unwrap() error { return e.cause }
 
+// evaluateCoreSafe wraps evaluateCore with panic recovery (O-1) so a panicking
+// dialect never leaves a ChainRun stuck in Dispatched or Evaluating; the panic
+// is converted into a closed FailedError{Reason: ReasonEvalFailed}.
+func (e *Engine) evaluateCoreSafe(ctx context.Context, c Compiled, input Input, budget Budget) (dec Decision, elapsed time.Duration, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			dec = Decision{}
+			err = &FailedError{
+				Reason: ReasonEvalFailed,
+				Cause:  fmt.Errorf("dialect panic: %v", rec),
+			}
+		}
+	}()
+	return e.evaluateCore(ctx, c, input, budget)
+}
+
 // EvaluatePending evaluates a single PendingStep alone through the engine's
 // ordinary evaluation path and completes its single-use token (v1 §3.1, §3.2, C1).
 func (e *Engine) EvaluatePending(p *PendingStep) error {
@@ -1068,7 +1084,7 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 		return nil
 	}
 
-	dec, elapsed, evalErr := e.evaluateCore(evalCtx, p.compiled, p.input, ioDomain.Budget)
+	dec, elapsed, evalErr := e.evaluateCoreSafe(evalCtx, p.compiled, p.input, ioDomain.Budget)
 	out := classifyDecisionToOutcome(p.index, p.dialect, p.kind, DomainIO, "", caps, dec, elapsed, evalErr)
 	var detail any
 	if p.kind == KindJudgment && out.Class == StepClassPass {
@@ -1163,13 +1179,18 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	leaderIO := leader.run.domains.IO
 	leader.run.mu.Unlock()
 
-	// C1: mint the shared group evalCtx and interest-withdrawal coordinator
-	// BEFORE claiming any member so every member's Pending -> Dispatched
-	// transition registers its withdraw callback under its own r.mu.
+	// C1 & R-1: mint the shared group evalCtx and interest-withdrawal
+	// coordinator BEFORE claiming any member so every member's
+	// Pending -> Dispatched transition registers its withdraw callback under
+	// its own r.mu. The dispatcher holds its own interest across the entire
+	// claim loop so an early member withdrawal before later members are
+	// claimed cannot drop remaining to 0 and cross-cancel live members.
 	cascadedCtx, stopCascade := cascadeAllCanceledContext(leaderIO.Ctx, inlineCtxs)
 	evalCtx, cancelCause := context.WithCancelCause(cascadedCtx)
 	interest := &groupInterestCancel{cancel: cancelCause, stop: stopCascade}
 	defer interest.release()
+	releaseDispatcher := interest.registerMember()
+	defer releaseDispatcher(context.Canceled)
 
 	// Claim and dispatch all tokens atomically per run (O-2: if any fails
 	// concurrently, fail-closed on ALL supplied steps so none stay live).
@@ -1236,6 +1257,12 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	groupID := fmt.Sprintf("grp-%d", e.groupSeq.Add(1))
 	caps := leaderDial.Declares()
 
+	// R-1 (C1 claim-phase guard): all members are claimed and validated;
+	// release the dispatcher's interest AT DISPATCH, immediately before the
+	// pre-I/O checks and evaluateCoreSafe. If every member already terminated
+	// before dispatch, remaining drops to 0 and evalCtx cancels immediately.
+	releaseDispatcher(context.Canceled)
+
 	// Step 2a: Cancel-at-barrier check (0 calls).
 	if ctxErr := leaderIO.Ctx.Err(); ctxErr != nil {
 		for _, m := range claimed {
@@ -1298,7 +1325,7 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 	// Step 3 & 4: ONE ordinary evaluation on leader's compiled rule and request
 	// under evalCtx (leaderIO.Ctx + all-Inline-canceled cascade + all-runs-
 	// terminal interest withdrawal). Charges the shared IO tracker once.
-	dec, elapsed, evalErr := e.evaluateCore(evalCtx, leader.compiled, leader.input, leaderIO.Budget)
+	dec, elapsed, evalErr := e.evaluateCoreSafe(evalCtx, leader.compiled, leader.input, leaderIO.Budget)
 	leaderOut := classifyDecisionToOutcome(leader.index, leader.dialect, leader.kind, DomainIO, groupID, caps, dec, elapsed, evalErr)
 	leaderOut.GroupElapsed = elapsed
 

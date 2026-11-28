@@ -17,6 +17,7 @@ package ruleengine_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -26,12 +27,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 )
 
-// TestC1_SEC3Probe1_ClaimThenStopRace_ZeroCallsAfterStopped (ptone/scion#9801):
+// TestC1_SEC3Probe1_ClaimThenStopRace_NoCallObservesLiveCtxAfterStopped (ptone/scion#9801, N-1):
 // Races EvaluatePending(p2) against a concurrent stale EvaluatePending(p1)
 // across 3000 iterations under -race. With C1 (Pending -> Dispatched with
 // evalCtx minted under r.mu and canceled before releasing r.mu on terminal),
-// ZERO step-2 dialect calls may start after Result().Stopped == true.
-func TestC1_SEC3Probe1_ClaimThenStopRace_ZeroCallsAfterStopped(t *testing.T) {
+// no dialect call may observe a live (uncanceled) ctx after Result().Stopped == true.
+func TestC1_SEC3Probe1_ClaimThenStopRace_NoCallObservesLiveCtxAfterStopped(t *testing.T) {
 	const iters = 3000
 	var startedAfterStop atomic.Int64
 	var totalStep2Calls atomic.Int64
@@ -538,4 +539,468 @@ func TestC1_StateTransitionTable(t *testing.T) {
 			t.Fatalf("Done must be absorbing (no extra steps), got %+v", res.Steps)
 		}
 	})
+}
+
+// TestProbe9801_GroupEarlyWithdrawBeforeSecondClaimMustNotCancelSurvivor (R-1):
+// EvaluateGroup(r1p2, [r2p2]). After r1 is claimed (Dispatched) but BEFORE r2 is
+// claimed, r1 is terminated by a stale replay. r1's interest withdrawal must not
+// cancel the shared group evalCtx, because the dispatcher holds an interest
+// across the claim loop and r2 (a distinct, live run) is about to join.
+func TestProbe9801_GroupEarlyWithdrawBeforeSecondClaimMustNotCancelSurvivor(t *testing.T) {
+	const iters = 5
+	hits, defects := 0, 0
+	for range iters {
+		io := newCountingFakeIODialect("io_pr_r1", 5*time.Second)
+		eng, _ := newChainTestEngine(t, "pr_r1", io)
+		c1 := mustCompile(t, eng, "pr_r1", "io_pr_r1", "a", ruleengine.KindFilter)
+		c2 := mustCompile(t, eng, "pr_r1", "io_pr_r1", "b", ruleengine.KindFilter)
+		tr := ruleengine.NewBudgetTracker(5 * time.Second)
+		ioDom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{MaxEvalTime: 5 * time.Second, Tracker: tr}}
+		inCtx1, cancel1 := context.WithCancel(context.Background())
+		inCtx2, cancel2 := context.WithCancel(context.Background())
+		mk := func(inCtx context.Context) (*ruleengine.ChainRun, *ruleengine.PendingStep, *ruleengine.PendingStep) {
+			r, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: ruleengine.Domain{Ctx: inCtx}, IO: ioDom},
+				ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: c1}, {Index: 2, Compiled: c2, GroupKey: "gk"}}},
+				ruleengine.Input{Activation: map[string]any{"x": 1}, AdmittedInputKey: "k1"}, ruleengine.ChainLimits{}, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, p1, _, _ := r.Next()
+			if err := eng.EvaluatePending(p1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Resume(); err != nil {
+				t.Fatal(err)
+			}
+			_, p2, _, _ := r.Next()
+			return r, p1, p2
+		}
+		r1, r1p1, r1p2 := mk(inCtx1)
+		r2, _, r2p2 := mk(inCtx2)
+		var sawCanceledCtx atomic.Bool
+		io.setHandler("b", func(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+			if ctx.Err() != nil {
+				sawCanceledCtx.Store(true)
+				return ruleengine.Decision{}, ctx.Err()
+			}
+			return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
+		})
+		calls0 := io.callCount()
+
+		done := make(chan error, 1)
+		go func() { _, err := eng.EvaluateGroup(r1p2, []*ruleengine.PendingStep{r2p2}); done <- err }()
+
+		hit := false
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			unlock := ruleengine.ProbeLockRun(r2)
+			if ruleengine.ProbeState(r1) == ruleengine.ProbeStateDispatched {
+				if ruleengine.ProbeStateLocked(r2) == ruleengine.ProbeStatePending {
+					hit = true
+					_ = eng.EvaluatePending(r1p1) // stale replay terminates r1 (locks r1 only)
+				}
+				unlock()
+				break
+			}
+			unlock()
+			runtime.Gosched()
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("EvaluateGroup: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			buf := make([]byte, 1<<20)
+			t.Fatalf("deadlock: %s", buf[:runtime.Stack(buf, true)])
+		}
+		if !hit {
+			cancel1()
+			cancel2()
+			continue
+		}
+		hits++
+		if _, err := r2.Resume(); err != nil {
+			t.Fatalf("r2.Resume: %v", err)
+		}
+		res2, _ := r2.Result()
+		res1, _ := r1.Result()
+		if !res1.Stopped || res1.Steps[len(res1.Steps)-1].Reason != ruleengine.ReasonInvalidCompletion {
+			t.Fatalf("r1 should be terminal invalid_completion: %+v", res1)
+		}
+		calls := io.callCount() - calls0
+		if len(res2.Steps) != 2 || res2.Steps[1].Class != ruleengine.StepClassPass || sawCanceledCtx.Load() || calls != 1 {
+			defects++
+			if defects == 1 {
+				t.Logf("first defect: r2 step2 = %+v (Err=%v); dialect calls=%d sawCanceledCtx=%v; inCtx2.Err=%v",
+					res2.Steps[len(res2.Steps)-1], res2.Steps[len(res2.Steps)-1].Err, calls, sawCanceledCtx.Load(), inCtx2.Err())
+			}
+		}
+		cancel1()
+		cancel2()
+	}
+	if hits == 0 {
+		t.Skip("interleaving never forced")
+	}
+	if defects > 0 {
+		t.Fatalf("cross-run cancellation: %d/%d forced interleavings canceled live run r2's evaluation after r1 alone withdrew", defects, hits)
+	}
+}
+
+// customDoneCtx is a non-cancelCtx context wrapper with a real Done() channel
+// so context.WithCancelCause / AfterFunc spawns a propagateCancel goroutine
+// that exits ONLY when the child cancel/stop function is invoked.
+type customDoneCtx struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c *customDoneCtx) Done() <-chan struct{} { return c.done }
+func (c *customDoneCtx) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// TestC1_R1_AllMembersTerminateDuringClaimCancelsGroupCtx (R-1 probe ii):
+// Every claimed member terminates before dispatch (before releaseDispatcher):
+// releasing the claim-phase guard drops remaining to 0, evalCtx cancels, and
+// 0 dialect calls are made.
+func TestC1_R1_AllMembersTerminateDuringClaimCancelsGroupCtx(t *testing.T) {
+	const maxAttempts = 40
+	for range maxAttempts {
+		io := newCountingFakeIODialect("io_r1_all", 5*time.Second)
+		var dialectStarted atomic.Bool
+		io.setHandler("b", func(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+			dialectStarted.Store(true)
+			select {
+			case <-ctx.Done():
+				return ruleengine.Decision{}, ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+				return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
+			}
+		})
+		eng, _ := newChainTestEngine(t, "r1_all", io)
+		c1 := mustCompile(t, eng, "r1_all", "io_r1_all", "a", ruleengine.KindFilter)
+		c2 := mustCompile(t, eng, "r1_all", "io_r1_all", "b", ruleengine.KindFilter)
+		ioDom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{MaxEvalTime: 5 * time.Second}}
+		inDom := ruleengine.Domain{Ctx: context.Background()}
+
+		mk := func() (*ruleengine.ChainRun, *ruleengine.PendingStep, *ruleengine.PendingStep) {
+			r, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: inDom, IO: ioDom},
+				ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: c1}, {Index: 2, Compiled: c2, GroupKey: "gk"}}},
+				ruleengine.Input{Activation: map[string]any{"x": 1}, AdmittedInputKey: "k1"}, ruleengine.ChainLimits{}, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, p1, _, _ := r.Next()
+			_ = eng.EvaluatePending(p1)
+			_, _ = r.Resume()
+			_, p2, _, _ := r.Next()
+			return r, p1, p2
+		}
+		r1, r1p1, r1p2 := mk()
+		r2, r2p1, r2p2 := mk()
+		calls0 := io.callCount()
+
+		done := make(chan error, 1)
+		go func() { _, err := eng.EvaluateGroup(r1p2, []*ruleengine.PendingStep{r2p2}); done <- err }()
+
+		hit := false
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			unlockR2 := ruleengine.ProbeLockRun(r2)
+			if ruleengine.ProbeState(r1) == ruleengine.ProbeStateDispatched && ruleengine.ProbeStateLocked(r2) == ruleengine.ProbeStatePending {
+				// r1 is claimed, r2 not yet claimed: terminate r1 first.
+				_ = eng.EvaluatePending(r1p1)
+				// Now hold r1.mu so EvaluateGroup pauses in Step 1b right after
+				// claiming r2 (before releaseDispatcher).
+				unlockR1 := ruleengine.ProbeLockRun(r1)
+				unlockR2()
+				for time.Now().Before(deadline) {
+					if ruleengine.ProbeState(r2) == ruleengine.ProbeStateDispatched {
+						_ = eng.EvaluatePending(r2p1)
+						hit = true
+						break
+					}
+					runtime.Gosched()
+				}
+				unlockR1()
+				break
+			}
+			unlockR2()
+			runtime.Gosched()
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("EvaluateGroup: %v", err)
+		}
+		if !hit {
+			continue
+		}
+		if dialectStarted.Load() || io.callCount() != calls0 {
+			t.Fatalf("expected 0 dialect calls when all members terminated before dispatch; started=%v calls=%d",
+				dialectStarted.Load(), io.callCount()-calls0)
+		}
+		for name, r := range map[string]*ruleengine.ChainRun{"r1": r1, "r2": r2} {
+			if ruleengine.ProbeHasInflight(r) {
+				t.Fatalf("%s still has inflight after terminal", name)
+			}
+			res, _ := r.Result()
+			if !res.Stopped || res.Steps[len(res.Steps)-1].Reason != ruleengine.ReasonInvalidCompletion {
+				t.Fatalf("%s expected terminal invalid_completion, got %+v", name, res)
+			}
+		}
+		return
+	}
+	t.Fatal("failed to force all-members-terminate-before-dispatch interleaving")
+}
+
+// TestC1_R1_DispatcherInterestReleasedOnAllPaths (R-1 variant):
+// Verifies that EvaluateGroup releases its dispatcher interest and evalCtx
+// resources with no goroutine leak across success, incompatible_group, and
+// claim-race paths.
+func TestC1_R1_DispatcherInterestReleasedOnAllPaths(t *testing.T) {
+	parent := &customDoneCtx{Context: context.Background(), done: make(chan struct{})}
+	defer close(parent.done)
+
+	io := newCountingFakeIODialect("io_r1_leak", time.Second)
+	eng, _ := newChainTestEngine(t, "r1_leak", io)
+	c := mustCompile(t, eng, "r1_leak", "io_r1_leak", "a", ruleengine.KindFilter)
+	ioDom := ruleengine.Domain{Ctx: parent, Budget: ruleengine.Budget{MaxEvalTime: time.Second}}
+	inDom := ruleengine.Domain{Ctx: context.Background()}
+
+	mk := func(gk, key string) (*ruleengine.ChainRun, *ruleengine.PendingStep) {
+		r, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: inDom, IO: ioDom},
+			ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: c, GroupKey: gk}}},
+			ruleengine.Input{AdmittedInputKey: key}, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, p, _, _ := r.Next()
+		return r, p
+	}
+
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	const iters = 30
+	for range iters {
+		// 1. Success path
+		r1, p1 := mk("gk", "k")
+		r2, p2 := mk("gk", "k")
+		if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
+			t.Fatalf("success EvaluateGroup: %v", err)
+		}
+		if ruleengine.ProbeHasInflight(r1) || ruleengine.ProbeHasInflight(r2) {
+			t.Fatal("inflight leaked on success path")
+		}
+
+		// 2. incompatible_group path
+		r3, p3 := mk("gk", "k1")
+		r4, p4 := mk("gk", "k2")
+		if _, err := eng.EvaluateGroup(p3, []*ruleengine.PendingStep{p4}); err == nil {
+			t.Fatal("expected incompatible_group")
+		}
+		if ruleengine.ProbeHasInflight(r3) || ruleengine.ProbeHasInflight(r4) {
+			t.Fatal("inflight leaked on incompatible_group path")
+		}
+
+		// 3. Stale-token claim failure path
+		r5, p5 := mk("gk", "k")
+		_ = eng.EvaluatePending(p5)
+		r6, p6 := mk("gk", "k")
+		if _, err := eng.EvaluateGroup(p6, []*ruleengine.PendingStep{p5}); err == nil {
+			t.Fatal("expected invalid_completion")
+		}
+		if ruleengine.ProbeHasInflight(r5) || ruleengine.ProbeHasInflight(r6) {
+			t.Fatal("inflight leaked on claim-failure path")
+		}
+	}
+
+	// Poll briefly for propagateCancel goroutines to exit.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		if runtime.NumGoroutine() <= before+10 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak in EvaluateGroup: before=%d after=%d (iters=%d)", before, runtime.NumGoroutine(), iters)
+}
+
+// TestC1_O1_DialectPanicCompletesAsFailedNeverStuckDispatched (O-1):
+// A dialect panic inside EvaluatePending or EvaluateGroup is recovered into a
+// closed StepClassFailed / ReasonEvalFailed outcome so the run transitions
+// cleanly Dispatched -> PendingCompleted -> Done and is never stuck Dispatched.
+func TestC1_O1_DialectPanicCompletesAsFailedNeverStuckDispatched(t *testing.T) {
+	t.Run("EvaluatePending", func(t *testing.T) {
+		io := newCountingFakeIODialect("io_panic_single", time.Second)
+		io.setHandler("boom", func(_ context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+			panic("dialect exploded")
+		})
+		eng, _ := newChainTestEngine(t, "o1_single", io)
+		c := mustCompile(t, eng, "o1_single", "io_panic_single", "boom", ruleengine.KindFilter)
+		dom := ruleengine.Domain{Ctx: context.Background()}
+		r, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom},
+			ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: c}}},
+			ruleengine.Input{}, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, p, _, _ := r.Next()
+		if err := eng.EvaluatePending(p); err != nil {
+			t.Fatalf("EvaluatePending should recover panic into outcome, got err=%v", err)
+		}
+		if ruleengine.ProbeHasInflight(r) {
+			t.Fatal("inflight not cleared after dialect panic")
+		}
+		ctrl, err := r.Resume()
+		if err != nil || !ctrl.Stop {
+			t.Fatalf("Resume after dialect panic: ctrl=%+v err=%v", ctrl, err)
+		}
+		res, tr := r.Result()
+		if !res.Stopped || len(res.Steps) != 1 || res.Steps[0].Class != ruleengine.StepClassFailed || res.Steps[0].Reason != ruleengine.ReasonEvalFailed {
+			t.Fatalf("unexpected result after dialect panic: %+v", res)
+		}
+		if _, err := ruleengine.EncodeChainTrace(tr, map[string]ruleengine.Capabilities{io.Name(): io.Declares()}, 4096); err != nil {
+			t.Fatalf("EncodeChainTrace rejected recovered panic trace: %v", err)
+		}
+	})
+
+	t.Run("EvaluateGroup", func(t *testing.T) {
+		io := newCountingFakeIODialect("io_panic_grp", time.Second)
+		io.setHandler("boom", func(_ context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+			panic("group dialect exploded")
+		})
+		eng, _ := newChainTestEngine(t, "o1_grp", io)
+		c := mustCompile(t, eng, "o1_grp", "io_panic_grp", "boom", ruleengine.KindFilter)
+		dom := ruleengine.Domain{Ctx: context.Background()}
+		mk := func() (*ruleengine.ChainRun, *ruleengine.PendingStep) {
+			r, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom},
+				ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: c, GroupKey: "gk"}}},
+				ruleengine.Input{AdmittedInputKey: "k"}, ruleengine.ChainLimits{}, nil, nil, nil)
+			_, p, _, _ := r.Next()
+			return r, p
+		}
+		r1, p1 := mk()
+		r2, p2 := mk()
+		if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
+			t.Fatalf("EvaluateGroup should recover panic into outcome, got err=%v", err)
+		}
+		for name, r := range map[string]*ruleengine.ChainRun{"r1": r1, "r2": r2} {
+			if ruleengine.ProbeHasInflight(r) {
+				t.Fatalf("%s inflight not cleared after group panic", name)
+			}
+			ctrl, err := r.Resume()
+			if err != nil || !ctrl.Stop {
+				t.Fatalf("%s Resume after group panic: ctrl=%+v err=%v", name, ctrl, err)
+			}
+			res, _ := r.Result()
+			if !res.Stopped || len(res.Steps) != 1 || res.Steps[0].Class != ruleengine.StepClassFailed || res.Steps[0].Reason != ruleengine.ReasonEvalFailed {
+				t.Fatalf("%s unexpected result after group panic: %+v", name, res)
+			}
+		}
+	})
+}
+
+type cancelOnDeclaresDialect struct {
+	name          string
+	cancelFn      context.CancelFunc
+	declaresCalls atomic.Int32
+	evalCalls     atomic.Int32
+}
+
+func (d *cancelOnDeclaresDialect) Name() string { return d.name }
+func (d *cancelOnDeclaresDialect) Declares() ruleengine.Capabilities {
+	// ResolveDialect calls Declares() once (AllowIO check); evaluateCore calls
+	// Declares() a second time AFTER the top-of-function ctx.Err() check and
+	// BEFORE the post-arm ctx.Err() check (engine.go:680). Canceling here
+	// deterministically tests the post-arm guard (kills mutant c10).
+	if d.declaresCalls.Add(1) == 2 && d.cancelFn != nil {
+		d.cancelFn()
+	}
+	return ruleengine.Capabilities{
+		PerformsIO:  false,
+		MaxEvalTime: time.Second,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *cancelOnDeclaresDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiledWithIdentity(env.Consumer, d.name, kind, "id:"+rule, rule), nil
+}
+func (d *cancelOnDeclaresDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.evalCalls.Add(1)
+	return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
+}
+
+// TestC1_O2_PostArmCtxCancelSkipsDialectCall (O-2, kills mutant c10):
+// Verifies that when caller ctx cancels between evaluateCore's entry check and
+// d.Evaluate, the post-arm ctx.Err() guard prevents invoking d.Evaluate.
+func TestC1_O2_PostArmCtxCancelSkipsDialectCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &cancelOnDeclaresDialect{name: "c10_dial"}
+	eng, _ := newChainTestEngine(t, "o2_c10", d)
+	c, err := eng.Compile(context.Background(), "c10_dial", "x", ruleengine.KindFilter, ruleengine.EnvironmentRef{Consumer: "o2_c10", Name: "e"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.declaresCalls.Store(0)
+	d.cancelFn = cancel
+	_, err = eng.Evaluate(ctx, c, ruleengine.Input{}, ruleengine.Budget{MaxEvalTime: time.Second})
+	if err == nil {
+		t.Fatal("expected canceled error when ctx canceled before d.Evaluate")
+	}
+	if got := d.evalCalls.Load(); got != 0 {
+		t.Fatalf("d.Evaluate was called %d times despite ctx canceled before call (mutant c10)", got)
+	}
+}
+
+// TestC1_O2_EvaluatePendingReleasesStopCtxNoGoroutineLeak (O-2, kills mutant c11):
+// Uses a custom non-cancelCtx parent with a Done() channel so each
+// EvaluatePending call spawns a context.WithCancelCause propagation goroutine
+// that exits ONLY when defer stopCtx() runs.
+func TestC1_O2_EvaluatePendingReleasesStopCtxNoGoroutineLeak(t *testing.T) {
+	parent := &customDoneCtx{Context: context.Background(), done: make(chan struct{})}
+	defer close(parent.done)
+
+	io := newCountingFakeIODialect("io_c11", time.Second)
+	eng, _ := newChainTestEngine(t, "o2_c11", io)
+	c := mustCompile(t, eng, "o2_c11", "io_c11", "a", ruleengine.KindFilter)
+	ioDom := ruleengine.Domain{Ctx: parent, Budget: ruleengine.Budget{MaxEvalTime: time.Second}}
+	inDom := ruleengine.Domain{Ctx: context.Background()}
+
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	const iters = 50
+	for range iters {
+		r, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: inDom, IO: ioDom},
+			ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: c}}},
+			ruleengine.Input{}, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, p, _, _ := r.Next()
+		if err := eng.EvaluatePending(p); err != nil {
+			t.Fatalf("EvaluatePending: %v", err)
+		}
+		if _, err := r.Resume(); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		if runtime.NumGoroutine() <= before+10 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak in EvaluatePending (mutant c11): before=%d after=%d (iters=%d)", before, runtime.NumGoroutine(), iters)
 }
