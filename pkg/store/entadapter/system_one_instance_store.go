@@ -536,6 +536,7 @@ func (s *SystemOneInstanceStore) ListSystemOneInstanceProjects(ctx context.Conte
 	rows, err := s.client.Project.Query().
 		Where(project.SystemOneAllowedInstancesNotNil()).
 		Order(ent.Asc(project.FieldName), ent.Asc(project.FieldID)).
+		Select(project.FieldID, project.FieldName, project.FieldSystemOneAllowedInstances).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
