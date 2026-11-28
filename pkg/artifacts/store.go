@@ -758,9 +758,10 @@ type Store interface {
 	CreateOrRemindReviewRequest(ctx context.Context, req ReviewRequest, remindCooldown time.Duration, now time.Time, actor *Actor, grantOpt *ReviewRequestGrantOption) (ReviewRequest, string, error)
 
 	// DismissReviewRequest transitions the caller's open review request on
-	// artifactID to dismissed using a CAS on state='open'. Returns
-	// ErrNotFound when no open request exists, and ErrRequestClosed when
-	// the CAS loses to a concurrent close.
+	// artifactID to dismissed under lockLiveArtifact + CAS on state='open',
+	// deleting any still-role-gated bounded review grant in the same
+	// transaction. Returns ErrNotFound when no open request exists, and
+	// ErrRequestClosed when the CAS loses to a concurrent close.
 	DismissReviewRequest(ctx context.Context, artifactID, reviewerKind, reviewerRef, responseNote string, now time.Time, actor *Actor) (ReviewRequest, error)
 
 	// GetOpenReviewRequest returns the open review request for
@@ -795,8 +796,11 @@ type Store interface {
 	ListOpenReviewRequests(ctx context.Context, after *ReviewRequestKey, limit int) ([]ReviewRequest, error)
 
 	// ExpireReviewRequest CAS-transitions an open review request to expired
-	// only if state is still 'open' and updated_at matches expectUpdatedAt.
-	ExpireReviewRequest(ctx context.Context, artifactID, requestID string, expectUpdatedAt time.Time, reason string, now time.Time, actor *Actor) (bool, error)
+	// under the artifact row lock only if state is still 'open' and updated_at
+	// matches expectUpdatedAt, deleting any still-role-gated bounded review
+	// grant in the same transaction. When a bounded grant was removed, it is
+	// returned so the caller can emit the grant_removed decision log.
+	ExpireReviewRequest(ctx context.Context, artifactID, requestID string, expectUpdatedAt time.Time, reason string, now time.Time, actor *Actor) (bool, *Grant, error)
 
 	// PurgeClosedReviewRequests deletes up to limit closed review request
 	// rows whose resolved_at is at or before resolvedBefore.

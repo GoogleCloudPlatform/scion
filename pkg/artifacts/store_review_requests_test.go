@@ -610,16 +610,16 @@ func TestReviewRequestReaperStoreExpireAndPurge(t *testing.T) {
 		}
 
 		// CAS mismatch on updated_at does not expire.
-		expired, err := st.ExpireReviewRequest(ctx, a.ID, rr.ID, t0.Add(time.Second), "ttl", t0.Add(31*24*time.Hour), &reconcilerActor)
-		if err != nil || expired {
-			t.Fatalf("wrong updated_at expire = %v, %v; want false, nil", expired, err)
+		expired, removedGrant, err := st.ExpireReviewRequest(ctx, a.ID, rr.ID, t0.Add(time.Second), "ttl", t0.Add(31*24*time.Hour), &reconcilerActor)
+		if err != nil || expired || removedGrant != nil {
+			t.Fatalf("wrong updated_at expire = %v, %+v, %v; want false, nil, nil", expired, removedGrant, err)
 		}
 
 		// Matching updated_at expires and writes EventReviewRequestExpired.
 		expiredAt := t0.Add(31 * 24 * time.Hour)
-		expired, err = st.ExpireReviewRequest(ctx, a.ID, rr.ID, rr.UpdatedAt, "ttl", expiredAt, &reconcilerActor)
-		if err != nil || !expired {
-			t.Fatalf("expire = %v, %v; want true, nil", expired, err)
+		expired, removedGrant, err = st.ExpireReviewRequest(ctx, a.ID, rr.ID, rr.UpdatedAt, "ttl", expiredAt, &reconcilerActor)
+		if err != nil || !expired || removedGrant != nil {
+			t.Fatalf("expire = %v, %+v, %v; want true, nil, nil", expired, removedGrant, err)
 		}
 
 		// Purge before 90 days keeps the row.

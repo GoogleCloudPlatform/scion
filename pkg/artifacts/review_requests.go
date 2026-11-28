@@ -883,6 +883,10 @@ func (s *Service) handleWithdrawReviewRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if row.RemovedGrant != nil {
+		s.logGrantRemoved(r, a, row.RemovedGrant, actor)
+	}
+
 	if row.ReviewerKind == PrincipalKindUser && row.ReviewerRef != "" {
 		if notifier, ok := s.host.(ReviewRequestNotifier); ok {
 			notifier.RequestClosed(ctx, a.ID, row.ReviewerRef)
@@ -1011,6 +1015,10 @@ func (s *Service) handleDismissReviewRequest(w http.ResponseWriter, r *http.Requ
 		slog.ErrorContext(ctx, "artifacts: dismiss review request failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "could not dismiss the review request")
 		return
+	}
+
+	if row.RemovedGrant != nil {
+		s.logGrantRemoved(r, a, row.RemovedGrant, actor)
 	}
 
 	authorNotified := false
